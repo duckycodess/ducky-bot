@@ -1,7 +1,8 @@
 import type { JobState } from '@ducky/contracts';
 import type { PendingNotificationRow, Store } from '@ducky/persistence';
+import type { ComponentSigner } from '../security/component-signing.js';
 import type { DiscordTransport } from '../discord/transport.js';
-import type { OutboundEmbedField, OutboundMessage } from '../discord/message.js';
+import type { OutboundEmbedField, OutboundMessage, OutboundRow } from '../discord/message.js';
 
 /**
  * States worth waking the owner up for. `queued` and `waiting_for_executor`
@@ -17,12 +18,16 @@ const NOTIFIABLE_STATES: ReadonlySet<JobState> = new Set([
   'cancelled',
 ]);
 
+/** Mirrors the `/job status` presenter's bound on how many pending actions get buttons. */
+const MAX_APPROVAL_ROWS = 4;
+const short = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const humanize = (s: string): string => s.replace(/_/g, ' ');
 
 export interface JobNotifierDeps {
   readonly store: Store;
   readonly transport: DiscordTransport;
   readonly ownerId: string;
+  readonly signer: ComponentSigner;
 }
 
 export interface NotificationSweepResult {
@@ -36,12 +41,22 @@ export interface NotificationSweepResult {
  *
  * Reads only the durable job_transitions ledger that jobs.repo already writes
  * on every state change, plus (when one exists for the job) the already
- * sanitized `summary_redacted` column of job_results -- the same record of
- * truth `/job status` reads for interactive display. Never touches raw
- * executor output, workspace paths, task/context text, or job_events
+ * sanitized job_results row -- the same record of truth `/job status` reads
+ * for interactive display. Never touches raw executor output, the result
+ * snapshot's file list, workspace paths, task/context text, or job_events
  * messages. Whatever is sent still passes through `transport.send`, so the
  * same sanitizeOutbound boundary every other outbound message goes through
  * applies here too, as a second line of defense.
+ *
+ * `needs_owner_input` and `needs_approval` notifications carry the same
+ * signed Discord components the interactive `/job status` presenter builds
+ * (`ComponentSigner.sign`, the exact `job_answer` / `approve` / `reject`
+ * kinds), so a click from this DM is verified by the router through the
+ * IDENTICAL path as a click from an interactive reply -- there is no
+ * DM-specific authorization logic. Approval buttons are built from a live
+ * `store.approvals.forJob` read at send time, not from anything cached on the
+ * transition row, so an approval already decided through another channel
+ * before the sweep runs simply gets no button rather than a stale one.
  *
  * Delivery is idempotent and retry-safe: a transition is marked delivered
  * only after the send resolves (or after being deliberately skipped), so an
@@ -60,12 +75,14 @@ export class JobNotifier {
   private readonly store: Store;
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
+  private readonly signer: ComponentSigner;
   private sweeping: Promise<NotificationSweepResult> | null = null;
 
   constructor(deps: JobNotifierDeps) {
     this.store = deps.store;
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
+    this.signer = deps.signer;
   }
 
   deliverPending(limit = 50): Promise<NotificationSweepResult> {
@@ -128,10 +145,20 @@ export class JobNotifier {
    */
   private buildMessage(row: PendingNotificationRow): OutboundMessage {
     const fields: OutboundEmbedField[] = [{ name: 'Reason', value: humanize(row.reason) }];
+    const rows: OutboundRow[] = [];
+
     const result = this.store.results.byJobId(row.jobId);
     if (result) {
       fields.push({ name: 'Result', value: result.summaryRedacted });
+      fields.push({ name: 'Verdict', value: humanize(result.verdict) });
     }
+
+    if (row.toState === 'needs_owner_input') {
+      this.addOwnerInputComponents(row, result, fields, rows);
+    } else if (row.toState === 'needs_approval') {
+      this.addApprovalComponents(row, fields, rows);
+    }
+
     return {
       embeds: [
         {
@@ -140,6 +167,84 @@ export class JobNotifier {
           fields,
         },
       ],
+      ...(rows.length > 0 ? { rows } : {}),
     };
+  }
+
+  /**
+   * The question is already redacted and length-clamped at persist time
+   * (`sanitizeResult` in result-intake.ts), the same guarantee `/job status`
+   * relies on -- this reads the identical `job_results` snapshot, never raw
+   * executor output.
+   *
+   * Only attached while the job is still actually awaiting an answer: a live
+   * `store.jobs.byId` check, not anything cached on the transition row, so an
+   * owner who already answered through another channel before this sweep ran
+   * gets no button to click.
+   */
+  private addOwnerInputComponents(
+    row: PendingNotificationRow,
+    result: ReturnType<Store['results']['byJobId']>,
+    fields: OutboundEmbedField[],
+    rows: OutboundRow[],
+  ): void {
+    const job = this.store.jobs.byId(row.jobId);
+    if (!job || job.state !== 'needs_owner_input') return;
+
+    if (result?.snapshot.verdict === 'needs_owner_input') {
+      fields.push({ name: 'Question', value: result.snapshot.question });
+    }
+
+    rows.push({
+      buttons: [
+        {
+          customId: this.signer.sign({
+            kind: 'job_answer',
+            entityId: row.publicId,
+            actorUserId: this.ownerId,
+          }),
+          label: 'Answer',
+          style: 'primary',
+        },
+      ],
+    });
+  }
+
+  /**
+   * Mirrors the `/job status` presenter exactly: pending approvals only,
+   * bounded to `MAX_APPROVAL_ROWS`, one row of Approve/Reject per action,
+   * descriptions clamped the same way (`short(description, 100)`).
+   *
+   * `store.approvals.forJob` is a live read at send time. An approval decided
+   * through the interactive path between the transition landing and this
+   * sweep running simply is not 'pending' any more and gets no button --
+   * there is nothing to unwind, the click-time re-check in
+   * ApprovalsService.decide is what actually enforces staleness either way.
+   */
+  private addApprovalComponents(
+    row: PendingNotificationRow,
+    fields: OutboundEmbedField[],
+    rows: OutboundRow[],
+  ): void {
+    const pending = this.store.approvals.forJob(row.jobId).filter((a) => a.state === 'pending');
+    if (pending.length === 0) return;
+
+    fields.push({
+      name: 'Proposed actions',
+      value: pending
+        .slice(0, MAX_APPROVAL_ROWS)
+        .map((a) => `• #${a.actionIndex + 1} ${a.actionKind}: ${short(a.description, 100)}`)
+        .join('\n'),
+    });
+
+    rows.push(
+      ...pending.slice(0, MAX_APPROVAL_ROWS).map((a) => ({
+        buttons: (['approve', 'reject'] as const).map((kind) => ({
+          customId: this.signer.sign({ kind, entityId: a.id, actorUserId: this.ownerId }),
+          label: `${kind} #${a.actionIndex + 1}`,
+          style: kind === 'approve' ? ('success' as const) : ('danger' as const),
+        })),
+      })),
+    );
   }
 }

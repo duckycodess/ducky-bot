@@ -50,6 +50,7 @@ export interface App {
   readonly discordProfile: DiscordProfileConfig;
   readonly store: Store;
   readonly authz: Authorizer;
+  readonly signer: ComponentSigner;
   readonly allowlist: RepoAllowlist;
   readonly captures: CapturesService;
   readonly schedules: SchedulesService;
@@ -112,7 +113,7 @@ export function createApp(
   const reconciler = new Reconciler({ store, approvals, pending });
 
   const transport = overrides.transport ?? transportForProfile(discordProfile);
-  const notifier = new JobNotifier({ store, transport, ownerId: authz.ownerId });
+  const notifier = new JobNotifier({ store, transport, ownerId: authz.ownerId, signer });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
 
@@ -155,7 +156,7 @@ export function createApp(
   });
 
   return {
-    env, paths, discordProfile, store, authz, allowlist, captures, schedules, jobs,
+    env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
     approvals, github, reconciler, notifier, router, transport, credentials, conversation, status,
     close: () => store.db.close(),
   };

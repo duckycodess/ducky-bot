@@ -4,7 +4,7 @@ import { JobNotifier } from '../src/domain/notifications.service.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { DiscordTransport } from '../src/discord/transport.js';
 import type { OutboundMessage, SendTarget } from '../src/discord/message.js';
-import { makeHarness, implementedResult, OWNER } from './helpers.js';
+import { makeHarness, implementedResult, commitAction, OWNER } from './helpers.js';
 
 const start = (h: ReturnType<typeof makeHarness>) => {
   h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
@@ -41,7 +41,7 @@ describe('job notification delivery', () => {
     const c = start(h);
     h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'no_result', { detail: 'ran out of time' });
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     const result = await notifier.deliverPending();
 
     // Two notifiable transitions land from claim+failure: 'claimed' -> running
@@ -67,7 +67,7 @@ describe('job notification delivery', () => {
       finishedAt: new Date().toISOString(),
     });
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     const result = await notifier.deliverPending();
     expect(result).toEqual({ delivered: 0, skipped: 1, failed: 0 });
     expect(h.transport.sent).toHaveLength(0);
@@ -80,7 +80,7 @@ describe('job notification delivery', () => {
     // transitioned to waiting_for_executor -- a state the notifier ignores.
     h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
     expect(h.transport.sent).toHaveLength(0);
     h.close();
@@ -91,7 +91,7 @@ describe('job notification delivery', () => {
     const c = start(h);
     h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'no_result', {});
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
     const afterFirst = h.transport.sent.length;
     expect(afterFirst).toBeGreaterThan(0);
@@ -112,7 +112,7 @@ describe('job notification delivery', () => {
     });
 
     const flaky = new FlakyTransport(1);
-    const notifier = new JobNotifier({ store: h.store, transport: flaky, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: flaky, ownerId: OWNER, signer: h.app.signer });
 
     const first = await notifier.deliverPending();
     expect(first).toEqual({ delivered: 0, skipped: 0, failed: 1 });
@@ -151,7 +151,7 @@ describe('job notification delivery', () => {
       }
     }
     const transport = new FailFirst();
-    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER, signer: h.app.signer });
     const result = await notifier.deliverPending();
 
     // Each job contributes two notifiable transitions (claimed, failed). Only
@@ -171,7 +171,7 @@ describe('job notification delivery', () => {
       detail: 'ghp_abcdefghijklmnopqrstuvwxyz012345 leaked in the detail too',
     });
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
     const flat = JSON.stringify(h.transport.sent);
@@ -186,7 +186,7 @@ describe('job notification delivery', () => {
     const c = start(h);
     h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'no_result', {});
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
     // MockDiscordTransport.send runs every message through sanitizeOutbound;
@@ -210,7 +210,7 @@ describe('job notification delivery', () => {
     );
     expect(h.store.jobs.byId(c.jobId)?.state).toBe('completed');
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
     const completed = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('completed'));
@@ -229,7 +229,7 @@ describe('job notification delivery', () => {
     const c = start(h);
     void c;
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
     expect(h.transport.sent).toHaveLength(1);
@@ -245,7 +245,7 @@ describe('job notification delivery', () => {
     const job = h.store.jobs.byId(c.jobId)!;
     expect(job.state).toBe('completed');
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
     // The repo's real, on-disk absolute path (from REPOS_JSON) must never
@@ -265,7 +265,7 @@ describe('job notification delivery', () => {
     // currently configured owner, delivery must still go to the configured
     // owner -- authorization never reads the database (AGENTS.md).
     const rogueOwner = '999999999999999999';
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: rogueOwner });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: rogueOwner, signer: h.app.signer });
     await notifier.deliverPending();
 
     expect(h.transport.sent.length).toBeGreaterThan(0);
@@ -296,7 +296,7 @@ describe('job notification delivery', () => {
       }
     }
     const transport = new SlowTransport();
-    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER, signer: h.app.signer });
 
     const [a, b, c2] = await Promise.all([
       notifier.deliverPending(),
@@ -320,7 +320,7 @@ describe('job notification delivery', () => {
     const c = start(h);
     h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'no_result', {});
 
-    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await expect(notifier.waitForIdle()).resolves.toBeUndefined();
 
     const sweep = notifier.deliverPending();
@@ -336,6 +336,7 @@ describe('job notification delivery', () => {
     // the pending-rows query itself throws. waitForIdle must still resolve
     // rather than propagate that rejection to a caller (shutdown) that isn't
     // expecting one.
+    const h = makeHarness();
     const brokenStore = {
       notifications: {
         pending: () => {
@@ -346,13 +347,14 @@ describe('job notification delivery', () => {
       results: { byJobId: () => undefined },
     } as unknown as import('@ducky/persistence').Store;
 
-    const notifier = new JobNotifier({ store: brokenStore, transport: new MockDiscordTransport(), ownerId: OWNER });
+    const notifier = new JobNotifier({ store: brokenStore, transport: new MockDiscordTransport(), ownerId: OWNER, signer: h.app.signer });
     const sweep = notifier.deliverPending();
     // Call waitForIdle while the (about-to-reject) sweep is still in flight,
     // exactly as shutdown would race against it.
     const idle = notifier.waitForIdle();
     await expect(sweep).rejects.toThrow('db unavailable');
     await expect(idle).resolves.toBeUndefined();
+    h.close();
   });
 });
 
@@ -375,7 +377,7 @@ describe('job notification delivery: startup/shutdown ordering', () => {
       }
     }
     const transport = new DelayedTransport();
-    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER });
+    const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER, signer: h.app.signer });
 
     // Simulate main.ts: kick off a sweep, then immediately begin shutdown.
     void notifier.deliverPending();
@@ -465,5 +467,277 @@ describe('job_notifications baseline backfill on migration', () => {
     expect(pending[0]!.jobId).toBe(job2.id);
 
     db.close();
+  });
+});
+
+describe('job notification delivery: interactive components', () => {
+  it('attaches a signed Answer button and the redacted question on needs_owner_input', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({
+        verdict: 'needs_owner_input',
+        question: 'Which database, and is ghp_abcdefghijklmnopqrstuvwxyz012345 still valid?',
+        proposedActions: [],
+      }),
+      500,
+    );
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('needs_owner_input');
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs owner input'));
+    expect(sent).toBeDefined();
+    const question = sent!.message.embeds![0]!.fields!.find((f) => f.name === 'Question');
+    expect(question).toBeDefined();
+    expect(question!.value).toContain('Which database');
+    // The redactor already ran when the question was persisted.
+    expect(question!.value).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz012345');
+
+    const row = sent!.message.rows?.find((r) => r.buttons.some((b) => b.label === 'Answer'));
+    expect(row).toBeDefined();
+    const button = row!.buttons[0]!;
+    // Signed for the configured owner, kind job_answer, entity = the job's public id --
+    // the EXACT shape the router's job_answer handler (and the modal auto-open
+    // matcher) expect, so a click from this DM is verified identically to one
+    // from an interactive `/job status` reply.
+    const verified = h.app.signer.verify(button.customId, OWNER);
+    expect(verified).toEqual({ kind: 'job_answer', entityId: c.publicId });
+    h.close();
+  });
+
+  it('does not attach an Answer button once the job has moved past needs_owner_input by send time', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({ verdict: 'needs_owner_input', question: 'q?', proposedActions: [] }),
+      500,
+    );
+    // The owner already answered through the interactive path before the
+    // sweep got a chance to run -- the transition to needs_owner_input is
+    // still sitting undelivered in job_transitions.
+    h.app.jobs.submitOwnerInput(h.owner, c.publicId, 'postgres');
+    expect(h.store.jobs.byId(c.jobId)?.state).not.toBe('needs_owner_input');
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const stale = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs owner input'));
+    expect(stale).toBeDefined();
+    expect(stale!.message.rows ?? []).toHaveLength(0);
+    h.close();
+  });
+
+  it('attaches signed Approve/Reject buttons per pending action on needs_approval', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({
+        proposedActions: [
+          { kind: 'git_commit', description: 'commit feat a', details: { message: 'feat: add a', files: ['src/a.ts'] } },
+          { kind: 'git_commit', description: 'commit feat b', details: { message: 'feat: add b', files: ['src/b.ts'] } },
+        ],
+      }),
+      500,
+    );
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('needs_approval');
+    const approvals = h.store.approvals.forJob(c.jobId);
+    expect(approvals).toHaveLength(2);
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'));
+    expect(sent).toBeDefined();
+    expect(sent!.message.rows).toHaveLength(2);
+
+    const actionsField = sent!.message.embeds![0]!.fields!.find((f) => f.name === 'Proposed actions');
+    expect(actionsField).toBeDefined();
+    expect(actionsField!.value).toContain('commit feat a');
+    expect(actionsField!.value).toContain('commit feat b');
+
+    for (const [i, approval] of approvals.entries()) {
+      const row = sent!.message.rows![i]!;
+      expect(row.buttons).toHaveLength(2);
+      const approve = row.buttons.find((b) => b.label.startsWith('approve'))!;
+      const reject = row.buttons.find((b) => b.label.startsWith('reject'))!;
+      expect(h.app.signer.verify(approve.customId, OWNER)).toEqual({ kind: 'approve', entityId: approval.id });
+      expect(h.app.signer.verify(reject.customId, OWNER)).toEqual({ kind: 'reject', entityId: approval.id });
+    }
+    h.close();
+  });
+
+  it('bounds approval buttons to at most 4 rows, mirroring the /job status presenter', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({
+        proposedActions: [
+          commitAction('a'), commitAction('b'), commitAction('c'), commitAction('d'), commitAction('e'),
+        ],
+      }),
+      500,
+    );
+    expect(h.store.approvals.forJob(c.jobId)).toHaveLength(5);
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    expect(sent.message.rows).toHaveLength(4);
+    h.close();
+  });
+
+  it('omits a stale, already-decided approval from both the buttons and the action list', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({
+        proposedActions: [
+          { kind: 'git_commit', description: 'keep this one', details: { message: 'feat: keep', files: ['src/a.ts'] } },
+          { kind: 'git_commit', description: 'gone before the sweep', details: { message: 'feat: gone', files: ['src/b.ts'] } },
+        ],
+      }),
+      500,
+    );
+    const [first, second] = h.store.approvals.forJob(c.jobId);
+    // The owner already decided the second action through the interactive
+    // path before this sweep ran; it must not resurface as a clickable
+    // button or in the action list, but the job is still in needs_approval
+    // because the FIRST action is still pending -- the still-actionable one
+    // must still get its button.
+    h.app.approvals.decide(h.owner, second!.id, 'approved');
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('needs_approval');
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'));
+    expect(sent).toBeDefined();
+    expect(sent!.message.rows).toHaveLength(1);
+    const only = sent!.message.rows![0]!.buttons[0]!;
+    expect(h.app.signer.verify(only.customId, OWNER)).toEqual({ kind: 'approve', entityId: first!.id });
+
+    const actionsField = sent!.message.embeds![0]!.fields!.find((f) => f.name === 'Proposed actions');
+    expect(actionsField!.value).toContain('keep this one');
+    expect(actionsField!.value).not.toContain('gone before the sweep');
+    h.close();
+  });
+
+  it('a stale button click is still rejected by the same server-side re-check /job status relies on', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    // Two actions, so deciding the first one leaves the job in
+    // needs_approval (the second is still pending) -- the resulting
+    // "already decided" error therefore comes from the approval-state check,
+    // not a job-no-longer-awaiting-approval short circuit.
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({ proposedActions: [commitAction('a'), commitAction('b')] }),
+      500,
+    );
+    const [approval] = h.store.approvals.forJob(c.jobId);
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    const approveButton = sent.message.rows![0]!.buttons.find((b) => b.label.startsWith('approve'))!;
+
+    // The owner decides through the interactive path first...
+    h.app.approvals.decide(h.owner, approval!.id, 'approved');
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('needs_approval');
+    // ...then clicks the (now stale) button from the DM. The notifier issued
+    // no special authorization for this button; it is the SAME
+    // ApprovalsService.decide re-check every click goes through, and it must
+    // still reject cleanly.
+    const verified = h.app.signer.verify(approveButton.customId, OWNER);
+    expect(verified).toEqual({ kind: 'approve', entityId: approval!.id });
+    expect(() => h.app.approvals.decide(h.owner, verified!.entityId, 'approved')).toThrow(/already/);
+    h.close();
+  });
+
+  it('includes both the redacted result summary and the verdict on completion', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(h.executorId, c.jobId, c.leaseId, implementedResult({ summary: 'All done.' }), 500);
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('completed');
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('completed'))!;
+    const fields = sent.message.embeds![0]!.fields!;
+    expect(fields.find((f) => f.name === 'Result')!.value).toContain('All done.');
+    expect(fields.find((f) => f.name === 'Verdict')!.value).toBe('implemented');
+    h.close();
+  });
+
+  it('includes the verdict on a failed result, distinct from the executor-failure reason', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(
+      h.executorId,
+      c.jobId,
+      c.leaseId,
+      implementedResult({ verdict: 'failed', summary: 'Could not reproduce the issue.', proposedActions: [] }),
+      500,
+    );
+    expect(h.store.jobs.byId(c.jobId)?.state).toBe('failed');
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('failed'))!;
+    const fields = sent.message.embeds![0]!.fields!;
+    expect(fields.find((f) => f.name === 'Result')!.value).toContain('Could not reproduce');
+    expect(fields.find((f) => f.name === 'Verdict')!.value).toBe('failed');
+    h.close();
+  });
+
+  it('never attaches components to a plain running/cancelled notification', async () => {
+    const h = makeHarness();
+    start(h);
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    expect(h.transport.sent).toHaveLength(1);
+    expect(h.transport.sent[0]!.message.rows ?? []).toHaveLength(0);
+    h.close();
+  });
+
+  it('every component still passes through sanitizeOutbound (custom ids are validated, not just built)', async () => {
+    const h = makeHarness();
+    const c = start(h);
+    h.app.jobs.submitResult(h.executorId, c.jobId, c.leaseId, implementedResult({ proposedActions: [commitAction()] }), 500);
+
+    const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+    await notifier.deliverPending();
+
+    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    // MockDiscordTransport.send runs every message through sanitizeOutbound,
+    // which drops any button whose customId does not match the exact signed
+    // shape -- if these buttons survived, they passed that check too.
+    expect(sent.message.rows).toHaveLength(1);
+    expect(sent.message.rows![0]!.buttons).toHaveLength(2);
+    h.close();
   });
 });

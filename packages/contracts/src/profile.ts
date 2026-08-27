@@ -13,19 +13,33 @@ export type DuckyProfile = (typeof DUCKY_PROFILES)[number];
 export const isDuckyProfile = (v: unknown): v is DuckyProfile =>
   typeof v === 'string' && (DUCKY_PROFILES as readonly string[]).includes(v);
 
-/** Env var names per profile. Kept here so nothing has to guess at them. */
+/**
+ * Env var names per profile. Kept here so nothing has to guess at them.
+ *
+ * Every secret is profile-scoped, not just the Discord ones: sharing an
+ * executor credential file would let a development executor claim production
+ * jobs, and sharing a component signing key would make a control minted by one
+ * bot verify on the other.
+ */
 export const PROFILE_ENV = {
   development: {
     token: 'DISCORD_DEV_TOKEN',
     appId: 'DISCORD_DEV_APP_ID',
     guildId: 'DISCORD_DEV_GUILD_ID',
+    credentialsFile: 'DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE',
+    componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
   },
   production: {
     token: 'DISCORD_PROD_TOKEN',
     appId: 'DISCORD_PROD_APP_ID',
     guildId: 'DISCORD_PROD_GUILD_ID',
+    credentialsFile: 'DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE',
+    componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
   },
-} as const satisfies Record<DuckyProfile, { token: string; appId: string; guildId: string }>;
+} as const satisfies Record<
+  DuckyProfile,
+  { token: string; appId: string; guildId: string; credentialsFile: string; componentKey: string }
+>;
 
 /**
  * Where slash commands are registered.

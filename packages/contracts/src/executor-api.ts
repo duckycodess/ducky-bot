@@ -158,6 +158,19 @@ export const WorkspaceRegistrationResponseSchema = z.strictObject({
   workspaceId: z.string(),
 });
 
+/**
+ * Bookkeeping after a workspace was actually closed.
+ *
+ * Deliberately lease-free: accepting a result clears the lease, so the close
+ * that follows a successful cleanup has none to present. It is authenticated
+ * by the owning executor and can only ever target a workspace already recorded
+ * against that job.
+ */
+export const WorkspaceCloseRequestSchema = z.strictObject({
+  workspaceId: z.string().min(1).max(128),
+});
+export type WorkspaceCloseRequest = z.infer<typeof WorkspaceCloseRequestSchema>;
+
 export const EXECUTOR_HEADERS = {
   executorId: 'x-ducky-executor-id',
   keyId: 'x-ducky-key-id',

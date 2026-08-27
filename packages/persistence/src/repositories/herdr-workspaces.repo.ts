@@ -24,10 +24,13 @@ export class HerdrWorkspacesRepo {
    * Idempotent: a retried registration for the same workspace only advances its
    * state and refreshes the timestamp. It never reassigns the workspace to a
    * different job, so a stale executor cannot steal a live workspace.
+   *
+   * Returns false when the row exists but belongs to another job -- the caller
+   * must treat that as a conflict rather than success.
    */
-  record(row: Omit<HerdrWorkspaceRow, 'createdAt' | 'closedAt' | 'updatedAt'>): void {
+  record(row: Omit<HerdrWorkspaceRow, 'createdAt' | 'closedAt' | 'updatedAt'>): boolean {
     const ts = nowIso();
-    this.db
+    const res = this.db
       .prepare(
         `INSERT INTO herdr_workspaces (workspace_id, repo_slug, job_id, label, mode, agent_name,
            worktree_path, workspace_path, state, created_at, updated_at)
@@ -44,6 +47,9 @@ export class HerdrWorkspacesRepo {
         row.workspaceId, row.repoSlug, row.jobId, row.label, row.mode, row.agentName,
         row.worktreePath, row.workspacePath, row.state, ts, ts,
       );
+    // The guarded upsert is a NO-OP when the workspace belongs to another job.
+    // Reporting that lets the caller fail loudly instead of assuming success.
+    return Number(res.changes) > 0;
   }
 
   /** Ownership proof by agent name, used when recovering after a crash. */

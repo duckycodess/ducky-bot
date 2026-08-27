@@ -59,7 +59,15 @@ export class ExecutorCredential {
     return keyFingerprint(this.#hmacSecret);
   }
 
-  isStrongEnough(): boolean {
+  /**
+   * Enforces the minimum DECODED LENGTH of both secrets.
+   *
+   * This is a floor, not a randomness test: 32 repeated bytes pass it. It
+   * exists to catch a hand-typed or truncated value, and the real guarantee
+   * comes from `executor:issue-credential`, which is the only supported way to
+   * mint one and always uses 32 bytes from a CSPRNG.
+   */
+  hasMinimumLength(): boolean {
     return (
       secretBytes(this.#bearer) >= MIN_SECRET_BYTES &&
       secretBytes(this.#hmacSecret) >= MIN_SECRET_BYTES

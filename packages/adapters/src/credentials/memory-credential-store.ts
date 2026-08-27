@@ -20,10 +20,16 @@ export class MemoryCredentialStore implements ExecutorCredentialStore {
     const parsed = CredentialFileSchema.parse(JSON.parse(json));
     for (const e of parsed.executors) {
       if (e.state !== 'active') continue;
-      this.#creds.set(
-        credentialKey(e.executorId, e.keyId),
-        new ExecutorCredential(e.executorId, e.keyId, e.bearerToken, e.hmacSecret),
-      );
+      const cred = new ExecutorCredential(e.executorId, e.keyId, e.bearerToken, e.hmacSecret);
+      // The same entropy floor as the file store. A development credential
+      // that is weak is still a credential an executor authenticates with.
+      if (!cred.hasMinimumLength()) {
+        throw new DuckyError(
+          'credential_unavailable',
+          `Credential ${e.keyId} is shorter than 32 bytes; issue a new one with executor:issue-credential.`,
+        );
+      }
+      this.#creds.set(credentialKey(e.executorId, e.keyId), cred);
     }
   }
 

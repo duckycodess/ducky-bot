@@ -44,10 +44,10 @@ export class FileCredentialStore implements ExecutorCredentialStore {
     for (const e of parsed.executors) {
       if (e.state !== 'active') continue;
       const cred = new ExecutorCredential(e.executorId, e.keyId, e.bearerToken, e.hmacSecret);
-      if (!cred.isStrongEnough()) {
+      if (!cred.hasMinimumLength()) {
         throw new DuckyError(
           'credential_unavailable',
-          `Credential ${e.keyId} has insufficient entropy; issue a new one.`,
+          `Credential ${e.keyId} is shorter than 32 bytes; issue a new one with executor:issue-credential.`,
         );
       }
       next.set(credentialKey(e.executorId, e.keyId), cred);

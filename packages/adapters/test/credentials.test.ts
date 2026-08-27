@@ -47,9 +47,13 @@ describe('executor credential material', () => {
     expect(constantTimeEquals(real, fake)).toBe(false);
   });
 
-  it('rejects low-entropy secrets', () => {
-    expect(new ExecutorCredential('e', 'k', 'short', 'short').isStrongEnough()).toBe(false);
-    expect(new ExecutorCredential('e', 'k', secret(), secret()).isStrongEnough()).toBe(true);
+  it('enforces a minimum decoded length, and is honest that it is only that', () => {
+    expect(new ExecutorCredential('e', 'k', 'short', 'short').hasMinimumLength()).toBe(false);
+    expect(new ExecutorCredential('e', 'k', secret(), secret()).hasMinimumLength()).toBe(true);
+    // A length floor cannot detect a non-random value of the right size; the
+    // guarantee comes from issue-credential always using a CSPRNG.
+    const repeated = 'x'.repeat(43);
+    expect(new ExecutorCredential('e', 'k', repeated, repeated).hasMinimumLength()).toBe(true);
   });
 });
 
@@ -81,11 +85,12 @@ describe('FileCredentialStore', () => {
     expect(() => new FileCredentialStore(link)).toThrow(/symlink/);
   });
 
-  it('refuses weak secrets', () => {
+  it('refuses a secret shorter than 32 decoded bytes', () => {
     const file = writeCredFile([
       { executorId: 'exec-a', keyId: 'k1', bearerToken: 'x'.repeat(20), hmacSecret: 'y'.repeat(20), state: 'active' },
     ]);
-    expect(() => new FileCredentialStore(file)).toThrow(/entropy/);
+    // Rejected by the schema length bound before it can even be constructed.
+    expect(() => new FileCredentialStore(file)).toThrow();
   });
 
   it('reloads when the file changes', async () => {
@@ -100,6 +105,16 @@ describe('FileCredentialStore', () => {
 });
 
 describe('MemoryCredentialStore', () => {
+  it('applies the same length floor as the file store', () => {
+    const weak = JSON.stringify({
+      version: 1,
+      executors: [
+        { executorId: 'exec-a', keyId: 'k1', bearerToken: 'x'.repeat(20), hmacSecret: 'y'.repeat(20), state: 'active' },
+      ],
+    });
+    expect(() => new MemoryCredentialStore(weak, 'test')).toThrow();
+  });
+
   it('works outside production', () => {
     const json = JSON.stringify({ version: 1, executors: [entry('exec-a', 'k1')] });
     expect(new MemoryCredentialStore(json, 'test').get('exec-a', 'k1')).toBeDefined();

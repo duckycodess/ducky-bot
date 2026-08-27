@@ -20,7 +20,9 @@ systemctl --user enable --now ducky-executor@development
 ```
 
 Give each profile its own `/etc/ducky/<profile>.env`. Sharing one file would
-defeat the isolation the two bots exist for.
+defeat the isolation the two bots exist for. systemd reads that file itself via
+`EnvironmentFile=`, so the units do not need Node's `--env-file` flag — that is
+only for running the scripts by hand.
 
 ## Before installing
 

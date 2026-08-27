@@ -15,6 +15,16 @@ cp config/repos.dev.example.json config/repos.dev.json
 pnpm migrate
 ```
 
+Node does not read a `.env` file on its own, so every `pnpm` script here loads
+one explicitly with Node's native `--env-file-if-exists`: first `.env`, then
+`.env.<profile>`, with the later file winning. A missing file is not an error,
+so a token-less run still works. Nothing is loaded implicitly — if you run a
+binary directly, pass the flag yourself:
+
+```bash
+node --env-file-if-exists=.env.production packages/coordinator/dist/main.js
+```
+
 Ducky runs as one of two isolated profiles, selected by `DUCKY_PROFILE`
 (`development` by default). Keep a separate env file per profile; the two share
 no credentials, database, port or command scope.
@@ -36,9 +46,14 @@ ever supplies a slug; the mapping to an absolute path is operator-controlled.
 ## Running
 
 ```bash
-pnpm dev:coordinator   # mock Discord transport while DISCORD_TOKEN is unset
-pnpm dev:executor      # second shell
+pnpm dev:coordinator        # development profile, reads .env.development
+pnpm dev:coordinator:prod   # production profile, reads .env.production
+pnpm dev:executor           # second shell
 ```
+
+`dev:coordinator` loads `.env.development` and `dev:coordinator:prod` loads
+`.env.production`; neither reads the other's file. Set `DUCKY_PROFILE` in the
+matching env file so the loaded values and the selected profile agree.
 
 Startup prints a diagnostic line per subsystem. `/status` reports the same
 provider table inside Discord.

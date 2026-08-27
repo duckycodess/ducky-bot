@@ -11,6 +11,10 @@ pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
 ```
 
+Scripts load `.env` then `.env.<profile>` with Node's native
+`--env-file-if-exists`; Node reads nothing implicitly. `pnpm dev:coordinator`
+is the development profile, `pnpm dev:coordinator:prod` the production one.
+
 ## Authority order
 
 1. Source, tests, migrations, configuration
@@ -36,6 +40,9 @@ Report contradictions rather than picking whichever reads best.
   transport so it cannot be bypassed by a new presenter.
 - **`discord.js` is imported by exactly one module**, asserted by a test.
 - **The executor never listens**, asserted by a test.
+- **Profiles share no secret.** Token, application id, guild, component signing
+  key and executor credential file are all per profile. Production reads none
+  of the unscoped or development variables.
 - Nothing in Phase 1 commits, pushes, deploys, or mutates a cloud resource.
 
 ## Validation expectations

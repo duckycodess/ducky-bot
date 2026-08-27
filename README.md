@@ -50,6 +50,9 @@ pnpm dev:coordinator                       # mock Discord transport with no toke
 pnpm dev:executor                          # in a second shell
 ```
 
+The scripts load `.env` then `.env.<profile>` with Node's native
+`--env-file-if-exists`; nothing is read implicitly.
+
 With no token for the selected profile the coordinator uses the in-memory
 transport, so the whole lifecycle is exercisable without touching Discord.
 
@@ -75,6 +78,7 @@ active profile is shown in the startup diagnostics and in `/status`.
 | `pnpm executor:issue-credential --executor <id>` | mint executor credentials |
 | `pnpm register-commands` | print the slash-command payload (dry run) |
 | `pnpm register-commands --apply --profile <development\|production>` | actually register, for one named bot |
+| `pnpm dev:coordinator:prod` | run the production profile locally |
 
 Every Discord surface except plain conversation is **owner-only**. See
 `docs/SECURITY.md`.

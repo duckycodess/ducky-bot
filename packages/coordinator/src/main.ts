@@ -31,6 +31,11 @@ async function main(): Promise<void> {
     } catch (err) {
       process.stderr.write(`reconciler error: ${(err as Error).message}\n`);
     }
+    // Independent of the reconciler: a notification failure must never block
+    // lease/reservation healing, and vice versa.
+    app.notifier.deliverPending().catch((err: unknown) => {
+      process.stderr.write(`notification sweep error: ${(err as Error).message}\n`);
+    });
   }, app.env.DUCKY_RECONCILE_INTERVAL_MS);
   timer.unref();
 

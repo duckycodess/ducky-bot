@@ -264,4 +264,20 @@ BEGIN
 END;
 `,
   },
+  {
+    version: 5,
+    name: 'job_notifications',
+    sql: `
+-- Delivery ledger for owner-facing job lifecycle notifications. One row per
+-- job_transitions id that has been successfully sent; a transition with no
+-- row here is still pending (or was skipped on purpose, which also counts as
+-- delivered). The primary key on transition_id is what makes delivery
+-- idempotent -- a retried sweep cannot double-send.
+CREATE TABLE job_notifications (
+  transition_id INTEGER PRIMARY KEY REFERENCES job_transitions(id),
+  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  delivered_at  TEXT NOT NULL
+);
+`,
+  },
 ];

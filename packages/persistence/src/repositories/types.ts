@@ -111,5 +111,19 @@ export interface OwnerInputRow {
   answer: string;
 }
 
+/** A job_transitions row not yet recorded in job_notifications, joined with the fields the owner-facing notifier needs. */
+export interface PendingNotificationRow {
+  transitionId: number;
+  jobId: string;
+  publicId: string;
+  discordUserId: string;
+  repoSlug: string;
+  fromState: JobState;
+  toState: JobState;
+  reason: string;
+  actor: string;
+  createdAt: string;
+}
+
 export const toBool = (v: unknown): boolean => Number(v) === 1;
 export const fromBool = (v: boolean): number => (v ? 1 : 0);

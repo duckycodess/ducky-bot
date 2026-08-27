@@ -11,6 +11,7 @@ export * from './repositories/approvals.repo.js';
 export * from './repositories/executors.repo.js';
 export * from './repositories/herdr-workspaces.repo.js';
 export * from './repositories/audit.repo.js';
+export * from './repositories/notifications.repo.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
@@ -22,6 +23,7 @@ import { ApprovalsRepo } from './repositories/approvals.repo.js';
 import { ExecutorsRepo } from './repositories/executors.repo.js';
 import { HerdrWorkspacesRepo } from './repositories/herdr-workspaces.repo.js';
 import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
+import { NotificationsRepo } from './repositories/notifications.repo.js';
 
 export interface Store {
   readonly db: Db;
@@ -34,6 +36,7 @@ export interface Store {
   readonly executors: ExecutorsRepo;
   readonly herdrWorkspaces: HerdrWorkspacesRepo;
   readonly audit: AuthorizedUserAuditRepo;
+  readonly notifications: NotificationsRepo;
 }
 
 export function createStore(db: Db): Store {
@@ -48,5 +51,6 @@ export function createStore(db: Db): Store {
     executors: new ExecutorsRepo(db),
     herdrWorkspaces: new HerdrWorkspacesRepo(db),
     audit: new AuthorizedUserAuditRepo(db),
+    notifications: new NotificationsRepo(db),
   };
 }

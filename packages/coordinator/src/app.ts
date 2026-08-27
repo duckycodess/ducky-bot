@@ -23,6 +23,7 @@ import { ApprovalsService } from './domain/approvals.service.js';
 import { DeferredActionPerformer } from './domain/action-performer.js';
 import { GitHubService } from './domain/github.service.js';
 import { Reconciler } from './domain/reconciler.js';
+import { JobNotifier } from './domain/notifications.service.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
@@ -56,6 +57,7 @@ export interface App {
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly reconciler: Reconciler;
+  readonly notifier: JobNotifier;
   readonly router: DuckyRouter;
   readonly transport: DiscordTransport;
   readonly credentials: ExecutorCredentialStore;
@@ -110,6 +112,7 @@ export function createApp(
   const reconciler = new Reconciler({ store, approvals, pending });
 
   const transport = overrides.transport ?? transportForProfile(discordProfile);
+  const notifier = new JobNotifier({ store, transport, ownerId: authz.ownerId });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
 
@@ -153,7 +156,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, allowlist, captures, schedules, jobs,
-    approvals, github, reconciler, router, transport, credentials, conversation, status,
+    approvals, github, reconciler, notifier, router, transport, credentials, conversation, status,
     close: () => store.db.close(),
   };
 }

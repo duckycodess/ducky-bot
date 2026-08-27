@@ -278,6 +278,14 @@ CREATE TABLE job_notifications (
   job_id        TEXT NOT NULL REFERENCES jobs(id),
   delivered_at  TEXT NOT NULL
 );
+
+-- Baseline every transition that already existed before this feature shipped
+-- as delivered. Without this, the very first sweep after upgrading an
+-- existing deployment would treat the whole job_transitions history as
+-- pending and DM the owner once per historical transition. Only transitions
+-- recorded from this point forward are left pending for the notifier.
+INSERT INTO job_notifications (transition_id, job_id, delivered_at)
+SELECT id, job_id, created_at FROM job_transitions;
 `,
   },
 ];

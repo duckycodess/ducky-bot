@@ -41,6 +41,10 @@ async function main(): Promise<void> {
 
   const shutdown = async (): Promise<void> => {
     clearInterval(timer);
+    // A notification sweep can be mid-write when shutdown is requested; wait
+    // for it to settle before the store closes underneath it, without
+    // triggering a new one.
+    await app.notifier.waitForIdle();
     await app.transport.stop();
     await server.close();
     app.close();

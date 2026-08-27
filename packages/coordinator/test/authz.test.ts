@@ -78,10 +78,16 @@ describe('owner-only surface manifest', () => {
     h.close();
   });
 
-  it('fails fast if a component signing key is missing or weak', () => {
+  it('fails fast if the profile’s component signing key is missing or weak', () => {
     expect(() =>
-      makeHarness({ env: { DUCKY_COMPONENT_SIGNING_KEY: 'short' } }),
+      makeHarness({ env: { DUCKY_DEV_COMPONENT_SIGNING_KEY: 'short' } }),
     ).toThrow(/32 bytes/);
-    expect(() => makeHarness({ env: { DUCKY_COMPONENT_SIGNING_KEY: secret() } })).not.toThrow();
+    expect(() => makeHarness({ env: { DUCKY_DEV_COMPONENT_SIGNING_KEY: secret() } })).not.toThrow();
+    // Absent entirely is also fatal; there is no unsigned fallback.
+    expect(() =>
+      makeHarness({
+        env: { DUCKY_DEV_COMPONENT_SIGNING_KEY: undefined, DUCKY_COMPONENT_SIGNING_KEY: undefined },
+      }),
+    ).toThrow(/required/);
   });
 });

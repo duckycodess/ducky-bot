@@ -16,7 +16,8 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   add('database', safe(() => app.store.db.prepare('SELECT 1').get() !== undefined), app.paths.dbPath);
   add('migrations', safe(() => isUpToDate(app.store.db)), 'schema up to date');
   add('owner', true, `configured (${app.authz.ownerId.slice(0, 4)}…)`);
-  add('component signing key', true, 'present');
+  add('component signing key', true, `present (${app.discordProfile.profile}-scoped)`);
+  add('executor credentials', true, app.paths.credentialsFile);
   add(
     'discord',
     true,

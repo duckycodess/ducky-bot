@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import {
-  DUCKY_PROFILES, SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES,
+  DUCKY_PROFILES, DuckyError, PROFILE_ENV,
+  SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES,
   type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -40,8 +41,14 @@ export const EnvSchema = z.object({
 
   DISCORD_CDN_HOSTS: z.string().default('cdn.discordapp.com,media.discordapp.net'),
 
-  DUCKY_COMPONENT_SIGNING_KEY: z.string(),
+  // Profile-scoped secrets. The shared names remain accepted for a
+  // single-profile development box, but production requires its own.
+  DUCKY_COMPONENT_SIGNING_KEY: z.string().optional(),
+  DUCKY_DEV_COMPONENT_SIGNING_KEY: z.string().optional(),
+  DUCKY_PROD_COMPONENT_SIGNING_KEY: z.string().optional(),
   DUCKY_EXECUTOR_CREDENTIALS_FILE: z.string().optional(),
+  DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE: z.string().optional(),
+  DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE: z.string().optional(),
   DUCKY_EXECUTOR_CREDENTIALS: z.string().optional(),
 
   DUCKY_REPOS_FILE: z.string().optional(),
@@ -60,9 +67,22 @@ export type Env = z.infer<typeof EnvSchema>;
  * Per-profile defaults, so two instances cannot collide on a database file or
  * a port by accident. An explicit value always wins.
  */
-const PROFILE_DEFAULTS: Record<DuckyProfile, { db: string; port: number; repos: string }> = {
-  development: { db: './data/ducky-dev.db', port: 8787, repos: './config/repos.dev.json' },
-  production: { db: './data/ducky-prod.db', port: 8788, repos: './config/repos.json' },
+const PROFILE_DEFAULTS: Record<
+  DuckyProfile,
+  { db: string; port: number; repos: string; credentials: string }
+> = {
+  development: {
+    db: './data/ducky-dev.db',
+    port: 8787,
+    repos: './config/repos.dev.json',
+    credentials: './config/executor-credentials.dev.json',
+  },
+  production: {
+    db: './data/ducky-prod.db',
+    port: 8788,
+    repos: './config/repos.json',
+    credentials: '/etc/ducky/executor-credentials-production.json',
+  },
 };
 
 export interface ResolvedPaths {
@@ -70,6 +90,55 @@ export interface ResolvedPaths {
   readonly httpPort: number;
   readonly reposFile: string;
   readonly instanceLabel: string;
+  readonly credentialsFile: string;
+}
+
+/**
+ * Secrets resolved for the SELECTED profile only.
+ *
+ * Production must supply its own: falling back to a shared value would let a
+ * development process hold production executor credentials, or let a control
+ * minted by one bot verify on the other. Development may still use the shared
+ * names, which keeps a single-profile local box simple.
+ */
+export interface ProfileSecrets {
+  readonly componentSigningKey: string;
+  readonly credentialsFile: string | undefined;
+  readonly inlineCredentials: string | undefined;
+}
+
+/** The configured credential-file path for this profile, if any. */
+function credentialsFileFor(env: Env): string | undefined {
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scoped = isProd
+    ? env.DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE
+    : env.DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE;
+  // Production never inherits the shared variable.
+  return scoped ?? (isProd ? undefined : env.DUCKY_EXECUTOR_CREDENTIALS_FILE);
+}
+
+export function resolveProfileSecrets(env: Env): ProfileSecrets {
+  const names = PROFILE_ENV[env.DUCKY_PROFILE];
+  const isProd = env.DUCKY_PROFILE === 'production';
+
+  const scopedKey = isProd ? env.DUCKY_PROD_COMPONENT_SIGNING_KEY : env.DUCKY_DEV_COMPONENT_SIGNING_KEY;
+  const componentSigningKey = scopedKey ?? (isProd ? undefined : env.DUCKY_COMPONENT_SIGNING_KEY);
+  if (!componentSigningKey) {
+    throw new DuckyError(
+      'invalid_input',
+      isProd
+        ? `${names.componentKey} is required for the production profile; it never shares the development key.`
+        : `${names.componentKey} or DUCKY_COMPONENT_SIGNING_KEY is required.`,
+    );
+  }
+
+  return {
+    componentSigningKey,
+    credentialsFile: credentialsFileFor(env),
+    // Inline credentials are a development convenience and are refused in
+    // production by the store itself.
+    inlineCredentials: isProd ? undefined : env.DUCKY_EXECUTOR_CREDENTIALS,
+  };
 }
 
 export function resolvePaths(env: Env): ResolvedPaths {
@@ -79,6 +148,9 @@ export function resolvePaths(env: Env): ResolvedPaths {
     httpPort: env.DUCKY_HTTP_PORT ?? d.port,
     reposFile: env.DUCKY_REPOS_FILE ?? d.repos,
     instanceLabel: env.DUCKY_INSTANCE_LABEL ?? `ducky-${env.DUCKY_PROFILE}`,
+    // Path resolution stays independent of secret validation, so a missing
+    // key surfaces as its own clear startup error rather than as a path error.
+    credentialsFile: credentialsFileFor(env) ?? d.credentials,
   };
 }
 

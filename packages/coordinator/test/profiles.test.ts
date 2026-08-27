@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PROFILE_ENV } from '@ducky/contracts';
 import { commandScopeFor, resolveDiscordProfile } from '../src/discord/profile-config.js';
-import { resolvePaths, loadEnv } from '../src/config.js';
+import { resolvePaths, resolveProfileSecrets, loadEnv } from '../src/config.js';
 import { makeHarness, OWNER, secret } from './helpers.js';
 
 const DEV_TOKEN = 'dev-placeholder-token';
@@ -12,7 +12,8 @@ const GUILD = '100000000000000012';
 const env = (over: Record<string, string | undefined> = {}): NodeJS.ProcessEnv =>
   ({
     OWNER_DISCORD_USER_ID: OWNER,
-    DUCKY_COMPONENT_SIGNING_KEY: secret(),
+    DUCKY_DEV_COMPONENT_SIGNING_KEY: secret(),
+    DUCKY_PROD_COMPONENT_SIGNING_KEY: secret(),
     DUCKY_EXECUTOR_CREDENTIALS: '{"version":1,"executors":[]}',
     ...over,
   }) as NodeJS.ProcessEnv;
@@ -71,6 +72,83 @@ describe('Discord profile isolation', () => {
     expect(PROFILE_ENV.development.token).not.toBe(PROFILE_ENV.production.token);
     expect(PROFILE_ENV.development.appId).not.toBe(PROFILE_ENV.production.appId);
     expect(PROFILE_ENV.development.guildId).not.toBe(PROFILE_ENV.production.guildId);
+  });
+});
+
+describe('secrets are profile-scoped, never shared', () => {
+  it('refuses a production profile that only has the shared signing key', () => {
+    expect(() =>
+      resolveProfileSecrets(
+        loadEnv({
+          OWNER_DISCORD_USER_ID: OWNER,
+          DUCKY_PROFILE: 'production',
+          DUCKY_COMPONENT_SIGNING_KEY: secret(),
+          DISCORD_PROD_TOKEN: PROD_TOKEN,
+          DISCORD_PROD_APP_ID: APP,
+        } as NodeJS.ProcessEnv),
+      ),
+    ).toThrow(/never shares the development key/);
+  });
+
+  it('refuses a production profile holding only the development key', () => {
+    expect(() =>
+      resolveProfileSecrets(
+        loadEnv({
+          OWNER_DISCORD_USER_ID: OWNER,
+          DUCKY_PROFILE: 'production',
+          DUCKY_DEV_COMPONENT_SIGNING_KEY: secret(),
+        } as NodeJS.ProcessEnv),
+      ),
+    ).toThrow(/DUCKY_PROD_COMPONENT_SIGNING_KEY is required/);
+  });
+
+  it('never lets production inherit a shared or development credential file', () => {
+    const secrets = resolveProfileSecrets(
+      loadEnv(
+        env({
+          DUCKY_PROFILE: 'production',
+          DUCKY_EXECUTOR_CREDENTIALS_FILE: '/shared/creds.json',
+          DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE: '/dev/creds.json',
+        }),
+      ),
+    );
+    expect(secrets.credentialsFile).toBeUndefined();
+    // Inline credentials are a development convenience only.
+    expect(secrets.inlineCredentials).toBeUndefined();
+  });
+
+  it('uses each profile’s own credential file when configured', () => {
+    const dev = resolveProfileSecrets(
+      loadEnv(env({ DUCKY_PROFILE: 'development', DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE: '/dev.json' })),
+    );
+    const prod = resolveProfileSecrets(
+      loadEnv(env({ DUCKY_PROFILE: 'production', DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE: '/prod.json' })),
+    );
+    expect(dev.credentialsFile).toBe('/dev.json');
+    expect(prod.credentialsFile).toBe('/prod.json');
+  });
+
+  it('gives the two profiles different signing keys', () => {
+    const shared = env();
+    const dev = resolveProfileSecrets(loadEnv({ ...shared, DUCKY_PROFILE: 'development' }));
+    const prod = resolveProfileSecrets(loadEnv({ ...shared, DUCKY_PROFILE: 'production' }));
+    expect(dev.componentSigningKey).not.toBe(prod.componentSigningKey);
+  });
+
+  it('still lets a single-profile development box use the shared names', () => {
+    const secrets = resolveProfileSecrets(
+      loadEnv({
+        OWNER_DISCORD_USER_ID: OWNER,
+        DUCKY_PROFILE: 'development',
+        DUCKY_COMPONENT_SIGNING_KEY: secret(),
+      } as NodeJS.ProcessEnv),
+    );
+    expect(secrets.componentSigningKey).toBeTruthy();
+  });
+
+  it('names distinct secret variables per profile', () => {
+    expect(PROFILE_ENV.development.componentKey).not.toBe(PROFILE_ENV.production.componentKey);
+    expect(PROFILE_ENV.development.credentialsFile).not.toBe(PROFILE_ENV.production.credentialsFile);
   });
 });
 
@@ -140,6 +218,12 @@ describe('operational isolation between profiles', () => {
     expect(paths.dbPath).toBe('/var/lib/ducky/custom.db');
     expect(paths.httpPort).toBe(9999);
     expect(paths.instanceLabel).toBe('ducky-prod-vm');
+  });
+
+  it('gives each profile its own credential file default', () => {
+    const dev = resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'development' })));
+    const prod = resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'production' })));
+    expect(dev.credentialsFile).not.toBe(prod.credentialsFile);
   });
 
   it('reports the active profile in status, without leaking the token', () => {

@@ -5,9 +5,12 @@ import {
   type ConversationProvider, type ExecutorCredentialStore, type GitHubReader,
   type ScheduleExtractionProvider,
 } from '@ducky/adapters';
-import { DuckyError } from '@ducky/contracts';
+import { DuckyError, PROFILE_ENV } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
-import { loadEnv, cdnHosts, readReposFile, resolvePaths, type Env, type ResolvedPaths } from './config.js';
+import {
+  loadEnv, cdnHosts, readReposFile, resolvePaths, resolveProfileSecrets,
+  type Env, type ProfileSecrets, type ResolvedPaths,
+} from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
 import { ComponentSigner } from './security/component-signing.js';
@@ -75,9 +78,13 @@ export function createApp(
   // the other profile's variables.
   const discordProfile = resolveDiscordProfile(env.DUCKY_PROFILE, envSource);
 
+  // Secrets for THIS profile only. Production never falls back to a shared or
+  // development value.
+  const secrets = resolveProfileSecrets(env);
+
   const store = overrides.store ?? createStoreFromEnv(env, paths);
   const authz = new Authorizer(loadAuthzConfig(env));
-  const signer = new ComponentSigner(env.DUCKY_COMPONENT_SIGNING_KEY);
+  const signer = new ComponentSigner(secrets.componentSigningKey);
 
   const allowlist = RepoAllowlist.fromJson(
     overrides.allowlistJson ?? readReposFile(paths.reposFile),
@@ -89,7 +96,7 @@ export function createApp(
   for (const id of authz.allConfiguredIds().slice(1)) store.audit.observe(id, 'chat');
   store.audit.revokeMissing(authz.allConfiguredIds());
 
-  const credentials = overrides.credentials ?? credentialStoreFromEnv(env);
+  const credentials = overrides.credentials ?? credentialStoreFor(env, paths, secrets);
   const conversation = overrides.conversation ?? conversationFromEnv(env);
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
@@ -157,17 +164,26 @@ function createStoreFromEnv(env: Env, paths: ResolvedPaths): Store {
   return createStore(db);
 }
 
-function credentialStoreFromEnv(env: Env): ExecutorCredentialStore {
-  if (env.DUCKY_EXECUTOR_CREDENTIALS_FILE) {
-    return new FileCredentialStore(env.DUCKY_EXECUTOR_CREDENTIALS_FILE);
+/**
+ * The credential file is profile-scoped, so a development coordinator can never
+ * load production executor credentials by inheriting a shared variable.
+ */
+function credentialStoreFor(
+  env: Env,
+  paths: ResolvedPaths,
+  secrets: ProfileSecrets,
+): ExecutorCredentialStore {
+  if (secrets.credentialsFile) return new FileCredentialStore(secrets.credentialsFile);
+  if (secrets.inlineCredentials) {
+    return new MemoryCredentialStore(secrets.inlineCredentials, env.NODE_ENV);
   }
-  if (env.DUCKY_EXECUTOR_CREDENTIALS) {
-    return new MemoryCredentialStore(env.DUCKY_EXECUTOR_CREDENTIALS, env.NODE_ENV);
+  if (env.DUCKY_PROFILE === 'production') {
+    throw new DuckyError(
+      'credential_unavailable',
+      `${PROFILE_ENV.production.credentialsFile} is required for the production profile.`,
+    );
   }
-  throw new DuckyError(
-    'credential_unavailable',
-    'Configure DUCKY_EXECUTOR_CREDENTIALS_FILE (or DUCKY_EXECUTOR_CREDENTIALS outside production).',
-  );
+  return new FileCredentialStore(paths.credentialsFile);
 }
 
 /**

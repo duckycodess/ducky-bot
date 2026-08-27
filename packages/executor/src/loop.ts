@@ -10,9 +10,14 @@ export interface LoopDeps {
   readonly version: string;
   readonly log?: (line: string) => void;
   readonly sleep?: (ms: number) => Promise<void>;
+  /** How often to report structured executor state while a job runs. */
+  readonly presenceIntervalMs?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Comfortably inside the offline window, so a running job never looks idle. */
+const PRESENCE_INTERVAL_MS = 30_000;
 
 /**
  * Claim, run, report. Backoff with jitter covers laptop sleep, network changes
@@ -21,6 +26,7 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  */
 export class ExecutorLoop {
   #stopped = false;
+  #presence: NodeJS.Timeout | undefined;
   /** Jobs this executor is running right now, reported on every heartbeat. */
   readonly #active = new Set<string>();
   private readonly workspaces = new Map<
@@ -32,6 +38,40 @@ export class ExecutorLoop {
 
   stop(): void {
     this.#stopped = true;
+    this.stopPresence();
+  }
+
+  /**
+   * Reports structured executor state on a timer, independently of the claim
+   * loop.
+   *
+   * The loop is blocked inside a running turn, so without this the general
+   * heartbeat -- the one carrying capabilities and activeJobIds -- would go
+   * silent for the whole job and `activeJobIds` would only ever be empty. The
+   * supervisor's per-job heartbeat keeps the lease and liveness fresh; this
+   * keeps the structured view useful, and deliberately does nothing with
+   * cancellation so the two cannot interfere.
+   */
+  private startPresence(): void {
+    if (this.#presence) return;
+    const interval = this.deps.presenceIntervalMs ?? PRESENCE_INTERVAL_MS;
+    this.#presence = setInterval(() => {
+      void this.deps.client
+        .heartbeat({
+          version: this.deps.version,
+          capabilities: ['herdr-pi'],
+          activeJobIds: this.activeJobIds(),
+        })
+        .catch(() => {
+          /* transient; the supervisor's job heartbeat is the liveness path */
+        });
+    }, interval);
+    this.#presence.unref?.();
+  }
+
+  private stopPresence(): void {
+    if (this.#presence) clearInterval(this.#presence);
+    this.#presence = undefined;
   }
 
   /** Job ids currently being executed here. */
@@ -44,6 +84,7 @@ export class ExecutorLoop {
     if (!claim) return 'idle';
 
     this.#active.add(claim.jobId);
+    this.startPresence();
     try {
       await runClaimedJob(
         {
@@ -62,6 +103,7 @@ export class ExecutorLoop {
       );
     } finally {
       this.#active.delete(claim.jobId);
+      this.stopPresence();
     }
     return 'claimed';
   }

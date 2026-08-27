@@ -218,6 +218,36 @@ describe('cancelling a running job', () => {
     );
   });
 
+  it('lets cancellation win a genuine simultaneous race', async () => {
+    // The orchestration resolves in the SAME tick the cancellation is
+    // observed, which is the case that previously slipped through.
+    const client = fakeClient(0);
+    let releaseRun: (() => void) | undefined;
+    const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult('raced'), {
+      cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
+    });
+    const originalRun = orchestrator.runJob.bind(orchestrator);
+    orchestrator.runJob = async (spec) => {
+      await new Promise<void>((resolve) => {
+        releaseRun = resolve;
+        // Resolve exactly when the abort fires, not before or after.
+        spec.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return originalRun(spec);
+    };
+
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1 }, claim());
+    expect(releaseRun).toBeDefined();
+
+    // Cancellation wins even though a result was available.
+    expect(client.submitResult).not.toHaveBeenCalled();
+    expect(orchestrator.cleanups).toHaveLength(0);
+    expect(client.cancelAck).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ terminated: true }),
+    );
+  });
+
   it('closes the workspace through the lease-free route on success', async () => {
     const client = fakeClient(99);
     const orchestrator = new MockPiOrchestrator();

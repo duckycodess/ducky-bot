@@ -78,6 +78,18 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     ...(deps.log ? { log: deps.log } : {}),
   });
 
+  /** What was registered when the workspace was created, reused verbatim later. */
+  let registered:
+    | {
+        workspaceId: string;
+        agentName: string;
+        label: string;
+        mode: 'worktree' | 'direct';
+        workspacePath: string;
+        worktreePath: string | null;
+      }
+    | undefined;
+
   const spec: OrchestrationSpec = {
     jobId: claim.jobId,
     publicId: claim.publicId,
@@ -104,6 +116,10 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     recoveryWaitMs: RECOVERY_WAIT_MS,
     signal: supervisor.signal,
     onWorkspaceCreated: async (info) => {
+      // Remembered so the follow-up state advance re-sends the SAME path. For
+      // a worktree that is Herdr's checkout directory, not the repo root, and
+      // overwriting it would corrupt the record cleanup later relies on.
+      registered = info;
       // Durable ownership before the agent exists. If this fails the
       // orchestrator aborts rather than starting an unrecorded agent.
       await client.registerWorkspace(claim.jobId, {
@@ -122,6 +138,25 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         workspacePath: info.workspacePath,
         mode: info.mode,
       });
+    },
+    onAgentStarted: async (info) => {
+      // Advance the record off `creating`, so a stale row is distinguishable
+      // from one whose agent genuinely started.
+      if (!registered || registered.workspaceId !== info.workspaceId) return;
+      await client
+        .registerWorkspace(claim.jobId, {
+          leaseId: claim.leaseId,
+          workspaceId: registered.workspaceId,
+          agentName: registered.agentName,
+          label: registered.label,
+          mode: registered.mode,
+          workspacePath: registered.workspacePath,
+          worktreePath: registered.worktreePath,
+          state: 'active',
+        })
+        .catch(() => {
+          /* the turn is already under way; bookkeeping is not worth aborting it */
+        });
     },
   };
 

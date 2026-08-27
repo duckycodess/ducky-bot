@@ -10,19 +10,25 @@ real orchestrator.
 
 ```bash
 pnpm install
-cp .env.example .env
-cp config/repos.example.json config/repos.json
+cp .env.example .env.development
+cp config/repos.dev.example.json config/repos.dev.json
 pnpm migrate
 ```
 
-Fill in `.env`:
+Ducky runs as one of two isolated profiles, selected by `DUCKY_PROFILE`
+(`development` by default). Keep a separate env file per profile; the two share
+no credentials, database, port or command scope.
+
+Fill in the env file:
 
 - `OWNER_DISCORD_USER_ID` — your Discord user id (developer mode → copy id).
   Exactly one. Startup fails otherwise.
 - `DUCKY_COMPONENT_SIGNING_KEY` — generate with
   `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`
 - `DUCKY_EXECUTOR_CREDENTIALS_FILE` or, outside production only,
-  `DUCKY_EXECUTOR_CREDENTIALS`
+  `DUCKY_EXECUTOR_CREDENTIALS` — give each profile its own file
+- `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
+  want the real development bot; leave them unset for the mock transport
 
 Edit `config/repos.json` so each slug points at a real checkout. Discord only
 ever supplies a slug; the mapping to an absolute path is operator-controlled.
@@ -59,12 +65,27 @@ DUCKY_EXECUTOR_HMAC_SECRET=...
 
 ## Discord application setup
 
-1. Create an application and a bot.
-2. Enable the **MessageContent** privileged intent — DMs are unreadable
+Create **two** applications, one per profile, so test traffic never reaches the
+real assistant.
+
+1. Create an application and a bot for each of development and production.
+2. Enable the **MessageContent** privileged intent on both — DMs are unreadable
    without it.
-3. Put the bot token in `DISCORD_TOKEN`.
-4. Review the payload with `pnpm register-commands` (a dry run — it prints and
-   registers nothing) before registering deliberately.
+3. Put each token in its own variable: `DISCORD_DEV_TOKEN` /
+   `DISCORD_PROD_TOKEN`, with the matching app id. Nothing reads across.
+4. For development, set `DISCORD_DEV_GUILD_ID` to a test server. Guild commands
+   appear immediately; global ones take time to propagate.
+5. Review the payload with `pnpm register-commands` (a dry run — it prints and
+   registers nothing).
+6. Register deliberately, naming the bot explicitly:
+
+```bash
+pnpm register-commands --apply --profile development   # guild-scoped
+pnpm register-commands --apply --profile production    # global
+```
+
+`--apply` refuses to run without `--profile`: which bot to write to is not
+something to infer from an ambient default.
 
 ## Verification
 

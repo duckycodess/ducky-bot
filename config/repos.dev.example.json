@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "slug": "example-sandbox",
+      "absolutePath": "/home/PLACEHOLDER/projects/example-sandbox",
+      "defaultBranch": "main",
+      "github": null,
+      "allowWorktree": true,
+      "allowBootstrap": true,
+      "bootstrapAllowedEntries": [
+        ".git"
+      ],
+      "enabled": true
+    }
+  ]
+}

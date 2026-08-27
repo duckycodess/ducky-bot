@@ -2,6 +2,14 @@
 
 What is actually true today. Phase 1, no deployment performed.
 
+## Two Discord identities
+
+`DUCKY_PROFILE` selects `development` or `production`. They share no token,
+application id, guild, database, port or command scope, and neither falls back
+to the other. Development may run token-less on the mock; production refuses to
+start without its own credentials. The active profile is in the startup
+diagnostics and in `/status`.
+
 ## Working end to end (against mock Discord and mock Pi)
 
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
@@ -41,7 +49,7 @@ from the reported checkout path.
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
 | Real Discord gateway | Fully implemented — a token selects it, embeds/buttons/modals are converted structurally, and interactions are deferred to meet the acknowledgement deadline. **Not run here**: there is no token, and the privileged MessageContent intent must be enabled in the portal first. |
 | Slash-command registration | `--apply` performs the real Discord write. **Not executed**; the default remains a dry run. |
-| Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait and then *observes* the agent. A still-working agent is reported honestly and the repository stays reserved for the owner. |
+| Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |
 | Azure deployment | Documented only; nothing provisioned. |
 

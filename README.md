@@ -39,15 +39,25 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
 
 ```bash
 pnpm install
-cp .env.example .env                       # fill in the owner id and a signing key
-cp config/repos.example.json config/repos.json
+cp .env.example .env.development           # fill in the owner id and a signing key
+cp config/repos.dev.example.json config/repos.dev.json
 pnpm migrate
 pnpm dev:coordinator                       # mock Discord transport with no token
 pnpm dev:executor                          # in a second shell
 ```
 
-With `DISCORD_TOKEN` unset the coordinator uses the in-memory transport, so the
-whole lifecycle is exercisable without touching Discord.
+With no token for the selected profile the coordinator uses the in-memory
+transport, so the whole lifecycle is exercisable without touching Discord.
+
+### Two bots
+
+Ducky runs as **two isolated Discord identities** — `development` and
+`production`, selected by `DUCKY_PROFILE`. They share no token, application id,
+database, port or command scope, and neither falls back to the other:
+development registers its commands to a single guild so they appear instantly,
+production registers globally, and a production instance **refuses to start**
+without its own credentials rather than borrowing the development bot. The
+active profile is shown in the startup diagnostics and in `/status`.
 
 ## Commands
 
@@ -60,6 +70,7 @@ whole lifecycle is exercisable without touching Discord.
 | `pnpm probe:herdr` | record live Herdr responses as fixtures |
 | `pnpm executor:issue-credential --executor <id>` | mint executor credentials |
 | `pnpm register-commands` | print the slash-command payload (dry run) |
+| `pnpm register-commands --apply --profile <development\|production>` | actually register, for one named bot |
 
 Every Discord surface except plain conversation is **owner-only**. See
 `docs/SECURITY.md`.

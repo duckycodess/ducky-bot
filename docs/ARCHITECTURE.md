@@ -149,10 +149,28 @@ sequenceDiagram
   end
 ```
 
+The orchestration is **raced** against the signal rather than awaited first: a
+real turn is a blocking `herdr agent prompt --wait`, so waiting it out would
+mean a cancellation only landed after the wall-clock timeout.
+
 Herdr offers no verified way to interrupt a Pi turn without risking a
 half-written edit, so nothing is ever typed into a live pane. Termination is
 only ever *reported* when it is *observed* — a false positive here would
-release the repository while a writer was still running.
+release the repository while a writer was still running. The executor's writer
+lock is likewise held until a stop is confirmed, so a retry on that host cannot
+start a second writer beside a live agent.
+
+## Workspace cleanup
+
+A workspace is closed only after a **terminal success**. A job awaiting an
+owner answer or an approval keeps its workspace, so the work stays inspectable
+and the next round can reuse the same Pi session; a failed or orphaned job
+keeps it for the owner to look at.
+
+Cleanup proves ownership again at the point of closing — the workspace must be
+the one recorded for that job and carry the Ducky label, and a still-working
+agent blocks the close — so a user's workspace can never be closed even if a
+wrong id reached it.
 
 ## Durable workspace ownership
 

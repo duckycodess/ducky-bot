@@ -5,9 +5,22 @@ a service.
 
 | File | Scope | Host |
 |---|---|---|
-| `ducky-coordinator.service` | system | Azure VM |
+| `ducky-coordinator@.service` | system, **per profile** | Azure VM |
 | `ducky-openclaw.service` | system | Azure VM — placeholder, unverified |
-| `user/ducky-executor.service` | user | WSL development machine |
+| `user/ducky-executor@.service` | user, **per profile** | WSL development machine |
+
+Both units are instanced on the profile name, so development and production run
+as separate services with separate environment files, databases, ports and
+executor identities:
+
+```bash
+systemctl enable --now ducky-coordinator@development
+systemctl enable --now ducky-coordinator@production
+systemctl --user enable --now ducky-executor@development
+```
+
+Give each profile its own `/etc/ducky/<profile>.env`. Sharing one file would
+defeat the isolation the two bots exist for.
 
 ## Before installing
 

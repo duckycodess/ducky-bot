@@ -3,6 +3,29 @@
 **Nothing has been provisioned.** This is the intended shape, written so the
 decision is reviewable before anything is created.
 
+## Two profiles
+
+Ducky runs as two isolated identities. Nothing is shared between them, and
+neither can fall back to the other:
+
+| | development | production |
+|---|---|---|
+| token | `DISCORD_DEV_TOKEN` | `DISCORD_PROD_TOKEN` |
+| application id | `DISCORD_DEV_APP_ID` | `DISCORD_PROD_APP_ID` |
+| commands | guild-scoped to `DISCORD_DEV_GUILD_ID` (instant) | global, unless `DISCORD_PROD_GUILD_ID` is set |
+| database | `./data/ducky-dev.db` | `./data/ducky-prod.db` |
+| port | 8787 | 8788 |
+| repositories | `config/repos.dev.json` | `config/repos.json` |
+| env file | `/etc/ducky/development.env` | `/etc/ducky/production.env` |
+| executor credential | its own file | its own file |
+
+Development may run with no token at all, which selects the mock transport.
+**Production fails to start without its own token** rather than borrowing the
+development bot, and production never registers into the development guild.
+
+The active profile appears in the startup diagnostics and in `/status`, so an
+instance is never ambiguous.
+
 ## Coordinator (Azure VM)
 
 - Ubuntu 24.04 LTS x64, a small B-series instance
@@ -18,8 +41,9 @@ decision is reviewable before anything is created.
 |---|---|---|
 | `/opt/ducky` | 0755 | application |
 | `/opt/ducky/config/repos.json` | 0644 | slugs → absolute paths |
-| `/etc/ducky/executor-credentials.json` | **0600** | refused otherwise |
-| `/var/lib/ducky/ducky.db` | 0600 | SQLite on persistent disk |
+| `/etc/ducky/<profile>.env` | **0600** | one per profile, never shared |
+| `/etc/ducky/executor-credentials-<profile>.json` | **0600** | refused otherwise |
+| `/var/lib/ducky/ducky-<profile>.db` | 0600 | SQLite on persistent disk |
 
 ### Backups
 
@@ -41,17 +65,26 @@ unattended.
 Templates are in `deploy/systemd/`. They are **templates**: nothing is
 installed by this repository.
 
-```bash
-# coordinator
-sudo cp deploy/systemd/ducky-coordinator.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now ducky-coordinator
+Both units are instanced on the profile name.
 
-# executor (WSL, user scope)
+```bash
+# coordinator, once per profile
+sudo cp deploy/systemd/ducky-coordinator@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ducky-coordinator@development
+sudo systemctl enable --now ducky-coordinator@production
+
+# executor (WSL, user scope), once per profile
 mkdir -p ~/.config/systemd/user
-cp deploy/systemd/user/ducky-executor.service ~/.config/systemd/user/
+cp deploy/systemd/user/ducky-executor@.service ~/.config/systemd/user/
 loginctl enable-linger "$USER"     # only if it should survive logout
-systemctl --user daemon-reload && systemctl --user enable --now ducky-executor
+systemctl --user daemon-reload
+systemctl --user enable --now ducky-executor@development
 ```
+
+Each instance reads `/etc/ducky/<profile>.env` (mode 0600). Give every profile
+its own executor credential file too: a shared one would let a development
+executor claim production jobs.
 
 ## Networking
 

@@ -8,7 +8,7 @@
 # the executor stops when the login session ends. Enable it only if the
 # executor should keep running unattended.
 [Unit]
-Description=Ducky executor (outbound only)
+Description=Ducky executor (%i profile, outbound only)
 Documentation=file:///home/%u/projects/ducky/docs/DEPLOYMENT.md
 After=default.target
 
@@ -17,7 +17,10 @@ Type=simple
 WorkingDirectory=%h/projects/ducky
 
 # Credentials belong in a 0600 environment file, never in this unit.
-EnvironmentFile=%h/.config/ducky/executor.env
+# Per-profile: %i is development or production. Each profile has its OWN
+# executor identity and credential, so a development executor can never claim
+# a production job.
+EnvironmentFile=%h/.config/ducky/executor-%i.env
 
 ExecStart=/usr/bin/env node %h/projects/ducky/packages/executor/dist/main.js
 Restart=always

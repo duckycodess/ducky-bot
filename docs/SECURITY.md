@@ -33,6 +33,21 @@ well. Command routing is not part of the security argument.
 The chat whitelist reaches **conversation only**. The conversational service is
 constructed with no reference to any privileged service.
 
+## Profile isolation
+
+The development and production bots are separate identities, not a flag on one
+identity. Each profile reads only its own `DISCORD_<PROFILE>_*` variables, and
+`resolveDiscordProfile` never consults the other set — so a production instance
+cannot be started with the development token even if both are present in the
+environment.
+
+Give each profile its own env file, database, port and **executor credential
+file**. A shared credential file would let a development executor claim
+production jobs, which is the one crossing that matters most.
+
+`register-commands --apply` requires an explicit `--profile`: which bot to
+write to is not something to infer from an ambient default.
+
 ## Executor credentials
 
 The plaintext bearer token and HMAC key **never enter SQLite**.
@@ -134,6 +149,12 @@ string, header set or body.
 - **Subprocesses.** `runArgv` uses `execFile` with an argv array, a mandatory
   timeout and a capped buffer. There is no shell mode; a shell string or a
   non-array throws. A global concurrency pool bounds host load.
+- **Workspace registrations.** The executor is authenticated, but its
+  *content* is still validated: the agent name and label must match the Ducky
+  prefixes for the claimed repository, and the path must be absolute,
+  normalized and inside the repository — or, for a worktree, under a
+  Herdr-managed worktrees directory. The record is what a later cleanup acts
+  on, so a malformed one is refused before it is persisted.
 - **Result payloads.** Size-capped, strictly parsed, path-checked and
   deep-sanitized *before* anything is persisted. A result claiming
   `implemented` without an independent passing review and passing verification

@@ -9,5 +9,10 @@ dist/
 *.db-shm
 .ducky/
 coverage/
+# Real configuration, one file per profile. Examples are tracked; anything
+# that could hold a real path or credential is not.
 config/repos.json
+config/repos.*.json
 config/executor-credentials.json
+config/executor-credentials.*.json
+!config/*.example.json

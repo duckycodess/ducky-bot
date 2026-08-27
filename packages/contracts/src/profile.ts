@@ -14,6 +14,46 @@ export const isDuckyProfile = (v: unknown): v is DuckyProfile =>
   typeof v === 'string' && (DUCKY_PROFILES as readonly string[]).includes(v);
 
 /**
+ * Default database and credential-file locations per profile, kept here so
+ * every place that resolves them -- the coordinator's own startup path, the
+ * migration CLI, the credentials CLI -- reads the same table instead of each
+ * maintaining its own copy that can drift.
+ */
+export const PROFILE_DEFAULT_DB_PATH: Record<DuckyProfile, string> = {
+  development: './data/ducky-dev.db',
+  production: './data/ducky-prod.db',
+};
+
+export const PROFILE_DEFAULT_CREDENTIALS_FILE: Record<DuckyProfile, string> = {
+  development: './config/executor-credentials.dev.json',
+  production: '/etc/ducky/executor-credentials-production.json',
+};
+
+/**
+ * An env-file assignment like `FOO=` loads as an empty string, not an unset
+ * variable. Node's --env-file-if-exists does not distinguish the two, so every
+ * optional-with-default env read normalizes blank to unset here, once.
+ */
+export const blankToUndefined = (v: string | undefined): string | undefined => {
+  const t = v?.trim();
+  return t ? t : undefined;
+};
+
+/**
+ * Resolves DUCKY_PROFILE the same way everywhere: blank or unset defaults to
+ * development, and anything else must be a known profile. Used by call sites
+ * that cannot pull in the coordinator's full env schema (the CLIs).
+ */
+export function resolveDuckyProfile(raw: string | undefined): DuckyProfile {
+  const v = blankToUndefined(raw);
+  if (v === undefined) return 'development';
+  if (!isDuckyProfile(v)) {
+    throw new Error(`DUCKY_PROFILE must be one of ${DUCKY_PROFILES.join(' | ')}.`);
+  }
+  return v;
+}
+
+/**
  * Env var names per profile. Kept here so nothing has to guess at them.
  *
  * Every secret is profile-scoped, not just the Discord ones: sharing an

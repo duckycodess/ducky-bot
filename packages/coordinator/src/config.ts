@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import {
-  DUCKY_PROFILES, DuckyError, PROFILE_ENV,
-  SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES,
+  DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE, PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
+  SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, blankToUndefined, resolveDuckyProfile,
   type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -72,16 +72,16 @@ const PROFILE_DEFAULTS: Record<
   { db: string; port: number; repos: string; credentials: string }
 > = {
   development: {
-    db: './data/ducky-dev.db',
+    db: PROFILE_DEFAULT_DB_PATH.development,
     port: 8787,
     repos: './config/repos.dev.json',
-    credentials: './config/executor-credentials.dev.json',
+    credentials: PROFILE_DEFAULT_CREDENTIALS_FILE.development,
   },
   production: {
-    db: './data/ducky-prod.db',
+    db: PROFILE_DEFAULT_DB_PATH.production,
     port: 8788,
     repos: './config/repos.json',
-    credentials: '/etc/ducky/executor-credentials-production.json',
+    credentials: PROFILE_DEFAULT_CREDENTIALS_FILE.production,
   },
 };
 
@@ -154,11 +154,49 @@ export function resolvePaths(env: Env): ResolvedPaths {
   };
 }
 
+/**
+ * An env-file assignment like `FOO=` loads as an empty string, not an unset
+ * variable -- Node's --env-file-if-exists does not distinguish the two. Every
+ * optional field in EnvSchema must therefore see blank the same as absent, or
+ * a leftover blank line in .env.production silently overrides a profile
+ * default instead of falling through to it.
+ */
+function blankValuesToUndefined(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    out[key] = value === '' ? undefined : value;
+  }
+  return out;
+}
+
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  return EnvSchema.parse(source);
+  return EnvSchema.parse(blankValuesToUndefined(source));
 }
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 
 export const readReposFile = (path: string): string => readFileSync(path, 'utf8');
+
+/**
+ * DB and credential-file defaults for scripts that operate on a profile's
+ * SQLite file directly (the `credentials` CLI) and cannot run the full env
+ * schema -- it has no business requiring OWNER_DISCORD_USER_ID or a component
+ * signing key just to issue a credential. Mirrors resolvePaths'/
+ * credentialsFileFor's precedence: an explicit scoped var wins, then the
+ * shared var (development only -- production never inherits it), then the
+ * profile default.
+ */
+export function resolveCliPaths(env: NodeJS.ProcessEnv): { dbPath: string; credentialsFile: string } {
+  const profile = resolveDuckyProfile(env['DUCKY_PROFILE']);
+  const isProd = profile === 'production';
+  const names = PROFILE_ENV[profile];
+
+  const dbPath = blankToUndefined(env['DUCKY_DB_PATH']) ?? PROFILE_DEFAULT_DB_PATH[profile];
+
+  const scoped = blankToUndefined(env[names.credentialsFile]);
+  const shared = isProd ? undefined : blankToUndefined(env['DUCKY_EXECUTOR_CREDENTIALS_FILE']);
+  const credentialsFile = scoped ?? shared ?? PROFILE_DEFAULT_CREDENTIALS_FILE[profile];
+
+  return { dbPath, credentialsFile };
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PROFILE_ENV } from '@ducky/contracts';
 import { commandScopeFor, resolveDiscordProfile } from '../src/discord/profile-config.js';
-import { resolvePaths, resolveProfileSecrets, loadEnv } from '../src/config.js';
+import { resolvePaths, resolveProfileSecrets, loadEnv, resolveCliPaths } from '../src/config.js';
 import { makeHarness, OWNER, secret } from './helpers.js';
 
 const DEV_TOKEN = 'dev-placeholder-token';
@@ -233,5 +233,86 @@ describe('operational isolation between profiles', () => {
     expect(JSON.stringify(status)).not.toContain(DEV_TOKEN);
     expect(JSON.stringify(status)).not.toContain(PROD_TOKEN);
     h.close();
+  });
+});
+
+describe('blank env-file assignments behave as unset', () => {
+  it('falls through to the profile default when DUCKY_DB_PATH is blank', () => {
+    const withBlank = resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'production', DUCKY_DB_PATH: '' })));
+    const withUnset = resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'production' })));
+    expect(withBlank.dbPath).toBe(withUnset.dbPath);
+    expect(withBlank.dbPath).not.toBe('');
+  });
+
+  it('falls through to the profile default when the credential file var is blank', () => {
+    const withBlank = resolveProfileSecrets(
+      loadEnv(env({ DUCKY_PROFILE: 'development', DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE: '' })),
+    );
+    expect(withBlank.credentialsFile).toBeUndefined();
+  });
+
+  it('does not let a blank DUCKY_HTTP_PORT crash instead of falling through', () => {
+    const paths = resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'development', DUCKY_HTTP_PORT: '' })));
+    expect(paths.httpPort).toBe(8787);
+  });
+
+  it('still fails on a genuinely missing required field', () => {
+    expect(() => loadEnv({ OWNER_DISCORD_USER_ID: '' } as NodeJS.ProcessEnv)).toThrow();
+  });
+});
+
+describe('resolveCliPaths (migrate / credentials CLIs)', () => {
+  it('honours the selected profile default for both db and credentials file', () => {
+    const dev = resolveCliPaths({ DUCKY_PROFILE: 'development' } as NodeJS.ProcessEnv);
+    const prod = resolveCliPaths({ DUCKY_PROFILE: 'production' } as NodeJS.ProcessEnv);
+    expect(dev.dbPath).not.toBe(prod.dbPath);
+    expect(dev.credentialsFile).not.toBe(prod.credentialsFile);
+    expect(dev.dbPath).toBe(resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'development' }))).dbPath);
+    expect(prod.dbPath).toBe(resolvePaths(loadEnv(env({ DUCKY_PROFILE: 'production' }))).dbPath);
+  });
+
+  it('defaults to development when DUCKY_PROFILE is unset or blank', () => {
+    const unset = resolveCliPaths({} as NodeJS.ProcessEnv);
+    const blank = resolveCliPaths({ DUCKY_PROFILE: '' } as NodeJS.ProcessEnv);
+    const dev = resolveCliPaths({ DUCKY_PROFILE: 'development' } as NodeJS.ProcessEnv);
+    expect(unset).toEqual(dev);
+    expect(blank).toEqual(dev);
+  });
+
+  it('rejects an unknown profile', () => {
+    expect(() => resolveCliPaths({ DUCKY_PROFILE: 'staging' } as NodeJS.ProcessEnv)).toThrow(
+      /must be one of/,
+    );
+  });
+
+  it('lets an explicit DUCKY_DB_PATH override the profile default', () => {
+    const out = resolveCliPaths({
+      DUCKY_PROFILE: 'production',
+      DUCKY_DB_PATH: '/var/lib/ducky/custom.db',
+    } as NodeJS.ProcessEnv);
+    expect(out.dbPath).toBe('/var/lib/ducky/custom.db');
+  });
+
+  it('treats a blank DUCKY_DB_PATH as unset, not as an empty path', () => {
+    const blank = resolveCliPaths({ DUCKY_PROFILE: 'production', DUCKY_DB_PATH: '' } as NodeJS.ProcessEnv);
+    const unset = resolveCliPaths({ DUCKY_PROFILE: 'production' } as NodeJS.ProcessEnv);
+    expect(blank.dbPath).toBe(unset.dbPath);
+  });
+
+  it('production never inherits the shared (development) credentials file variable', () => {
+    const out = resolveCliPaths({
+      DUCKY_PROFILE: 'production',
+      DUCKY_EXECUTOR_CREDENTIALS_FILE: '/shared/creds.json',
+    } as NodeJS.ProcessEnv);
+    expect(out.credentialsFile).not.toBe('/shared/creds.json');
+  });
+
+  it('prefers a profile-scoped credentials file over the shared one', () => {
+    const out = resolveCliPaths({
+      DUCKY_PROFILE: 'development',
+      DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE: '/dev.json',
+      DUCKY_EXECUTOR_CREDENTIALS_FILE: '/shared.json',
+    } as NodeJS.ProcessEnv);
+    expect(out.credentialsFile).toBe('/dev.json');
   });
 });

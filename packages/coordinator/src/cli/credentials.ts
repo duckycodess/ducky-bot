@@ -5,6 +5,7 @@ import {
 } from '@ducky/adapters';
 import { KEY_ID_RE, EXECUTOR_ID_RE, newKeyId } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations } from '@ducky/persistence';
+import { resolveCliPaths } from '../config.js';
 
 /**
  * Issues, lists and revokes executor credentials.
@@ -23,7 +24,9 @@ function usage(): never {
       '  credentials revoke-credential --key-id <k>',
       '  credentials revoke-executor --executor <id>',
       '',
-      'env: DUCKY_DB_PATH, DUCKY_EXECUTOR_CREDENTIALS_FILE',
+      'env: DUCKY_PROFILE (development|production, default development),',
+      '     DUCKY_DB_PATH, DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE / DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE,',
+      '     DUCKY_EXECUTOR_CREDENTIALS_FILE (development-only shared fallback)',
       '',
     ].join('\n'),
   );
@@ -50,8 +53,7 @@ function saveFile(path: string, data: { version: 1; executors: CredentialFileEnt
 
 function main(): void {
   const [, , command, ...argv] = process.argv;
-  const dbPath = process.env['DUCKY_DB_PATH'] ?? './data/ducky.db';
-  const filePath = process.env['DUCKY_EXECUTOR_CREDENTIALS_FILE'] ?? './config/executor-credentials.json';
+  const { dbPath, credentialsFile: filePath } = resolveCliPaths(process.env);
 
   const db = openDatabase({ location: dbPath });
   runMigrations(db);

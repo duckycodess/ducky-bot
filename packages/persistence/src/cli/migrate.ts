@@ -1,5 +1,18 @@
+import { fileURLToPath } from 'node:url';
+import { blankToUndefined, resolveDuckyProfile, PROFILE_DEFAULT_DB_PATH } from '@ducky/contracts';
 import { openDatabase } from '../db.js';
 import { appliedVersions, pendingMigrations, runMigrations } from '../migrate.js';
+
+/**
+ * DUCKY_DB_PATH always wins when set (and non-blank); otherwise the target is
+ * the SELECTED profile's own default -- this must match what the coordinator
+ * itself opens at startup, or `--dry` can report a profile's database as
+ * up to date while the coordinator is actually reading a different file.
+ */
+export function resolveMigrateDbPath(env: NodeJS.ProcessEnv): string {
+  const profile = resolveDuckyProfile(env['DUCKY_PROFILE']);
+  return blankToUndefined(env['DUCKY_DB_PATH']) ?? PROFILE_DEFAULT_DB_PATH[profile];
+}
 
 /**
  * Applies pending migrations, or lists them with `--dry`.
@@ -9,7 +22,7 @@ import { appliedVersions, pendingMigrations, runMigrations } from '../migrate.js
  */
 function main(): void {
   const dry = process.argv.includes('--dry');
-  const location = process.env['DUCKY_DB_PATH'] ?? './data/ducky.db';
+  const location = resolveMigrateDbPath(process.env);
   const db = openDatabase({ location });
 
   try {
@@ -36,4 +49,4 @@ function main(): void {
   }
 }
 
-main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) main();

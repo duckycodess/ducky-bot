@@ -123,11 +123,12 @@ export class MockHerdr implements HerdrClient {
     this.seq += 1;
     const workspaceId = `wW${this.seq}`;
     this.state.workspaces.push({ workspace_id: workspaceId, label: `ducky-mgd:${input.branch}` });
-    // Mirrors the live layout: a linked worktree lives outside the source repo.
+    // Mirrors the live layout: a linked worktree lives outside the source
+    // repo, under a Herdr worktrees directory, already home-expanded.
     return {
       workspaceId,
       rootPaneId: `${workspaceId}:p1`,
-      path: `/herdr-worktrees/${path.basename(input.cwd)}/${input.branch.replace(/\//g, '-')}`,
+      path: `/home/mock/.herdr/worktrees/${path.basename(input.cwd)}/${input.branch.replace(/\//g, '-')}`,
     };
   }
 

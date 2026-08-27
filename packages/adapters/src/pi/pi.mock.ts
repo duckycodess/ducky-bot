@@ -83,6 +83,11 @@ export class MockPiOrchestrator implements PiOrchestrator {
       worktreePath: spec.mode === 'worktree' ? spec.repoPath : null,
     });
 
+    await spec.onAgentStarted?.({
+      workspaceId: `mock-ws-${spec.publicId}`,
+      agentName: `ducky-pi-${spec.slugKey}`,
+    });
+
     if (this.options.runUntilAborted) {
       await new Promise<void>((resolve) => {
         if (spec.signal?.aborted) return resolve();

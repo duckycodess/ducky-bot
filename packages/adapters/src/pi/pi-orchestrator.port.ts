@@ -33,6 +33,12 @@ export interface OrchestrationSpec {
     workspacePath: string;
     worktreePath: string | null;
   }) => Promise<void>;
+  /**
+   * Called once an agent is actually live in the workspace, so a recorded row
+   * does not sit at `creating` forever and recovery can tell a workspace that
+   * got as far as running from one that never did.
+   */
+  readonly onAgentStarted?: (info: { workspaceId: string; agentName: string }) => Promise<void>;
 }
 
 /**

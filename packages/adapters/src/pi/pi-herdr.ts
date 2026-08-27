@@ -301,6 +301,9 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       '--session-id', `ducky-${spec.slugKey}`,
       '--thinking', this.thinkingLevel,
     ]);
+    // The agent exists now, so the record should no longer say `creating`.
+    await spec.onAgentStarted?.({ workspaceId, agentName });
+
     await this.herdr.agentPrompt(agentName, spec.brief, spec.promptTimeoutMs, spec.signal);
 
     const result = await this.results.read(workspacePath);

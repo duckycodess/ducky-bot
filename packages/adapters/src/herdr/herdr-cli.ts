@@ -1,6 +1,8 @@
+import { homedir } from 'node:os';
 import { DuckyError, HERDR_TIMEOUT_MS } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
+import { expandHerdrPath } from './paths.js';
 import type { HerdrClient } from './herdr.port.js';
 import {
   AgentInfoSchema, AgentListResultSchema, EnvelopeSchema, PaneSplitResultSchema,
@@ -11,6 +13,8 @@ import {
 export interface HerdrCliOptions {
   readonly bin?: string;
   readonly timeoutMs?: number;
+  /** Overridable so the expansion can be tested without touching the real home. */
+  readonly homeDir?: string;
   /** Records every argv for the probe script and for tests. */
   readonly onInvoke?: (argv: readonly string[]) => void;
 }
@@ -40,11 +44,13 @@ function herdrError(raw: unknown, argv: readonly string[]): DuckyError {
 export class HerdrCli implements HerdrClient {
   private readonly bin: string;
   private readonly timeoutMs: number;
+  private readonly homeDir: string;
   private readonly onInvoke: ((argv: readonly string[]) => void) | undefined;
 
   constructor(opts: HerdrCliOptions = {}) {
     this.bin = opts.bin ?? 'herdr';
     this.timeoutMs = opts.timeoutMs ?? HERDR_TIMEOUT_MS;
+    this.homeDir = opts.homeDir ?? homedir();
     this.onInvoke = opts.onInvoke;
   }
 
@@ -205,14 +211,17 @@ export class HerdrCli implements HerdrClient {
     );
     const workspaceId = r.workspace?.workspace_id;
     const rootPaneId = r.root_pane?.pane_id;
-    const checkoutPath = r.worktree?.path ?? r.workspace?.worktree?.checkout_path;
-    if (!workspaceId || !rootPaneId || !checkoutPath) {
+    const reported = r.worktree?.path ?? r.workspace?.worktree?.checkout_path;
+    if (!workspaceId || !rootPaneId || !reported) {
       throw new DuckyError(
         'herdr_unavailable',
         'Herdr did not return a workspace, pane and checkout path for the new worktree.',
       );
     }
-    return { workspaceId, rootPaneId, path: checkoutPath };
+    // Herdr reports `~/.herdr/worktrees/...`; the coordinator requires an
+    // absolute normalized path, so expand it here rather than let a real
+    // worktree job be rejected at registration.
+    return { workspaceId, rootPaneId, path: expandHerdrPath(reported, this.homeDir) };
   }
 
   async worktreeRemove(workspaceId: string): Promise<void> {

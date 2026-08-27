@@ -15,6 +15,7 @@ export * from './openclaw/openclaw.http.js';
 export * from './schedule/extraction.port.js';
 export * from './schedule/extraction.deterministic.js';
 export * from './schedule/attachment-policy.js';
+export * from './herdr/paths.js';
 export * from './herdr/herdr.types.js';
 export * from './herdr/herdr.port.js';
 export * from './herdr/herdr-cli.js';

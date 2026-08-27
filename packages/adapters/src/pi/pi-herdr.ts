@@ -6,7 +6,7 @@ import type { HerdrClient } from '../herdr/herdr.port.js';
 import type { AgentInfo } from '../herdr/herdr.types.js';
 import { FileResultReader, RESULT_RELATIVE_PATH, type ResultReader } from './result-file.js';
 import type {
-  OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
+  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
 } from './pi-orchestrator.port.js';
 
 export { RESULT_RELATIVE_PATH };
@@ -65,6 +65,61 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     this.thinkingLevel = opts.thinkingLevel ?? 'high';
   }
 
+  /**
+   * Stops waiting on a turn and reports what the agent is actually doing.
+   *
+   * Herdr exposes no verified way to interrupt a Pi turn without risking a
+   * half-written edit, so this deliberately does NOT send keystrokes into a
+   * live pane. If the agent is still working we say so and let the caller fail
+   * closed into an orphan reservation, which keeps the repository blocked for
+   * the owner instead of pretending the work stopped.
+   */
+  async cancel(spec: OrchestrationSpec): Promise<CancelOutcome> {
+    const agentName = agentNameFor(spec.slugKey);
+    const workspaceId = spec.recorded?.workspaceId;
+
+    let agent;
+    try {
+      agent = await this.herdr.agentGet(agentName);
+    } catch {
+      return {
+        terminated: false,
+        agentStatus: 'unknown',
+        detail: 'Herdr could not be reached to confirm whether the agent stopped.',
+        workspaceId,
+        agentName,
+      };
+    }
+
+    if (!agent) {
+      return {
+        terminated: true,
+        agentStatus: 'absent',
+        detail: 'The agent is gone, so nothing is still running.',
+        workspaceId,
+        agentName,
+      };
+    }
+    if (agent.agent_status === 'idle' || agent.agent_status === 'done') {
+      return {
+        terminated: true,
+        agentStatus: agent.agent_status,
+        detail: 'The agent finished its turn and is idle.',
+        workspaceId,
+        agentName,
+      };
+    }
+    return {
+      terminated: false,
+      agentStatus: agent.agent_status,
+      detail:
+        `The Pi agent is still ${agent.agent_status}. It was left untouched rather than ` +
+        'interrupted mid-edit; the repository stays reserved until you clear it.',
+      workspaceId,
+      agentName,
+    };
+  }
+
   async runJob(spec: OrchestrationSpec): Promise<OrchestrationOutcome> {
     if (!(await this.herdr.available())) return { kind: 'unavailable' };
 
@@ -119,7 +174,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     }
 
     if (agent.agent_status === 'working') {
-      const settled = await this.pollUntilSettled(agentName, spec.recoveryWaitMs);
+      const settled = await this.pollUntilSettled(agentName, spec.recoveryWaitMs, spec.signal);
       if (!settled) {
         return { kind: 'orphan', reason: 'orphan_agent_still_working', workspaceId, agentName };
       }
@@ -175,6 +230,19 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     }
 
     await this.herdr.workspaceReportMetadata(workspaceId, { owner: 'ducky', job: spec.publicId });
+
+    // Register ownership BEFORE an agent exists. A crash after this point still
+    // leaves durable proof that the workspace is ours, so recovery reattaches
+    // instead of treating a live agent as a stranger's.
+    await spec.onWorkspaceCreated?.({
+      workspaceId,
+      agentName,
+      label,
+      mode: spec.mode,
+      workspacePath,
+      worktreePath: spec.mode === 'worktree' ? workspacePath : null,
+    });
+
     await this.herdr.agentStart(agentName, 'pi', rootPaneId, [
       '--session-id', `ducky-${spec.slugKey}`,
       '--thinking', this.thinkingLevel,
@@ -191,9 +259,11 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   private async pollUntilSettled(
     agentName: string,
     waitMs: number,
+    signal?: AbortSignal | undefined,
   ): Promise<'settled' | 'blocked' | undefined> {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
+      if (signal?.aborted) return undefined;
       await this.sleep(this.pollIntervalMs);
       const now = await this.herdr.agentGet(agentName);
       if (!now) return 'settled';

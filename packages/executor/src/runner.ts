@@ -88,7 +88,17 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     branch: resolved.branch,
     base: resolved.base,
     brief,
-    recorded: deps.recordedWorkspace?.(claim.jobId),
+    // Prefer what the coordinator sent: after a restart the in-memory map is
+    // empty, and without this the adapter would meet its own agent as a
+    // stranger and report a foreign conflict.
+    recorded:
+      (claim.recordedWorkspace
+        ? {
+            workspaceId: claim.recordedWorkspace.workspaceId,
+            agentName: claim.recordedWorkspace.agentName,
+            workspacePath: claim.recordedWorkspace.workspacePath,
+          }
+        : undefined) ?? deps.recordedWorkspace?.(claim.jobId),
     recoveryRequired: claim.payload.recoveryRequired,
     promptTimeoutMs: JOB_MAX_WALL_CLOCK_MS,
     recoveryWaitMs: RECOVERY_WAIT_MS,
@@ -116,40 +126,77 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   };
 
   const lock = acquireWriterLock(claim.payload.repoSlug);
-  let outcome: OrchestrationOutcome;
+  let outcome: OrchestrationOutcome | undefined;
+  let failure: unknown;
   supervisor.start();
+
   try {
-    outcome = await orchestrator.runJob(spec);
-  } catch (err) {
-    const detail = isDuckyError(err) ? err.ownerMessage : 'The orchestrator failed.';
-    const reason: ExecutorFailureReason =
-      isDuckyError(err) && err.code === 'herdr_unavailable' ? 'herdr_unavailable' : 'no_result';
-    await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
-    return;
+    // Raced, not awaited to completion. A real turn is a blocking
+    // `herdr agent prompt --wait`; waiting it out would mean a cancellation
+    // took effect only after the full wall-clock timeout.
+    outcome = await Promise.race([
+      orchestrator.runJob(spec).then((o) => o).catch((err) => {
+        failure = err;
+        return undefined;
+      }),
+      cancelled(supervisor.signal),
+    ]);
   } finally {
     supervisor.stop();
-    // Released before any report, including needs_owner_input.
-    lock.release();
   }
 
-  // The owner cancelled mid-turn. Confirm what the agent is actually doing
-  // before acknowledging: claiming a termination we did not observe would let
-  // the coordinator release the repository while a writer was still live.
-  if (supervisor.cancelRequested) {
-    const stopped = await orchestrator.cancel(spec);
+  // The owner cancelled. Confirm what the agent is ACTUALLY doing before
+  // acknowledging, and keep the writer lock until we know: releasing it while
+  // the agent may still be live is precisely the second-writer hazard.
+  if (supervisor.cancelRequested && outcome === undefined) {
+    let stopped;
+    try {
+      stopped = await orchestrator.cancel(spec);
+    } catch (err) {
+      stopped = {
+        terminated: false,
+        agentStatus: 'unknown' as const,
+        detail: isDuckyError(err) ? err.ownerMessage : 'Could not confirm whether the agent stopped.',
+        workspaceId: spec.recorded?.workspaceId,
+        agentName: spec.recorded?.agentName,
+      };
+    }
+
+    // Only safe to let go once nothing of ours is running.
+    if (stopped.terminated) lock.release();
+
     await client.cancelAck(claim.jobId, {
       leaseId: claim.leaseId,
       terminated: stopped.terminated,
       note: redact(stopped.detail).slice(0, 400),
     });
     if (!stopped.terminated) {
-      // Fail closed: the repository stays reserved for the owner to clear.
       await client.reportFailure(claim.jobId, claim.leaseId, 'orphan_agent_still_working', {
         detail: redact(stopped.detail).slice(0, 400),
         ...(stopped.workspaceId === undefined ? {} : { workspaceId: stopped.workspaceId }),
         ...(stopped.agentName === undefined ? {} : { agentName: stopped.agentName }),
       });
+      // Deliberately NOT released: the lock outlives this run so a retry on
+      // this host cannot start a second writer beside the live agent.
     }
+    return;
+  }
+
+  // Past the cancellation branch the turn has genuinely ended.
+  lock.release();
+
+  if (failure !== undefined) {
+    const err = failure;
+    const detail = isDuckyError(err) ? err.ownerMessage : 'The orchestrator failed.';
+    const reason: ExecutorFailureReason =
+      isDuckyError(err) && err.code === 'herdr_unavailable' ? 'herdr_unavailable' : 'no_result';
+    await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
+    return;
+  }
+  if (outcome === undefined) {
+    await client.reportFailure(claim.jobId, claim.leaseId, 'no_result', {
+      detail: 'The orchestrator returned nothing.',
+    });
     return;
   }
 
@@ -161,15 +208,53 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   }
 
   switch (outcome.kind) {
-    case 'result':
+    case 'result': {
       deps.onWorkspace?.(claim.jobId, {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,
         workspacePath: outcome.workspacePath,
         mode: resolved.mode,
       });
-      await client.submitResult(claim.jobId, claim.leaseId, outcome.result);
+      const accepted = (await client.submitResult(claim.jobId, claim.leaseId, outcome.result)) as
+        | { state?: string }
+        | undefined;
+
+      // Clean up ONLY after a genuinely terminal success. A job that paused for
+      // an owner answer, is awaiting approval, or failed keeps its workspace so
+      // the work stays inspectable -- and so the next round can reuse it.
+      if (accepted?.state === 'completed') {
+        // cleanup() proves ownership against `recorded`, so hand it exactly
+        // the workspace this run produced.
+        const cleaned = await orchestrator.cleanup(
+          {
+            ...spec,
+            recorded: {
+              workspaceId: outcome.workspaceId,
+              agentName: outcome.agentName,
+              workspacePath: outcome.workspacePath,
+            },
+          },
+          outcome.workspaceId,
+        );
+        log(`job ${claim.publicId} cleanup: ${cleaned.detail}`);
+        if (cleaned.closed) {
+          await client
+            .registerWorkspace(claim.jobId, {
+              leaseId: claim.leaseId,
+              workspaceId: outcome.workspaceId,
+              agentName: outcome.agentName,
+              label: workspaceLabelFor(slugKey),
+              mode: resolved.mode,
+              workspacePath: outcome.workspacePath,
+              state: 'closed',
+            })
+            .catch(() => {
+              /* the job is already complete; a bookkeeping miss is not fatal */
+            });
+        }
+      }
       return;
+    }
 
     case 'orphan':
       // A possibly-live writer stays untouched and keeps blocking the repo
@@ -208,6 +293,14 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       });
       return;
   }
+}
+
+/** Resolves (to undefined) as soon as the owner cancels. */
+function cancelled(signal: AbortSignal): Promise<undefined> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve(undefined);
+    signal.addEventListener('abort', () => resolve(undefined), { once: true });
+  });
 }
 
 function digest(s: string): string {

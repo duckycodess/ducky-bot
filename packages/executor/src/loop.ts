@@ -21,6 +21,8 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  */
 export class ExecutorLoop {
   #stopped = false;
+  /** Jobs this executor is running right now, reported on every heartbeat. */
+  readonly #active = new Set<string>();
   private readonly workspaces = new Map<
     string,
     { workspaceId: string; agentName: string; workspacePath: string }
@@ -32,25 +34,35 @@ export class ExecutorLoop {
     this.#stopped = true;
   }
 
+  /** Job ids currently being executed here. */
+  activeJobIds(): string[] {
+    return [...this.#active];
+  }
+
   async runOnce(): Promise<'claimed' | 'idle'> {
     const claim = await this.deps.client.claim(this.deps.pollWaitMs);
     if (!claim) return 'idle';
 
-    await runClaimedJob(
-      {
-        client: this.deps.client,
-        orchestrator: this.deps.orchestrator,
-        recordedWorkspace: (jobId) => this.workspaces.get(jobId),
-        onWorkspace: (jobId, info) =>
-          this.workspaces.set(jobId, {
-            workspaceId: info.workspaceId,
-            agentName: info.agentName,
-            workspacePath: info.workspacePath,
-          }),
-        ...(this.deps.log ? { log: this.deps.log } : {}),
-      },
-      claim,
-    );
+    this.#active.add(claim.jobId);
+    try {
+      await runClaimedJob(
+        {
+          client: this.deps.client,
+          orchestrator: this.deps.orchestrator,
+          recordedWorkspace: (jobId) => this.workspaces.get(jobId),
+          onWorkspace: (jobId, info) =>
+            this.workspaces.set(jobId, {
+              workspaceId: info.workspaceId,
+              agentName: info.agentName,
+              workspacePath: info.workspacePath,
+            }),
+          ...(this.deps.log ? { log: this.deps.log } : {}),
+        },
+        claim,
+      );
+    } finally {
+      this.#active.delete(claim.jobId);
+    }
     return 'claimed';
   }
 
@@ -61,10 +73,12 @@ export class ExecutorLoop {
 
     while (!this.#stopped) {
       try {
+        // Reports what is genuinely in flight, so the coordinator's liveness
+        // view matches reality rather than always looking idle.
         await this.deps.client.heartbeat({
           version: this.deps.version,
           capabilities: ['herdr-pi'],
-          activeJobIds: [],
+          activeJobIds: this.activeJobIds(),
         });
         const outcome = await this.runOnce();
         backoff = 1000;

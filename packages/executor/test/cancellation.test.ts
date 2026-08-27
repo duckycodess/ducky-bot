@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockPiOrchestrator, exampleImplementedResult } from '@ducky/adapters';
 import type { ClaimResponse } from '@ducky/contracts';
 import { runClaimedJob } from '../src/runner.js';
@@ -15,12 +15,25 @@ beforeAll(() => {
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoPath });
 });
 
+// The writer lock is host-wide and is deliberately RETAINED after an
+// unterminated cancellation, so each case needs its own lock directory.
+let previousState: string | undefined;
+beforeEach(() => {
+  previousState = process.env['XDG_STATE_HOME'];
+  process.env['XDG_STATE_HOME'] = mkdtempSync(path.join(os.tmpdir(), 'ducky-lock-'));
+});
+afterEach(() => {
+  if (previousState === undefined) delete process.env['XDG_STATE_HOME'];
+  else process.env['XDG_STATE_HOME'] = previousState;
+});
+
 const claim = (over: Partial<ClaimResponse['payload']> = {}): ClaimResponse => ({
   jobId: 'job-1',
   publicId: 'jabcde',
   leaseId: 'lease-1',
   leaseExpiresAt: new Date(Date.now() + 300_000).toISOString(),
   ownerInputs: [],
+  recordedWorkspace: null,
   payload: {
     repoSlug: 'demo',
     absolutePath: repoPath,
@@ -154,6 +167,36 @@ describe('cancelling a running job', () => {
       'orphan_agent_still_working',
       expect.objectContaining({ workspaceId: 'ws-1', agentName: 'ducky-pi-demo' }),
     );
+  });
+
+  it('keeps the writer lock when the agent could not be confirmed stopped', async () => {
+    const client = fakeClient(0);
+    const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult(), {
+      runUntilAborted: true,
+      cancelOutcome: {
+        terminated: false,
+        agentStatus: 'working',
+        detail: 'still working',
+      },
+    });
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 5 }, claim());
+
+    // Held on purpose: a retry on this host must not start a second writer
+    // beside an agent that may still be live.
+    const { acquireWriterLock } = await import('../src/single-writer.js');
+    expect(() => acquireWriterLock('demo')).toThrow(/already holds/);
+  });
+
+  it('releases the writer lock once a stop is confirmed', async () => {
+    const client = fakeClient(0);
+    const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult(), {
+      runUntilAborted: true,
+      cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
+    });
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 5 }, claim());
+
+    const { acquireWriterLock } = await import('../src/single-writer.js');
+    expect(() => acquireWriterLock('demo').release()).not.toThrow();
   });
 
   it('registers the workspace before an agent could be started', async () => {

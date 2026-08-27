@@ -1,0 +1,36 @@
+# TEMPLATE. Copy to ~/.config/systemd/user/ on the WSL host.
+#
+# This is a USER service on purpose: the executor needs the developer's own
+# environment, Herdr session and Pi installation.
+#
+# `Linger=no` is the default on this host, so without
+#     loginctl enable-linger $USER
+# the executor stops when the login session ends. Enable it only if the
+# executor should keep running unattended.
+[Unit]
+Description=Ducky executor (outbound only)
+Documentation=file:///home/%u/projects/ducky/docs/DEPLOYMENT.md
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/ducky
+
+# Credentials belong in a 0600 environment file, never in this unit.
+EnvironmentFile=%h/.config/ducky/executor.env
+
+ExecStart=/usr/bin/env node %h/projects/ducky/packages/executor/dist/main.js
+Restart=always
+RestartSec=10s
+
+# Backoff with jitter in the client already covers sleep, network changes and
+# coordinator restarts; this is the backstop for a hard crash.
+StartLimitIntervalSec=0
+
+# The executor drives Herdr and Pi as this user, so it deliberately does NOT
+# run with a restricted filesystem view: containment comes from the repository
+# allowlist, argv-only subprocesses and the writer lock, not from systemd.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

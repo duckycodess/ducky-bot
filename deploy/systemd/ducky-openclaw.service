@@ -1,0 +1,29 @@
+# TEMPLATE, and a placeholder: OpenClaw is not installed or verified on this
+# host, so ExecStart is a guess and must be checked against the real binary
+# before use. See docs/integrations/openclaw.md.
+[Unit]
+Description=OpenClaw gateway (private, loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ducky
+Group=ducky
+WorkingDirectory=/opt/openclaw
+EnvironmentFile=/etc/ducky/openclaw.env
+
+# MUST bind to loopback (or a tailnet address) only. The coordinator refuses a
+# public gateway URL, but that is a second line of defence, not the first.
+ExecStart=/usr/bin/openclaw serve --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

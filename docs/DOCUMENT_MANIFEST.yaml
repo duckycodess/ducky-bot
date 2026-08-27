@@ -1,0 +1,56 @@
+# What each document is for, who maintains it, and when it must change.
+version: 1
+documents:
+  - path: README.md
+    purpose: Entry point; what Ducky is and its Phase 1 limitations
+    authority: overview
+    update_trigger: A capability or limitation changes
+  - path: PROJECT_CONTEXT.md
+    purpose: Founding intent and the constraints behind the design
+    authority: intent
+    update_trigger: The purpose or a core constraint changes
+  - path: AGENTS.md
+    purpose: Verified commands, authority order, repository constraints
+    authority: process
+    update_trigger: A command, invariant or validation expectation changes
+  - path: docs/ARCHITECTURE.md
+    purpose: Components, data flow, trust boundaries, lifetimes
+    authority: architecture
+    update_trigger: A component, boundary or lifetime changes
+  - path: docs/CURRENT_STATE.md
+    purpose: What is implemented, verified, mocked, or deferred
+    authority: state
+    update_trigger: Any behaviour change; verification status changes
+  - path: docs/DEVELOPMENT.md
+    purpose: Local setup, environment variables, Discord setup
+    authority: process
+    update_trigger: Setup steps or environment variables change
+  - path: docs/TESTING.md
+    purpose: Test strategy and what each suite guarantees
+    authority: process
+    update_trigger: Test strategy changes
+  - path: docs/SECURITY.md
+    purpose: Trust boundaries, credentials, redaction, approval gate
+    authority: security
+    update_trigger: Any change to authorization, secrets or egress
+  - path: docs/DEPLOYMENT.md
+    purpose: Intended Azure/WSL deployment; not yet performed
+    authority: deployment
+    update_trigger: Deployment approach changes
+  - path: docs/integrations/openclaw.md
+    purpose: The unverified OpenClaw surface and how to finish it
+    authority: integration
+    update_trigger: OpenClaw is installed or its API is verified
+  - path: docs/integrations/herdr.md
+    purpose: Herdr binding, probe procedure, verified vs unverified commands
+    authority: integration
+    update_trigger: Probe coverage changes
+  - path: docs/decisions/
+    purpose: Architecture decision records
+    authority: decision
+    update_trigger: A long-lived or hard-to-reverse decision is made
+  - path: docs/runbooks/
+    purpose: Operational procedures
+    authority: operations
+    update_trigger: An operational procedure changes
+generated: []

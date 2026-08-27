@@ -1,0 +1,23 @@
+# Architecture decision records
+
+One record per decision that is long-lived, contract-shaping, or hard to
+reverse. Trivial implementation choices do not get one.
+
+| ADR | Decision |
+|---|---|
+| [0001](0001-monorepo-package-boundaries.md) | pnpm workspace with five packages |
+| [0002](0002-node-sqlite-and-hand-rolled-migrations.md) | Built-in `node:sqlite` with hand-written migrations |
+| [0003](0003-outbound-only-executor.md) | The executor polls outbound and never listens |
+| [0004](0004-herdr-pi-orchestration.md) | Herdr/Pi as the sole orchestration path, with a file result contract |
+| [0005](0005-openclaw-adapter-with-mock.md) | OpenClaw behind a port with a marked mock and a throwing HTTP guard |
+| [0006](0006-approval-gate-deferred-performer.md) | Per-action approvals with a deferred performer |
+| [0007](0007-redaction-at-transport-boundary.md) | Redaction at the transport boundary; no secret in the database |
+| [0008](0008-executor-credential-model.md) | Verifier in the database, key material in a runtime store |
+| [0009](0009-env-config-sole-authorization-authority.md) | Environment config is the only authorization authority |
+| [0010](0010-per-repo-reservations.md) | Per-repository reservations as the single-writer boundary |
+| [0011](0011-capability-honest-schedule-extraction.md) | Capability-honest schedule extraction |
+
+## Format
+
+Status · Context · Decision · Alternatives considered · Consequences ·
+Follow-up.

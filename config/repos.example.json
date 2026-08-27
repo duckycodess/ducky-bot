@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "repos": [
+    {
+      "slug": "example-app",
+      "absolutePath": "/home/PLACEHOLDER/projects/example-app",
+      "defaultBranch": "main",
+      "github": { "owner": "PLACEHOLDER-ORG", "repo": "example-app" },
+      "allowWorktree": true,
+      "allowBootstrap": false,
+      "bootstrapAllowedEntries": [".git"],
+      "enabled": true
+    },
+    {
+      "slug": "example-greenfield",
+      "absolutePath": "/home/PLACEHOLDER/projects/example-greenfield",
+      "defaultBranch": null,
+      "github": null,
+      "allowWorktree": true,
+      "allowBootstrap": true,
+      "bootstrapAllowedEntries": [".git"],
+      "enabled": true
+    }
+  ]
+}

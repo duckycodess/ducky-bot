@@ -22,6 +22,13 @@ diagnostics and in `/status`.
   rounds, per-repo reservations, durable workspace registration, crash
   recovery, reconciliation
 - Per-action approvals, decided individually, recorded and **not executed**
+- Proactive owner notifications on job lifecycle transitions (running,
+  needs_owner_input, needs_approval, completed, failed, cancelled), with the
+  same signed Answer/Approve/Reject components `/job status` offers — swept
+  off the durable `job_transitions` ledger on the existing reconcile
+  interval, **not pushed instantly**: delivery lags by up to one interval,
+  and an upgrade backfills prior history as already delivered rather than
+  replaying it
 - Authenticated, signed, replay-resistant, rate-limited executor API
 - Executor: outbound polling, fail-closed workspace resolution, single-writer
   lock, Herdr/Pi orchestration behind a port
@@ -62,7 +69,7 @@ and `/status` reports `experimental`.
 | OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. |
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
-| Real Discord gateway | Structurally implemented — a profile's token selects it, embeds/buttons/modals are converted, and interactions are deferred to meet the acknowledgement deadline. The conversion is unit-tested, but **the path has never run against a live bot**: no token here, and the privileged MessageContent intent must be enabled in the portal first. |
+| Real Discord gateway | Structurally implemented — a profile's token selects it, embeds/buttons/modals are converted, and interactions are deferred to meet the acknowledgement deadline. The conversion is unit-tested, but **the path has never run against a live bot**: no token here, and the privileged MessageContent intent must be enabled in the portal first. Proactive job notifications send through this exact same path, so the same caveat applies to them: unit-tested against the mock transport only, never verified as an owner-initiated DM against a live bot. |
 | Slash-command registration | `--apply` performs the real Discord write. **Not executed**; the default remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |

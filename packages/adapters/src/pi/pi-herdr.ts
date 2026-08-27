@@ -144,7 +144,16 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       return { closed: false, detail: 'That workspace is not Ducky-managed; it was left alone.' };
     }
 
-    const agent = await this.herdr.agentGet(agentNameFor(spec.slugKey));
+    // Cleanup is destructive, so an unproven state must never authorise it.
+    let agent;
+    try {
+      agent = await this.herdr.agentGet(agentNameFor(spec.slugKey));
+    } catch {
+      return {
+        closed: false,
+        detail: 'Herdr could not be reached to confirm the agent had stopped; the workspace was kept.',
+      };
+    }
     if (agent && (agent.agent_status === 'working' || agent.agent_status === 'blocked')) {
       return { closed: false, detail: `The agent is still ${agent.agent_status}; the workspace was kept.` };
     }
@@ -161,7 +170,15 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     if (!(await this.herdr.available())) return { kind: 'unavailable' };
 
     const agentName = agentNameFor(spec.slugKey);
-    const existing = await this.herdr.agentGet(agentName);
+
+    // A failure here is an OUTAGE, not an absent agent. Falling through to
+    // fresh creation would risk a second workspace beside a live one.
+    let existing;
+    try {
+      existing = await this.herdr.agentGet(agentName);
+    } catch {
+      return { kind: 'unavailable' };
+    }
 
     if (existing) {
       const owned = await this.proveOwnership(existing, spec, agentName);

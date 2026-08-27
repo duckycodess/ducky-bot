@@ -45,6 +45,7 @@ export class MockHerdr implements HerdrClient {
 
   async agentGet(target: string): Promise<AgentInfo | undefined> {
     this.record('agentGet', { target });
+    // An outage is NOT an absent agent, and must not read like one.
     if (!this.state.available) throw new DuckyError('herdr_unavailable', 'Herdr is not running.');
     return this.state.agents.find((a) => a.name === target || a.pane_id === target);
   }

@@ -20,6 +20,23 @@ export interface HerdrCliOptions {
  * executor runs under systemd with no caller pane, and herdr reaches its server
  * over a socket regardless.
  */
+/** Herdr's wording for "that target does not exist", as opposed to an outage. */
+const NOT_FOUND = /\b(not[ _-]?found|no such|unknown (agent|pane|workspace)|does not exist)\b/i;
+
+class HerdrNotFoundError extends DuckyError {
+  constructor(detail: string) {
+    super('not_found', detail);
+  }
+}
+
+const isNotFound = (err: unknown): boolean => err instanceof HerdrNotFoundError;
+
+function herdrError(raw: unknown, argv: readonly string[]): DuckyError {
+  const text = redact(typeof raw === 'string' ? raw : JSON.stringify(raw ?? '')).slice(0, 200);
+  if (NOT_FOUND.test(text)) return new HerdrNotFoundError(text);
+  return new DuckyError('herdr_unavailable', `Herdr command failed (${argv[0]}): ${text}`);
+}
+
 export class HerdrCli implements HerdrClient {
   private readonly bin: string;
   private readonly timeoutMs: number;
@@ -50,10 +67,7 @@ export class HerdrCli implements HerdrClient {
       ...(signal ? { signal } : {}),
     });
     if (res.code !== 0) {
-      throw new DuckyError(
-        'herdr_unavailable',
-        `Herdr command failed: ${redact(res.stderr || res.stdout).slice(0, 200)}`,
-      );
+      throw herdrError(res.stderr || res.stdout, argv);
     }
     let parsed: unknown;
     try {
@@ -63,7 +77,7 @@ export class HerdrCli implements HerdrClient {
     }
     const env = EnvelopeSchema.parse(parsed);
     if (env.error !== undefined) {
-      throw new DuckyError('herdr_unavailable', `Herdr reported an error for ${argv[0]}.`);
+      throw herdrError(env.error, argv);
     }
     return env.result;
   }
@@ -81,14 +95,29 @@ export class HerdrCli implements HerdrClient {
     return AgentListResultSchema.parse(await this.call(['agent', 'list'])).agents;
   }
 
+  /**
+   * `undefined` means Herdr answered and there is NO such agent.
+   *
+   * A socket failure, a dead server or an unparseable response is an outage
+   * and throws `herdr_unavailable` instead. Collapsing the two would let a
+   * transient outage look like an absent agent, and the caller would then
+   * create a second workspace beside a live one, or "clean up" without ever
+   * having proved what was running.
+   */
   async agentGet(target: string): Promise<AgentInfo | undefined> {
+    let raw: unknown;
     try {
-      const raw = await this.call(['agent', 'get', target]);
-      const obj = raw as Record<string, unknown>;
-      return AgentInfoSchema.parse(obj['agent'] ?? obj);
-    } catch {
-      return undefined;
+      raw = await this.call(['agent', 'get', target]);
+    } catch (err) {
+      if (isNotFound(err)) return undefined;
+      throw err;
     }
+    const obj = raw as Record<string, unknown>;
+    const parsed = AgentInfoSchema.safeParse(obj['agent'] ?? obj);
+    if (!parsed.success) {
+      throw new DuckyError('herdr_unavailable', 'Herdr returned an unreadable agent record.');
+    }
+    return parsed.data;
   }
 
   async agentStart(

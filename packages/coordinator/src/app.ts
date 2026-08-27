@@ -5,7 +5,7 @@ import {
   type ConversationProvider, type ExecutorCredentialStore, type GitHubReader,
   type ScheduleExtractionProvider,
 } from '@ducky/adapters';
-import { DuckyError, PROFILE_ENV } from '@ducky/contracts';
+import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   loadEnv, cdnHosts, readReposFile, resolvePaths, resolveProfileSecrets,
@@ -173,16 +173,15 @@ function credentialStoreFor(
   paths: ResolvedPaths,
   secrets: ProfileSecrets,
 ): ExecutorCredentialStore {
+  // An explicitly configured, profile-scoped file always wins.
   if (secrets.credentialsFile) return new FileCredentialStore(secrets.credentialsFile);
   if (secrets.inlineCredentials) {
     return new MemoryCredentialStore(secrets.inlineCredentials, env.NODE_ENV);
   }
-  if (env.DUCKY_PROFILE === 'production') {
-    throw new DuckyError(
-      'credential_unavailable',
-      `${PROFILE_ENV.production.credentialsFile} is required for the production profile.`,
-    );
-  }
+  // Otherwise the PROFILE'S OWN default path -- which resolvePaths already
+  // computed per profile. Production reaches its own default here; what it
+  // must never do is inherit a shared or development value, and
+  // resolveProfileSecrets has already refused to hand it one.
   return new FileCredentialStore(paths.credentialsFile);
 }
 

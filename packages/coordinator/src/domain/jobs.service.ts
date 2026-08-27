@@ -641,8 +641,20 @@ export class JobsService {
     if (!row || row.jobId !== job.id) {
       throw new DuckyError('not_found', 'That workspace is not recorded for this job.');
     }
-    // Idempotent: a retried close is a success, not an error.
+    // Idempotent: a retried close is a success, not an error. Checked before
+    // the state gate so a late retry cannot fail after the job moved on.
     if (row.closedAt !== null) return { closed: true, workspaceId };
+
+    // Only a job that COMPLETED may have its workspace closed. Failure,
+    // approval, owner-input and orphan states all retain theirs so the work
+    // stays inspectable -- and a still-running job must never have its
+    // workspace marked gone underneath it.
+    if (job.state !== 'completed') {
+      throw new DuckyError(
+        'invalid_transition',
+        `\`${job.publicId}\` is ${job.state.replace(/_/g, ' ')}; only a completed job's workspace is closed.`,
+      );
+    }
 
     withTransaction(this.store.db, () => {
       this.store.herdrWorkspaces.markClosed(workspaceId);

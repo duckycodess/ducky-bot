@@ -67,6 +67,7 @@ function fakeClient(cancelAfter: number) {
     reportFailure: vi.fn(async () => ({ state: 'failed', orphan: true })),
     submitResult: vi.fn(async () => ({ state: 'completed', accepted: true, duplicate: false })),
     registerWorkspace: vi.fn(async () => ({ registered: true, workspaceId: 'ws' })),
+    closeWorkspace: vi.fn(async () => ({ closed: true, workspaceId: 'ws' })),
   };
 }
 
@@ -197,6 +198,49 @@ describe('cancelling a running job', () => {
 
     const { acquireWriterLock } = await import('../src/single-writer.js');
     expect(() => acquireWriterLock('demo').release()).not.toThrow();
+  });
+
+  it('discards a result that resolved after the owner cancelled', async () => {
+    const client = fakeClient(0);
+    // Resolves normally AND the cancellation is observed: cancellation wins.
+    const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult('finished anyway'), {
+      cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
+    });
+
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1 }, claim());
+
+    // The work the owner stopped is never accepted or cleaned up after.
+    expect(client.submitResult).not.toHaveBeenCalled();
+    expect(orchestrator.cleanups).toHaveLength(0);
+    expect(client.cancelAck).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({ terminated: true }),
+    );
+  });
+
+  it('closes the workspace through the lease-free route on success', async () => {
+    const client = fakeClient(99);
+    const orchestrator = new MockPiOrchestrator();
+
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 50 }, claim());
+
+    expect(client.submitResult).toHaveBeenCalled();
+    expect(orchestrator.cleanups).toHaveLength(1);
+    // Bookkeeping goes through closeWorkspace, which needs no lease -- the
+    // result already cleared it.
+    expect(client.closeWorkspace).toHaveBeenCalledWith('job-1', 'mock-ws-jabcde');
+  });
+
+  it('does not clean up when the job did not reach a terminal success', async () => {
+    const client = fakeClient(99);
+    client.submitResult = vi.fn(async () => ({ state: 'needs_approval', accepted: true, duplicate: false }));
+    const orchestrator = new MockPiOrchestrator();
+
+    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 50 }, claim());
+
+    // An approval is still pending, so the workspace stays for inspection.
+    expect(orchestrator.cleanups).toHaveLength(0);
+    expect(client.closeWorkspace).not.toHaveBeenCalled();
   });
 
   it('registers the workspace before an agent could be started', async () => {

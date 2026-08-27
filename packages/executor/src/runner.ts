@@ -145,10 +145,15 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     supervisor.stop();
   }
 
-  // The owner cancelled. Confirm what the agent is ACTUALLY doing before
-  // acknowledging, and keep the writer lock until we know: releasing it while
-  // the agent may still be live is precisely the second-writer hazard.
-  if (supervisor.cancelRequested && outcome === undefined) {
+  // Cancellation WINS the race. If the owner's request was observed at all,
+  // this turn's result is not accepted -- even when the orchestration happened
+  // to resolve at the same moment. Accepting it would complete, and clean up
+  // after, work the owner had explicitly stopped. Re-submitting is the owner's
+  // call to make.
+  if (supervisor.cancelRequested) {
+    if (outcome !== undefined) {
+      log(`job ${claim.publicId}: result discarded, the owner cancelled during the turn`);
+    }
     let stopped;
     try {
       stopped = await orchestrator.cancel(spec);
@@ -162,7 +167,9 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       };
     }
 
-    // Only safe to let go once nothing of ours is running.
+    // Only safe to let go once nothing of ours is running. Ownership was
+    // already registered when the workspace was created, so nothing more needs
+    // recording here.
     if (stopped.terminated) lock.release();
 
     await client.cancelAck(claim.jobId, {
@@ -238,19 +245,18 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         );
         log(`job ${claim.publicId} cleanup: ${cleaned.detail}`);
         if (cleaned.closed) {
-          await client
-            .registerWorkspace(claim.jobId, {
-              leaseId: claim.leaseId,
-              workspaceId: outcome.workspaceId,
-              agentName: outcome.agentName,
-              label: workspaceLabelFor(slugKey),
-              mode: resolved.mode,
-              workspacePath: outcome.workspacePath,
-              state: 'closed',
-            })
-            .catch(() => {
-              /* the job is already complete; a bookkeeping miss is not fatal */
-            });
+          // Recorded only after the exact recorded workspace was proved closed,
+          // through a lease-free route -- submitting the result already cleared
+          // the lease, so the old registration call could never have succeeded
+          // here and the row would have stayed open for reapers to trip over.
+          try {
+            await client.closeWorkspace(claim.jobId, outcome.workspaceId);
+          } catch (err) {
+            log(
+              `job ${claim.publicId}: workspace closed in Herdr but bookkeeping failed ` +
+                `(${redact((err as Error).message).slice(0, 120)})`,
+            );
+          }
         }
       }
       return;

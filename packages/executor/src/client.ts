@@ -134,6 +134,13 @@ export class CoordinatorClient {
     );
   }
 
+  /** Idempotent bookkeeping; needs no lease because the job is already done. */
+  async closeWorkspace(jobId: string, workspaceId: string): Promise<unknown> {
+    return this.expectJson(
+      await this.post(`/api/v1/executor/jobs/${jobId}/workspace/close`, { workspaceId }),
+    );
+  }
+
   async reportFailure(
     jobId: string,
     leaseId: string,

@@ -6,6 +6,21 @@ import {
 import { redact, type Redactor } from '@ducky/adapters';
 import type { OutboundEmbed, OutboundMessage, OutboundRow } from './message.js';
 
+/**
+ * A component id is a signed opaque handle, so it cannot be redacted -- doing
+ * so would corrupt the signature and every control would stop working.
+ *
+ * Instead it is validated STRUCTURALLY: only the exact shape this codebase
+ * emits is allowed through, over a character set that cannot express a secret
+ * (base64url segments and lowercase identifiers, no quotes, no whitespace).
+ * Anything else is dropped rather than sent, so an id can never become a
+ * smuggling channel for text that skipped the redactor.
+ */
+const SAFE_CUSTOM_ID = /^v1:[a-z0-9][a-z0-9-]{0,31}:[a-z_]{1,32}:[A-Za-z0-9._-]{1,64}:[A-Za-z0-9_-]{16,32}$/;
+
+export const isSafeCustomId = (id: string): boolean =>
+  id.length <= CUSTOM_ID_MAX && SAFE_CUSTOM_ID.test(id);
+
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   const keep = Math.max(0, max - TRUNCATION_MARKER.length);
@@ -68,9 +83,10 @@ export function sanitizeOutbound(message: OutboundMessage, r: Redactor = redact)
     out.rows = message.rows.slice(0, ACTION_ROWS_MAX).map((row) => ({
       buttons: row.buttons
         .slice(0, BUTTONS_PER_ROW_MAX)
-        // A custom id longer than the limit is dropped rather than silently
-        // mangled: a truncated id would fail signature verification anyway.
-        .filter((b) => b.customId.length <= CUSTOM_ID_MAX)
+        // Dropped rather than mangled: a truncated or malformed id would fail
+        // signature verification anyway, and letting arbitrary text through
+        // here would bypass the redactor.
+        .filter((b) => isSafeCustomId(b.customId))
         .map((b) => ({
           customId: b.customId,
           label: clip(r(b.label), 80),

@@ -200,6 +200,15 @@ export class DuckyRouter {
             },
             {
               customId: d.signer.sign({
+                kind: 'sched_edit',
+                entityId: outcome.draft.draftId,
+                actorUserId: actor.discordUserId,
+              }),
+              label: 'Correct',
+              style: 'primary',
+            },
+            {
+              customId: d.signer.sign({
                 kind: 'sched_discard',
                 entityId: outcome.draft.draftId,
                 actorUserId: actor.discordUserId,
@@ -332,6 +341,67 @@ export class DuckyRouter {
       const { saved } = d.schedules.confirm(actor, entityId);
       return { content: `Saved ${saved} schedule entr${saved === 1 ? 'y' : 'ies'}.`, ephemeral: true };
     });
+    /**
+     * The button opens a modal (handled in the transport); the submission
+     * arrives here with the edited text. One entry per line, in the same shape
+     * the extractor emits, so a correction is a re-parse rather than a
+     * free-form edit that could smuggle anything past validation.
+     */
+    this.components.set('sched_edit', async (actor, entityId, values) => {
+      const raw = values?.['entries'];
+      if (!raw) {
+        const draft = d.schedules.pendingDraft(actor, entityId);
+        if (!draft) {
+          return {
+            content: 'This schedule preview expired. Send it again.',
+            ephemeral: true,
+          };
+        }
+        return {
+          content:
+            'Edit the entries and submit again, one per line:\n```\n' +
+            draft.entries
+              .map((e) =>
+                [e.startsAt, e.title, e.location ?? '', e.notes ?? '']
+                  .join(' | ')
+                  .replace(/\s*\|\s*$/, ''),
+              )
+              .join('\n') +
+            '\n```',
+          ephemeral: true,
+        };
+      }
+      const corrected = await d.schedules.correctFromText(actor, entityId, raw);
+      if (corrected.entries.length === 0) {
+        return { content: 'No schedule entries found in that. Nothing was saved.', ephemeral: true };
+      }
+      const rows: OutboundRow[] = [
+        {
+          buttons: [
+            {
+              customId: d.signer.sign({
+                kind: 'sched_confirm',
+                entityId,
+                actorUserId: actor.discordUserId,
+              }),
+              label: `Confirm ${corrected.entries.length}`,
+              style: 'success',
+            },
+            {
+              customId: d.signer.sign({
+                kind: 'sched_edit',
+                entityId,
+                actorUserId: actor.discordUserId,
+              }),
+              label: 'Correct',
+              style: 'primary',
+            },
+          ],
+        },
+      ];
+      return present.schedulePreview(corrected, rows);
+    });
+
     this.components.set('sched_discard', async (actor, entityId) => {
       d.schedules.discard(actor, entityId);
       return { content: 'Discarded. Nothing was saved.', ephemeral: true };

@@ -21,9 +21,11 @@ import { GitHubService } from './domain/github.service.js';
 import { Reconciler } from './domain/reconciler.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
+import { DiscordJsTransport } from './discord/discordjs.transport.js';
 import { fetchTextAttachment } from './discord/attachments.js';
 import { HourlyBudget } from './discord/command-buckets.js';
 import type { DiscordTransport } from './discord/transport.js';
+import { toDiscordPayload } from './discord/payload.js';
 import type { ProviderStatus } from './discord/presenters.js';
 
 export interface AppOverrides {
@@ -93,12 +95,12 @@ export function createApp(
   const github = new GitHubService(authz, allowlist, githubReader);
   const reconciler = new Reconciler({ store, approvals, pending });
 
-  const transport = overrides.transport ?? new MockDiscordTransport();
+  const transport = overrides.transport ?? transportFromEnv(env);
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
 
   const status = (): ProviderStatus => ({
-    discord: transport.kind === 'real' ? 'real (discord.js)' : 'mock (no token configured)',
+    discord: transport.kind === 'real' ? 'real (discord.js)' : 'mock (no DISCORD_TOKEN)',
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
@@ -154,6 +156,25 @@ function credentialStoreFromEnv(env: Env): ExecutorCredentialStore {
     'credential_unavailable',
     'Configure DUCKY_EXECUTOR_CREDENTIALS_FILE (or DUCKY_EXECUTOR_CREDENTIALS outside production).',
   );
+}
+
+/**
+ * A token selects the real gateway; without one the mock keeps a local run
+ * fully exercisable. The token is never logged, and nothing here falls back to
+ * the mock when a token IS present -- that would silently drop real traffic.
+ */
+function transportFromEnv(env: Env): DiscordTransport {
+  if (!env.DISCORD_TOKEN) return new MockDiscordTransport();
+  return new DiscordJsTransport(env.DISCORD_TOKEN, (client) => ({
+    deliver: async (target, message) => {
+      const c = client as {
+        users?: { fetch(id: string): Promise<{ send(payload: unknown): Promise<unknown> }> };
+      };
+      if (!c.users) throw new DuckyError('not_found', 'The Discord client is not connected.');
+      const user = await c.users.fetch(target.userId);
+      await user.send(toDiscordPayload({ ...message, ephemeral: false }));
+    },
+  }));
 }
 
 function conversationFromEnv(env: Env): ConversationProvider {

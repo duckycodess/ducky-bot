@@ -67,7 +67,7 @@ export interface HarnessOptions {
   readonly github?: MockGitHubReader;
 }
 
-export function makeHarness(opts: HarnessOptions = {}): Harness {
+export function makeHarness(opts: HarnessOptions = {}, realTransport = false): Harness {
   const db = openDatabase({ location: ':memory:' });
   runMigrations(db);
   const store = createStore(db);
@@ -95,7 +95,8 @@ export function makeHarness(opts: HarnessOptions = {}): Harness {
     } as NodeJS.ProcessEnv,
     {
       store,
-      transport,
+      // Omitting the override exercises the real selection path in app.ts.
+      ...(realTransport ? {} : { transport }),
       allowlistJson: REPOS_JSON,
       conversation: new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),

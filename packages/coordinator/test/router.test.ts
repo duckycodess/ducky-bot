@@ -165,3 +165,100 @@ describe('command registration', () => {
     );
   });
 });
+
+describe('schedule corrections', () => {
+  const SCHEDULE = '2026-09-01 09:00 | Standup | Room 3';
+
+  const boot = async () => {
+    const h = makeHarness();
+    await h.transport.start((e) => h.app.router.handle(e));
+    return h;
+  };
+
+  const previewIds = async (h: Awaited<ReturnType<typeof boot>>) => {
+    const preview = await h.transport.dispatch({
+      kind: 'command', name: 'schedule', userId: OWNER, options: { text: SCHEDULE },
+    });
+    const buttons = preview?.rows?.[0]?.buttons ?? [];
+    return {
+      confirm: buttons.find((b) => /Confirm/.test(b.label))!.customId,
+      edit: buttons.find((b) => /Correct/.test(b.label))!.customId,
+    };
+  };
+
+  it('offers a correction control on the preview', async () => {
+    const h = await boot();
+    const ids = await previewIds(h);
+    expect(ids.edit).toBeDefined();
+    expect(ids.confirm).toBeDefined();
+    h.close();
+  });
+
+  it('pre-fills the current entries when the modal is opened', async () => {
+    const h = await boot();
+    const ids = await previewIds(h);
+    const opened = await h.transport.dispatch({
+      kind: 'component', customId: ids.edit, userId: OWNER,
+    });
+    expect(opened?.content).toContain('Standup');
+    expect(h.store.schedules.count()).toBe(0);
+    h.close();
+  });
+
+  it('re-parses a correction and still saves nothing until confirmed', async () => {
+    const h = await boot();
+    const ids = await previewIds(h);
+
+    const corrected = await h.transport.dispatch({
+      kind: 'component',
+      customId: ids.edit,
+      userId: OWNER,
+      values: { entries: '2026-09-02 10:00 | Daily standup | Room 9' },
+    });
+    expect(flat(corrected)).toContain('Daily standup');
+    expect(h.store.schedules.count()).toBe(0);
+
+    await h.transport.dispatch({ kind: 'component', customId: ids.confirm, userId: OWNER });
+    const saved = h.app.schedules.list(h.app.authz.actor(OWNER));
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.title).toBe('Daily standup');
+    h.close();
+  });
+
+  it('reports plainly when a correction parses to nothing', async () => {
+    const h = await boot();
+    const ids = await previewIds(h);
+    const out = await h.transport.dispatch({
+      kind: 'component', customId: ids.edit, userId: OWNER, values: { entries: 'nonsense' },
+    });
+    expect(out?.content).toMatch(/No schedule entries found/);
+    expect(h.store.schedules.count()).toBe(0);
+    h.close();
+  });
+
+  it('refuses a correction from a non-owner', async () => {
+    const h = await boot();
+    const ids = await previewIds(h);
+    const out = await h.transport.dispatch({
+      kind: 'component', customId: ids.edit, userId: CHAT, values: { entries: 'x' },
+    });
+    expect(out?.content).toMatch(/not authorized/i);
+    h.close();
+  });
+});
+
+describe('transport selection', () => {
+  it('uses the mock transport when no token is configured', () => {
+    const h = makeHarness();
+    expect(h.app.transport.kind).toBe('mock');
+    expect(h.app.status().discord).toMatch(/mock/);
+    h.close();
+  });
+
+  it('uses the real transport as soon as a token is present', () => {
+    const h = makeHarness({ env: { DISCORD_TOKEN: 'placeholder-not-a-real-token' } }, true);
+    expect(h.app.transport.kind).toBe('real');
+    expect(h.app.status().discord).toMatch(/real/);
+    h.close();
+  });
+});

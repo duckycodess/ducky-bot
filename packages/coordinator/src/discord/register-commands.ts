@@ -45,9 +45,47 @@ export function commandPayload(): unknown[] {
   return COMMANDS;
 }
 
-if (process.argv[1]?.endsWith('register-commands.ts') || process.argv[1]?.endsWith('register-commands.js')) {
-  process.stdout.write(`${JSON.stringify(commandPayload(), null, 2)}\n`);
-  process.stdout.write(
-    '\nDry run only. Registering with Discord is a deliberate, separate step.\n',
-  );
+/**
+ * Registers the commands with Discord. This is a WRITE to an external service,
+ * so it never happens at boot and never without `--apply`.
+ */
+async function apply(): Promise<void> {
+  const token = process.env['DISCORD_TOKEN'];
+  const appId = process.env['DISCORD_APP_ID'];
+  if (!token || !appId) {
+    process.stderr.write(
+      'DISCORD_TOKEN and DISCORD_APP_ID are both required to register commands.\n',
+    );
+    process.exit(1);
+  }
+
+  const res = await fetch(`https://discord.com/api/v10/applications/${appId}/commands`, {
+    method: 'PUT',
+    headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(commandPayload()),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!res.ok) {
+    // The body can echo request detail; print the status only.
+    process.stderr.write(`Discord rejected the registration (HTTP ${res.status}).\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`Registered ${commandPayload().length} commands.\n`);
+}
+
+const invokedDirectly =
+  process.argv[1]?.endsWith('register-commands.ts') ||
+  process.argv[1]?.endsWith('register-commands.js');
+
+if (invokedDirectly) {
+  if (process.argv.includes('--apply')) {
+    void apply();
+  } else {
+    process.stdout.write(`${JSON.stringify(commandPayload(), null, 2)}\n`);
+    process.stdout.write(
+      '\nDry run. This wrote nothing to Discord.\n' +
+        'Registering is an external write: re-run with --apply, and only deliberately.\n',
+    );
+  }
 }

@@ -1,0 +1,15 @@
+{
+  "name": "@ducky/executor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "dependencies": {
+    "@ducky/adapters": "workspace:*",
+    "@ducky/contracts": "workspace:*",
+    "pino": "^10.3.1",
+    "zod": "^4.4.3"
+  }
+}

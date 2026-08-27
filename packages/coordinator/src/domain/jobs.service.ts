@@ -1,11 +1,21 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import {
   DEFAULT_MAX_ATTEMPTS, DuckyError, EXECUTOR_OFFLINE_AFTER_MS, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
   type JobState, type JobSubmitInput,
 } from '@ducky/contracts';
-import { redact } from '@ducky/adapters';
+import { DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX } from '@ducky/contracts';
+import { redact, toSlugKey as herdrSlugKey } from '@ducky/adapters';
+
+/** Herdr checks linked worktrees out under its own directory. */
+const HERDR_WORKTREE_DIR = /(^|\/)\.herdr\/worktrees\//;
+
+const isWithin = (parent: string, child: string): boolean => {
+  const rel = path.relative(path.normalize(parent), path.normalize(child));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
 import { isoPlus, nowIso, withTransaction, type JobRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { RepoAllowlist } from './allowlist.js';
@@ -276,6 +286,7 @@ export class JobsService {
       this.store.jobs.appendEvent(job.id, 'claimed', 'Picked up by the executor.');
 
       const repo = this.allowlist.resolve(job.repoSlug);
+      const recorded = this.store.herdrWorkspaces.openForJob(job.id);
       const response: ClaimResponse = {
         jobId: job.id,
         publicId: job.publicId,
@@ -296,6 +307,18 @@ export class JobsService {
           ownerInputRounds: job.ownerInputRounds,
         },
         ownerInputs: this.store.jobs.ownerInputs(job.id),
+        // A restarted executor has no in-memory map, so ownership travels with
+        // the claim. Without it, recovery would meet its own agent as a
+        // stranger and report a foreign conflict.
+        recordedWorkspace: recorded
+          ? {
+              workspaceId: recorded.workspaceId,
+              agentName: recorded.agentName,
+              workspacePath: recorded.workspacePath ?? repo.absolutePath,
+              mode: recorded.mode,
+              state: recorded.state,
+            }
+          : null,
       };
 
       this.store.db
@@ -411,14 +434,13 @@ export class JobsService {
   ): { state: JobState; orphan: boolean } {
     const job = this.leasedJob(executorId, jobId, leaseId);
 
-    // A conflict only means *this executor* could not prove ownership. If we
-    // have a workspace recorded for this job, something Ducky-owned may still
-    // be live in it, so the repository must stay blocked until the owner
-    // looks -- releasing it here would be the second-writer bug.
+    // Once a workspace is registered, a Ducky-owned agent may be live in it.
+    // ANY failure from that point on therefore keeps the repository reserved
+    // until the owner has looked -- releasing it would let a second writer
+    // start beside a running agent. Only a failure that happened before any
+    // workspace existed can safely release.
     const hasRecordedWorkspace = this.store.herdrWorkspaces.openForJob(job.id) !== undefined;
-    const orphan =
-      ORPHAN_FAILURE_REASONS.includes(reason) ||
-      (reason === 'foreign_agent_conflict' && hasRecordedWorkspace);
+    const orphan = ORPHAN_FAILURE_REASONS.includes(reason) || hasRecordedWorkspace;
 
     withTransaction(this.store.db, () => {
       this.store.jobs.transition(job.id, 'failed', reason, `executor:${executorId}`, {
@@ -470,6 +492,7 @@ export class JobsService {
     },
   ): { registered: boolean; workspaceId: string } {
     const job = this.leasedJob(executorId, jobId, leaseId);
+    this.assertRegistrable(job, input);
 
     const existing = this.store.herdrWorkspaces.byWorkspaceId(input.workspaceId);
     if (existing && existing.jobId !== job.id) {
@@ -500,6 +523,64 @@ export class JobsService {
       }
     });
     return { registered: true, workspaceId: input.workspaceId };
+  }
+
+  /**
+   * The registration decides what Ducky will later consider its own, and what
+   * it is therefore willing to close. Executor-supplied values are checked
+   * here rather than trusted: a malformed name or a path escaping the
+   * repository must be refused BEFORE it is persisted, or a later cleanup
+   * could act on something that is not ours.
+   *
+   * A worktree checkout legitimately lives outside the source repository --
+   * Herdr places it under its own directory -- so that case is allowed, but
+   * only under a Ducky-owned worktrees path, never at an arbitrary location.
+   */
+  private assertRegistrable(
+    job: JobRow,
+    input: {
+      workspaceId: string;
+      label: string;
+      mode: 'worktree' | 'direct';
+      agentName: string;
+      workspacePath: string;
+    },
+  ): void {
+    const bad = (message: string): never => {
+      throw new DuckyError('invalid_input', message);
+    };
+
+    const slugKey = herdrSlugKey(job.repoSlug);
+    if (input.agentName !== `${DUCKY_AGENT_PREFIX}${slugKey}`) {
+      bad('That agent name is not the one Ducky uses for this repository.');
+    }
+    if (input.label !== `${DUCKY_WORKSPACE_LABEL_PREFIX}${slugKey}`) {
+      bad('That workspace label is not Ducky-managed.');
+    }
+    if (!/^[A-Za-z0-9:_-]{1,128}$/.test(input.workspaceId)) {
+      bad('That workspace id is malformed.');
+    }
+    if (input.workspacePath.includes('\0') || /[\u0000-\u001f\u007f]/.test(input.workspacePath)) {
+      bad('That workspace path contains control characters.');
+    }
+    if (!path.isAbsolute(input.workspacePath) || path.normalize(input.workspacePath) !== input.workspacePath) {
+      bad('That workspace path is not a normalized absolute path.');
+    }
+
+    const repo = this.allowlist.resolve(job.repoSlug);
+    const inRepo = isWithin(repo.absolutePath, input.workspacePath);
+    if (input.mode === 'direct') {
+      // Direct mode edits the checkout itself, so it must be the checkout.
+      if (input.workspacePath !== path.normalize(repo.absolutePath)) {
+        bad('A direct-mode workspace must be the configured repository path.');
+      }
+      return;
+    }
+    // Worktree mode: either inside the repo, or under a Ducky-owned worktrees
+    // directory that Herdr manages. Nothing else.
+    if (!inRepo && !HERDR_WORKTREE_DIR.test(input.workspacePath)) {
+      bad('A worktree workspace must live in the repository or a Herdr worktrees directory.');
+    }
   }
 
   /** Recorded workspace for a job, so a reclaim can prove ownership. */

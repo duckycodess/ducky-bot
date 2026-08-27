@@ -19,13 +19,14 @@ const reconcilerAt = (h: ReturnType<typeof makeHarness>, when: Date) =>
 
 const later = (ms: number) => new Date(Date.now() + ms);
 
+/** Matches what the executor really sends: Ducky prefixes and the repo path. */
 const registerWorkspace = (h: ReturnType<typeof makeHarness>, c: { jobId: string; leaseId: string }) =>
   h.app.jobs.registerWorkspace(h.executorId, c.jobId, c.leaseId, {
     workspaceId: 'wX',
     label: 'ducky-mgd:demo',
     mode: 'direct',
     agentName: 'ducky-pi-demo',
-    workspacePath: '/tmp/demo',
+    workspacePath: '/tmp/ducky-demo',
   });
 
 describe('forced cleanup cannot release a live reservation', () => {
@@ -160,7 +161,7 @@ describe('workspace registration makes ownership durable', () => {
         label: 'ducky-mgd:other',
         mode: 'direct',
         agentName: 'ducky-pi-other',
-        workspacePath: '/tmp/other',
+        workspacePath: '/tmp/ducky-other',
       }),
     ).toThrow(/different job/);
     h.close();
@@ -176,7 +177,7 @@ describe('workspace registration makes ownership durable', () => {
         label: 'ducky-mgd:demo',
         mode: 'direct',
         agentName: 'ducky-pi-demo',
-        workspacePath: '/tmp/demo',
+        workspacePath: '/tmp/ducky-demo',
       }),
     ).toThrow(/no longer current/);
     h.close();
@@ -196,6 +197,22 @@ describe('workspace registration makes ownership durable', () => {
 
     h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'b', bootstrap: false });
     expect(h.app.jobs.claim(h.executorId, 'k3')).toBeUndefined();
+    h.close();
+  });
+
+  it('keeps the repository blocked for ANY failure once a workspace exists', () => {
+    const h = makeHarness();
+    const job = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
+    const c = claimOne(h);
+    registerWorkspace(h, c);
+
+    // Not an orphan reason: an ordinary "the agent produced nothing" failure.
+    const out = h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'no_result', {
+      workspaceId: 'wX',
+    });
+    expect(out.orphan).toBe(true);
+    expect(h.store.jobs.reservation('demo')?.reason).toBe('orphan_agent');
+    expect(h.store.jobs.byId(job.id)?.state).toBe('failed');
     h.close();
   });
 

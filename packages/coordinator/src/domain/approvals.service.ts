@@ -57,6 +57,20 @@ export class ApprovalsService {
     const jobState = withTransaction(this.store.db, () => {
       const approval = this.store.approvals.byId(approvalId);
       if (!approval) throw new DuckyError('not_found', 'That approval no longer exists.');
+
+      // Re-checked INSIDE the transaction: the job may have been cancelled, or
+      // the approval decided or expired, between the preflight and here.
+      // Settling a job that already moved on would overwrite a terminal state.
+      const job = this.store.jobs.byId(approval.jobId);
+      if (!job || job.discordUserId !== actor.discordUserId) {
+        throw new DuckyError('not_found', 'That approval no longer exists.');
+      }
+      if (job.state !== 'needs_approval') {
+        throw new DuckyError(
+          'invalid_input',
+          `\`${job.publicId}\` is ${job.state.replace(/_/g, ' ')} and is no longer awaiting approval.`,
+        );
+      }
       if (approval.state !== 'pending') {
         throw new DuckyError('invalid_input', `That action was already ${approval.state}.`);
       }
@@ -88,8 +102,11 @@ export class ApprovalsService {
     return withTransaction(this.store.db, () => this.settleJobWithin(jobId));
   }
 
-  /** Settlement body. The caller must already hold a transaction. */
-  private settleJobWithin(jobId: string): string {
+  /**
+   * Settlement body. The CALLER must already hold a transaction, so expiry and
+   * settlement can be committed together.
+   */
+  settleJobWithin(jobId: string): string {
     const job = this.store.jobs.byId(jobId);
     if (!job) throw new DuckyError('not_found', 'Unknown job.');
     if (job.state !== 'needs_approval') return job.state;

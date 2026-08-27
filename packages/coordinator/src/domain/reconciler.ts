@@ -191,13 +191,27 @@ export class Reconciler {
     return n;
   }
 
+  /**
+   * Expiry and settlement are one transaction per job. Doing them separately
+   * left a window where every approval was expired but the job stayed in
+   * needs_approval until some later pass noticed.
+   *
+   * A job the owner cancelled in the meantime is skipped rather than settled:
+   * cancellation already resolved its pending approvals, and settling would
+   * try to move a terminal job.
+   */
   expireApprovals(): number {
     const rows = this.store.approvals.expiredPending(this.now().toISOString());
     const jobIds = new Set(rows.map((r) => r.jobId));
     let n = 0;
     for (const jobId of jobIds) {
-      n += this.store.approvals.expireAllPending(jobId, 'approval_ttl_expired');
-      this.approvals.settleJob(jobId);
+      const job = this.store.jobs.byId(jobId);
+      if (!job || job.state !== 'needs_approval') continue;
+      n += withTransaction(this.store.db, () => {
+        const expired = this.store.approvals.expireAllPending(jobId, 'approval_ttl_expired');
+        this.approvals.settleJobWithin(jobId);
+        return expired;
+      });
     }
     return n;
   }

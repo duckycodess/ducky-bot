@@ -49,7 +49,12 @@ describe('per-action approvals', () => {
     const h = makeHarness();
     const { approvals } = withActions(h, 1);
     h.app.approvals.decide(h.owner, approvals[0]!.id, 'approved');
-    expect(() => h.app.approvals.decide(h.owner, approvals[0]!.id, 'rejected')).toThrow(/already/);
+    // Refused either as already-decided or because the job has since settled;
+    // both are the same guarantee, that one action is decided exactly once.
+    expect(() => h.app.approvals.decide(h.owner, approvals[0]!.id, 'rejected')).toThrow(
+      /already|no longer awaiting/i,
+    );
+    expect(h.store.approvals.byId(approvals[0]!.id)?.state).toBe('approved');
     h.close();
   });
 

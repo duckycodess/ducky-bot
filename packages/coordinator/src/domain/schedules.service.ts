@@ -53,6 +53,30 @@ export class SchedulesService {
     return { kind: 'draft', draft: this.pending.put(actor.discordUserId, entries, source.kind) };
   }
 
+  /** The pending draft, so a correction can be pre-filled with what we parsed. */
+  pendingDraft(actor: ActorContext, draftId: string): PendingDraft | undefined {
+    this.authz.requireOwner(actor);
+    return this.pending.get(draftId, actor.discordUserId);
+  }
+
+  /**
+   * Re-parses corrected text through the same extractor as the original.
+   *
+   * Corrections go through validation rather than being written straight into
+   * the draft, so an edit cannot introduce a value the extractor itself could
+   * never have produced. Still nothing is persisted.
+   */
+  async correctFromText(actor: ActorContext, draftId: string, text: string): Promise<PendingDraft> {
+    this.authz.requireOwner(actor);
+    const existing = this.pending.get(draftId, actor.discordUserId);
+    if (!existing) throw new DuckyError('extraction_expired', this.expiredMessage());
+
+    const entries = await this.extractor.extract({ kind: existing.sourceKind, text });
+    const updated = this.pending.replace(draftId, actor.discordUserId, entries);
+    if (!updated) throw new DuckyError('extraction_expired', this.expiredMessage());
+    return updated;
+  }
+
   correct(actor: ActorContext, draftId: string, entries: ScheduleDraft): PendingDraft {
     this.authz.requireOwner(actor);
     const parsed = ScheduleDraftSchema.parse(entries);

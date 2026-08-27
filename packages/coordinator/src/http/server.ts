@@ -5,7 +5,7 @@ import {
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
   JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
-  EXECUTOR_HEADERS, isDuckyError,
+  WorkspaceRegistrationRequestSchema, EXECUTOR_HEADERS, isDuckyError,
 } from '@ducky/contracts';
 import type { ExecutorCredentialStore } from '@ducky/adapters';
 import type { Store } from '@ducky/persistence';
@@ -198,6 +198,26 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         ...(body.detail === undefined ? {} : { detail: body.detail }),
         ...(body.workspaceId === undefined ? {} : { workspaceId: body.workspaceId }),
         ...(body.agentName === undefined ? {} : { agentName: body.agentName }),
+      });
+    }),
+  );
+
+  // Registered before an agent starts, so ownership is durable even if the
+  // executor dies between creating a workspace and prompting it.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/workspace',
+    { config: { rateLimit: { max: RATE_LIMITS.jobHeartbeat.max, timeWindow: RATE_LIMITS.jobHeartbeat.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = WorkspaceRegistrationRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.registerWorkspace(executorId, id, body.leaseId, {
+        workspaceId: body.workspaceId,
+        label: body.label,
+        mode: body.mode,
+        agentName: body.agentName,
+        workspacePath: body.workspacePath,
+        worktreePath: body.worktreePath ?? null,
+        state: body.state,
       });
     }),
   );

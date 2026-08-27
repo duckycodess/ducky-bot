@@ -196,8 +196,14 @@ export class JobsService {
   }
 
   /**
-   * Clears an `orphan_agent` reservation. Without `force` the caller must have
-   * confirmed the agent is gone; with `force` the decision is recorded.
+   * Clears an `orphan_agent` reservation, and ONLY that.
+   *
+   * `force` is the second step of the documented two-step confirmation for an
+   * orphan whose agent cannot be confirmed gone. It is deliberately not an
+   * override for a live reservation: releasing one while its job is still
+   * nonterminal would let a second writer start on the same repository, which
+   * is exactly what the reservation exists to prevent. A normal reservation is
+   * released by cancelling the job, which goes through the safe path.
    */
   cleanup(actor: ActorContext, publicId: string, force: boolean): { released: boolean; note: string } {
     this.authz.requireOwner(actor);
@@ -207,8 +213,11 @@ export class JobsService {
     if (!reservation || reservation.jobId !== job.id) {
       return { released: false, note: 'That job is not holding its repository.' };
     }
-    if (reservation.reason !== 'orphan_agent' && !force) {
-      return { released: false, note: 'That reservation is a normal active job; cancel it instead.' };
+    if (reservation.reason !== 'orphan_agent') {
+      return {
+        released: false,
+        note: `\`${job.publicId}\` is ${job.state.replace(/_/g, ' ')} and still holds \`${job.repoSlug}\`. Cancel it instead; forced cleanup is only for an orphaned agent.`,
+      };
     }
 
     withTransaction(this.store.db, () => {
@@ -217,8 +226,8 @@ export class JobsService {
         job.id,
         force ? 'forced_cleanup' : 'cleanup',
         force
-          ? 'Owner forced release of the repository reservation.'
-          : 'Owner released the repository reservation.',
+          ? 'Owner forced release of an orphaned repository reservation without confirming the agent had stopped.'
+          : 'Owner released an orphaned repository reservation.',
       );
     });
     return { released: true, note: `Released \`${job.repoSlug}\`.` };
@@ -401,7 +410,15 @@ export class JobsService {
     extra: { detail?: string; workspaceId?: string; agentName?: string } = {},
   ): { state: JobState; orphan: boolean } {
     const job = this.leasedJob(executorId, jobId, leaseId);
-    const orphan = ORPHAN_FAILURE_REASONS.includes(reason);
+
+    // A conflict only means *this executor* could not prove ownership. If we
+    // have a workspace recorded for this job, something Ducky-owned may still
+    // be live in it, so the repository must stay blocked until the owner
+    // looks -- releasing it here would be the second-writer bug.
+    const hasRecordedWorkspace = this.store.herdrWorkspaces.openForJob(job.id) !== undefined;
+    const orphan =
+      ORPHAN_FAILURE_REASONS.includes(reason) ||
+      (reason === 'foreign_agent_conflict' && hasRecordedWorkspace);
 
     withTransaction(this.store.db, () => {
       this.store.jobs.transition(job.id, 'failed', reason, `executor:${executorId}`, {
@@ -429,16 +446,65 @@ export class JobsService {
     return { state: 'failed', orphan };
   }
 
-  recordWorkspace(input: {
-    jobId: string;
-    repoSlug: string;
-    workspaceId: string;
-    label: string;
-    mode: 'worktree' | 'direct';
-    agentName: string;
-    worktreePath: string | null;
-  }): void {
-    this.store.herdrWorkspaces.record(input);
+  /**
+   * Records a Ducky-owned Herdr workspace. The executor calls this as soon as
+   * the workspace exists and BEFORE any agent is started in it, so a crash in
+   * between still leaves the coordinator able to prove ownership rather than
+   * mistaking a live agent for a stranger's.
+   *
+   * Idempotent, and lease-checked: a stale executor cannot re-point a
+   * workspace at a different job.
+   */
+  registerWorkspace(
+    executorId: string,
+    jobId: string,
+    leaseId: string,
+    input: {
+      workspaceId: string;
+      label: string;
+      mode: 'worktree' | 'direct';
+      agentName: string;
+      workspacePath: string;
+      worktreePath?: string | null | undefined;
+      state?: 'creating' | 'active' | 'closed';
+    },
+  ): { registered: boolean; workspaceId: string } {
+    const job = this.leasedJob(executorId, jobId, leaseId);
+
+    const existing = this.store.herdrWorkspaces.byWorkspaceId(input.workspaceId);
+    if (existing && existing.jobId !== job.id) {
+      throw new DuckyError(
+        'lease_mismatch',
+        'That workspace is already registered to a different job.',
+      );
+    }
+
+    withTransaction(this.store.db, () => {
+      this.store.herdrWorkspaces.record({
+        workspaceId: input.workspaceId,
+        repoSlug: job.repoSlug,
+        jobId: job.id,
+        label: input.label,
+        mode: input.mode,
+        agentName: input.agentName,
+        workspacePath: input.workspacePath,
+        worktreePath: input.worktreePath ?? null,
+        state: input.state ?? 'creating',
+      });
+      if (!existing) {
+        this.store.jobs.appendEvent(
+          job.id,
+          'workspace_registered',
+          `Registered Ducky workspace ${input.workspaceId} (${input.mode}).`,
+        );
+      }
+    });
+    return { registered: true, workspaceId: input.workspaceId };
+  }
+
+  /** Recorded workspace for a job, so a reclaim can prove ownership. */
+  workspaceForJob(jobId: string): ReturnType<Store['herdrWorkspaces']['openForJob']> {
+    return this.store.herdrWorkspaces.openForJob(jobId);
   }
 
   // ================================================================ helpers ==

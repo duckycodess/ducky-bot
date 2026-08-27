@@ -62,6 +62,42 @@ export class Reconciler {
     for (const job of stale) {
       withTransaction(this.store.db, () => {
         const attempts = job.attempts + 1;
+
+        // The owner asked for this job to stop. Requeueing it would run the
+        // work again after a cancellation, so expiry is the terminal outcome.
+        if (job.cancelRequested) {
+          this.store.jobs.transition(
+            job.id,
+            'cancelled',
+            'lease_expired_after_cancel',
+            'system:reconciler',
+            {
+              attempts,
+              finishedAt: this.now().toISOString(),
+              leaseId: null,
+              leaseExpiresAt: null,
+            },
+          );
+          this.store.jobs.appendEvent(
+            job.id,
+            'lease_expired_after_cancel',
+            'The executor stopped reporting after cancellation was requested. Workspace retained.',
+          );
+          // A workspace we recorded may still hold a live agent, so the
+          // repository stays blocked for the owner rather than being handed on.
+          if (this.store.herdrWorkspaces.openForJob(job.id)) {
+            this.store.jobs.markReservationOrphan(job.repoSlug);
+            this.store.jobs.appendEvent(
+              job.id,
+              'reservation_orphaned',
+              `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+            );
+          } else {
+            this.releaseUnlessOrphan(job.repoSlug);
+          }
+          return;
+        }
+
         if (attempts > job.maxAttempts) {
           this.store.jobs.transition(job.id, 'failed', 'lease_expired_exhausted', 'system:reconciler', {
             attempts,
@@ -77,13 +113,12 @@ export class Reconciler {
           this.releaseUnlessOrphan(job.repoSlug);
           return;
         }
-        this.store.jobs.transition(
-          job.id,
-          'waiting_for_executor',
-          job.cancelRequested ? 'lease_expired_after_cancel' : 'lease_expired',
-          'system:reconciler',
-          { attempts, recoveryRequired: true, leaseId: null, leaseExpiresAt: null },
-        );
+        this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired', 'system:reconciler', {
+          attempts,
+          recoveryRequired: true,
+          leaseId: null,
+          leaseExpiresAt: null,
+        });
         this.store.jobs.appendEvent(
           job.id,
           'lease_expired',

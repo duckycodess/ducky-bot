@@ -39,44 +39,57 @@ export class ApprovalsService {
     return this.store.approvals.forJob(jobId);
   }
 
+  /**
+   * Records one decision and settles the job in a SINGLE transaction.
+   *
+   * Doing the two separately left a window where a crash could leave no
+   * pending approvals but a job stuck in needs_approval forever. State and
+   * expiry are re-checked inside the transaction, so a concurrent decision or
+   * an expiry that lands mid-call cannot slip through.
+   */
   decide(actor: ActorContext, approvalId: string, decision: 'approved' | 'rejected'): DecisionOutcome {
     this.authz.requireOwner(actor);
 
-    const approval = this.store.approvals.byId(approvalId);
-    if (!approval) throw new DuckyError('not_found', 'That approval no longer exists.');
-    this.assertOwnsJob(actor, approval.jobId);
+    const preflight = this.store.approvals.byId(approvalId);
+    if (!preflight) throw new DuckyError('not_found', 'That approval no longer exists.');
+    this.assertOwnsJob(actor, preflight.jobId);
 
-    if (approval.state !== 'pending') {
-      throw new DuckyError('invalid_input', `That action was already ${approval.state}.`);
-    }
-    if (Date.parse(approval.expiresAt) < this.now().getTime()) {
-      throw new DuckyError('invalid_input', 'That approval expired.');
-    }
+    const jobState = withTransaction(this.store.db, () => {
+      const approval = this.store.approvals.byId(approvalId);
+      if (!approval) throw new DuckyError('not_found', 'That approval no longer exists.');
+      if (approval.state !== 'pending') {
+        throw new DuckyError('invalid_input', `That action was already ${approval.state}.`);
+      }
+      if (Date.parse(approval.expiresAt) < this.now().getTime()) {
+        throw new DuckyError('invalid_input', 'That approval expired.');
+      }
 
-    const changed = this.store.approvals.decide(
-      approvalId,
-      decision,
-      `owner:${actor.discordUserId}`,
-      decision === 'approved' ? 'owner_approved' : 'owner_rejected',
-    );
-    if (!changed) throw new DuckyError('invalid_input', 'That action was already decided.');
+      const changed = this.store.approvals.decide(
+        approvalId,
+        decision,
+        `owner:${actor.discordUserId}`,
+        decision === 'approved' ? 'owner_approved' : 'owner_rejected',
+      );
+      if (!changed) throw new DuckyError('invalid_input', 'That action was already decided.');
 
-    let note =
+      return this.settleJobWithin(approval.jobId);
+    });
+
+    const note =
       decision === 'approved'
         ? 'Approved and recorded. Phase 1 does not execute the action.'
         : 'Rejected.';
 
-    if (decision === 'approved' && this.performer.enabled) {
-      // Reserved for a later phase; the deferred performer never reaches here.
-      note = 'Approved.';
-    }
-
-    const jobState = this.settleJob(approval.jobId);
     return { approval: this.store.approvals.byId(approvalId)!, jobState, note };
   }
 
-  /** Once nothing is pending the job leaves needs_approval. */
+  /** Once nothing is pending the job leaves needs_approval. Opens its own transaction. */
   settleJob(jobId: string): string {
+    return withTransaction(this.store.db, () => this.settleJobWithin(jobId));
+  }
+
+  /** Settlement body. The caller must already hold a transaction. */
+  private settleJobWithin(jobId: string): string {
     const job = this.store.jobs.byId(jobId);
     if (!job) throw new DuckyError('not_found', 'Unknown job.');
     if (job.state !== 'needs_approval') return job.state;
@@ -91,20 +104,16 @@ export class ApprovalsService {
         ? 'approvals_expired'
         : 'all_actions_rejected';
 
-    withTransaction(this.store.db, () => {
-      this.store.jobs.transition(jobId, 'completed', reason, 'system:approvals', {
-        finishedAt: this.now().toISOString(),
-      });
-      this.store.jobs.appendEvent(
-        jobId,
-        reason,
-        anyApproved
-          ? 'Approved actions recorded; Phase 1 defers execution.'
-          : 'No action was approved.',
-      );
-      const r = this.store.jobs.reservation(job.repoSlug);
-      if (!r || r.reason !== 'orphan_agent') this.store.jobs.releaseReservation(job.repoSlug);
+    this.store.jobs.transition(jobId, 'completed', reason, 'system:approvals', {
+      finishedAt: this.now().toISOString(),
     });
+    this.store.jobs.appendEvent(
+      jobId,
+      reason,
+      anyApproved ? 'Approved actions recorded; Phase 1 defers execution.' : 'No action was approved.',
+    );
+    const r = this.store.jobs.reservation(job.repoSlug);
+    if (!r || r.reason !== 'orphan_agent') this.store.jobs.releaseReservation(job.repoSlug);
     return 'completed';
   }
 

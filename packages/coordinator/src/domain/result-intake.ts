@@ -53,6 +53,15 @@ export function sanitizeResult(result: JobResultFile): JobResultFile {
   }
 }
 
+/**
+ * Deep-sanitizes an action. EVERY free-text field of every kind goes through
+ * the redactor -- a branch name, a deploy target or an Azure operation is just
+ * as capable of carrying a token as a commit message, and these strings are
+ * persisted and shown to the owner.
+ *
+ * Paths and file lists are not redacted: they are already constrained to
+ * repository-relative form by the schema, and folding them would corrupt them.
+ */
 function sanitizeAction(a: JobResultFile['proposedActions'][number]): typeof a {
   const description = clamp(redact(a.description), 500);
   switch (a.kind) {
@@ -62,6 +71,12 @@ function sanitizeAction(a: JobResultFile['proposedActions'][number]): typeof a {
         description,
         details: { message: clamp(redact(a.details.message), 2000), files: a.details.files },
       };
+    case 'git_push':
+      return {
+        kind: 'git_push',
+        description,
+        details: { remote: a.details.remote, branch: clamp(redact(a.details.branch), 255) },
+      };
     case 'github_pr':
       return {
         kind: 'github_pr',
@@ -69,8 +84,8 @@ function sanitizeAction(a: JobResultFile['proposedActions'][number]): typeof a {
         details: {
           title: clamp(redact(a.details.title), 256),
           body: clamp(redact(a.details.body), 5000),
-          base: a.details.base,
-          head: a.details.head,
+          base: clamp(redact(a.details.base), 255),
+          head: clamp(redact(a.details.head), 255),
         },
       };
     case 'github_issue':
@@ -82,8 +97,18 @@ function sanitizeAction(a: JobResultFile['proposedActions'][number]): typeof a {
           body: clamp(redact(a.details.body), 5000),
         },
       };
-    default:
-      return { ...a, description };
+    case 'deploy':
+      return {
+        kind: 'deploy',
+        description,
+        details: { target: clamp(redact(a.details.target), 120) },
+      };
+    case 'azure_mutation':
+      return {
+        kind: 'azure_mutation',
+        description,
+        details: { operation: clamp(redact(a.details.operation), 120) },
+      };
   }
 }
 

@@ -106,6 +106,13 @@ identifiers, raw environment, SSH keys, raw terminal transcripts, local
 usernames (`/home/<user>` folds to `~`, the account name to `Tj`), or
 unnecessary absolute paths.
 
+Component ids are the one outbound field that **cannot** be redacted — doing so
+would corrupt the signature and break every control. They are validated
+structurally instead: only the exact signed shape this codebase emits passes,
+over a character set that cannot express a secret. Anything else is dropped
+rather than sent, so an id cannot become a channel for text that skipped the
+redactor.
+
 The orchestration prompt is redacted and control-stripped before it becomes an
 argv element, and the executor logs it only as `<prompt:sha256:…>`. The HTTP
 server runs with request logging disabled and never logs a raw URL, query

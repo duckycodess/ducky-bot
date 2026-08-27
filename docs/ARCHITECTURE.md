@@ -122,6 +122,50 @@ immediate and safe.
 | `needs_approval` | → `completed` / `approvals_expired_reservation`, actions expired, result preserved |
 | `orphan_agent` | never expires — `/job cleanup` only |
 
+## Cancelling a running job
+
+A claimed job is supervised: the executor heartbeats its lease and watches for
+a cancellation the owner requested after the claim.
+
+```mermaid
+sequenceDiagram
+  participant O as Owner
+  participant C as Coordinator
+  participant E as Executor
+  participant P as Pi agent
+  O->>C: /job cancel
+  C->>C: cancel_requested = 1 (state unchanged)
+  E->>C: job heartbeat
+  C-->>E: cancelRequested: true
+  E->>E: abort the turn's wait
+  E->>P: observe status (never keystrokes)
+  alt agent idle / absent
+    E->>C: cancel-ack terminated=true
+    C->>C: cancelled, reservation released
+  else agent still working
+    E->>C: cancel-ack terminated=false
+    E->>C: failure orphan_agent_still_working
+    C->>C: reservation converted to orphan_agent
+  end
+```
+
+Herdr offers no verified way to interrupt a Pi turn without risking a
+half-written edit, so nothing is ever typed into a live pane. Termination is
+only ever *reported* when it is *observed* — a false positive here would
+release the repository while a writer was still running.
+
+## Durable workspace ownership
+
+The executor registers a workspace with the coordinator as soon as it exists
+and **before** any agent is started in it. Without that record, an executor
+crash between creation and the first prompt would leave a live Ducky agent that
+the next claim could not recognise — it would report `foreign_agent_conflict`
+and release the reservation underneath it.
+
+Registration is idempotent, lease-checked, and refuses to re-point a workspace
+at a different job. A conflict reported while we hold a registered workspace
+converts the reservation to `orphan_agent` rather than releasing it.
+
 ## Crash recovery
 
 A lease can expire while a Ducky-owned Pi agent is still working. Handing the

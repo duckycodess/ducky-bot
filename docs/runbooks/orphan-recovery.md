@@ -54,7 +54,7 @@ herdr workspace close <workspace_id>
 | `needs_owner_input` for a long time | waiting on you | `/job answer id:<id> answer:<text>` |
 | `failed` / `owner_input_expired` | no answer within 24 h | resubmit; the workspace was kept |
 | `completed` / `approvals_expired_reservation` | actions lapsed | resubmit if still wanted |
-| `running` with cancellation pending | executor could not stop yet | it resolves on ack or lease expiry |
+| `running` with cancellation pending | the executor saw the request and is confirming what the agent is doing | it resolves within a heartbeat; if the agent is still working the job fails to an orphan reservation you clear with `/job cleanup` |
 | `failed` / `foreign_agent_conflict` | an agent holds the name but is not provably ours | inspect it; Ducky touched nothing |
 
 ## Health

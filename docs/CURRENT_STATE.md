@@ -7,9 +7,12 @@ What is actually true today. Phase 1, no deployment performed.
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup), `/jobs`, `/repo status`, `/status`
 - Captures and inbox with per-row management
-- Text and CSV schedule extraction → editable preview → explicit confirm
-- Job lifecycle: queue, claim, lease, heartbeat, result intake, cancellation,
-  owner-input rounds, per-repo reservations, crash recovery, reconciliation
+- Text and CSV schedule extraction → preview → correction modal → explicit
+  confirm
+- Job lifecycle: queue, claim, lease, heartbeat, result intake, cancellation
+  (supervised mid-turn, acknowledged only once a stop is observed), owner-input
+  rounds, per-repo reservations, durable workspace registration, crash
+  recovery, reconciliation
 - Per-action approvals, decided individually, recorded and **not executed**
 - Authenticated, signed, replay-resistant, rate-limited executor API
 - Executor: outbound polling, fail-closed workspace resolution, single-writer
@@ -36,7 +39,9 @@ from the reported checkout path.
 | OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. |
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
-| Real Discord gateway | Implemented but not run — no token here. The privileged MessageContent intent must be enabled in the portal first. |
+| Real Discord gateway | Fully implemented — a token selects it, embeds/buttons/modals are converted structurally, and interactions are deferred to meet the acknowledgement deadline. **Not run here**: there is no token, and the privileged MessageContent intent must be enabled in the portal first. |
+| Slash-command registration | `--apply` performs the real Discord write. **Not executed**; the default remains a dry run. |
+| Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait and then *observes* the agent. A still-working agent is reported honestly and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |
 | Azure deployment | Documented only; nothing provisioned. |
 

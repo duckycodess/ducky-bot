@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+.ducky/
+coverage/
+config/repos.json
+config/executor-credentials.json

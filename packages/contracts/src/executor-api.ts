@@ -1,0 +1,134 @@
+import { z } from 'zod';
+import { JobResultFileSchema } from './job-result.js';
+import { EXECUTOR_ID_RE, PUBLIC_JOB_ID_RE } from './ids.js';
+import { CLAIM_MAX_WAIT_MS, MAX_ANSWER, MAX_PROGRESS_MESSAGE, MAX_QUESTION } from './limits.js';
+
+export const ExecutorIdSchema = z.string().regex(EXECUTOR_ID_RE);
+
+export const HeartbeatRequestSchema = z.strictObject({
+  executorId: ExecutorIdSchema,
+  version: z.string().max(64),
+  capabilities: z.array(z.string().max(64)).max(32),
+  activeJobIds: z.array(z.string().max(64)).max(32),
+});
+export type HeartbeatRequest = z.infer<typeof HeartbeatRequestSchema>;
+
+export const ClaimRequestSchema = z.strictObject({
+  executorId: ExecutorIdSchema,
+  capabilities: z.array(z.string().max(64)).max(32),
+  waitMs: z.number().int().min(0).max(CLAIM_MAX_WAIT_MS),
+  idempotencyKey: z.string().min(8).max(128),
+});
+export type ClaimRequest = z.infer<typeof ClaimRequestSchema>;
+
+export const OwnerInputSchema = z.strictObject({
+  round: z.number().int().min(0),
+  question: z.string().max(MAX_QUESTION),
+  answer: z.string().max(MAX_ANSWER),
+});
+export type OwnerInput = z.infer<typeof OwnerInputSchema>;
+
+export const JobPayloadSchema = z.strictObject({
+  repoSlug: z.string().max(64),
+  absolutePath: z.string().max(4096),
+  defaultBranch: z.string().max(255).nullable(),
+  task: z.string(),
+  context: z.string().nullable(),
+  bootstrap: z.boolean(),
+  allowWorktree: z.boolean(),
+  allowBootstrap: z.boolean(),
+  bootstrapAllowedEntries: z.array(z.string().max(255)).max(32),
+  maxOwnerInputRounds: z.number().int().min(0),
+  recoveryRequired: z.boolean(),
+  ownerInputRounds: z.number().int().min(0),
+});
+export type JobPayload = z.infer<typeof JobPayloadSchema>;
+
+export const ClaimResponseSchema = z.strictObject({
+  jobId: z.string(),
+  publicId: z.string().regex(PUBLIC_JOB_ID_RE),
+  leaseId: z.string(),
+  leaseExpiresAt: z.string(),
+  payload: JobPayloadSchema,
+  ownerInputs: z.array(OwnerInputSchema).max(16),
+});
+export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
+
+export const JobHeartbeatRequestSchema = z.strictObject({
+  leaseId: z.string().min(1).max(128),
+  progress: z
+    .strictObject({ kind: z.string().max(64), message: z.string().max(MAX_PROGRESS_MESSAGE) })
+    .optional(),
+});
+export type JobHeartbeatRequest = z.infer<typeof JobHeartbeatRequestSchema>;
+
+export const JobResultRequestSchema = z.strictObject({
+  leaseId: z.string().min(1).max(128),
+  result: JobResultFileSchema,
+});
+export type JobResultRequest = z.infer<typeof JobResultRequestSchema>;
+
+export const CancelAckRequestSchema = z.strictObject({
+  leaseId: z.string().min(1).max(128),
+  terminated: z.boolean(),
+  note: z.string().max(MAX_PROGRESS_MESSAGE).optional(),
+});
+export type CancelAckRequest = z.infer<typeof CancelAckRequestSchema>;
+
+/**
+ * Structured failure report. An orphaned or unresolvable workspace has no
+ * review and no verification, so forcing it through the result schema would
+ * mean fabricating evidence. It gets its own route instead.
+ */
+export const EXECUTOR_FAILURE_REASONS = [
+  'orphan_agent_still_working',
+  'orphan_agent_blocked',
+  'foreign_agent_conflict',
+  'herdr_unavailable',
+  'workspace_rejected',
+  'no_result',
+  'wall_clock_exceeded',
+] as const;
+export type ExecutorFailureReason = (typeof EXECUTOR_FAILURE_REASONS)[number];
+
+/** Reasons that leave a possibly-live writer behind and must block the repo. */
+export const ORPHAN_FAILURE_REASONS: readonly ExecutorFailureReason[] = [
+  'orphan_agent_still_working',
+  'orphan_agent_blocked',
+];
+
+export const JobFailureRequestSchema = z.strictObject({
+  leaseId: z.string().min(1).max(128),
+  reason: z.enum(EXECUTOR_FAILURE_REASONS),
+  detail: z.string().max(MAX_PROGRESS_MESSAGE).optional(),
+  workspaceId: z.string().max(128).optional(),
+  agentName: z.string().max(64).optional(),
+  workspacePath: z.string().max(4096).optional(),
+});
+export type JobFailureRequest = z.infer<typeof JobFailureRequestSchema>;
+
+export const EXECUTOR_HEADERS = {
+  executorId: 'x-ducky-executor-id',
+  keyId: 'x-ducky-key-id',
+  timestamp: 'x-ducky-timestamp',
+  nonce: 'x-ducky-nonce',
+  signature: 'x-ducky-signature',
+} as const;
+
+/** The exact string both sides sign. Version-prefixed so it can evolve. */
+export function canonicalRequest(input: {
+  method: string;
+  path: string;
+  timestamp: string;
+  nonce: string;
+  bodySha256Hex: string;
+}): string {
+  return [
+    'v1',
+    input.method.toUpperCase(),
+    input.path,
+    input.timestamp,
+    input.nonce,
+    input.bodySha256Hex,
+  ].join('\n');
+}

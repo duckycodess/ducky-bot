@@ -1,0 +1,31 @@
+{
+  "name": "ducky",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --force && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -p tsconfig.test.json",
+    "migrate": "tsx packages/persistence/src/cli/migrate.ts",
+    "dev:coordinator": "tsx packages/coordinator/src/main.ts",
+    "dev:executor": "tsx packages/executor/src/main.ts",
+    "probe:herdr": "node scripts/probe-herdr.mjs",
+    "executor:issue-credential": "tsx packages/coordinator/src/cli/credentials.ts issue",
+    "executor:list-credentials": "tsx packages/coordinator/src/cli/credentials.ts list",
+    "executor:revoke-credential": "tsx packages/coordinator/src/cli/credentials.ts revoke-credential",
+    "executor:revoke-executor": "tsx packages/coordinator/src/cli/credentials.ts revoke-executor",
+    "register-commands": "tsx packages/coordinator/src/discord/register-commands.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.22.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/persistence" },
+    { "path": "packages/adapters" },
+    { "path": "packages/coordinator" },
+    { "path": "packages/executor" }
+  ]
+}

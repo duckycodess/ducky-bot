@@ -1,0 +1,113 @@
+/** Every bound in the system lives here so a change is visible in one diff. */
+
+// ---- result contract bounds -------------------------------------------------
+export const RESULT_MAX_BYTES = 128 * 1024;
+export const MAX_SUMMARY = 4000;
+export const MAX_CHANGED_FILES = 500;
+export const MAX_PATH_LEN = 512;
+export const MAX_REVIEW_NOTES = 2000;
+export const MAX_VERIFY_COMMANDS = 50;
+export const MAX_VERIFY_CMD = 512;
+export const MAX_VERIFY_SUMMARY = 1000;
+export const MAX_PROPOSED_ACTIONS = 10;
+export const MAX_ACTION_DESCRIPTION = 500;
+export const MAX_COMMIT_MESSAGE = 2000;
+export const MAX_PR_TITLE = 256;
+export const MAX_PR_BODY = 5000;
+export const MAX_QUESTION = 2000;
+export const MAX_ANSWER = 2000;
+export const MAX_PROGRESS_MESSAGE = 500;
+
+// ---- discord bounds (assumption H3; enforced defensively) -------------------
+export const DISCORD_CONTENT_MAX = 2000;
+export const EMBED_TITLE_MAX = 256;
+export const EMBED_DESC_MAX = 4096;
+export const EMBED_FIELD_NAME_MAX = 256;
+export const EMBED_FIELD_VALUE_MAX = 1024;
+export const EMBED_FIELDS_MAX = 25;
+export const EMBED_FOOTER_MAX = 2048;
+export const EMBED_TOTAL_MAX = 6000;
+export const CUSTOM_ID_MAX = 100;
+export const ACTION_ROWS_MAX = 5;
+export const BUTTONS_PER_ROW_MAX = 5;
+export const TRUNCATION_MARKER = '…[truncated]';
+
+// ---- input bounds -----------------------------------------------------------
+export const CAPTURE_MIN = 1;
+export const CAPTURE_MAX = 2000;
+export const TASK_MAX = 4000;
+export const CONTEXT_MAX = 4000;
+export const INBOX_PAGE_SIZE = 10;
+
+// ---- job / lifecycle --------------------------------------------------------
+export const DEFAULT_MAX_ATTEMPTS = 1;
+export const MAX_OWNER_INPUT_ROUNDS = 3;
+export const LEASE_TTL_MS = 5 * 60_000;
+export const LEASE_HEARTBEAT_MS = 30_000;
+export const APPROVAL_TTL_MS = 7 * 24 * 60 * 60_000;
+export const JOB_MAX_WALL_CLOCK_MS = 2 * 60 * 60_000;
+export const RECOVERY_WAIT_MS = 15 * 60_000;
+export const EXECUTOR_OFFLINE_AFTER_MS = 3 * 60_000;
+
+/** Reservation TTL per job state. `null` means "never expires" (orphan_agent). */
+export const RESERVATION_TTL_MS: Record<string, number | null> = {
+  queued: 24 * 60 * 60_000,
+  waiting_for_executor: 24 * 60 * 60_000,
+  running: 24 * 60 * 60_000,
+  needs_owner_input: 24 * 60 * 60_000,
+  // must outlive the approvals themselves so the normal expiry path runs first
+  needs_approval: APPROVAL_TTL_MS + 60 * 60_000,
+};
+
+// ---- schedule ---------------------------------------------------------------
+export const PENDING_SCHEDULE_TTL_MS = 30 * 60_000;
+export const MAX_PENDING_DRAFTS_PER_OWNER = 20;
+export const SCHEDULE_MAX_ATTACHMENT_BYTES = 1024 * 1024;
+export const SCHEDULE_ATTACHMENT_TIMEOUT_MS = 15_000;
+export const SCHEDULE_ATTACHMENTS_PER_HOUR = 20;
+export const SCHEDULE_MAX_ENTRIES = 100;
+export const BINARY_SNIFF_BYTES = 8192;
+
+// ---- auth -------------------------------------------------------------------
+export const CLOCK_SKEW_MS = 120_000;
+export const NONCE_TTL_MS = 2 * CLOCK_SKEW_MS;
+export const MIN_SECRET_BYTES = 32;
+export const CREDENTIAL_RELOAD_MS = 60_000;
+
+// ---- http / rate limits -----------------------------------------------------
+export const HTTP_BODY_LIMIT = 256 * 1024;
+export const HTTP_REQUEST_TIMEOUT_MS = 40_000;
+export const HTTP_KEEPALIVE_TIMEOUT_MS = 30_000;
+export const HTTP_CONNECTION_TIMEOUT_MS = 35_000;
+export const CLAIM_MAX_WAIT_MS = 25_000;
+
+export const RATE_LIMITS = {
+  heartbeat: { max: 120, windowMs: 60_000 },
+  claim: { max: 120, windowMs: 60_000 },
+  jobHeartbeat: { max: 120, windowMs: 60_000 },
+  result: { max: 10, windowMs: 60_000 },
+  cancelAck: { max: 10, windowMs: 60_000 },
+  unauthenticated: { max: 600, windowMs: 60_000 },
+} as const;
+
+export const COMMAND_BUCKETS = {
+  capture: { max: 30, windowMs: 60_000 },
+  schedule: { max: 10, windowMs: 60_000 },
+  jobSubmit: { max: 5, windowMs: 60_000 },
+  jobRead: { max: 20, windowMs: 60_000 },
+  interaction: { max: 60, windowMs: 60_000 },
+} as const;
+
+// ---- subprocess -------------------------------------------------------------
+export const SUBPROCESS_CONCURRENCY = 4;
+export const SUBPROCESS_MAX_BUFFER = 4 * 1024 * 1024;
+export const GH_TIMEOUT_MS = 20_000;
+export const HERDR_TIMEOUT_MS = 30_000;
+export const GIT_TIMEOUT_MS = 20_000;
+
+// ---- herdr ------------------------------------------------------------------
+export const HERDR_WORKSPACE_TTL_MS = 24 * 60 * 60_000;
+export const DUCKY_AGENT_PREFIX = 'ducky-pi-';
+export const DUCKY_WORKSPACE_LABEL_PREFIX = 'ducky-mgd:';
+/** Herdr agent names must match [a-z][a-z0-9_-]{0,31}; the prefix eats 9 chars. */
+export const MAX_SLUG_KEY_LEN = 22;

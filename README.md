@@ -35,9 +35,11 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
   worktree creation are checked against recorded live responses
   (`pnpm probe:herdr`); starting and prompting a Pi agent was not exercised, so
   it reports itself `experimental`. See `docs/integrations/herdr.md`.
-- **The real Discord path has never run against a live bot.** The payload
-  conversion is unit-tested and the transport is wired, but no token has been
-  used here and no command has been registered.
+- **The development Discord gateway has now been smoke-tested live.** The
+  configured bot and guild returned HTTP 200, the coordinator connected, and
+  the seven development commands were registered. A human DM/slash-command
+  interaction has not yet been exercised; Message Content intent still must
+  be enabled in the portal.
 
 ## Quick start
 

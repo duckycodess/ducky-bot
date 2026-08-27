@@ -53,6 +53,10 @@ Three different things, and they are not interchangeable:
   `workspace report-metadata`, `pane split`, `worktree create` — recorded as
   fixtures by `pnpm probe:herdr` and parsed by the production schemas
 - The `gh` read-only JSON surface
+- Development Discord bot identity and configured guild REST access (HTTP 200)
+- Development coordinator gateway startup on `127.0.0.1:8787`
+- Seven development slash commands registered to the configured test guild
+- Development executor authentication, polling, and liveness heartbeat
 
 The probe caught a real detail: Herdr checks a linked worktree out under its own
 directory, not inside the source repository, so the result file must be read
@@ -69,8 +73,8 @@ and `/status` reports `experimental`.
 | OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. |
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
-| Real Discord gateway | Structurally implemented — a profile's token selects it, embeds/buttons/modals are converted, and interactions are deferred to meet the acknowledgement deadline. The conversion is unit-tested, but **the path has never run against a live bot**: no token here, and the privileged MessageContent intent must be enabled in the portal first. Proactive job notifications send through this exact same path, so the same caveat applies to them: unit-tested against the mock transport only, never verified as an owner-initiated DM against a live bot. |
-| Slash-command registration | `--apply` performs the real Discord write. **Not executed**; the default remains a dry run. |
+| Real Discord gateway | The development bot successfully connected during a local smoke test, and the bot/guild REST checks returned HTTP 200. A human DM/slash-command interaction has not yet been exercised; Message Content intent must be enabled in the portal for message bodies. Proactive job notifications use this same path, so their delivery is still not verified by an owner-initiated live DM. |
+| Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |
 | Azure deployment | Documented only; nothing provisioned. |

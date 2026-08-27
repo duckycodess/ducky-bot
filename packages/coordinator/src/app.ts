@@ -7,7 +7,8 @@ import {
 } from '@ducky/adapters';
 import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
-import { loadEnv, cdnHosts, readReposFile, type Env } from './config.js';
+import { loadEnv, cdnHosts, readReposFile, resolvePaths, type Env, type ResolvedPaths } from './config.js';
+import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
 import { ComponentSigner } from './security/component-signing.js';
 import { RepoAllowlist } from './domain/allowlist.js';
@@ -41,6 +42,8 @@ export interface AppOverrides {
 
 export interface App {
   readonly env: Env;
+  readonly paths: ResolvedPaths;
+  readonly discordProfile: DiscordProfileConfig;
   readonly store: Store;
   readonly authz: Authorizer;
   readonly allowlist: RepoAllowlist;
@@ -67,13 +70,17 @@ export function createApp(
   overrides: AppOverrides = {},
 ): App {
   const env = loadEnv(envSource);
+  const paths = resolvePaths(env);
+  // Fails closed for production without its own credentials, and never reads
+  // the other profile's variables.
+  const discordProfile = resolveDiscordProfile(env.DUCKY_PROFILE, envSource);
 
-  const store = overrides.store ?? createStoreFromEnv(env);
+  const store = overrides.store ?? createStoreFromEnv(env, paths);
   const authz = new Authorizer(loadAuthzConfig(env));
   const signer = new ComponentSigner(env.DUCKY_COMPONENT_SIGNING_KEY);
 
   const allowlist = RepoAllowlist.fromJson(
-    overrides.allowlistJson ?? readReposFile(env.DUCKY_REPOS_FILE),
+    overrides.allowlistJson ?? readReposFile(paths.reposFile),
   );
   for (const row of allowlist.toRepoRows()) store.repos.upsert(row);
 
@@ -95,12 +102,17 @@ export function createApp(
   const github = new GitHubService(authz, allowlist, githubReader);
   const reconciler = new Reconciler({ store, approvals, pending });
 
-  const transport = overrides.transport ?? transportFromEnv(env);
+  const transport = overrides.transport ?? transportForProfile(discordProfile);
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
 
+  const scope = discordProfile.token ? commandScopeFor(discordProfile) : undefined;
   const status = (): ProviderStatus => ({
-    discord: transport.kind === 'real' ? 'real (discord.js)' : 'mock (no DISCORD_TOKEN)',
+    profile: `${discordProfile.profile} (${paths.instanceLabel})`,
+    discord:
+      transport.kind === 'real'
+        ? `real (${discordProfile.profile} bot, ${scope?.kind === 'guild' ? 'guild' : 'global'} commands)`
+        : `mock (no ${discordProfile.profile} token)`,
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
@@ -133,14 +145,14 @@ export function createApp(
   });
 
   return {
-    env, store, authz, allowlist, captures, schedules, jobs, approvals, github,
-    reconciler, router, transport, credentials, conversation, status,
+    env, paths, discordProfile, store, authz, allowlist, captures, schedules, jobs,
+    approvals, github, reconciler, router, transport, credentials, conversation, status,
     close: () => store.db.close(),
   };
 }
 
-function createStoreFromEnv(env: Env): Store {
-  const db = openDatabase({ location: env.DUCKY_DB_PATH });
+function createStoreFromEnv(env: Env, paths: ResolvedPaths): Store {
+  const db = openDatabase({ location: paths.dbPath });
   runMigrations(db);
   return createStore(db);
 }
@@ -159,13 +171,16 @@ function credentialStoreFromEnv(env: Env): ExecutorCredentialStore {
 }
 
 /**
- * A token selects the real gateway; without one the mock keeps a local run
- * fully exercisable. The token is never logged, and nothing here falls back to
- * the mock when a token IS present -- that would silently drop real traffic.
+ * The SELECTED profile's token chooses the gateway. Development without a
+ * token runs on the mock; production without one never gets this far, because
+ * profile resolution already failed closed.
+ *
+ * Nothing falls back to the mock when a token is present -- that would
+ * silently drop real traffic -- and nothing reads the other profile's token.
  */
-function transportFromEnv(env: Env): DiscordTransport {
-  if (!env.DISCORD_TOKEN) return new MockDiscordTransport();
-  return new DiscordJsTransport(env.DISCORD_TOKEN, (client) => ({
+function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
+  if (!config.token) return new MockDiscordTransport();
+  return new DiscordJsTransport(config.token, (client) => ({
     deliver: async (target, message) => {
       const c = client as {
         users?: { fetch(id: string): Promise<{ send(payload: unknown): Promise<unknown> }> };

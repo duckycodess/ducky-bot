@@ -19,9 +19,9 @@ async function main(): Promise<void> {
   });
 
   await app.transport.start((event) => app.router.handle(event));
-  await server.listen({ host: app.env.DUCKY_HTTP_HOST, port: app.env.DUCKY_HTTP_PORT });
+  await server.listen({ host: app.env.DUCKY_HTTP_HOST, port: app.paths.httpPort });
   process.stdout.write(
-    `ducky coordinator listening on ${app.env.DUCKY_HTTP_HOST}:${app.env.DUCKY_HTTP_PORT}\n`,
+    `${app.paths.instanceLabel} listening on ${app.env.DUCKY_HTTP_HOST}:${app.paths.httpPort}\n`,
   );
 
   const timer = setInterval(() => {

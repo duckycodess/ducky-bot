@@ -1,4 +1,5 @@
-import { OWNER_ONLY_COMMANDS } from '@ducky/contracts';
+import { DUCKY_PROFILES, OWNER_ONLY_COMMANDS, PROFILE_ENV } from '@ducky/contracts';
+import { commandScopeFor, resolveDiscordProfile } from './profile-config.js';
 
 /**
  * Prints the slash-command definitions.
@@ -47,21 +48,46 @@ export function commandPayload(): unknown[] {
 
 /**
  * Registers the commands with Discord. This is a WRITE to an external service,
- * so it never happens at boot and never without `--apply`.
+ * so it never happens at boot, never without `--apply`, and never without an
+ * explicitly named profile -- registering the wrong bot is not something to
+ * infer from an ambient default.
+ *
+ * Development registers guild-scoped (commands appear immediately).
+ * Production registers globally unless its own guild is configured; it never
+ * borrows the development guild.
  */
-async function apply(): Promise<void> {
-  const token = process.env['DISCORD_TOKEN'];
-  const appId = process.env['DISCORD_APP_ID'];
-  if (!token || !appId) {
+async function apply(profileArg: string | undefined): Promise<void> {
+  if (!profileArg) {
     process.stderr.write(
-      'DISCORD_TOKEN and DISCORD_APP_ID are both required to register commands.\n',
+      `--apply requires --profile <${DUCKY_PROFILES.join('|')}>. ` +
+        'Refusing to guess which bot to register.\n',
     );
     process.exit(1);
   }
 
-  const res = await fetch(`https://discord.com/api/v10/applications/${appId}/commands`, {
+  let config;
+  try {
+    config = resolveDiscordProfile(profileArg, process.env);
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    process.exit(1);
+  }
+
+  const names = PROFILE_ENV[config.profile];
+  if (!config.token || !config.appId) {
+    process.stderr.write(`${names.token} and ${names.appId} are both required.\n`);
+    process.exit(1);
+  }
+
+  const scope = commandScopeFor(config);
+  const url =
+    scope.kind === 'guild'
+      ? `https://discord.com/api/v10/applications/${config.appId}/guilds/${scope.guildId}/commands`
+      : `https://discord.com/api/v10/applications/${config.appId}/commands`;
+
+  const res = await fetch(url, {
     method: 'PUT',
-    headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bot ${config.token}`, 'content-type': 'application/json' },
     body: JSON.stringify(commandPayload()),
     signal: AbortSignal.timeout(30_000),
   });
@@ -71,7 +97,15 @@ async function apply(): Promise<void> {
     process.stderr.write(`Discord rejected the registration (HTTP ${res.status}).\n`);
     process.exit(1);
   }
-  process.stdout.write(`Registered ${commandPayload().length} commands.\n`);
+  process.stdout.write(
+    `Registered ${commandPayload().length} commands for the ${config.profile} bot ` +
+      `(${scope.kind === 'guild' ? `guild ${scope.guildId}` : 'global'}).\n`,
+  );
+}
+
+function flag(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
 const invokedDirectly =
@@ -80,12 +114,13 @@ const invokedDirectly =
 
 if (invokedDirectly) {
   if (process.argv.includes('--apply')) {
-    void apply();
+    void apply(flag('profile'));
   } else {
     process.stdout.write(`${JSON.stringify(commandPayload(), null, 2)}\n`);
     process.stdout.write(
       '\nDry run. This wrote nothing to Discord.\n' +
-        'Registering is an external write: re-run with --apply, and only deliberately.\n',
+        `Registering is an external write: re-run with --apply --profile <${DUCKY_PROFILES.join('|')}>, ` +
+        'and only deliberately.\n',
     );
   }
 }

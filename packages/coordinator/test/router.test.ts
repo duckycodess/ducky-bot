@@ -255,10 +255,19 @@ describe('transport selection', () => {
     h.close();
   });
 
-  it('uses the real transport as soon as a token is present', () => {
-    const h = makeHarness({ env: { DISCORD_TOKEN: 'placeholder-not-a-real-token' } }, true);
+  it('uses the real transport as soon as the selected profile has a token', () => {
+    const h = makeHarness(
+      {
+        env: {
+          DISCORD_DEV_TOKEN: 'placeholder-not-a-real-token',
+          DISCORD_DEV_APP_ID: '100000000000000009',
+          DISCORD_DEV_GUILD_ID: '100000000000000010',
+        },
+      },
+      true,
+    );
     expect(h.app.transport.kind).toBe('real');
-    expect(h.app.status().discord).toMatch(/real/);
+    expect(h.app.status().discord).toMatch(/real \(development bot, guild commands\)/);
     h.close();
   });
 });

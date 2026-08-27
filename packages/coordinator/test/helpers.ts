@@ -86,11 +86,13 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
   const app = createApp(
     {
       NODE_ENV: 'test',
+      DUCKY_PROFILE: 'development',
       OWNER_DISCORD_USER_ID: OWNER,
       CHAT_WHITELIST_USER_IDS: CHAT,
       DUCKY_COMPONENT_SIGNING_KEY: secret(),
       DUCKY_EXECUTOR_CREDENTIALS: credentialsJson,
       DUCKY_DB_PATH: ':memory:',
+      DUCKY_REPOS_FILE: 'unused-in-tests',
       ...opts.env,
     } as NodeJS.ProcessEnv,
     {

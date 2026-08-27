@@ -98,6 +98,7 @@ export function repoStatus(s: RepoStatusSummary): OutboundMessage {
 }
 
 export interface ProviderStatus {
+  readonly profile: string;
   readonly discord: string;
   readonly conversation: string;
   readonly orchestrator: string;
@@ -113,6 +114,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
       {
         title: 'Ducky status',
         fields: [
+          { name: 'Profile', value: p.profile, inline: true },
           { name: 'Discord', value: p.discord, inline: true },
           { name: 'Conversation', value: p.conversation, inline: true },
           { name: 'Orchestrator', value: p.orchestrator, inline: true },

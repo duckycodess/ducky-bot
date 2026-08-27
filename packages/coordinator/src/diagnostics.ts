@@ -12,14 +12,17 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   const out: Diagnostic[] = [];
   const add = (name: string, ok: boolean, detail: string) => out.push({ name, ok, detail });
 
-  add('database', safe(() => app.store.db.prepare('SELECT 1').get() !== undefined), app.env.DUCKY_DB_PATH);
+  add('profile', true, `${app.discordProfile.profile} (${app.paths.instanceLabel})`);
+  add('database', safe(() => app.store.db.prepare('SELECT 1').get() !== undefined), app.paths.dbPath);
   add('migrations', safe(() => isUpToDate(app.store.db)), 'schema up to date');
   add('owner', true, `configured (${app.authz.ownerId.slice(0, 4)}…)`);
   add('component signing key', true, 'present');
   add(
     'discord',
     true,
-    app.transport.kind === 'real' ? 'real client' : 'mock transport (no DISCORD_TOKEN)',
+    app.transport.kind === 'real'
+      ? `real client (${app.discordProfile.profile} bot)`
+      : `mock transport (no ${app.discordProfile.profile} token)`,
   );
   add(
     'discord intents',

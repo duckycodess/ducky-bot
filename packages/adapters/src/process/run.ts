@@ -6,6 +6,8 @@ export interface RunOptions {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly maxBuffer?: number;
+  /** Kills the child when aborted, so a cancellation is not left waiting. */
+  readonly signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -77,6 +79,7 @@ export async function runArgv(
           env: options.env,
           maxBuffer: options.maxBuffer ?? SUBPROCESS_MAX_BUFFER,
           windowsHide: true,
+          ...(options.signal ? { signal: options.signal } : {}),
         },
         (err, stdout, stderr) => {
           const raw = err as (NodeJS.ErrnoException & { code?: number | string }) | null;

@@ -70,9 +70,25 @@ export class MockHerdr implements HerdrClient {
     return info;
   }
 
-  async agentPrompt(target: string, text: string, timeoutMs: number): Promise<void> {
+  async agentPrompt(
+    target: string,
+    text: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     this.record('agentPrompt', { target, textLength: text.length, timeoutMs });
+    if (this.promptBlocks) {
+      // Models a real `herdr agent prompt --wait`: it does not return until the
+      // turn settles or the wait is aborted.
+      await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('aborted'));
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    }
   }
+
+  /** Set to model a long-running turn that only ends when aborted. */
+  promptBlocks = false;
 
   async workspaceList(): Promise<WorkspaceSummary[]> {
     this.record('workspaceList', null);

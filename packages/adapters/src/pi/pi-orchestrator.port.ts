@@ -80,4 +80,12 @@ export interface PiOrchestrator {
    * Implementations must not fabricate a termination they cannot observe.
    */
   cancel(spec: OrchestrationSpec): Promise<CancelOutcome>;
+  /**
+   * Closes a workspace after a successful terminal result.
+   *
+   * Only ever called with a workspace the coordinator recorded as ours, and
+   * only on success -- failure, approval, owner-input and orphan states all
+   * retain the workspace so the owner can inspect it.
+   */
+  cleanup(spec: OrchestrationSpec, workspaceId: string): Promise<{ closed: boolean; detail: string }>;
 }

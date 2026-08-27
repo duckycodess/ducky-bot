@@ -120,6 +120,43 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     };
   }
 
+  /**
+   * Closes a Ducky workspace once its job succeeded.
+   *
+   * Ownership is proved again here rather than trusted from the caller: the
+   * label must be Ducky-managed and the workspace must be the one recorded for
+   * this job. A user's workspace can therefore never be closed, even if a
+   * wrong id were somehow passed in. A still-working agent also blocks the
+   * close, since finishing a result does not guarantee the pane is idle.
+   */
+  async cleanup(
+    spec: OrchestrationSpec,
+    workspaceId: string,
+  ): Promise<{ closed: boolean; detail: string }> {
+    if (spec.recorded?.workspaceId !== workspaceId) {
+      return { closed: false, detail: 'That workspace is not the one recorded for this job.' };
+    }
+
+    const workspaces = await this.herdr.workspaceList();
+    const ws = workspaces.find((w) => w.workspace_id === workspaceId);
+    if (!ws) return { closed: true, detail: 'The workspace was already gone.' };
+    if (!(ws.label ?? '').startsWith(DUCKY_WORKSPACE_LABEL_PREFIX)) {
+      return { closed: false, detail: 'That workspace is not Ducky-managed; it was left alone.' };
+    }
+
+    const agent = await this.herdr.agentGet(agentNameFor(spec.slugKey));
+    if (agent && (agent.agent_status === 'working' || agent.agent_status === 'blocked')) {
+      return { closed: false, detail: `The agent is still ${agent.agent_status}; the workspace was kept.` };
+    }
+
+    if (spec.mode === 'worktree') {
+      await this.herdr.worktreeRemove(workspaceId);
+    } else {
+      await this.herdr.workspaceClose(workspaceId);
+    }
+    return { closed: true, detail: 'Workspace closed.' };
+  }
+
   async runJob(spec: OrchestrationSpec): Promise<OrchestrationOutcome> {
     if (!(await this.herdr.available())) return { kind: 'unavailable' };
 
@@ -197,7 +234,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       }
     }
 
-    await this.herdr.agentPrompt(agentName, spec.brief, spec.promptTimeoutMs);
+    await this.herdr.agentPrompt(agentName, spec.brief, spec.promptTimeoutMs, spec.signal);
     const result = await this.results.read(workspacePath);
     return result
       ? { kind: 'result', result, workspaceId, agentName, workspacePath, reused: true }
@@ -247,7 +284,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       '--session-id', `ducky-${spec.slugKey}`,
       '--thinking', this.thinkingLevel,
     ]);
-    await this.herdr.agentPrompt(agentName, spec.brief, spec.promptTimeoutMs);
+    await this.herdr.agentPrompt(agentName, spec.brief, spec.promptTimeoutMs, spec.signal);
 
     const result = await this.results.read(workspacePath);
     return result

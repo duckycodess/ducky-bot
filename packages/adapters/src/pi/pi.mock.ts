@@ -47,6 +47,16 @@ export class MockPiOrchestrator implements PiOrchestrator {
     return this.options.writeFileToDisk ?? false;
   }
 
+  readonly cleanups: { spec: OrchestrationSpec; workspaceId: string }[] = [];
+
+  async cleanup(
+    spec: OrchestrationSpec,
+    workspaceId: string,
+  ): Promise<{ closed: boolean; detail: string }> {
+    this.cleanups.push({ spec, workspaceId });
+    return { closed: true, detail: 'Mock workspace closed.' };
+  }
+
   async cancel(spec: OrchestrationSpec): Promise<CancelOutcome> {
     this.cancels.push(spec);
     return (

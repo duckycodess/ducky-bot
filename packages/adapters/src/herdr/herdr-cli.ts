@@ -43,9 +43,12 @@ export class HerdrCli implements HerdrClient {
     }
   }
 
-  private async call(argv: readonly string[]): Promise<unknown> {
+  private async call(argv: readonly string[], signal?: AbortSignal): Promise<unknown> {
     this.onInvoke?.(argv);
-    const res = await runArgv(this.bin, argv, { timeoutMs: this.timeoutMs });
+    const res = await runArgv(this.bin, argv, {
+      timeoutMs: this.timeoutMs,
+      ...(signal ? { signal } : {}),
+    });
     if (res.code !== 0) {
       throw new DuckyError(
         'herdr_unavailable',
@@ -101,8 +104,21 @@ export class HerdrCli implements HerdrClient {
     return AgentInfoSchema.parse(obj['agent'] ?? obj);
   }
 
-  async agentPrompt(target: string, text: string, timeoutMs: number): Promise<void> {
-    await this.call(['agent', 'prompt', target, text, '--wait', '--timeout', String(timeoutMs)]);
+  /**
+   * `--wait` blocks until the turn settles. The signal is passed down so a
+   * cancellation stops us waiting immediately instead of holding on for the
+   * whole timeout; the agent itself is deliberately left alone.
+   */
+  async agentPrompt(
+    target: string,
+    text: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.call(
+      ['agent', 'prompt', target, text, '--wait', '--timeout', String(timeoutMs)],
+      signal,
+    );
   }
 
   async workspaceList(): Promise<WorkspaceSummary[]> {

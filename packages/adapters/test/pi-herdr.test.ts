@@ -225,3 +225,142 @@ describe('worktree mode uses the checkout path Herdr reports', () => {
     expect(seen).toEqual(['/repos/greenfield']);
   });
 });
+
+describe('cancellation against the real adapter shape', () => {
+  const owned = (status: AgentInfo['agent_status']): AgentInfo => ({
+    agent: 'pi',
+    agent_status: status,
+    pane_id: `${WS}:p1`,
+    workspace_id: WS,
+    name: AGENT,
+    cwd: '/repos/demo',
+  });
+
+  it('stops waiting on a blocking prompt as soon as the signal fires', async () => {
+    const herdr = new MockHerdr();
+    // Models `herdr agent prompt --wait`: it does not return on its own.
+    herdr.promptBlocks = true;
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+
+    const controller = new AbortController();
+    const started = Date.now();
+    const run = orchestrator.runJob(spec({ signal: controller.signal })).catch((e) => e as Error);
+    setTimeout(() => controller.abort(), 20);
+
+    const outcome = await run;
+    // Returned because it was aborted, not because a long timeout elapsed.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(herdr.countOf('agentPrompt')).toBe(1);
+  });
+
+  it('reports a still-working agent as not terminated, and touches nothing', async () => {
+    const herdr = new MockHerdr({
+      available: true,
+      agents: [owned('working')],
+      workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
+    });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+
+    const outcome = await orchestrator.cancel(spec({ recorded }));
+    expect(outcome.terminated).toBe(false);
+    expect(outcome.agentStatus).toBe('working');
+    expect(outcome.detail).toMatch(/still working/i);
+    // Never typed into, never closed.
+    expect(herdr.countOf('agentPrompt')).toBe(0);
+    expect(herdr.countOf('workspaceClose')).toBe(0);
+  });
+
+  it('reports an idle or absent agent as terminated', async () => {
+    for (const [status, agents] of [
+      ['idle', [owned('idle')]],
+      ['absent', []],
+    ] as const) {
+      const herdr = new MockHerdr({ available: true, agents: [...agents], workspaces: [] });
+      const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+      const outcome = await orchestrator.cancel(spec({ recorded }));
+      expect(outcome.terminated, status).toBe(true);
+    }
+  });
+
+  it('never claims termination when Herdr itself cannot be reached', async () => {
+    const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    const outcome = await orchestrator.cancel(spec({ recorded }));
+    expect(outcome.terminated).toBe(false);
+    expect(outcome.agentStatus).toBe('unknown');
+  });
+});
+
+describe('workspace cleanup is ownership-proving', () => {
+  it('closes only the recorded, Ducky-labelled workspace', async () => {
+    const herdr = new MockHerdr({
+      available: true,
+      agents: [],
+      workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
+    });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+
+    const out = await orchestrator.cleanup(spec({ recorded, mode: 'direct' }), WS);
+    expect(out.closed).toBe(true);
+    expect(herdr.countOf('workspaceClose')).toBe(1);
+  });
+
+  it('refuses to close a user workspace even if its id is passed in', async () => {
+    const herdr = new MockHerdr({
+      available: true,
+      agents: [],
+      // A human's workspace that happens to be labelled "ducky".
+      workspaces: [{ workspace_id: 'wUser', label: 'ducky' }],
+    });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+
+    const mismatched = await orchestrator.cleanup(spec({ recorded }), 'wUser');
+    expect(mismatched.closed).toBe(false);
+    expect(mismatched.detail).toMatch(/not the one recorded/i);
+
+    const forged = await orchestrator.cleanup(
+      spec({ recorded: { ...recorded, workspaceId: 'wUser' } }),
+      'wUser',
+    );
+    expect(forged.closed).toBe(false);
+    expect(forged.detail).toMatch(/not Ducky-managed/i);
+    expect(herdr.countOf('workspaceClose')).toBe(0);
+    expect(herdr.countOf('worktreeRemove')).toBe(0);
+  });
+
+  it('keeps the workspace when the agent is still working', async () => {
+    const herdr = new MockHerdr({
+      available: true,
+      agents: [owned('working')],
+      workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
+    });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    const out = await orchestrator.cleanup(spec({ recorded }), WS);
+    expect(out.closed).toBe(false);
+    expect(herdr.countOf('workspaceClose')).toBe(0);
+  });
+
+  it('removes the worktree rather than just closing it in worktree mode', async () => {
+    const herdr = new MockHerdr({
+      available: true,
+      agents: [],
+      workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
+    });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    await orchestrator.cleanup(spec({ recorded, mode: 'worktree' }), WS);
+    expect(herdr.countOf('worktreeRemove')).toBe(1);
+    expect(herdr.countOf('workspaceClose')).toBe(0);
+  });
+});
+
+function owned(status: AgentInfo['agent_status']): AgentInfo {
+  return {
+    agent: 'pi',
+    agent_status: status,
+    pane_id: `${WS}:p1`,
+    workspace_id: WS,
+    name: AGENT,
+    cwd: '/repos/demo',
+  };
+}

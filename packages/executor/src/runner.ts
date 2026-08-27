@@ -4,13 +4,14 @@ import {
   type ClaimResponse, type ExecutorFailureReason,
 } from '@ducky/contracts';
 import {
-  agentNameFor, buildOrchestrationBrief, redact, toSlugKey,
-  type OrchestrationOutcome, type PiOrchestrator,
+  agentNameFor, buildOrchestrationBrief, redact, toSlugKey, workspaceLabelFor,
+  type OrchestrationOutcome, type OrchestrationSpec, type PiOrchestrator,
 } from '@ducky/adapters';
 import { RESULT_RELATIVE_PATH } from '@ducky/adapters';
 import type { CoordinatorClient } from './client.js';
 import { resolveWorkspace } from './workspace.js';
 import { acquireWriterLock } from './single-writer.js';
+import { JobSupervisor } from './supervisor.js';
 
 export interface RunnerDeps {
   readonly client: CoordinatorClient;
@@ -28,6 +29,7 @@ export interface RunnerDeps {
     mode: 'worktree' | 'direct';
   }) => void;
   readonly log?: (line: string) => void;
+  readonly heartbeatMs?: number | undefined;
 }
 
 /**
@@ -66,24 +68,58 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   // The prompt itself is never logged; only its digest.
   log(`job ${claim.publicId} prompt <prompt:sha256:${digest(brief)}> mode=${resolved.mode}`);
 
+  // Heartbeats the lease and aborts the turn if the owner cancels. Without it
+  // a cancellation would go unseen until the lease expired.
+  const supervisor = new JobSupervisor({
+    client,
+    jobId: claim.jobId,
+    leaseId: claim.leaseId,
+    ...(deps.heartbeatMs === undefined ? {} : { intervalMs: deps.heartbeatMs }),
+    ...(deps.log ? { log: deps.log } : {}),
+  });
+
+  const spec: OrchestrationSpec = {
+    jobId: claim.jobId,
+    publicId: claim.publicId,
+    repoSlug: claim.payload.repoSlug,
+    slugKey,
+    mode: resolved.mode,
+    repoPath: resolved.repoPath,
+    branch: resolved.branch,
+    base: resolved.base,
+    brief,
+    recorded: deps.recordedWorkspace?.(claim.jobId),
+    recoveryRequired: claim.payload.recoveryRequired,
+    promptTimeoutMs: JOB_MAX_WALL_CLOCK_MS,
+    recoveryWaitMs: RECOVERY_WAIT_MS,
+    signal: supervisor.signal,
+    onWorkspaceCreated: async (info) => {
+      // Durable ownership before the agent exists. If this fails the
+      // orchestrator aborts rather than starting an unrecorded agent.
+      await client.registerWorkspace(claim.jobId, {
+        leaseId: claim.leaseId,
+        workspaceId: info.workspaceId,
+        agentName: info.agentName,
+        label: info.label,
+        mode: info.mode,
+        workspacePath: info.workspacePath,
+        worktreePath: info.worktreePath,
+        state: 'creating',
+      });
+      deps.onWorkspace?.(claim.jobId, {
+        workspaceId: info.workspaceId,
+        agentName: info.agentName,
+        workspacePath: info.workspacePath,
+        mode: info.mode,
+      });
+    },
+  };
+
   const lock = acquireWriterLock(claim.payload.repoSlug);
   let outcome: OrchestrationOutcome;
+  supervisor.start();
   try {
-    outcome = await orchestrator.runJob({
-      jobId: claim.jobId,
-      publicId: claim.publicId,
-      repoSlug: claim.payload.repoSlug,
-      slugKey,
-      mode: resolved.mode,
-      repoPath: resolved.repoPath,
-      branch: resolved.branch,
-      base: resolved.base,
-      brief,
-      recorded: deps.recordedWorkspace?.(claim.jobId),
-      recoveryRequired: claim.payload.recoveryRequired,
-      promptTimeoutMs: Math.min(JOB_MAX_WALL_CLOCK_MS, JOB_MAX_WALL_CLOCK_MS),
-      recoveryWaitMs: RECOVERY_WAIT_MS,
-    });
+    outcome = await orchestrator.runJob(spec);
   } catch (err) {
     const detail = isDuckyError(err) ? err.ownerMessage : 'The orchestrator failed.';
     const reason: ExecutorFailureReason =
@@ -91,8 +127,30 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
     return;
   } finally {
+    supervisor.stop();
     // Released before any report, including needs_owner_input.
     lock.release();
+  }
+
+  // The owner cancelled mid-turn. Confirm what the agent is actually doing
+  // before acknowledging: claiming a termination we did not observe would let
+  // the coordinator release the repository while a writer was still live.
+  if (supervisor.cancelRequested) {
+    const stopped = await orchestrator.cancel(spec);
+    await client.cancelAck(claim.jobId, {
+      leaseId: claim.leaseId,
+      terminated: stopped.terminated,
+      note: redact(stopped.detail).slice(0, 400),
+    });
+    if (!stopped.terminated) {
+      // Fail closed: the repository stays reserved for the owner to clear.
+      await client.reportFailure(claim.jobId, claim.leaseId, 'orphan_agent_still_working', {
+        detail: redact(stopped.detail).slice(0, 400),
+        ...(stopped.workspaceId === undefined ? {} : { workspaceId: stopped.workspaceId }),
+        ...(stopped.agentName === undefined ? {} : { agentName: stopped.agentName }),
+      });
+    }
+    return;
   }
 
   if (Date.now() - started > JOB_MAX_WALL_CLOCK_MS) {

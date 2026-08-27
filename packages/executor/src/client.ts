@@ -116,6 +116,24 @@ export class CoordinatorClient {
     return this.expectJson(await this.post(`/api/v1/executor/jobs/${jobId}/cancel-ack`, body));
   }
 
+  async registerWorkspace(
+    jobId: string,
+    body: {
+      leaseId: string;
+      workspaceId: string;
+      agentName: string;
+      label: string;
+      mode: 'worktree' | 'direct';
+      workspacePath: string;
+      worktreePath?: string | null;
+      state?: 'creating' | 'active' | 'closed';
+    },
+  ): Promise<unknown> {
+    return this.expectJson(
+      await this.post(`/api/v1/executor/jobs/${jobId}/workspace`, body),
+    );
+  }
+
   async reportFailure(
     jobId: string,
     leaseId: string,

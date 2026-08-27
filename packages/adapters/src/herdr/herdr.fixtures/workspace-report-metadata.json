@@ -1,0 +1,5 @@
+{
+  "_note": "succeeds with an empty response body",
+  "exitCode": 0,
+  "stdout": ""
+}

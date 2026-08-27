@@ -1,0 +1,22 @@
+{
+  "id": "cli:pane:split",
+  "result": {
+    "pane": {
+      "agent_status": "unknown",
+      "cwd": "/tmp/ducky-probe-RbHol4",
+      "focused": false,
+      "foreground_cwd": "/tmp/ducky-probe-RbHol4",
+      "pane_id": "wJ:p2",
+      "revision": 0,
+      "scroll": {
+        "max_offset_from_bottom": 0,
+        "offset_from_bottom": 0,
+        "viewport_rows": 50
+      },
+      "tab_id": "wJ:t1",
+      "terminal_id": "term_65a08f4d9b73ca",
+      "workspace_id": "wJ"
+    },
+    "type": "pane_info"
+  }
+}

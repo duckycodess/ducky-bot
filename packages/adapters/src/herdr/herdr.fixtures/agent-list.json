@@ -1,0 +1,139 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "agents": [
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "~/.pi/agent/sessions/--home-tj-dotph-ball-cutter--/2026-08-21T03-36-34-940Z_01a02264-517c-7d48-aea8-8ebed61ccee0.jsonl"
+        },
+        "agent_status": "idle",
+        "cwd": "~/dotph/ball-cutter",
+        "focused": false,
+        "foreground_cwd": "~/dotph/ball-cutter",
+        "pane_id": "wB:p1",
+        "revision": 3,
+        "screen_detection_skipped": true,
+        "state_change_seq": 11,
+        "tab_id": "wB:t1",
+        "terminal_id": "term_65a04de61aa9e1",
+        "terminal_title": "π - ball-cutter",
+        "terminal_title_stripped": "π - ball-cutter",
+        "workspace_id": "wB"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "~/.pi/agent/sessions/--home-tj-dotph-domain-suggester--/2026-08-21T03-52-52-886Z_01a02273-3d96-78fe-9000-f2806072fec2.jsonl"
+        },
+        "agent_status": "idle",
+        "cwd": "~/dotph/domain-suggester",
+        "focused": false,
+        "foreground_cwd": "~/dotph/domain-suggester",
+        "pane_id": "wC:p1",
+        "revision": 3,
+        "screen_detection_skipped": true,
+        "state_change_seq": 9,
+        "tab_id": "wC:t1",
+        "terminal_id": "term_65a04de61bf3e2",
+        "terminal_title": "π - domain-suggester",
+        "terminal_title_stripped": "π - domain-suggester",
+        "workspace_id": "wC"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "~/.pi/agent/sessions/--home-tj-dotph-domain-wallet--/2026-08-26T03-03-13-040Z_01a03c05-9190-7bbb-98e1-e090a4cbca69.jsonl"
+        },
+        "agent_status": "idle",
+        "cwd": "~/dotph/domain-wallet",
+        "focused": false,
+        "foreground_cwd": "~/dotph/domain-wallet",
+        "pane_id": "wD:p1",
+        "revision": 3,
+        "screen_detection_skipped": true,
+        "state_change_seq": 8,
+        "tab_id": "wD:t1",
+        "terminal_id": "term_65a04de61d87c3",
+        "terminal_title": "π - domain-wallet",
+        "terminal_title_stripped": "π - domain-wallet",
+        "workspace_id": "wD"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "~/.pi/agent/sessions/--home-tj-projects-ducky--/2026-08-26T09-16-50-969Z_01a03d5b-a399-7691-930e-c628fbda2b42.jsonl"
+        },
+        "agent_status": "working",
+        "cwd": "~/projects/ducky",
+        "focused": true,
+        "foreground_cwd": "~/projects/ducky",
+        "pane_id": "wE:p1",
+        "revision": 3,
+        "screen_detection_skipped": true,
+        "state_change_seq": 51,
+        "tab_id": "wE:t1",
+        "terminal_id": "term_65a04de61f7684",
+        "terminal_title": "π - ducky",
+        "terminal_title_stripped": "π - ducky",
+        "workspace_id": "wE"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "[REDACTED:guid]"
+        },
+        "agent_status": "working",
+        "cwd": "~/projects/ducky",
+        "focused": false,
+        "foreground_cwd": "~/projects/ducky",
+        "pane_id": "wE:p2",
+        "revision": 6810,
+        "state_change_seq": 52,
+        "tab_id": "wE:t1",
+        "terminal_id": "term_65a04de61f79f5",
+        "terminal_title": "◑ Plan received",
+        "terminal_title_stripped": "◑ Plan received",
+        "workspace_id": "wE"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "~/.pi/agent/sessions/--home-tj-SAgeneral--/2026-08-26T16-26-31-768Z_01a03ee5-05d8-7fa2-806a-7fe07ab108c5.jsonl"
+        },
+        "agent_status": "idle",
+        "cwd": "~/SAgeneral",
+        "focused": false,
+        "foreground_cwd": "~/SAgeneral",
+        "pane_id": "wF:p1",
+        "revision": 3,
+        "screen_detection_skipped": true,
+        "state_change_seq": 12,
+        "tab_id": "wF:t1",
+        "terminal_id": "term_65a04de620a866",
+        "terminal_title": "π - SAgeneral",
+        "terminal_title_stripped": "π - SAgeneral",
+        "workspace_id": "wF"
+      }
+    ],
+    "type": "agent_list"
+  }
+}

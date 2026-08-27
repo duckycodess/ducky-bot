@@ -1,0 +1,58 @@
+{
+  "id": "cli:workspace:list",
+  "result": {
+    "type": "workspace_list",
+    "workspaces": [
+      {
+        "active_tab_id": "wB:t1",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "ball-cutter",
+        "number": 1,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "wB"
+      },
+      {
+        "active_tab_id": "wC:t1",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "domain-suggester",
+        "number": 2,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "wC"
+      },
+      {
+        "active_tab_id": "wD:t1",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "domain-wallet",
+        "number": 3,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "wD"
+      },
+      {
+        "active_tab_id": "wE:t1",
+        "agent_status": "working",
+        "focused": true,
+        "label": "ducky",
+        "number": 4,
+        "pane_count": 2,
+        "tab_count": 1,
+        "workspace_id": "wE"
+      },
+      {
+        "active_tab_id": "wF:t1",
+        "agent_status": "idle",
+        "focused": false,
+        "label": "SAgeneral",
+        "number": 5,
+        "pane_count": 1,
+        "tab_count": 1,
+        "workspace_id": "wF"
+      }
+    ]
+  }
+}

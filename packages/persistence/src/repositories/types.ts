@@ -87,6 +87,8 @@ export interface ExecutorCredentialRow {
   revokedAt: string | null;
 }
 
+export type HerdrWorkspaceState = 'creating' | 'active' | 'closed';
+
 export interface HerdrWorkspaceRow {
   workspaceId: string;
   repoSlug: string;
@@ -95,7 +97,11 @@ export interface HerdrWorkspaceRow {
   mode: 'worktree' | 'direct';
   agentName: string;
   worktreePath: string | null;
+  /** Where the result file lives; for a worktree this is not the repo root. */
+  workspacePath: string | null;
+  state: HerdrWorkspaceState;
   createdAt: string;
+  updatedAt?: string | null;
   closedAt: string | null;
 }
 

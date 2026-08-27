@@ -24,6 +24,7 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'inbox_delete',
   'sched_confirm',
   'sched_discard',
+  'sched_edit',
   'job_answer',
   'job_cleanup',
   'approve',

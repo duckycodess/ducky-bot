@@ -1,6 +1,6 @@
 import type { Db } from '../db.js';
 import { nowIso } from '../db.js';
-import type { HerdrWorkspaceRow } from './types.js';
+import type { HerdrWorkspaceRow, HerdrWorkspaceState } from './types.js';
 
 const map = (r: Record<string, unknown>): HerdrWorkspaceRow => ({
   workspaceId: String(r['workspace_id']),
@@ -10,6 +10,8 @@ const map = (r: Record<string, unknown>): HerdrWorkspaceRow => ({
   mode: String(r['mode']) as 'worktree' | 'direct',
   agentName: String(r['agent_name']),
   worktreePath: r['worktree_path'] == null ? null : String(r['worktree_path']),
+  workspacePath: r['workspace_path'] == null ? null : String(r['workspace_path']),
+  state: String(r['state'] ?? 'active') as HerdrWorkspaceState,
   createdAt: String(r['created_at']),
   closedAt: r['closed_at'] == null ? null : String(r['closed_at']),
 });
@@ -18,17 +20,38 @@ const map = (r: Record<string, unknown>): HerdrWorkspaceRow => ({
 export class HerdrWorkspacesRepo {
   constructor(private readonly db: Db) {}
 
-  record(row: Omit<HerdrWorkspaceRow, 'createdAt' | 'closedAt'>): void {
+  /**
+   * Idempotent: a retried registration for the same workspace only advances its
+   * state and refreshes the timestamp. It never reassigns the workspace to a
+   * different job, so a stale executor cannot steal a live workspace.
+   */
+  record(row: Omit<HerdrWorkspaceRow, 'createdAt' | 'closedAt' | 'updatedAt'>): void {
+    const ts = nowIso();
     this.db
       .prepare(
         `INSERT INTO herdr_workspaces (workspace_id, repo_slug, job_id, label, mode, agent_name,
-           worktree_path, created_at) VALUES (?,?,?,?,?,?,?,?)
-         ON CONFLICT(workspace_id) DO UPDATE SET job_id = excluded.job_id`,
+           worktree_path, workspace_path, state, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+           state = excluded.state,
+           agent_name = excluded.agent_name,
+           workspace_path = COALESCE(excluded.workspace_path, herdr_workspaces.workspace_path),
+           worktree_path = COALESCE(excluded.worktree_path, herdr_workspaces.worktree_path),
+           updated_at = excluded.updated_at
+         WHERE herdr_workspaces.job_id = excluded.job_id`,
       )
       .run(
         row.workspaceId, row.repoSlug, row.jobId, row.label, row.mode, row.agentName,
-        row.worktreePath, nowIso(),
+        row.worktreePath, row.workspacePath, row.state, ts, ts,
       );
+  }
+
+  /** Ownership proof by agent name, used when recovering after a crash. */
+  openByAgentName(agentName: string): HerdrWorkspaceRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM herdr_workspaces WHERE agent_name = ? AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1')
+      .get(agentName);
+    return r ? map(r as Record<string, unknown>) : undefined;
   }
 
   byWorkspaceId(id: string): HerdrWorkspaceRow | undefined {

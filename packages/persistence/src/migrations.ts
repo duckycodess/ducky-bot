@@ -240,6 +240,19 @@ CREATE UNIQUE INDEX ux_jobs_one_running_per_repo ON jobs(repo_slug) WHERE state 
   },
   {
     version: 3,
+    name: 'workspace_registration_state',
+    sql: `
+-- A workspace is registered BEFORE its agent starts, so a crash in between
+-- still leaves proof that it is Ducky-owned.
+ALTER TABLE herdr_workspaces ADD COLUMN state TEXT NOT NULL DEFAULT 'active'
+  CHECK (state IN ('creating','active','closed'));
+ALTER TABLE herdr_workspaces ADD COLUMN workspace_path TEXT;
+ALTER TABLE herdr_workspaces ADD COLUMN updated_at TEXT;
+CREATE INDEX ix_herdr_ws_agent ON herdr_workspaces(agent_name) WHERE closed_at IS NULL;
+`,
+  },
+  {
+    version: 4,
     name: 'result_immutability',
     sql: `
 -- The accepted result snapshot is the record of truth; approvals are derived.

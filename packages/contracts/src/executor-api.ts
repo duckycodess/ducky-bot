@@ -88,6 +88,7 @@ export const EXECUTOR_FAILURE_REASONS = [
   'workspace_rejected',
   'no_result',
   'wall_clock_exceeded',
+  'cancelled_by_owner',
 ] as const;
 export type ExecutorFailureReason = (typeof EXECUTOR_FAILURE_REASONS)[number];
 
@@ -106,6 +107,35 @@ export const JobFailureRequestSchema = z.strictObject({
   workspacePath: z.string().max(4096).optional(),
 });
 export type JobFailureRequest = z.infer<typeof JobFailureRequestSchema>;
+
+/**
+ * Registered as soon as a Ducky workspace exists and BEFORE any agent is
+ * started in it, so an executor crash between creation and the first prompt
+ * still leaves the coordinator able to prove the workspace is ours.
+ *
+ * Without this the next claim would see an unrecognised agent, report
+ * `foreign_agent_conflict`, and release the reservation while a live writer was
+ * still running in that workspace.
+ */
+export const HERDR_WORKSPACE_STATES = ['creating', 'active', 'closed'] as const;
+export type HerdrWorkspaceState = (typeof HERDR_WORKSPACE_STATES)[number];
+
+export const WorkspaceRegistrationRequestSchema = z.strictObject({
+  leaseId: z.string().min(1).max(128),
+  workspaceId: z.string().min(1).max(128),
+  agentName: z.string().min(1).max(64),
+  label: z.string().min(1).max(128),
+  mode: z.enum(['worktree', 'direct']),
+  workspacePath: z.string().min(1).max(4096),
+  worktreePath: z.string().max(4096).nullable().optional(),
+  state: z.enum(HERDR_WORKSPACE_STATES).default('creating'),
+});
+export type WorkspaceRegistrationRequest = z.infer<typeof WorkspaceRegistrationRequestSchema>;
+
+export const WorkspaceRegistrationResponseSchema = z.strictObject({
+  registered: z.boolean(),
+  workspaceId: z.string(),
+});
 
 export const EXECUTOR_HEADERS = {
   executorId: 'x-ducky-executor-id',

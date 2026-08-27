@@ -9,3 +9,4 @@ export * from './executor-api.js';
 export * from './discord.js';
 export * from './owner-only-surface.js';
 export * from './github.js';
+export * from './profile.js';

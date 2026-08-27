@@ -44,6 +44,28 @@ export const JobPayloadSchema = z.strictObject({
 });
 export type JobPayload = z.infer<typeof JobPayloadSchema>;
 
+export const HERDR_WORKSPACE_STATES = ['creating', 'active', 'closed'] as const;
+export type HerdrWorkspaceState = (typeof HERDR_WORKSPACE_STATES)[number];
+
+/**
+ * A workspace the coordinator already knows this job owns.
+ *
+ * Sent on claim so a RESTARTED executor -- which has lost its in-memory map --
+ * can still prove ownership and reattach, rather than seeing an unrecognised
+ * agent and reporting a foreign conflict against its own workspace.
+ *
+ * This is executor-to-executor data relayed through the coordinator. It carries
+ * a filesystem path and is never surfaced to Discord.
+ */
+export const RecordedWorkspaceSchema = z.strictObject({
+  workspaceId: z.string().min(1).max(128),
+  agentName: z.string().min(1).max(64),
+  workspacePath: z.string().min(1).max(4096),
+  mode: z.enum(['worktree', 'direct']),
+  state: z.enum(HERDR_WORKSPACE_STATES),
+});
+export type RecordedWorkspace = z.infer<typeof RecordedWorkspaceSchema>;
+
 export const ClaimResponseSchema = z.strictObject({
   jobId: z.string(),
   publicId: z.string().regex(PUBLIC_JOB_ID_RE),
@@ -51,6 +73,7 @@ export const ClaimResponseSchema = z.strictObject({
   leaseExpiresAt: z.string(),
   payload: JobPayloadSchema,
   ownerInputs: z.array(OwnerInputSchema).max(16),
+  recordedWorkspace: RecordedWorkspaceSchema.nullable(),
 });
 export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
 
@@ -117,8 +140,6 @@ export type JobFailureRequest = z.infer<typeof JobFailureRequestSchema>;
  * `foreign_agent_conflict`, and release the reservation while a live writer was
  * still running in that workspace.
  */
-export const HERDR_WORKSPACE_STATES = ['creating', 'active', 'closed'] as const;
-export type HerdrWorkspaceState = (typeof HERDR_WORKSPACE_STATES)[number];
 
 export const WorkspaceRegistrationRequestSchema = z.strictObject({
   leaseId: z.string().min(1).max(128),

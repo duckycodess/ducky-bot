@@ -1,0 +1,70 @@
+import type { Db } from '../db.js';
+import { nowIso } from '../db.js';
+import type { HerdrWorkspaceRow } from './types.js';
+
+const map = (r: Record<string, unknown>): HerdrWorkspaceRow => ({
+  workspaceId: String(r['workspace_id']),
+  repoSlug: String(r['repo_slug']),
+  jobId: String(r['job_id']),
+  label: String(r['label']),
+  mode: String(r['mode']) as 'worktree' | 'direct',
+  agentName: String(r['agent_name']),
+  worktreePath: r['worktree_path'] == null ? null : String(r['worktree_path']),
+  createdAt: String(r['created_at']),
+  closedAt: r['closed_at'] == null ? null : String(r['closed_at']),
+});
+
+/** The authoritative ownership record for anything Ducky created in Herdr. */
+export class HerdrWorkspacesRepo {
+  constructor(private readonly db: Db) {}
+
+  record(row: Omit<HerdrWorkspaceRow, 'createdAt' | 'closedAt'>): void {
+    this.db
+      .prepare(
+        `INSERT INTO herdr_workspaces (workspace_id, repo_slug, job_id, label, mode, agent_name,
+           worktree_path, created_at) VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(workspace_id) DO UPDATE SET job_id = excluded.job_id`,
+      )
+      .run(
+        row.workspaceId, row.repoSlug, row.jobId, row.label, row.mode, row.agentName,
+        row.worktreePath, nowIso(),
+      );
+  }
+
+  byWorkspaceId(id: string): HerdrWorkspaceRow | undefined {
+    const r = this.db.prepare('SELECT * FROM herdr_workspaces WHERE workspace_id = ?').get(id);
+    return r ? map(r as Record<string, unknown>) : undefined;
+  }
+
+  openForJob(jobId: string): HerdrWorkspaceRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM herdr_workspaces WHERE job_id = ? AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1')
+      .get(jobId);
+    return r ? map(r as Record<string, unknown>) : undefined;
+  }
+
+  openForRepo(repoSlug: string): HerdrWorkspaceRow[] {
+    return this.db
+      .prepare('SELECT * FROM herdr_workspaces WHERE repo_slug = ? AND closed_at IS NULL')
+      .all(repoSlug)
+      .map((r) => map(r as Record<string, unknown>));
+  }
+
+  markClosed(workspaceId: string): void {
+    this.db
+      .prepare('UPDATE herdr_workspaces SET closed_at = ? WHERE workspace_id = ?')
+      .run(nowIso(), workspaceId);
+  }
+
+  /** Ownership is proved by presence here, never by a Herdr label alone. */
+  isDuckyOwned(workspaceId: string): boolean {
+    return this.byWorkspaceId(workspaceId) !== undefined;
+  }
+
+  staleOpen(cutoffIso: string): HerdrWorkspaceRow[] {
+    return this.db
+      .prepare('SELECT * FROM herdr_workspaces WHERE closed_at IS NULL AND created_at < ?')
+      .all(cutoffIso)
+      .map((r) => map(r as Record<string, unknown>));
+  }
+}

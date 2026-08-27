@@ -41,9 +41,15 @@ identity. Each profile reads only its own `DISCORD_<PROFILE>_*` variables, and
 cannot be started with the development token even if both are present in the
 environment.
 
-Give each profile its own env file, database, port and **executor credential
-file**. A shared credential file would let a development executor claim
-production jobs, which is the one crossing that matters most.
+Every secret is profile-scoped and resolved for the selected profile only:
+the Discord token and application id, the **component signing key**, and the
+**executor credential file**. Production reads none of the unscoped or
+development variables and fails closed without its own.
+
+That matters in both directions. A shared executor credential file would let a
+development executor claim production jobs; a shared component signing key
+would make a signed control minted by one bot verify on the other. A
+single-profile development box may still use the unscoped names.
 
 `register-commands --apply` requires an explicit `--profile`: which bot to
 write to is not something to infer from an ambient default.

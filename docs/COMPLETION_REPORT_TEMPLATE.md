@@ -22,4 +22,10 @@ used unqualified.
 - Which providers were mocked (conversation is always mocked in Phase 1)
 - That approved actions are recorded and **not executed**
 - That document and image schedule extraction is **unsupported**
+- That the real Discord gateway path is **unit-tested but never run against a
+  live bot**, and that no commands were registered
+- Which profile, if any, was exercised
 - The exact commands run and their results — never a check that was not run
+
+Do not describe something as "verified" unless it was exercised for real. Say
+"unit-tested" or "unavailable" where that is what happened.

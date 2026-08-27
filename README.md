@@ -31,9 +31,13 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
 - **Conversation replies come from a marked mock.** OpenClaw is not installed
   here, so its API could not be verified. Every mock reply is prefixed
   `[mock]`; the real HTTP provider throws rather than guessing an API.
-- **The Herdr/Pi orchestrator is verified against recorded live responses**
-  for workspace, pane and worktree creation (`pnpm probe:herdr`). Starting and
-  prompting a Pi agent was not exercised — see `docs/integrations/herdr.md`.
+- **The Herdr/Pi orchestrator is partly verified.** Workspace, pane and
+  worktree creation are checked against recorded live responses
+  (`pnpm probe:herdr`); starting and prompting a Pi agent was not exercised, so
+  it reports itself `experimental`. See `docs/integrations/herdr.md`.
+- **The real Discord path has never run against a live bot.** The payload
+  conversion is unit-tested and the transport is wired, but no token has been
+  used here and no command has been registered.
 
 ## Quick start
 

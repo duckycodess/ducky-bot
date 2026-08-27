@@ -28,6 +28,17 @@ diagnostics and in `/status`.
 - Read-only GitHub inspection through a frozen `gh` argv table
 - Redaction at the transport boundary; no secret in the database or logs
 
+## What "verified" means here
+
+Three different things, and they are not interchangeable:
+
+- **Verified against this host** — exercised for real, with recorded evidence.
+- **Unit-tested only** — the logic is covered, but the external system it talks
+  to has never been contacted. The real Discord payload path is in this
+  category.
+- **Unavailable** — the dependency is not installed or not probed, and the code
+  says so at runtime rather than pretending.
+
 ## Verified against the live host
 
 - SQLite behaviour (`node:sqlite`, WAL, partial unique indexes, triggers)
@@ -40,6 +51,10 @@ The probe caught a real detail: Herdr checks a linked worktree out under its own
 directory, not inside the source repository, so the result file must be read
 from the reported checkout path.
 
+**Not probed:** `herdr agent start` and `agent prompt`, because exercising them
+launches a real Pi agent. `HerdrPiOrchestrator.verified` is therefore `false`
+and `/status` reports `experimental`.
+
 ## Mocked or unverified — stated plainly
 
 | Area | Status |
@@ -47,7 +62,7 @@ from the reported checkout path.
 | OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. |
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
-| Real Discord gateway | Fully implemented — a token selects it, embeds/buttons/modals are converted structurally, and interactions are deferred to meet the acknowledgement deadline. **Not run here**: there is no token, and the privileged MessageContent intent must be enabled in the portal first. |
+| Real Discord gateway | Structurally implemented — a profile's token selects it, embeds/buttons/modals are converted, and interactions are deferred to meet the acknowledgement deadline. The conversion is unit-tested, but **the path has never run against a live bot**: no token here, and the privileged MessageContent intent must be enabled in the portal first. |
 | Slash-command registration | `--apply` performs the real Discord write. **Not executed**; the default remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |

@@ -19,6 +19,9 @@ WorkingDirectory=/opt/ducky
 # Per-profile secrets. Mode 0600, owned by this service's user. Unit files are
 # world-readable, so never inline a token here.
 EnvironmentFile=/etc/ducky/%i.env
+# Every secret in that file is profile-scoped: DISCORD_<PROFILE>_*,
+# DUCKY_<PROFILE>_COMPONENT_SIGNING_KEY and
+# DUCKY_<PROFILE>_EXECUTOR_CREDENTIALS_FILE. Production reads no shared value.
 Environment=NODE_ENV=production
 Environment=DUCKY_PROFILE=%i
 Environment=DUCKY_INSTANCE_LABEL=ducky-%i

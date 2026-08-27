@@ -17,7 +17,14 @@ neither can fall back to the other:
 | port | 8787 | 8788 |
 | repositories | `config/repos.dev.json` | `config/repos.json` |
 | env file | `/etc/ducky/development.env` | `/etc/ducky/production.env` |
-| executor credential | its own file | its own file |
+| component signing key | `DUCKY_DEV_COMPONENT_SIGNING_KEY` | `DUCKY_PROD_COMPONENT_SIGNING_KEY` |
+| executor credentials | `DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE` | `DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE` |
+
+Every secret is profile-scoped, not only the Discord ones. Production reads
+**none** of the unscoped or development variables: a shared component key would
+let a control minted by one bot verify on the other, and a shared executor
+credential file would let a development executor claim production jobs. A
+single-profile development box may still use the unscoped names.
 
 Development may run with no token at all, which selects the mock transport.
 **Production fails to start without its own token** rather than borrowing the

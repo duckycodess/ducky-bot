@@ -94,7 +94,9 @@ describe('orphaned agents block the repository until the owner clears them', () 
     const { job } = orphan(h);
     expect(() => h.app.jobs.cleanup(h.chat, job.publicId, false)).toThrow(/not authorized/i);
 
-    const released = h.app.jobs.cleanup(h.owner, job.publicId, false);
+    // Unforced cleanup needs an observation showing the agent has stopped.
+    expect(h.app.jobs.cleanup(h.owner, job.publicId, false).released).toBe(false);
+    const released = h.app.jobs.cleanup(h.owner, job.publicId, false, 'absent');
     expect(released.released).toBe(true);
     expect(h.store.jobs.reservation('demo')).toBeUndefined();
 

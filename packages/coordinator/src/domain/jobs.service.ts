@@ -215,7 +215,12 @@ export class JobsService {
    * is exactly what the reservation exists to prevent. A normal reservation is
    * released by cancelling the job, which goes through the safe path.
    */
-  cleanup(actor: ActorContext, publicId: string, force: boolean): { released: boolean; note: string } {
+  cleanup(
+    actor: ActorContext,
+    publicId: string,
+    force: boolean,
+    agentState?: 'idle' | 'working' | 'blocked' | 'done' | 'unknown' | 'absent',
+  ): { released: boolean; note: string } {
     this.authz.requireOwner(actor);
     const job = this.ownedJob(actor, publicId);
     const reservation = this.store.jobs.reservation(job.repoSlug);
@@ -230,14 +235,34 @@ export class JobsService {
       };
     }
 
+    // Step one: the caller must have inspected the agent. `agentState` is what
+    // the caller observed, not a claim the owner typed. Without an observation
+    // showing the agent gone or idle, an unforced cleanup refuses -- releasing
+    // while a writer is live is what the reservation exists to prevent.
+    const live = agentState === 'working' || agentState === 'blocked';
+    const unknown = agentState === undefined || agentState === 'unknown';
+
+    if (live && !force) {
+      return {
+        released: false,
+        note: `The agent for \`${job.repoSlug}\` is still ${agentState}. Stop it first, or re-run with force to release anyway.`,
+      };
+    }
+    if (unknown && !force) {
+      return {
+        released: false,
+        note: `Could not confirm the agent for \`${job.repoSlug}\` has stopped. Inspect it, then re-run with force to release anyway.`,
+      };
+    }
+
     withTransaction(this.store.db, () => {
       this.store.jobs.releaseReservation(job.repoSlug);
       this.store.jobs.appendEvent(
         job.id,
         force ? 'forced_cleanup' : 'cleanup',
         force
-          ? 'Owner forced release of an orphaned repository reservation without confirming the agent had stopped.'
-          : 'Owner released an orphaned repository reservation.',
+          ? `Owner forced release of an orphaned reservation (agent observed: ${agentState ?? 'unknown'}).`
+          : `Owner released an orphaned reservation after the agent was observed ${agentState}.`,
       );
     });
     return { released: true, note: `Released \`${job.repoSlug}\`.` };
@@ -338,6 +363,11 @@ export class JobsService {
     const job = this.leasedJob(executorId, jobId, leaseId);
     const leaseExpiresAt = isoPlus(LEASE_TTL_MS, this.now());
     withTransaction(this.store.db, () => {
+      // A job heartbeat IS proof of life. Renewing only the lease left a
+      // long-running job's executor looking offline after the liveness window,
+      // so a second submission would report "waiting for executor" while one
+      // was demonstrably running.
+      this.store.executors.touchExecutor(executorId, null);
       this.store.jobs.touchLease(job.id, leaseExpiresAt);
       this.store.jobs.refreshReservationForState(job.repoSlug, job.id, job.state);
       if (progress) {
@@ -494,16 +524,12 @@ export class JobsService {
     const job = this.leasedJob(executorId, jobId, leaseId);
     this.assertRegistrable(job, input);
 
-    const existing = this.store.herdrWorkspaces.byWorkspaceId(input.workspaceId);
-    if (existing && existing.jobId !== job.id) {
-      throw new DuckyError(
-        'lease_mismatch',
-        'That workspace is already registered to a different job.',
-      );
-    }
-
+    // The ownership decision is made INSIDE the transaction. Checking first and
+    // writing afterwards left a race where a concurrent registration could win
+    // and this call would still report success while recording nothing.
     withTransaction(this.store.db, () => {
-      this.store.herdrWorkspaces.record({
+      const existing = this.store.herdrWorkspaces.byWorkspaceId(input.workspaceId);
+      const wrote = this.store.herdrWorkspaces.record({
         workspaceId: input.workspaceId,
         repoSlug: job.repoSlug,
         jobId: job.id,
@@ -514,6 +540,12 @@ export class JobsService {
         worktreePath: input.worktreePath ?? null,
         state: input.state ?? 'creating',
       });
+      if (!wrote) {
+        throw new DuckyError(
+          'lease_mismatch',
+          'That workspace is already registered to a different job.',
+        );
+      }
       if (!existing) {
         this.store.jobs.appendEvent(
           job.id,
@@ -581,6 +613,42 @@ export class JobsService {
     if (!inRepo && !HERDR_WORKTREE_DIR.test(input.workspacePath)) {
       bad('A worktree workspace must live in the repository or a Herdr worktrees directory.');
     }
+  }
+
+  /**
+   * Marks a recorded workspace closed after the executor actually closed it.
+   *
+   * Deliberately separate from registerWorkspace: accepting the result clears
+   * the lease, so the bookkeeping that follows a successful cleanup cannot use
+   * one. It is therefore allowed on a TERMINAL job and authenticated by the
+   * executor that owns the row rather than by a live lease.
+   *
+   * It can only ever close a workspace already recorded against this job, so
+   * it can never authorize closing an unrecorded or user-owned workspace.
+   */
+  markWorkspaceClosed(
+    executorId: string,
+    jobId: string,
+    workspaceId: string,
+  ): { closed: boolean; workspaceId: string } {
+    const job = this.store.jobs.byId(jobId);
+    if (!job) throw new DuckyError('not_found', 'Unknown job.');
+    if (job.executorId !== executorId) {
+      throw new DuckyError('lease_mismatch', 'That job belongs to another executor.');
+    }
+
+    const row = this.store.herdrWorkspaces.byWorkspaceId(workspaceId);
+    if (!row || row.jobId !== job.id) {
+      throw new DuckyError('not_found', 'That workspace is not recorded for this job.');
+    }
+    // Idempotent: a retried close is a success, not an error.
+    if (row.closedAt !== null) return { closed: true, workspaceId };
+
+    withTransaction(this.store.db, () => {
+      this.store.herdrWorkspaces.markClosed(workspaceId);
+      this.store.jobs.appendEvent(job.id, 'workspace_closed', `Closed workspace ${workspaceId}.`);
+    });
+    return { closed: true, workspaceId };
   }
 
   /** Recorded workspace for a job, so a reclaim can prove ownership. */

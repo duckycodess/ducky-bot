@@ -5,7 +5,8 @@ import {
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
   JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
-  WorkspaceRegistrationRequestSchema, EXECUTOR_HEADERS, isDuckyError,
+  WorkspaceCloseRequestSchema, WorkspaceRegistrationRequestSchema,
+  EXECUTOR_HEADERS, isDuckyError,
 } from '@ducky/contracts';
 import type { ExecutorCredentialStore } from '@ducky/adapters';
 import type { Store } from '@ducky/persistence';
@@ -219,6 +220,18 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         worktreePath: body.worktreePath ?? null,
         state: body.state,
       });
+    }),
+  );
+
+  // Bookkeeping after the executor closed a workspace. Allowed on a terminal
+  // job precisely because the result already cleared the lease.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/workspace/close',
+    { config: { rateLimit: { max: RATE_LIMITS.jobHeartbeat.max, timeWindow: RATE_LIMITS.jobHeartbeat.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = WorkspaceCloseRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.markWorkspaceClosed(executorId, id, body.workspaceId);
     }),
   );
 

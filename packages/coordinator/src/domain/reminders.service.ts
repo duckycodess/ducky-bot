@@ -6,7 +6,7 @@ import {
   ReminderAddInputSchema, newPublicReminderId, parseIntervalMinutes, parseWhen,
   type RecurrenceKind, type ReminderListFilter,
 } from '@ducky/contracts';
-import type { ReminderRow, Store } from '@ducky/persistence';
+import { withTransaction, type ReminderRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
 
@@ -130,7 +130,9 @@ export class RemindersService {
     if (row.status !== 'scheduled') {
       throw new DuckyError('invalid_input', `Reminder \`${row.publicId}\` has already finished.`);
     }
-    this.store.reminders.cancel(actor.discordUserId, row.id, this.clock.nowIso());
+    withTransaction(this.store.db, () =>
+      this.store.reminders.cancel(actor.discordUserId, row.id, this.clock.nowIso()),
+    );
     return this.store.reminders.byPublicId(actor.discordUserId, publicId) ?? row;
   }
 

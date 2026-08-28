@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   canonicalJson, DuckyError, GITHUB_WATCH_BATCH, GITHUB_WATCH_EVENT_BATCH,
+  isDuckyError,
   MAX_GITHUB_WATCHES_PER_OWNER,
   GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS, GITHUB_WATCH_MAX_PR_CHECKS,
   GITHUB_WATCH_SUMMARY_MAX, GitHubWatchAddInputSchema, newPublicWatchId,
@@ -118,7 +119,9 @@ export class GitHubWatchService {
   cancel(actor: ActorContext, publicId: string): GitHubWatchRow {
     this.authz.requireOwner(actor);
     const id = this.owned(actor, publicId).id;
-    const changed = this.store.githubWatches.cancel(actor.discordUserId, id, this.clock.nowIso());
+    const changed = withTransaction(this.store.db, () =>
+      this.store.githubWatches.cancel(actor.discordUserId, id, this.clock.nowIso()),
+    );
     if (!changed) throw new DuckyError('invalid_input', 'That watch is already cancelled.');
     return this.store.githubWatches.byId(id)!;
   }
@@ -147,7 +150,17 @@ export class GitHubWatchService {
         const changed = await this.observe(watch);
         result.observed += 1;
         if (changed) result.changed += 1;
-      } catch {
+      } catch (err) {
+        // A repository removed from the allowlist is not a transient GitHub
+        // outage. Retire that watch instead of polling forever against a
+        // configuration the owner deliberately stopped exposing.
+        if (isDuckyError(err) && (err.code === 'repo_not_allowed' || err.code === 'invalid_input')) {
+          withTransaction(this.store.db, () =>
+            this.store.githubWatches.cancel(watch.discordUserId, watch.id, this.clock.nowIso()),
+          );
+          result.abandoned += 1;
+          continue;
+        }
         const now = this.clock.nowMs();
         const next = new Date(now + watch.intervalMinutes * 60_000).toISOString();
         this.store.githubWatches.recordFailure(

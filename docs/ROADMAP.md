@@ -132,10 +132,13 @@ Delivered:
 - **A structured audit log**, bounded and pruned, that is a record and never an
   authority.
 
-Deliberately NOT delivered: `approved` and `executing_approved_action` states —
-the action performer is still unimplemented, so they would be dead labels; and
-any real dependency checker — the shipped one only ever answers `pending`, so
-no job is resumed on a check that did not happen.
+Deliberately NOT delivered: `approved` and `executing_approved_action` job
+states — approvals and execution remain separate so the existing lifecycle is
+not rewritten; and any real dependency checker — the shipped one only ever
+answers `pending`, so no job is resumed on a check that did not happen. A
+same-filesystem, opt-in performer now supports explicit owner-approved commit,
+push and PR actions, with a durable per-approval execution ledger; production
+executor routing and other action kinds remain deferred.
 
 ---
 
@@ -204,6 +207,22 @@ Still open:
 bytes are forwarded to a provider that declared it accepts that exact type;
 what it does with them is its own contract, and 2D has to verify it. No live
 attachment byte has been fetched on this host.
+
+---
+
+## 2C′ — Bounded GitHub repository watches ✅ delivered (read-only)
+
+Owner-configured `/watch add|list|remove` entries run on the existing
+coordinator interval. Each observation uses the existing allowlisted,
+read-only `gh` adapter, stores only a normalized snapshot and hash, and emits
+one owner-DM summary when the snapshot changes. Delivery has its own durable
+retry/abandon ledger and never reaches a shared channel.
+
+This first slice deliberately covers open PR state/title/branch and a bounded
+sample of PR check status. It does not yet observe recent commits, review
+comments/requested changes, workflow history or issue updates; those require
+additional verified `gh` response schemas. A live watch has not been exercised
+on this host.
 
 ---
 

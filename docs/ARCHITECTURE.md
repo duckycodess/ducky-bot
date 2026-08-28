@@ -225,6 +225,8 @@ erDiagram
   tasks }o--|| owner : ""
   reminders }o--|| owner : ""
   reminders ||--o{ reminder_occurrences : "one per due occurrence"
+  github_watches }o--|| owner : ""
+  github_watches ||--o{ github_watch_events : "meaningful changes"
 ```
 
 `job_results` holds one immutable row per executor turn, keyed by
@@ -253,6 +255,11 @@ tick advance a recurrence exactly once. Recurrence is bounded by construction:
 `interval_minutes` with `max_occurrences`, enforced by CHECK constraints, and
 there is no cron column
 (see [decisions/0013](decisions/0013-bounded-reminder-recurrence-and-catch-up.md)).
+
+`github_watches` stores the owner's explicit interval and the latest
+normalized, redacted snapshot; `github_watch_events` is a durable owner-DM
+outbox keyed by its snapshot fingerprint. Raw GitHub payloads, usernames and
+API responses are not stored.
 
 ## Work phases and dependency waits
 
@@ -306,8 +313,10 @@ checker is downgraded rather than believed.
 ## Command policy
 
 `COMMAND_POLICY` classifies every `gh`, `git` and `herdr` operation as
-`read_only`, `local_mutation`, `external_mutation` or `high_risk`. The ceiling
-in this phase is `local_mutation`, asserted by a test over the whole table.
+`read_only`, `local_mutation`, `external_mutation` or `high_risk`. Ordinary
+workspace inspection has a `local_mutation` ceiling; only the explicit,
+owner-approved action performer may opt into the narrow external entries.
+Force, hook-bypass and high-risk commands remain refused.
 
 Two independent gates: the frozen argv table decides what can be
 *constructed*, `checkCommandAllowed` decides whether what was constructed may
@@ -332,15 +341,16 @@ reconciler prunes past the retention window so the table stays bounded.
 ## The assistant tick
 
 The daily assistant has **no scheduler of its own**. `ReminderNotifier.tick()`
-runs on the coordinator's existing interval, beside `Reconciler.run()` and
-`JobNotifier.deliverPending()`, and each of the three is isolated: a failure in
-one never blocks the others. A tick materializes what has come due, then
-delivers what is outstanding, and is re-entrancy guarded so two overlapping
-passes cannot both read an occurrence as undelivered.
+and `GitHubWatchService.tick()` run on the coordinator's existing interval,
+beside `Reconciler.run()` and `JobNotifier.deliverPending()`, and each is
+isolated: a failure in one never blocks the others. A tick materializes what
+has come due, then delivers what is outstanding, and is re-entrancy guarded so
+two overlapping passes cannot both read an occurrence as undelivered.
 
-The consequence is a worst-case reminder lateness of one
+The consequence is a worst-case reminder/watch lateness of one
 `DUCKY_RECONCILE_INTERVAL_MS`, visible in configuration rather than hidden in a
-timer table, and nothing scheduled in memory to be lost on restart.
+timer table, and nothing scheduled in memory to be lost on restart. GitHub
+snapshots are normalized and unchanged snapshots do not generate a DM.
 
 ## Decisions
 

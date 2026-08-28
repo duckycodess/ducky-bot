@@ -14,6 +14,7 @@ import type { SchedulesService } from '../domain/schedules.service.js';
 import type { JobsService } from '../domain/jobs.service.js';
 import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
+import type { GitHubWatchService } from '../domain/github-watches.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
@@ -38,6 +39,7 @@ export interface RouterDeps {
   readonly jobs: JobsService;
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
+  readonly githubWatches: GitHubWatchService;
   /**
    * The daily assistant. Owner-only in full: none of these is reachable from
    * `handleSharedRead`, and no shared route names any of their commands.
@@ -557,6 +559,27 @@ export class DuckyRouter {
       return present.repoStatus(summary);
     });
 
+    this.commands.set('watch', async (actor, e) => {
+      this.buckets.check('jobRead', actor.discordUserId);
+      switch (e.subcommand ?? 'list') {
+        case 'add':
+          return assistant.watchAdded(d.githubWatches.add(actor, {
+            repoSlug: String(e.options['repo'] ?? ''),
+            ...(e.options['every'] === undefined ? {} : { everyMinutes: e.options['every'] }),
+          }));
+        case 'remove':
+        case 'cancel':
+          return assistant.watchCancelled(
+            d.githubWatches.cancel(actor, String(e.options['id'] ?? '')),
+          );
+        default: {
+          const all = e.options['filter'] === 'all';
+          const rows = d.githubWatches.list(actor, all);
+          return assistant.watchesList(rows, this.watchRows(actor, rows), all);
+        }
+      }
+    });
+
     this.commands.set('status', async (actor) => {
       this.buckets.check('jobRead', actor.discordUserId);
       d.authz.requireOwner(actor);
@@ -659,6 +682,23 @@ export class DuckyRouter {
           style: kind === 'task_done' ? ('success' as const) : ('secondary' as const),
         })),
       }));
+  }
+
+  private watchRows(
+    actor: ActorContext,
+    rows: readonly { publicId: string; state: string }[],
+  ): OutboundRow[] {
+    const active = rows.filter((r) => r.state === 'active').slice(0, 5);
+    if (active.length === 0) return [];
+    return [{
+      buttons: active.map((watch) => ({
+        customId: this.deps.signer.sign({
+          kind: 'watch_cancel', entityId: watch.publicId, actorUserId: actor.discordUserId,
+        }),
+        label: `cancel ${watch.publicId}`,
+        style: 'secondary' as const,
+      })),
+    }];
   }
 
   private reminderRows(
@@ -813,6 +853,9 @@ export class DuckyRouter {
     );
     this.components.set('reminder_cancel', async (actor, entityId) =>
       assistant.reminderCancelled(d.reminders.cancel(actor, entityId)),
+    );
+    this.components.set('watch_cancel', async (actor, entityId) =>
+      assistant.watchCancelled(d.githubWatches.cancel(actor, entityId)),
     );
   }
 }

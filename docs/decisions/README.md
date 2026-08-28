@@ -21,6 +21,7 @@ reverse. Trivial implementation choices do not get one.
 | [0014](0014-single-owner-timezone-as-a-projection.md) | One configured owner timezone, applied as a projection |
 | [0015](0015-provider-agnostic-conversation-attachments.md) | Provider-agnostic conversation attachments, refused before download |
 | [0016](0016-work-phases-dependency-waits-and-audit.md) | Work phases beside the state machine, bounded dependency waits, and a structured audit log |
+| [0017](0017-explicit-approved-git-actions.md) | Explicit, opt-in execution of approved Git actions |
 
 ## Format
 

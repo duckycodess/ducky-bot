@@ -4,7 +4,7 @@ import {
   type ReminderState, type TaskPriority,
 } from '@ducky/contracts';
 import type {
-  PendingReminderOccurrenceRow, ReminderRow, ScheduleRow, TaskRow,
+  GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleRow, TaskRow,
 } from '@ducky/persistence';
 import type { Briefing, BriefingSection } from '../domain/briefing.service.js';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
@@ -190,6 +190,60 @@ export function reminderDm(row: PendingReminderOccurrenceRow, tz: string): Outbo
   }
   return {
     embeds: [{ title: 'Reminder', description: short(row.text, 1000), fields }],
+    ephemeral: false,
+  };
+}
+
+// ----------------------------------------------------------- GitHub watches --
+
+export function watchAdded(row: GitHubWatchRow): OutboundMessage {
+  return {
+    content: `Watching \`${row.repoSlug}\` every ${row.intervalMinutes} minutes (${row.publicId}).`,
+    ephemeral: true,
+  };
+}
+
+export function watchCancelled(row: GitHubWatchRow): OutboundMessage {
+  return { content: `Repository watch \`${row.publicId}\` cancelled.`, ephemeral: true };
+}
+
+export function watchesList(
+  rows: readonly GitHubWatchRow[],
+  buttons: OutboundRow[],
+  includeCancelled: boolean,
+): OutboundMessage {
+  if (rows.length === 0) {
+    return { content: `No ${includeCancelled ? '' : 'active '}repository watches.`, ephemeral: true };
+  }
+  return {
+    embeds: [{
+      title: `Repository watches (${rows.length})`,
+      fields: rows.map((row) => ({
+        name: `${row.publicId} · ${row.repoSlug}`,
+        value: [
+          `${row.state} · every ${row.intervalMinutes} minutes`,
+          row.nextCheckAt ? `-# next check ${discordTimestamp(row.nextCheckAt, 'R') || 'unknown'}` : '',
+          row.lastError ? '-# last check failed; retrying on schedule' : '',
+        ].filter(Boolean).join('\n'),
+      })),
+      footer: 'Read-only GitHub monitoring. No GitHub changes are made.',
+    }],
+    rows: buttons,
+    ephemeral: true,
+  };
+}
+
+/** A high-level, owner-only watch update. Raw API payloads never leave the service. */
+export function githubWatchDm(event: GitHubWatchEventRow): OutboundMessage {
+  return {
+    embeds: [{
+      title: `Repository update — ${event.repoSlug}`,
+      description: short(event.summary, 1200),
+      fields: [
+        { name: 'Watch', value: event.publicWatchId, inline: true },
+        { name: 'Observed', value: discordTimestamp(event.createdAt, 'R') || 'recent', inline: true },
+      ],
+    }],
     ephemeral: false,
   };
 }

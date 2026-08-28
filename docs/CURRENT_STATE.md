@@ -1,7 +1,7 @@
 # Current state
 
-What is actually true today. Phase 1 plus milestones 2A, 2B and 2C, no
-deployment performed.
+What is actually true today. Phase 1 plus milestones 2A, 2B, 2C, lifecycle
+hardening, and explicit approved-action/watch paths; no deployment performed.
 
 ## Two Discord identities
 
@@ -16,7 +16,7 @@ diagnostics and in `/status`.
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
   `/status`, `/task` (add, list, done, cancel), `/reminder` (add, list,
-  cancel), `/briefing`
+  cancel), `/briefing`, `/watch` (add, list, remove)
 - Opt-in shared job visibility (milestone 2A), **off by default**. With
   `DUCKY_SHARED_CHANNEL_IDS` empty the feature is unreachable. When a channel
   is listed, anyone who can read it gets a safe projection from `/jobs` and
@@ -121,6 +121,11 @@ diagnostics and in `/status`.
   deliberately NOT added: the performer is still unimplemented, so they would
   be dead states. See
   [decisions/0016](decisions/0016-work-phases-dependency-waits-and-audit.md)
+- **Explicit approved Git actions.** An owner can use `/job execute` after a
+  per-action approval; the immutable proposal and a durable execution ledger
+  are checked before the opt-in same-filesystem performer can commit, push or
+  create a PR. The default flag remains off, and no action is executed merely
+  because it was approved.
 - **Durable waiting-on-dependency path.** A result may report
   `waiting_on_dependency` with a closed dependency shape (type, description,
   optional opaque external key, next check, and TWO ceilings: a check count
@@ -190,7 +195,9 @@ diagnostics and in `/status`.
 - Authenticated, signed, replay-resistant, rate-limited executor API
 - Executor: outbound polling, fail-closed workspace resolution, single-writer
   lock, Herdr/Pi orchestration behind a port
-- Read-only GitHub inspection through a frozen `gh` argv table
+- Read-only GitHub inspection through a frozen `gh` argv table, plus bounded
+  owner-configured repository watches with normalized-snapshot deduplication
+  and owner-DM change summaries
 - Redaction at the transport boundary; no secret in the database or logs
 
 ## What "verified" means here
@@ -243,6 +250,7 @@ and `/status` reports `experimental`.
 | Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
+| GitHub repository watches | **Unit-tested only.** The loop uses the verified read-only `gh` surface, stores normalized snapshots and deduplicates owner-DM summaries. Recent commits, review comments/requested changes, workflow history and a live watch have not been exercised here. |
 | Dependency checking | **No real checker exists.** The port ships with `UnavailableDependencyChecker`, which only ever answers `pending`, so a dependency wait always ends at the owner's desk on this host. The resume-on-ready and fail-on-failed paths are unit-tested against a scripted fake; neither has ever run against a real external system. |
 | Azure deployment | Documented only; nothing provisioned. |
 

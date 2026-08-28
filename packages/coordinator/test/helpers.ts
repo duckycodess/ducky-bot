@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
-  type ConversationProvider, type DependencyChecker,
+  type ConversationProvider, type DependencyChecker, type GitHubReader,
 } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
 import type { ActionPerformer } from '../src/domain/action-performer.js';
@@ -69,7 +69,7 @@ export interface Harness {
 export interface HarnessOptions {
   readonly env?: Record<string, string | undefined>;
   readonly registerExecutor?: boolean;
-  readonly github?: MockGitHubReader;
+  readonly github?: GitHubReader;
   /**
    * Drives the daily assistant's clock. Reminder materialization, due dates
    * and briefing day boundaries are all read through this, so a test can move

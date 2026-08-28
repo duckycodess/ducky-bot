@@ -10,6 +10,7 @@ export * from './domain/git-action-performer.js';
 export * from './domain/approvals.service.js';
 export * from './domain/captures.service.js';
 export * from './domain/github.service.js';
+export * from './domain/github-watches.service.js';
 export * from './domain/jobs.service.js';
 export * from './domain/pending-schedules.js';
 export * from './domain/reconciler.js';

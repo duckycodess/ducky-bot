@@ -25,6 +25,7 @@ import { ApprovalsService } from './domain/approvals.service.js';
 import { type ActionPerformer } from './domain/action-performer.js';
 import { GitActionPerformer } from './domain/git-action-performer.js';
 import { GitHubService } from './domain/github.service.js';
+import { GitHubWatchService } from './domain/github-watches.service.js';
 import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
@@ -92,6 +93,7 @@ export interface App {
   readonly jobs: JobsService;
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
+  readonly githubWatches: GitHubWatchService;
   readonly reconciler: Reconciler;
   readonly notifier: JobNotifier;
   readonly clock: OwnerClock;
@@ -188,6 +190,9 @@ export function createApp(
   const reminderNotifier = new ReminderNotifier({
     store, transport, ownerId: authz.ownerId, clock,
   });
+  const githubWatches = new GitHubWatchService({
+    store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
+  });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const conversationAttachmentBudget = new HourlyBudget(env.CONVERSATION_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
@@ -230,6 +235,7 @@ export function createApp(
       ? 'enabled only after owner approval and /job execute'
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
+    githubWatches: `${store.githubWatches.countActive(authz.ownerId)} active`,
   });
 
   const router = new DuckyRouter({
@@ -240,6 +246,7 @@ export function createApp(
     jobs,
     approvals,
     github,
+    githubWatches,
     tasks,
     reminders,
     briefing,
@@ -263,7 +270,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
+    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments, dependencies,
     close: () => store.db.close(),

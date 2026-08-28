@@ -39,6 +39,20 @@ const COMMANDS = [
   ] },
   { name: 'repo', description: 'Read-only repository status (owner only)', options: [{ name: 'slug', type: 3, required: true, description: 'Repository slug' }] },
   { name: 'status', description: 'Show which providers are live (owner only)' },
+  { name: 'watch', description: 'Watch an allowlisted GitHub repository (owner only)', options: [
+    { name: 'add', type: 1, description: 'Start a read-only repository watch', options: [
+      { name: 'repo', type: 3, required: true, description: 'Allowlisted GitHub repository slug' },
+      { name: 'every', type: 4, required: false, description: 'Minutes between checks (15-1440)' },
+    ] },
+    { name: 'list', type: 1, description: 'List active repository watches', options: [
+      { name: 'filter', type: 3, required: false, description: 'active | all', choices: [
+        { name: 'active', value: 'active' }, { name: 'all', value: 'all' },
+      ] },
+    ] },
+    { name: 'remove', type: 1, description: 'Cancel a repository watch', options: [
+      { name: 'id', type: 3, required: true, description: 'Watch id' },
+    ] },
+  ] },
   { name: 'task', description: 'Your tasks (owner only)', options: [
     { name: 'add', type: 1, description: 'Add a task', options: [
       { name: 'title', type: 3, required: true, description: 'What needs doing' },

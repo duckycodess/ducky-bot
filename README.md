@@ -65,6 +65,9 @@ Beside the development controller, Ducky keeps the owner's day:
   reminders and schedule by counting them. No provider is reachable from the
   assembly path, so nothing in a briefing can be generated; a briefing that
   invents a deadline is worse than no briefing.
+- `/watch add|list|remove` — owner-configured, read-only GitHub repository
+  monitoring. It stores normalized snapshots and sends a deduplicated summary
+  only when the observed PR/check view changes; it does not write to GitHub.
 - `DUCKY_OWNER_TIMEZONE` sets which day is "today" and what `tomorrow 09:00`
   means. Instants stay stored as UTC and existing schedule rows keep the text
   you typed — the zone is a projection, not storage, so changing it re-renders

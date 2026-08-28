@@ -48,6 +48,12 @@ async function main(): Promise<void> {
     app.dependencies.tick().catch((err: unknown) => {
       process.stderr.write(`dependency tick error: ${(err as Error).message}\n`);
     });
+    // GitHub watches are another bounded observation on the SAME coordinator
+    // interval. Snapshot changes enqueue an owner-DM event; unchanged snapshots
+    // do not produce a message.
+    app.githubWatches.tick().catch((err: unknown) => {
+      process.stderr.write(`GitHub watch tick error: ${(err as Error).message}\n`);
+    });
   }, app.env.DUCKY_RECONCILE_INTERVAL_MS);
   timer.unref();
 
@@ -59,6 +65,7 @@ async function main(): Promise<void> {
     await app.notifier.waitForIdle();
     await app.reminderNotifier.waitForIdle();
     await app.dependencies.waitForIdle();
+    await app.githubWatches.waitForIdle();
     await app.transport.stop();
     await server.close();
     app.close();

@@ -234,6 +234,7 @@ export interface ProviderStatus {
   readonly ownerTimezone: string;
   /** Whether anything can actually confirm a dependency, and what happens if not. */
   readonly dependencyChecker: string;
+  readonly githubWatches: string;
 }
 
 /** Always visible, so the owner is never guessing which providers are real. */
@@ -253,6 +254,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Executors', value: p.executors, inline: true },
           { name: 'Your timezone', value: p.ownerTimezone, inline: true },
           { name: 'Dependency checks', value: p.dependencyChecker },
+          { name: 'GitHub watches', value: p.githubWatches, inline: true },
           { name: 'Shared visibility', value: p.sharedChannels },
         ],
       },

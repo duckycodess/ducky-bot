@@ -203,6 +203,17 @@ export const CONVERSATION_ATTACHMENTS_PER_HOUR = 20;
 /** One at a time. Several files in one message is refused, never partly read. */
 export const CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE = 1;
 
+// ---- GitHub watches ---------------------------------------------------------
+/** Explicit owner watches are ongoing schedules, never a hidden tight loop. */
+export const GITHUB_WATCH_INTERVAL_MIN_MINUTES = 15;
+export const GITHUB_WATCH_INTERVAL_MAX_MINUTES = 24 * 60;
+export const MAX_GITHUB_WATCHES_PER_OWNER = 20;
+export const GITHUB_WATCH_BATCH = 5;
+export const GITHUB_WATCH_EVENT_BATCH = 20;
+export const GITHUB_WATCH_MAX_PR_CHECKS = 5;
+export const GITHUB_WATCH_SUMMARY_MAX = 1200;
+export const GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS = 8;
+
 // ---- audit log --------------------------------------------------------------
 /** Every free-text audit detail is redacted and then clamped to this. */
 export const AUDIT_DETAIL_MAX = 300;

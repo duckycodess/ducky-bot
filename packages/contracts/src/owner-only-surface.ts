@@ -22,6 +22,7 @@ export const OWNER_ONLY_COMMANDS = [
   'task',
   'reminder',
   'briefing',
+  'watch',
 ] as const;
 export type OwnerOnlyCommand = (typeof OWNER_ONLY_COMMANDS)[number];
 
@@ -41,6 +42,7 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'task_done',
   'task_cancel',
   'reminder_cancel',
+  'watch_cancel',
 ] as const;
 export type OwnerOnlyInteractionKind = (typeof OWNER_ONLY_INTERACTION_KINDS)[number];
 

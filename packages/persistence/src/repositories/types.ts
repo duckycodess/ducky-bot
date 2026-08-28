@@ -1,7 +1,8 @@
 import type {
   ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
   CaptureState, DependencyCheckStatus, DependencyState, DependencyType,
-  JobState, JobWorkPhase, RecurrenceKind, ReminderState, TaskPriority, TaskState,
+  GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
+  TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -82,6 +83,39 @@ export interface ApprovalRow {
   decidedBy: string | null;
   decidedAt: string | null;
   decisionReason: string | null;
+}
+
+/** A configured owner-only GitHub repository watch. */
+export interface GitHubWatchRow {
+  id: string;
+  publicId: string;
+  discordUserId: string;
+  repoSlug: string;
+  intervalMinutes: number;
+  nextCheckAt: string | null;
+  state: GitHubWatchState;
+  snapshotHash: string | null;
+  snapshotJson: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  cancelledAt: string | null;
+}
+
+/** A meaningful watch change waiting for owner-DM delivery. */
+export interface GitHubWatchEventRow {
+  id: string;
+  watchId: string;
+  publicWatchId: string;
+  discordUserId: string;
+  repoSlug: string;
+  fingerprint: string;
+  summary: string;
+  createdAt: string;
+  deliveredAt: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  abandonedAt: string | null;
 }
 
 /** One durable, at-most-once execution attempt for an approved action. */

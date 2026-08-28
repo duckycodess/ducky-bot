@@ -538,4 +538,54 @@ CREATE TABLE approval_executions (
 CREATE INDEX ix_approval_executions_job ON approval_executions(job_id);
 `,
   },
+  {
+    version: 10,
+    name: 'github_repository_watches',
+    sql: `
+-- Owner-configured, read-only GitHub observations. A watch has an explicit
+-- interval and is checked only by the existing coordinator loop; it is not a
+-- hidden per-watch timer or an autonomous write workflow.
+CREATE TABLE github_watches (
+  id               TEXT PRIMARY KEY,
+  public_id        TEXT NOT NULL UNIQUE,
+  discord_user_id  TEXT NOT NULL,
+  repo_slug        TEXT NOT NULL REFERENCES repos(slug),
+  interval_minutes INTEGER NOT NULL CHECK (interval_minutes >= 15 AND interval_minutes <= 1440),
+  next_check_at    TEXT,
+  state            TEXT NOT NULL CHECK (state IN ('active','cancelled')),
+  snapshot_hash    TEXT,
+  snapshot_json    TEXT,
+  last_error       TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  cancelled_at     TEXT,
+  CHECK ((state = 'active') = (next_check_at IS NOT NULL))
+);
+
+CREATE UNIQUE INDEX ux_github_watches_owner_repo
+  ON github_watches(discord_user_id, repo_slug) WHERE state = 'active';
+CREATE INDEX ix_github_watches_due
+  ON github_watches(next_check_at) WHERE state = 'active';
+
+-- Meaningful normalized changes waiting for owner-DM delivery. The fingerprint
+-- is unique per watch, so a repeated observation cannot create duplicate
+-- notifications even if the observation and delivery sweeps overlap.
+CREATE TABLE github_watch_events (
+  id              TEXT PRIMARY KEY,
+  watch_id        TEXT NOT NULL REFERENCES github_watches(id) ON DELETE CASCADE,
+  fingerprint     TEXT NOT NULL,
+  summary         TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  delivered_at    TEXT,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  abandoned_at    TEXT,
+  UNIQUE (watch_id, fingerprint)
+);
+
+CREATE INDEX ix_github_watch_events_pending
+  ON github_watch_events(created_at)
+  WHERE delivered_at IS NULL AND abandoned_at IS NULL;
+`,
+  },
 ];

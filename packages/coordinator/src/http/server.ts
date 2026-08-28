@@ -1,7 +1,8 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import {
-  CLAIM_MAX_WAIT_MS, HTTP_BODY_LIMIT, HTTP_CONNECTION_TIMEOUT_MS, HTTP_KEEPALIVE_TIMEOUT_MS,
+  CLAIM_MAX_WAIT_MS, EXECUTOR_OFFLINE_AFTER_MS,
+  HTTP_BODY_LIMIT, HTTP_CONNECTION_TIMEOUT_MS, HTTP_KEEPALIVE_TIMEOUT_MS,
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
   JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
@@ -117,7 +118,28 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     { config: { rateLimit: { max: RATE_LIMITS.heartbeat.max, timeWindow: RATE_LIMITS.heartbeat.windowMs } } },
     authed(async (req, executorId) => {
       const body = HeartbeatRequestSchema.parse(req.body);
+      // Audited on CONNECTION, not on every beat. A heartbeat lands every few
+      // seconds; recording each one would drown the audit trail in noise and
+      // grow the table without adding a single fact. A new executor, a
+      // restarted one, and a version change are the events worth keeping.
+      const before = deps.store.executors.getExecutor(executorId);
+      const reconnected =
+        !before ||
+        before.lastSeenAt === null ||
+        before.lastSeenAt < new Date(Date.now() - EXECUTOR_OFFLINE_AFTER_MS).toISOString();
       deps.store.executors.touchExecutor(executorId, body.version);
+      if (reconnected || before?.version !== body.version) {
+        deps.store.auditLog.record({
+          event: 'executor.connected',
+          actorKind: 'executor',
+          actorRef: executorId,
+          subjectKind: 'executor',
+          subjectRef: executorId,
+          // Version and capability NAMES only. No token, no signature, no
+          // header set: none of that may ever reach a durable record.
+          detail: `version ${body.version}; ${body.capabilities.length} capability(ies)`,
+        });
+      }
       return {
         serverTime: new Date().toISOString(),
         leaseTtlMs: 5 * 60_000,

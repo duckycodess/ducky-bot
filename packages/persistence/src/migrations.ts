@@ -435,4 +435,86 @@ CREATE INDEX ix_reminder_occurrences_pending
   WHERE delivered_at IS NULL AND abandoned_at IS NULL;
 `,
   },
+  {
+    version: 8,
+    name: 'lifecycle_dependencies_audit',
+    sql: `
+-- The engineering work phase of a RUNNING job.
+--
+-- A second dimension beside jobs.state, not a replacement for it. The state
+-- says who owns the job and what may touch it; the phase says what the agent
+-- is doing. Keeping them apart is what lets fine-grained progress land without
+-- touching ux_jobs_one_running_per_repo, the lease-expiry sweep, the claim
+-- predicate or the cancel path -- all of which are keyed on state = 'running'.
+--
+-- NULL means "no work in progress", which is every job that is not currently
+-- leased. Every existing row starts NULL, which is correct for all of them.
+ALTER TABLE jobs ADD COLUMN work_phase TEXT
+  CHECK (work_phase IS NULL OR work_phase IN
+    ('preparing','planning','implementing','reviewing','fixing','verifying'));
+
+-- What a job is blocked on, when it reports waiting_on_dependency.
+--
+-- The row is the schedule: next_check_at is the cursor a bounded reconciliation
+-- reads, checks_made/max_checks and deadline_at are the two independent
+-- ceilings, and there is deliberately no way to express "check forever".
+CREATE TABLE job_dependencies (
+  id            TEXT PRIMARY KEY,
+  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  type          TEXT NOT NULL CHECK (type IN
+                  ('ci_run','external_service','package_publish','upstream_change','human_action','other')),
+  description   TEXT NOT NULL,
+  external_key  TEXT,
+  state         TEXT NOT NULL CHECK (state IN ('waiting','ready','failed','expired','cancelled')),
+  next_check_at TEXT,
+  checks_made   INTEGER NOT NULL DEFAULT 0,
+  max_checks    INTEGER NOT NULL CHECK (max_checks >= 1),
+  deadline_at   TEXT NOT NULL,
+  last_check_at TEXT,
+  last_status   TEXT CHECK (last_status IS NULL OR last_status IN ('pending','ready','failed')),
+  last_detail   TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  resolved_at   TEXT,
+  -- A waiting dependency always has a cursor; a resolved one never does. This
+  -- is what makes "is anything still being checked?" a schema fact rather than
+  -- something the resolver has to be trusted to keep true.
+  CHECK ((state = 'waiting') = (next_check_at IS NOT NULL))
+);
+
+-- At most ONE open dependency per job. A job cannot be waiting on two things
+-- at once, because it has one state and one reservation.
+CREATE UNIQUE INDEX ux_job_dependencies_one_open
+  ON job_dependencies(job_id) WHERE state = 'waiting';
+
+CREATE INDEX ix_job_dependencies_due
+  ON job_dependencies(next_check_at) WHERE state = 'waiting';
+
+-- A structured record of what happened, and NOTHING ELSE.
+--
+-- It is never read to decide anything: authorization is frozen environment
+-- configuration and the job state machine is the jobs table. A row here grants
+-- nothing and blocks nothing, exactly as authorized_user_audit does not.
+--
+-- It holds no secret, no raw authentication material, no terminal output and
+-- no environment. actor_ref is a role reference or a non-secret executor id
+-- -- never a Discord user id, never a bearer token, never a signature. Every
+-- free-text detail is redacted and clamped before it is written.
+CREATE TABLE audit_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  actor_kind   TEXT NOT NULL CHECK (actor_kind IN ('owner','executor','system','reconciler')),
+  actor_ref    TEXT,
+  subject_kind TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                 ('job','approval','executor','dependency')),
+  subject_ref  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','failed')),
+  detail       TEXT
+);
+
+CREATE INDEX ix_audit_log_at ON audit_log(at);
+CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
+`,
+  },
 ];

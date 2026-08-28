@@ -227,6 +227,21 @@ string, header set or body.
 - **Subprocesses.** `runArgv` uses `execFile` with an argv array, a mandatory
   timeout and a capped buffer. There is no shell mode; a shell string or a
   non-array throws. A global concurrency pool bounds host load.
+- **Command policy.** Every `gh`, `git` and `herdr` operation is classified
+  `read_only` / `local_mutation` / `external_mutation` / `high_risk` in one
+  central table, with the ceiling at `local_mutation` in this phase. Two
+  independent gates: the frozen argv table decides what can be *constructed*,
+  `checkCommandAllowed` decides whether what was constructed may *run*. An
+  unclassified command is refused rather than allowed by default, and
+  `FORBIDDEN_COMMAND_VERBS` (`push`, `reset`, `clean`, `rm`, `exec`, `auth`, …)
+  is checked first and independently of the table. There is no arbitrary shell
+  and no high-risk verb reachable from anywhere.
+- **Dependency checks.** A checker is told the dependency record and nothing
+  else -- no repository path, no task text, no credentials. It cannot extend
+  its own budget or reschedule itself; the resolver bounds every pass, every
+  check count and every deadline. The shipped checker only ever answers
+  `pending`, and a `ready` from an unverified checker is downgraded rather than
+  believed, so no job resumes on a check that did not happen.
 - **Workspace registrations.** The executor is authenticated, but its
   *content* is still validated: the agent name and label must match the Ducky
   prefixes for the claimed repository, and the path must be absolute,
@@ -237,6 +252,26 @@ string, header set or body.
   deep-sanitized *before* anything is persisted. A result claiming
   `implemented` without an independent passing review and passing verification
   is downgraded — the executor cannot mark its own homework.
+
+## The audit log
+
+`audit_log` is a structured RECORD and **never an authority**. Nothing reads it
+to decide anything -- authorization is frozen environment configuration and the
+lifecycle is the `jobs` table -- and a test asserts that no repository which
+decides anything selects from it. A forged row confers nothing, exactly as
+`authorized_user_audit` does not.
+
+It holds no secret, no raw authentication material, no terminal output and no
+environment. Every free-text detail is constructed from fixed strings and
+already-redacted values, then clamped. The owner is recorded as the role
+`owner` rather than a Discord user id: there is exactly one owner, so the id
+adds nothing an auditor could use and would be unnecessary personal data in a
+long-lived table. Executor ids are kept -- not secret, genuinely identifying.
+Lease ids, which are capabilities rather than identifiers, are never recorded.
+
+Writing an audit row never throws: a job rolled back because bookkeeping failed
+would be worse than one that ran correctly and was not written down. Retention
+is bounded and the reconciler prunes past the window.
 
 ## The approval gate
 

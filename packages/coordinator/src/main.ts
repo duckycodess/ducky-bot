@@ -43,6 +43,11 @@ async function main(): Promise<void> {
     app.reminderNotifier.tick().catch((err: unknown) => {
       process.stderr.write(`reminder tick error: ${(err as Error).message}\n`);
     });
+    // Dependency waits ride the same interval too. Bounded per pass and
+    // bounded per dependency, so this can never become a polling loop.
+    app.dependencies.tick().catch((err: unknown) => {
+      process.stderr.write(`dependency tick error: ${(err as Error).message}\n`);
+    });
   }, app.env.DUCKY_RECONCILE_INTERVAL_MS);
   timer.unref();
 
@@ -53,6 +58,7 @@ async function main(): Promise<void> {
     // triggering a new one.
     await app.notifier.waitForIdle();
     await app.reminderNotifier.waitForIdle();
+    await app.dependencies.waitForIdle();
     await app.transport.stop();
     await server.close();
     app.close();

@@ -1,5 +1,7 @@
 import type {
-  ApprovalState, CaptureState, JobState, RecurrenceKind, ReminderState, TaskPriority, TaskState,
+  ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
+  CaptureState, DependencyCheckStatus, DependencyState, DependencyType,
+  JobState, JobWorkPhase, RecurrenceKind, ReminderState, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -32,6 +34,12 @@ export interface JobRow {
   context: string | null;
   bootstrap: boolean;
   state: JobState;
+  /**
+   * Where a RUNNING job is in the engineering loop, or null when nothing is
+   * in progress. Orthogonal to `state`: the state says who owns the job, the
+   * phase says what the agent is doing.
+   */
+  workPhase: JobWorkPhase | null;
   cancelRequested: boolean;
   attempts: number;
   maxAttempts: number;
@@ -236,6 +244,50 @@ export interface PendingReminderOccurrenceRow {
   recurrenceKind: RecurrenceKind;
   maxOccurrences: number;
   nextFireAt: string | null;
+}
+
+/**
+ * What a job is blocked on, and the bounded schedule for finding out whether
+ * it still is.
+ *
+ * `nextCheckAt` is non-null exactly while `state` is `waiting` -- the schema
+ * enforces it -- so "is anything still being polled?" is a fact of the row
+ * rather than something the resolver has to be trusted to maintain.
+ */
+export interface DependencyRow {
+  id: string;
+  jobId: string;
+  type: DependencyType;
+  description: string;
+  externalKey: string | null;
+  state: DependencyState;
+  nextCheckAt: string | null;
+  checksMade: number;
+  maxChecks: number;
+  deadlineAt: string;
+  lastCheckAt: string | null;
+  lastStatus: DependencyCheckStatus | null;
+  lastDetail: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+}
+
+/**
+ * One audit row. A RECORD, never an authority: nothing reads this to decide
+ * anything, and it carries no secret, no raw authentication material, no
+ * terminal output and no Discord user id.
+ */
+export interface AuditLogRow {
+  id: number;
+  at: string;
+  event: AuditEvent;
+  actorKind: AuditActorKind;
+  actorRef: string | null;
+  subjectKind: AuditSubjectKind | null;
+  subjectRef: string | null;
+  outcome: AuditOutcome;
+  detail: string | null;
 }
 
 export const toBool = (v: unknown): boolean => Number(v) === 1;

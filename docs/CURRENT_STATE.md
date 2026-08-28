@@ -107,6 +107,59 @@ diagnostics and in `/status`.
   (supervised mid-turn, acknowledged only once a stop is observed), owner-input
   rounds, per-repo reservations, durable workspace registration, crash
   recovery, reconciliation
+- **Engineering work phases.** `preparing`, `planning`, `implementing`,
+  `reviewing`, `fixing`, `verifying`, persisted beside the job state rather
+  than replacing it. Set on claim, moved by an **allowlisted** `phase` on the
+  executor's job heartbeat, validated against an exhaustive phase machine
+  (a report cannot walk backwards from implementing to planning), idempotent
+  for a repeated report, and cleared whenever the job stops being lease-bearing
+  so a paused job never renders a stale phase. Shown privately as
+  "Working — reviewing"; never in a shared channel.
+  **`running` is still the only lease-bearing state**, so the partial unique
+  index, the lease-expiry sweep, the supervised cancel branch and the claim
+  predicate are unchanged. `approved` / `executing_approved_action` were
+  deliberately NOT added: the performer is still unimplemented, so they would
+  be dead states. See
+  [decisions/0016](decisions/0016-work-phases-dependency-waits-and-audit.md)
+- **Durable waiting-on-dependency path.** A result may report
+  `waiting_on_dependency` with a closed dependency shape (type, description,
+  optional opaque external key, next check, and TWO ceilings: a check count
+  and a wall-clock deadline). Persisted in the same transaction as the result
+  and the transition. **The lease is released and the repository reservation is
+  retained**, so nothing else starts in that repository while the job waits.
+  Visible in the owner's private `/job status` only.
+  - A bounded `DependencyResolver` runs on the existing coordinator interval —
+    no second scheduler, no per-dependency timer, no unbounded polling. Batched
+    per pass, compare-and-set on the check count, bounded exponential backoff,
+    re-entrancy guarded. A checker that throws or hangs counts as `pending` and
+    **still spends a check**.
+  - Outcomes: `ready` → requeued keeping its reservation; `failed` → job fails
+    and the repository is released; `pending` with budget → rescheduled;
+    **budget spent → `needs_owner_input`**.
+  - **The shipped checker never reports ready.** Nothing on this host can
+    observe a CI run or a registry, so `UnavailableDependencyChecker` answers
+    `pending` for everything and a wait ends at the owner's desk rather than
+    being resumed on a check that did not happen. A `ready` from an unverified
+    checker is downgraded, not believed.
+  - Cancelling a waiting job closes its dependency in the same transaction, so
+    the resolver cannot later requeue a job the owner stopped. The cursor is
+    durable, so a restart resumes from it.
+- **Central command policy.** Every `gh`, `git` and `herdr` operation is
+  classified `read_only` / `local_mutation` / `external_mutation` /
+  `high_risk`, with the ceiling at `local_mutation` in this phase and a test
+  asserting the whole table against it. `gh-cli` and the executor's `git`
+  helper consult it before spawning: the frozen argv table decides what can be
+  constructed, the policy decides whether it may run. An unclassified command
+  is refused rather than allowed by default. No arbitrary shell anywhere.
+- **Structured audit log.** Job creation, claim, every transition (written from
+  the single point of state change, so coverage is structural), phase changes
+  including refused ones, cancellation, failure, approval decisions, executor
+  connect/offline and every dependency event. It is a record and **never an
+  authority** — nothing reads it to decide anything, asserted by a test. No
+  secret, no raw authentication material, no terminal output, no environment;
+  the owner is recorded as the role `owner` rather than a Discord id. Details
+  are redacted and clamped, recording never throws, and the reconciler prunes
+  past the retention window.
 - Per-action approvals, decided individually, recorded and **not executed**
 - Proactive job notifications on lifecycle transitions (running,
   needs_owner_input, needs_approval, completed, failed, cancelled), delivered
@@ -182,7 +235,8 @@ and `/status` reports `experimental`.
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
 | Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
-| Approved action execution | Deliberately absent. |
+| Approved action execution | Deliberately absent. The command policy classifies external mutations and refuses them; the performer still throws. |
+| Dependency checking | **No real checker exists.** The port ships with `UnavailableDependencyChecker`, which only ever answers `pending`, so a dependency wait always ends at the owner's desk on this host. The resume-on-ready and fail-on-failed paths are unit-tested against a scripted fake; neither has ever run against a real external system. |
 | Azure deployment | Documented only; nothing provisioned. |
 
 ## Deferred

@@ -105,6 +105,40 @@ Still open, and deliberately deferred:
 
 ---
 
+## 2B′ — Job lifecycle hardening ✅ delivered
+
+Not originally a numbered milestone; taken on because the engineering loop and
+the "blocked on something else" case were the two largest gaps in the Phase 1
+lifecycle. See
+[ADR 0016](decisions/0016-work-phases-dependency-waits-and-audit.md).
+
+Delivered:
+
+- **Work phases** (`preparing` → `planning` → `implementing` → `reviewing` ⇄
+  `fixing` ⇄ `verifying`), persisted beside the job state and driven by
+  allowlisted executor progress reports through an exhaustive phase machine.
+  **`running` stays the only lease-bearing state**, so every single-writer
+  guarantee is untouched.
+- **`waiting_on_dependency`**, a real job state with behaviour nothing else
+  has: the lease is released and the repository reservation is retained. Backed
+  by a `job_dependencies` record with a closed shape and two independent
+  ceilings, written in the same transaction as the result.
+- **A bounded resolver** on the existing coordinator interval, with an injected
+  `DependencyChecker` port. Resume on ready, fail on failed, reschedule with
+  bounded backoff, and hand the job to the owner when the budget is spent.
+  Nothing polls forever.
+- **A central command policy** classifying every subprocess surface, applied at
+  the `gh` and `git` call sites.
+- **A structured audit log**, bounded and pruned, that is a record and never an
+  authority.
+
+Deliberately NOT delivered: `approved` and `executing_approved_action` states —
+the action performer is still unimplemented, so they would be dead labels; and
+any real dependency checker — the shipped one only ever answers `pending`, so
+no job is resumed on a check that did not happen.
+
+---
+
 ## 2C — Provider-agnostic conversation attachments ✅ delivered (pipeline only)
 
 Ducky can now accept one image or file on an ordinary conversation message.

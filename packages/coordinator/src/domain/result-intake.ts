@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  APPROVAL_TTL_MS, DuckyError, JobResultFileSchema, MAX_REVIEW_NOTES, MAX_SUMMARY,
-  RESULT_MAX_BYTES, canonicalJson, isRepoRelativePath, type JobResultFile,
+  APPROVAL_TTL_MS, DEPENDENCY_DEFAULT_CHECK_INTERVAL_MS, DEPENDENCY_DEFAULT_MAX_CHECKS,
+  DEPENDENCY_DEFAULT_WAIT_MS, DEPENDENCY_DESCRIPTION_MAX, DEPENDENCY_EXTERNAL_KEY_MAX,
+  DEPENDENCY_MAX_CHECKS, DEPENDENCY_MAX_WAIT_MS, DEPENDENCY_MIN_CHECK_INTERVAL_MS,
+  DuckyError, JobResultFileSchema, MAX_REVIEW_NOTES, MAX_SUMMARY,
+  RESULT_MAX_BYTES, canonicalJson, isRepoRelativePath,
+  type DependencyRequest, type JobResultFile,
 } from '@ducky/contracts';
 import { redact } from '@ducky/adapters';
 import { withTransaction, type Store, type JobRow } from '@ducky/persistence';
@@ -9,7 +13,7 @@ import { withTransaction, type Store, type JobRow } from '@ducky/persistence';
 export type IntakeVerdict =
   | {
       kind: 'accepted';
-      state: 'needs_approval' | 'needs_owner_input' | 'completed' | 'failed';
+      state: 'needs_approval' | 'needs_owner_input' | 'waiting_on_dependency' | 'completed' | 'failed';
       duplicate: false;
     }
   | { kind: 'duplicate'; state: string; duplicate: true }
@@ -50,7 +54,55 @@ export function sanitizeResult(result: JobResultFile): JobResultFile {
       };
     case 'failed':
       return { ...base, verdict: 'failed', proposedActions: [] };
+    case 'waiting_on_dependency':
+      return {
+        ...base,
+        verdict: 'waiting_on_dependency',
+        dependency: sanitizeDependency(result.dependency),
+        proposedActions: [],
+      };
   }
+}
+
+/**
+ * The executor PROPOSES a schedule; the coordinator DECIDES one.
+ *
+ * Every numeric field is clamped to the configured ceiling and every string is
+ * redacted, because this record is what holds a repository reservation open.
+ * An executor asking to be checked once a second for a year gets the floor and
+ * the ceiling instead, and an absent field gets a conservative default rather
+ * than "forever".
+ */
+export function sanitizeDependency(d: DependencyRequest): DependencyRequest {
+  const seconds = (ms: number): number => Math.floor(ms / 1000);
+  const clampRange = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
+
+  const out: {
+    type: DependencyRequest['type'];
+    description: string;
+    externalKey?: string;
+    nextCheckInSeconds: number;
+    maxChecks: number;
+    deadlineInSeconds: number;
+  } = {
+    type: d.type,
+    description: clamp(redact(d.description), DEPENDENCY_DESCRIPTION_MAX),
+    nextCheckInSeconds: clampRange(
+      d.nextCheckInSeconds ?? seconds(DEPENDENCY_DEFAULT_CHECK_INTERVAL_MS),
+      seconds(DEPENDENCY_MIN_CHECK_INTERVAL_MS),
+      seconds(DEPENDENCY_MAX_WAIT_MS),
+    ),
+    maxChecks: clampRange(d.maxChecks ?? DEPENDENCY_DEFAULT_MAX_CHECKS, 1, DEPENDENCY_MAX_CHECKS),
+    deadlineInSeconds: clampRange(
+      d.deadlineInSeconds ?? seconds(DEPENDENCY_DEFAULT_WAIT_MS),
+      seconds(DEPENDENCY_MIN_CHECK_INTERVAL_MS),
+      seconds(DEPENDENCY_MAX_WAIT_MS),
+    ),
+  };
+  if (d.externalKey !== undefined) {
+    out.externalKey = clamp(redact(d.externalKey), DEPENDENCY_EXTERNAL_KEY_MAX);
+  }
+  return out;
 }
 
 /**
@@ -219,9 +271,11 @@ export function intakeResult(deps: IntakeDeps, input: IntakeInput): IntakeVerdic
       ? 'failed'
       : sanitized.verdict === 'needs_owner_input'
         ? 'needs_owner_input'
-        : sanitized.proposedActions.length > 0
-          ? 'needs_approval'
-          : 'completed';
+        : sanitized.verdict === 'waiting_on_dependency'
+          ? 'waiting_on_dependency'
+          : sanitized.proposedActions.length > 0
+            ? 'needs_approval'
+            : 'completed';
 
   withTransaction(store.db, () => {
     store.results.insert({
@@ -241,8 +295,45 @@ export function intakeResult(deps: IntakeDeps, input: IntakeInput): IntakeVerdic
       );
     }
 
+    /**
+     * The dependency record is written in the SAME transaction as the result
+     * and the transition. A job in `waiting_on_dependency` with no dependency
+     * row would be a job nothing will ever resume -- it holds a reservation
+     * and has no cursor -- so the two must not be able to exist apart.
+     */
+    if (sanitized.verdict === 'waiting_on_dependency') {
+      const d = sanitized.dependency;
+      const at = now();
+      const dependencyId = randomUUID();
+      store.dependencies.insert({
+        id: dependencyId,
+        jobId: input.job.id,
+        type: d.type,
+        description: d.description,
+        externalKey: d.externalKey ?? null,
+        nextCheckAt: new Date(at.getTime() + (d.nextCheckInSeconds ?? 0) * 1000).toISOString(),
+        maxChecks: d.maxChecks ?? 1,
+        deadlineAt: new Date(at.getTime() + (d.deadlineInSeconds ?? 0) * 1000).toISOString(),
+        createdAt: at.toISOString(),
+      });
+      store.auditLog.record({
+        event: 'dependency.recorded',
+        actorKind: 'executor',
+        actorRef: input.job.executorId ?? 'unknown',
+        subjectKind: 'dependency',
+        subjectRef: dependencyId,
+        // The TYPE and the budget, not the description: what the job is waiting
+        // for is the owner's content and already lives in job_dependencies.
+        detail: `${d.type}; up to ${d.maxChecks ?? 1} check(s) for job ${input.job.publicId}`,
+      });
+    }
+
     const terminal = target === 'completed' || target === 'failed';
     store.jobs.transition(input.job.id, target, `result_${sanitized.verdict}`, 'system:intake', {
+      // The lease is released even for a dependency wait: nothing is being
+      // written while we wait, so holding a lease would only make the job look
+      // stalled to the expiry sweep. The RESERVATION is retained, which is
+      // what keeps another job off the repository.
       leaseId: null,
       leaseExpiresAt: null,
       ...(terminal ? { finishedAt: now().toISOString() } : {}),

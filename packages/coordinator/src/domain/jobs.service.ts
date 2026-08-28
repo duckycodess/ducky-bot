@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
-  DEFAULT_MAX_ATTEMPTS, DuckyError, EXECUTOR_OFFLINE_AFTER_MS, LEASE_TTL_MS,
+  DEFAULT_MAX_ATTEMPTS, DuckyError, EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
+  canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
-  type JobState, type JobSubmitInput,
+  type JobProgress, type JobState, type JobSubmitInput, type JobWorkPhase,
 } from '@ducky/contracts';
 import { DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX } from '@ducky/contracts';
 import { redact, toSlugKey as herdrSlugKey } from '@ducky/adapters';
@@ -16,6 +17,7 @@ const isWithin = (parent: string, child: string): boolean => {
   const rel = path.relative(path.normalize(parent), path.normalize(child));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 };
+import { AUDIT_OWNER_REF } from '@ducky/contracts';
 import { isoPlus, nowIso, withTransaction, type JobRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { RepoAllowlist } from './allowlist.js';
@@ -34,6 +36,11 @@ export interface JobDetail {
   readonly events: ReturnType<Store['jobs']['events']>;
   readonly approvals: ReturnType<Store['approvals']['forJob']>;
   readonly result: ReturnType<Store['results']['byJobId']>;
+  /**
+   * What this job has waited on, newest last. PRIVATE: the shared projection
+   * has no field that could carry it, and no shared route reaches this method.
+   */
+  readonly dependencies: ReturnType<Store['dependencies']['forJob']>;
 }
 
 export class JobsService {
@@ -95,6 +102,14 @@ export class JobsService {
         this.store.jobs.transition(job.id, state, 'no_executor_online', 'system:submit');
       }
       this.store.jobs.appendEvent(job.id, 'submitted', `Queued for ${repo.slug}.`);
+      this.store.auditLog.record({
+        event: 'job.created',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'job',
+        subjectRef: job.publicId,
+        detail: `repo ${repo.slug}; state ${state}`,
+      });
       return this.store.jobs.byId(job.id)!;
     });
   }
@@ -113,6 +128,7 @@ export class JobsService {
       events: this.store.jobs.events(job.id),
       approvals: this.store.approvals.forJob(job.id),
       result: this.store.results.byJobId(job.id),
+      dependencies: this.store.dependencies.forJob(job.id),
     };
   }
 
@@ -136,6 +152,11 @@ export class JobsService {
       withTransaction(this.store.db, () => {
         this.store.jobs.setCancelRequested(job.id);
         this.store.jobs.appendEvent(job.id, 'cancel_requested', 'Owner requested cancellation.');
+        this.store.auditLog.record({
+          event: 'job.cancel_requested', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
+          subjectKind: 'job', subjectRef: job.publicId,
+          detail: 'running; waiting for the executor to stop',
+        });
       });
       return { state: 'running', note: 'Cancellation requested; waiting for the executor to stop.' };
     }
@@ -145,17 +166,28 @@ export class JobsService {
         ? 'cancelled_with_pending_approvals'
         : job.state === 'needs_owner_input'
           ? 'cancelled_awaiting_owner_input'
-          : 'cancelled_by_owner';
+          : job.state === 'waiting_on_dependency'
+            ? 'cancelled_awaiting_dependency'
+            : 'cancelled_by_owner';
 
     withTransaction(this.store.db, () => {
       if (job.state === 'needs_approval') {
         this.store.approvals.rejectAllPending(job.id, `owner:${actor.discordUserId}`, 'job_cancelled');
       }
+      // A cancelled job must stop being polled for. Closing the dependency in
+      // the SAME transaction is what stops the resolver spending its bounded
+      // budget on work nobody wants -- and what stops it later requeueing a
+      // job the owner already stopped.
+      this.store.dependencies.cancelOpenForJob(job.id, this.now().toISOString());
       this.store.jobs.transition(job.id, 'cancelled', reason, `owner:${actor.discordUserId}`, {
         finishedAt: this.now().toISOString(),
         cancelRequested: true,
       });
       this.store.jobs.appendEvent(job.id, reason, 'Cancelled by the owner. Workspace retained.');
+      this.store.auditLog.record({
+        event: 'job.cancelled', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'job', subjectRef: job.publicId, detail: reason,
+      });
       this.releaseUnlessOrphan(job.repoSlug);
     });
     return { state: 'cancelled', note: 'Cancelled. Any workspace was retained for inspection.' };
@@ -323,8 +355,16 @@ export class JobsService {
         leaseExpiresAt,
         executorId,
         startedAt: job.startedAt ?? this.now().toISOString(),
+        // A freshly claimed job is preparing. Setting it here rather than
+        // waiting for the first progress report means the owner never sees a
+        // running job with no phase at all.
+        workPhase: INITIAL_WORK_PHASE,
       });
       this.store.jobs.appendEvent(job.id, 'claimed', 'Picked up by the executor.');
+      this.store.auditLog.record({
+        event: 'job.claimed', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, detail: `repo ${job.repoSlug}`,
+      });
 
       const repo = this.allowlist.resolve(job.repoSlug);
       const recorded = this.store.herdrWorkspaces.openForJob(job.id);
@@ -370,14 +410,52 @@ export class JobsService {
     });
   }
 
+  /**
+   * Lease renewal, proof of life, and -- optionally -- a move through the
+   * engineering loop.
+   *
+   * The phase is applied INSIDE the same transaction as the lease renewal, so
+   * a job can never end up with a refreshed lease and a stale phase or the
+   * reverse. It is validated three ways before it lands:
+   *
+   * - the value is an allowlisted enum, rejected at the HTTP schema before it
+   *   ever reaches here;
+   * - the edge must be permitted by the work-phase machine, so a report cannot
+   *   walk backwards from `implementing` to `planning`; and
+   * - the job must still be lease-bearing, which the lease check above has
+   *   already established.
+   *
+   * Reporting the SAME phase again is a no-op rather than an error: a retried
+   * heartbeat is ordinary traffic. An invalid EDGE is refused with a clear
+   * error, because that is a bug in the executor rather than a retry.
+   */
   jobHeartbeat(
     executorId: string,
     jobId: string,
     leaseId: string,
-    progress?: { kind: string; message: string },
-  ): { cancelRequested: boolean; leaseExpiresAt: string } {
+    progress?: JobProgress,
+  ): { cancelRequested: boolean; leaseExpiresAt: string; workPhase: JobWorkPhase | null } {
     const job = this.leasedJob(executorId, jobId, leaseId);
     const leaseExpiresAt = isoPlus(LEASE_TTL_MS, this.now());
+    let phase = job.workPhase;
+
+    // Validated BEFORE the transaction opens, and the refusal is recorded
+    // outside it. Doing this inside would roll the audit row back along with
+    // the rejected write, which would lose exactly the record worth keeping:
+    // a refusal is a fact about an executor's behaviour, not a failed write to
+    // be forgotten.
+    if (progress?.phase !== undefined && !canTransitionWorkPhase(job.workPhase, progress.phase)) {
+      this.store.auditLog.record({
+        event: 'job.phase_changed', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, outcome: 'refused',
+        detail: `refused ${job.workPhase ?? 'none'} -> ${progress.phase}`,
+      });
+      throw new DuckyError(
+        'invalid_transition',
+        `A job cannot move from ${job.workPhase ?? 'no phase'} to ${progress.phase}.`,
+      );
+    }
+
     withTransaction(this.store.db, () => {
       // A job heartbeat IS proof of life. Renewing only the lease left a
       // long-running job's executor looking offline after the liveness window,
@@ -386,11 +464,30 @@ export class JobsService {
       this.store.executors.touchExecutor(executorId, null);
       this.store.jobs.touchLease(job.id, leaseExpiresAt);
       this.store.jobs.refreshReservationForState(job.repoSlug, job.id, job.state);
+
+      if (progress?.phase !== undefined) {
+        const from = job.workPhase;
+        // Re-asserted inside the transaction by `setWorkPhase` itself, so the
+        // pre-check above is a convenience for the audit record rather than
+        // the only guard.
+        if (this.store.jobs.setWorkPhase(job.id, progress.phase)) phase = progress.phase;
+        if (from !== phase) {
+          this.store.jobs.appendEvent(
+            job.id, 'phase_changed', `${from ?? 'none'} -> ${phase}`,
+          );
+          this.store.auditLog.record({
+            event: 'job.phase_changed', actorKind: 'executor', actorRef: executorId,
+            subjectKind: 'job', subjectRef: job.publicId,
+            detail: `${from ?? 'none'} -> ${phase}`,
+          });
+        }
+      }
+
       if (progress) {
         this.store.jobs.appendEvent(job.id, progress.kind, redact(progress.message).slice(0, 400));
       }
     });
-    return { cancelRequested: job.cancelRequested, leaseExpiresAt };
+    return { cancelRequested: job.cancelRequested, leaseExpiresAt, workPhase: phase };
   }
 
   /**
@@ -461,6 +558,10 @@ export class JobsService {
         leaseExpiresAt: null,
       });
       this.store.jobs.appendEvent(job.id, 'cancelled', 'Executor confirmed termination.');
+      this.store.auditLog.record({
+        event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, detail: 'termination confirmed',
+      });
       this.releaseUnlessOrphan(job.repoSlug);
     });
     return { state: 'cancelled' };
@@ -500,6 +601,11 @@ export class JobsService {
         reason,
         redact(extra.detail ?? reason.replace(/_/g, ' ')).slice(0, 400),
       );
+      this.store.auditLog.record({
+        event: 'job.failed', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, outcome: 'failed',
+        detail: `${reason}${orphan ? '; repository stays reserved' : ''}`,
+      });
       if (orphan) {
         this.store.jobs.markReservationOrphan(job.repoSlug);
         this.store.jobs.appendEvent(

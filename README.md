@@ -19,6 +19,33 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
                                                             → owner approval → (deferred)
 ```
 
+## Job lifecycle
+
+A coding job now reports where it actually is. `preparing` → `planning` →
+`implementing` → `reviewing` ⇄ `fixing` ⇄ `verifying`, driven by the executor's
+own progress reports through an allowlisted, exhaustively validated phase
+machine, and shown privately as "Working — reviewing". `running` remains the
+only lease-bearing state, so every single-writer guarantee is unchanged.
+
+A job that cannot continue until something *outside* Ducky happens — a CI run,
+a package publish, someone merging another PR — parks in
+`waiting_on_dependency`: **the lease is released, the repository reservation is
+kept**, and a bounded resolver checks on a schedule with two independent
+ceilings. Nothing polls forever.
+
+**No real dependency checker ships.** The one that does answers `pending` for
+everything, because nothing on this host can observe a CI run. So a wait runs
+out its budget and comes back to you — "I held your repository, I could not
+confirm this, over to you" — rather than resuming on a check that did not
+happen. See
+[`docs/decisions/0016`](docs/decisions/0016-work-phases-dependency-waits-and-audit.md).
+
+Alongside it: a central command policy classifying every `gh`, `git` and
+`herdr` operation (nothing above a contained local mutation is permitted in
+this phase, and an unclassified command is refused), and a structured audit log
+that is a record and never an authority — no secret, no raw auth material, no
+terminal output, and the owner recorded as a role rather than a Discord id.
+
 ## Daily assistant (milestone 2B)
 
 Beside the development controller, Ducky keeps the owner's day:
@@ -77,7 +104,8 @@ so lock the channel down first. See
   preview. Text and CSV work end to end.
 - **Approved actions are recorded, never executed.** Commits, pushes, pull
   requests, deployments and cloud mutations all stop at the approval gate.
-  There is no GitHub writer anywhere in the codebase.
+  There is no GitHub writer anywhere in the codebase, and the command policy
+  classifies every external mutation as not performed in this phase.
 - **Conversation replies come from a marked mock.** OpenClaw is not installed
   here, so its API could not be verified. Every mock reply is prefixed
   `[mock]`; the real HTTP provider throws rather than guessing an API.

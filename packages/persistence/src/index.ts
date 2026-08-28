@@ -14,6 +14,8 @@ export * from './repositories/audit.repo.js';
 export * from './repositories/notifications.repo.js';
 export * from './repositories/tasks.repo.js';
 export * from './repositories/reminders.repo.js';
+export * from './repositories/dependencies.repo.js';
+export * from './repositories/audit-log.repo.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
@@ -28,6 +30,8 @@ import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
 import { NotificationsRepo } from './repositories/notifications.repo.js';
 import { TasksRepo } from './repositories/tasks.repo.js';
 import { RemindersRepo } from './repositories/reminders.repo.js';
+import { DependenciesRepo } from './repositories/dependencies.repo.js';
+import { AuditLogRepo } from './repositories/audit-log.repo.js';
 
 export interface Store {
   readonly db: Db;
@@ -43,6 +47,13 @@ export interface Store {
   readonly notifications: NotificationsRepo;
   readonly tasks: TasksRepo;
   readonly reminders: RemindersRepo;
+  readonly dependencies: DependenciesRepo;
+  /**
+   * The general structured audit log. Distinct from `audit`, which is the
+   * Phase 1 authorized-user observation trail; both are records, neither is
+   * ever consulted for a decision.
+   */
+  readonly auditLog: AuditLogRepo;
 }
 
 export function createStore(db: Db): Store {
@@ -60,5 +71,7 @@ export function createStore(db: Db): Store {
     notifications: new NotificationsRepo(db),
     tasks: new TasksRepo(db),
     reminders: new RemindersRepo(db),
+    dependencies: new DependenciesRepo(db),
+    auditLog: new AuditLogRepo(db),
   };
 }

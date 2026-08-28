@@ -1,5 +1,8 @@
-import type { ApprovalRow, CaptureRow, JobRow } from '@ducky/persistence';
-import { ownerNextStep, ownerStateLabel, type RepoStatusSummary } from '@ducky/contracts';
+import type { ApprovalRow, CaptureRow, DependencyRow, JobRow } from '@ducky/persistence';
+import {
+  DEPENDENCY_STATE_LABEL, DEPENDENCY_TYPE_LABEL,
+  ownerDetailedLabel, ownerNextStep, ownerStateLabel, type RepoStatusSummary,
+} from '@ducky/contracts';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
 import type { PendingDraft } from '../domain/pending-schedules.js';
 
@@ -50,26 +53,55 @@ export function jobsList(rows: readonly JobRow[]): OutboundMessage {
   const embed: OutboundEmbed = {
     title: 'Recent jobs',
     fields: rows.map((j) => ({
-      name: `${j.publicId} · ${ownerStateLabel(j.state)}`,
+      // The work phase refines the label for a running job and is absent
+      // everywhere else, so a paused or finished job reads exactly as it did
+      // in Phase 1.
+      name: `${j.publicId} · ${ownerDetailedLabel(j.state, j.workPhase)}`,
       value: `${j.repoSlug} — ${short(j.task, 120)}\n-# ${ownerNextStep(j.state)}`,
     })),
   };
   return { embeds: [embed], ephemeral: true };
 }
 
+/**
+ * The owner's private job view.
+ *
+ * `dependencies` is PRIVATE, like everything else here: it says what the work
+ * is blocked on and how many times we have looked, which is detail about the
+ * job. The shared projection has no field that could carry it and no shared
+ * route reaches this presenter.
+ */
 export function jobDetail(
   job: JobRow,
   events: { kind: string; message: string }[],
   approvals: readonly ApprovalRow[],
   summary: string | null,
   rows: OutboundRow[],
+  dependencies: readonly DependencyRow[] = [],
 ): OutboundMessage {
   const fields: OutboundEmbedField[] = [
     { name: 'Repository', value: job.repoSlug, inline: true },
-    { name: 'State', value: ownerStateLabel(job.state), inline: true },
+    { name: 'State', value: ownerDetailedLabel(job.state, job.workPhase), inline: true },
     { name: 'What happens next', value: ownerNextStep(job.state) },
     { name: 'Task', value: short(job.task, 500) },
   ];
+  const waiting = dependencies.find((d) => d.state === 'waiting');
+  if (waiting) {
+    fields.push({
+      name: 'Waiting on',
+      value:
+        `${DEPENDENCY_TYPE_LABEL[waiting.type]} — ${short(waiting.description, 200)}\n` +
+        `-# checked ${waiting.checksMade} of ${waiting.maxChecks} times` +
+        (waiting.nextCheckAt ? `, next check ${waiting.nextCheckAt}` : '') +
+        (waiting.lastDetail ? `\n-# ${short(waiting.lastDetail, 150)}` : ''),
+    });
+  } else if (dependencies.length > 0) {
+    const last = dependencies[dependencies.length - 1]!;
+    fields.push({
+      name: 'Last dependency',
+      value: `${DEPENDENCY_STATE_LABEL[last.state]} — ${short(last.description, 200)}`,
+    });
+  }
   if (summary) fields.push({ name: 'Result', value: short(summary, 900) });
   if (job.retainedWorkspaceId) {
     fields.push({ name: 'Retained workspace', value: job.retainedWorkspaceId });
@@ -119,6 +151,8 @@ export interface ProviderStatus {
   readonly sharedChannels: string;
   /** The configured owner timezone every assistant readback is rendered in. */
   readonly ownerTimezone: string;
+  /** Whether anything can actually confirm a dependency, and what happens if not. */
+  readonly dependencyChecker: string;
 }
 
 /** Always visible, so the owner is never guessing which providers are real. */
@@ -137,6 +171,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Approved actions', value: p.actions, inline: true },
           { name: 'Executors', value: p.executors, inline: true },
           { name: 'Your timezone', value: p.ownerTimezone, inline: true },
+          { name: 'Dependency checks', value: p.dependencyChecker },
           { name: 'Shared visibility', value: p.sharedChannels },
         ],
       },

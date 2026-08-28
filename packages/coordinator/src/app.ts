@@ -2,8 +2,9 @@ import {
   DeterministicScheduleExtractor, FileCredentialStore, GhCliReader, HerdrCli,
   MemoryCredentialStore, MockConversationProvider, HttpOpenClawProvider,
   assertPrivateGatewayUrl,
-  type ConversationProvider, type ExecutorCredentialStore, type GitHubReader,
-  type ScheduleExtractionProvider,
+  UnavailableDependencyChecker,
+  type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
+  type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
 import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
@@ -32,6 +33,7 @@ import { TasksService } from './domain/tasks.service.js';
 import { RemindersService } from './domain/reminders.service.js';
 import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
+import { DependencyResolver } from './domain/dependency-resolver.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
@@ -65,6 +67,13 @@ export interface AppOverrides {
    * it, so the global `fetch` is what actually runs.
    */
   readonly conversationFetch?: typeof fetch;
+  /**
+   * Answers "is this dependency ready yet?". Omitted in production, which
+   * gets `UnavailableDependencyChecker` -- a checker that only ever answers
+   * `pending`, so no job is ever resumed on the strength of a check that did
+   * not happen.
+   */
+  readonly dependencyChecker?: DependencyChecker;
 }
 
 export interface App {
@@ -87,6 +96,7 @@ export interface App {
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
+  readonly dependencies: DependencyResolver;
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
@@ -151,6 +161,12 @@ export function createApp(
   const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
 
+  // No real checker ships. The default answers `pending` for everything, so a
+  // dependency wait runs out its bounded budget and goes to the owner rather
+  // than being declared ready by something that never looked.
+  const dependencyChecker = overrides.dependencyChecker ?? new UnavailableDependencyChecker();
+  const dependencies = new DependencyResolver({ store, checker: dependencyChecker });
+
   // Opt-in, profile-scoped, and empty by default: with nothing configured the
   // shared surface does not exist at all.
   const sharedPolicy = new SharedChannelPolicy(resolveSharedChannelIds(env));
@@ -197,6 +213,9 @@ export function createApp(
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
     })`,
     ownerTimezone: clock.timeZone,
+    dependencyChecker: dependencies.checkerVerified
+      ? `${dependencies.checkerName} (verified)`
+      : `${dependencies.checkerName} — dependency waits end at your desk, never auto-resumed`,
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',
@@ -237,7 +256,7 @@ export function createApp(
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
     approvals, github, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
-    clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments,
+    clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments, dependencies,
     close: () => store.db.close(),
   };
 }

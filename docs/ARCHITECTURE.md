@@ -218,6 +218,7 @@ erDiagram
   jobs ||--o{ job_owner_inputs : "one per round"
   jobs ||--o{ job_results : "one per executor turn"
   jobs ||--o{ approvals : "one per proposed action"
+  jobs ||--o{ job_dependencies : "at most one open"
   executors ||--o{ executor_credentials : "one per key id"
   captures }o--|| owner : ""
   schedules }o--|| owner : "only after confirmation"
@@ -252,6 +253,81 @@ tick advance a recurrence exactly once. Recurrence is bounded by construction:
 `interval_minutes` with `max_occurrences`, enforced by CHECK constraints, and
 there is no cron column
 (see [decisions/0013](decisions/0013-bounded-reminder-recurrence-and-catch-up.md)).
+
+## Work phases and dependency waits
+
+`jobs.state` says who owns a job and what may touch it. `jobs.work_phase` --
+`preparing`, `planning`, `implementing`, `reviewing`, `fixing`, `verifying` --
+says what the agent is doing. They are **orthogonal on purpose**: every
+single-writer guarantee (the partial unique index, the lease-expiry sweep, the
+supervised cancel branch, the claim predicate) is keyed on
+`state = 'running'`, and `running` is still the ONLY lease-bearing state.
+Splitting it into six would have meant rewriting all of them
+(see [decisions/0016](decisions/0016-work-phases-dependency-waits-and-audit.md)).
+
+A phase is set on claim, moved by an allowlisted `phase` on the executor's job
+heartbeat, validated against an exhaustive phase machine, idempotent for a
+repeated report, and **cleared** whenever the job stops being lease-bearing --
+so a paused job can never render a stale phase.
+
+`waiting_on_dependency` IS a real state, because it has behaviour nothing else
+has: **the lease is released and the repository reservation is retained.**
+Nothing is being written, so a lease would only look stalled to the sweep; but
+the job has already worked in that repository and expects to resume, so nothing
+else may start there.
+
+```mermaid
+stateDiagram-v2
+  running --> waiting_on_dependency: result waiting_on_dependency
+  waiting_on_dependency --> queued: checker says ready
+  waiting_on_dependency --> failed: checker says it will not happen
+  waiting_on_dependency --> needs_owner_input: bounded check budget spent
+  waiting_on_dependency --> cancelled: owner cancels
+```
+
+`job_dependencies` is the schedule: a closed type enum, a `next_check_at`
+cursor, and TWO independent ceilings (`max_checks` and `deadline_at`). The
+schema requires a waiting row to have a cursor and a resolved one not to, so
+"is anything still being polled?" is a fact of the row. The dependency, the
+result snapshot and the transition are one transaction.
+
+`DependencyResolver` rides the **existing coordinator interval** -- no second
+scheduler and no per-dependency timer -- with a bounded batch, a
+compare-and-set on the check count, bounded exponential backoff and a
+re-entrancy guard. A checker that throws still spends a check, so a broken one
+cannot buy unlimited retries.
+
+**The shipped checker never reports ready.** `UnavailableDependencyChecker`
+answers `pending` for everything, because nothing on this host can observe a CI
+run or a registry. A wait therefore expires to `needs_owner_input` rather than
+being resumed on a check that did not happen, and a `ready` from an unverified
+checker is downgraded rather than believed.
+
+## Command policy
+
+`COMMAND_POLICY` classifies every `gh`, `git` and `herdr` operation as
+`read_only`, `local_mutation`, `external_mutation` or `high_risk`. The ceiling
+in this phase is `local_mutation`, asserted by a test over the whole table.
+
+Two independent gates: the frozen argv table decides what can be
+*constructed*, `checkCommandAllowed` decides whether what was constructed may
+*run*. An unclassified command is refused rather than allowed by default, and
+`FORBIDDEN_COMMAND_VERBS` (`push`, `reset`, `clean`, `rm`, `exec`, `auth`, …)
+is checked first and independently of the table.
+
+## The audit log
+
+`audit_log` is a structured RECORD and never an authority. It is written from
+`JobsRepo.transition` -- the single point of state change, so coverage is
+structural -- plus creation, claim, phase change, cancellation, failure,
+approval decisions, executor connect/offline and every dependency event.
+
+Nothing reads it to decide anything, asserted by a test. It holds no secret, no
+raw authentication material, no terminal output and no environment; the owner
+is recorded as the role `owner` rather than a Discord id, because there is
+exactly one and the id would be unnecessary personal data in a long-lived
+table. Details are redacted and clamped, recording never throws, and the
+reconciler prunes past the retention window so the table stays bounded.
 
 ## The assistant tick
 

@@ -13,3 +13,6 @@ export * from './profile.js';
 export * from './job-visibility.js';
 export * from './time.js';
 export * from './assistant.js';
+export * from './dependency.js';
+export * from './command-policy.js';
+export * from './audit.js';

@@ -1,5 +1,6 @@
 import {
-  EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS, isTerminal,
+  AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
+  isTerminal,
 } from '@ducky/contracts';
 import { isoPlus, withTransaction, type Store } from '@ducky/persistence';
 import type { ApprovalsService } from './approvals.service.js';
@@ -12,6 +13,8 @@ export interface ReconcileReport {
   noncesPruned: number;
   draftsSwept: number;
   executorsOffline: number;
+  /** Audit rows past the retention window, removed so the table stays bounded. */
+  auditPruned: number;
 }
 
 export interface ReconcilerDeps {
@@ -47,6 +50,7 @@ export class Reconciler {
       noncesPruned: this.store.executors.pruneNonces(this.now().toISOString()),
       draftsSwept: this.pending.sweep(),
       executorsOffline: this.markOfflineExecutors(),
+      auditPruned: this.pruneAudit(),
     };
   }
 
@@ -151,7 +155,22 @@ export class Reconciler {
       }
 
       withTransaction(this.store.db, () => {
-        if (job.state === 'needs_owner_input') {
+        if (job.state === 'waiting_on_dependency') {
+          // The reservation outlives the longest permitted dependency wait, so
+          // reaching this means the wait itself somehow outlived its own
+          // ceilings. Fail rather than extend: a job that has held a
+          // repository longer than any bound allows is a bug, and quietly
+          // renewing the reservation would hide it.
+          this.store.dependencies.cancelOpenForJob(job.id, this.now().toISOString());
+          this.store.jobs.transition(job.id, 'failed', 'dependency_wait_expired', 'system:reconciler', {
+            finishedAt: this.now().toISOString(),
+          });
+          this.store.jobs.appendEvent(
+            job.id,
+            'dependency_wait_expired',
+            'The repository reservation outlived the dependency wait. The job stopped safely.',
+          );
+        } else if (job.state === 'needs_owner_input') {
           this.store.jobs.transition(job.id, 'failed', 'owner_input_expired', 'system:reconciler', {
             finishedAt: this.now().toISOString(),
           });
@@ -218,7 +237,30 @@ export class Reconciler {
 
   markOfflineExecutors(): number {
     const cutoff = isoPlus(-EXECUTOR_OFFLINE_AFTER_MS, this.now());
-    return this.store.executors.offlineExecutors(cutoff).length;
+    const offline = this.store.executors.offlineExecutors(cutoff);
+    for (const e of offline) {
+      this.store.auditLog.record({
+        event: 'executor.offline', actorKind: 'reconciler', actorRef: 'reconciler',
+        subjectKind: 'executor', subjectRef: e.id, outcome: 'ok',
+        detail: `no heartbeat since ${e.lastSeenAt ?? 'never'}`,
+      });
+    }
+    return offline.length;
+  }
+
+  /**
+   * Keeps the audit table bounded.
+   *
+   * It is the one structure here that otherwise grows for as long as the
+   * system runs. A window rather than an archive is the honest trade for a
+   * personal assistant on a workstation, and the batch cap means a long-idle
+   * instance drains over several passes instead of one enormous delete.
+   */
+  pruneAudit(): number {
+    return this.store.auditLog.pruneOlderThan(
+      isoPlus(-AUDIT_RETENTION_MS, this.now()),
+      AUDIT_PRUNE_BATCH,
+    );
   }
 
   /** Ducky-owned workspaces whose repo is no longer reserved may be reaped. */

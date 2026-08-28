@@ -1,4 +1,4 @@
-import { DuckyError } from '@ducky/contracts';
+import { AUDIT_OWNER_REF, DuckyError } from '@ducky/contracts';
 import { withTransaction, type ApprovalRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { ActionPerformer } from './action-performer.js';
@@ -85,6 +85,20 @@ export class ApprovalsService {
         decision === 'approved' ? 'owner_approved' : 'owner_rejected',
       );
       if (!changed) throw new DuckyError('invalid_input', 'That action was already decided.');
+
+      // The action KIND and the decision, and nothing else. The action's
+      // details -- a commit message, a PR body, a deploy target -- are the
+      // owner's content and belong in the approvals table, not duplicated into
+      // a long-lived audit record.
+      this.store.auditLog.record({
+        event: 'approval.decided',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'approval',
+        subjectRef: approval.id,
+        outcome: 'ok',
+        detail: `${decision} ${approval.actionKind} for job ${job.publicId} (not executed in this phase)`,
+      });
 
       return this.settleJobWithin(approval.jobId);
     });

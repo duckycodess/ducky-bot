@@ -1,6 +1,6 @@
 import { readdirSync, realpathSync, statSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { DuckyError, GIT_TIMEOUT_MS, type JobPayload } from '@ducky/contracts';
+import { DuckyError, GIT_TIMEOUT_MS, checkCommandAllowed, type JobPayload } from '@ducky/contracts';
 import { runArgv } from '@ducky/adapters';
 
 export interface ResolvedWorkspace {
@@ -14,7 +14,18 @@ const GIT_STATE_FILES = [
   'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'BISECT_LOG', 'rebase-apply', 'rebase-merge',
 ];
 
+/**
+ * Every git invocation in the executor.
+ *
+ * The central command policy is consulted before the subprocess starts, so a
+ * read-only workspace inspection cannot quietly grow a `reset`, a `clean` or a
+ * `push`: those verbs are refused outright, and anything not classified at all
+ * is refused too. `runArgv` already forbids a shell string; this forbids the
+ * argv itself.
+ */
 async function git(cwd: string, args: readonly string[]) {
+  const refusal = checkCommandAllowed('git', args);
+  if (refusal) throw new DuckyError('not_enabled_in_phase1', refusal.detail);
   return runArgv('git', args, { cwd, timeoutMs: GIT_TIMEOUT_MS });
 }
 

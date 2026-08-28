@@ -1,0 +1,204 @@
+/**
+ * One place that says what a command DOES, so nothing has to be inferred from
+ * an argv table at a call site.
+ *
+ * Phase 1 already had the important property -- a frozen argv table per
+ * integration and no shell anywhere -- but "is this table safe?" was a fact
+ * you established by reading it. This module makes it a fact you can assert:
+ * every command surface classifies its operations here, and a test can then
+ * check that no surface reachable today is anything but read-only or a
+ * contained local mutation.
+ */
+
+export const COMMAND_CLASSES = [
+  /** Reads state and changes nothing, anywhere. */
+  'read_only',
+  /**
+   * Changes something on THIS host, inside a path the operator already
+   * allowlisted. A worktree checkout, a local branch.
+   */
+  'local_mutation',
+  /**
+   * Changes something outside this host, or something other people can see:
+   * a push, a pull request, a deployment, a cloud resource.
+   */
+  'external_mutation',
+  /**
+   * Destructive, hard to reverse, or capable of destroying work that was never
+   * committed. Never reachable, in any phase, from any table here.
+   */
+  'high_risk',
+] as const;
+
+export type CommandClass = (typeof COMMAND_CLASSES)[number];
+
+export const COMMAND_CLASS_RANK = {
+  read_only: 0,
+  local_mutation: 1,
+  external_mutation: 2,
+  high_risk: 3,
+} as const satisfies Record<CommandClass, number>;
+
+/**
+ * The highest class any command surface may be classified as in this phase.
+ *
+ * External mutation stops at the approval gate and its performer is
+ * deliberately not implemented (ADR 0006), so nothing in the running system
+ * may sit above a local mutation. A test asserts every classified operation
+ * against this.
+ */
+export const MAX_ALLOWED_COMMAND_CLASS: CommandClass = 'local_mutation';
+
+export const exceedsAllowedClass = (c: CommandClass): boolean =>
+  COMMAND_CLASS_RANK[c] > COMMAND_CLASS_RANK[MAX_ALLOWED_COMMAND_CLASS];
+
+export interface CommandPolicyEntry {
+  /** The binary, as invoked. Never a shell string. */
+  readonly bin: string;
+  /** The subcommand path that identifies the operation, e.g. `['pr','list']`. */
+  readonly verb: readonly string[];
+  readonly cls: CommandClass;
+  /** Why it is classified this way. Read by a human, not by code. */
+  readonly note: string;
+}
+
+/**
+ * Verbs that are never allowed to appear in ANY classified argv, whatever the
+ * surrounding table claims.
+ *
+ * This is a belt-and-braces list, not the primary control -- the primary
+ * control is that argv tables are frozen and take no caller input. It exists
+ * so that adding a plausible-looking entry to a table trips a test rather than
+ * shipping.
+ */
+export const FORBIDDEN_COMMAND_VERBS = [
+  // Destroys uncommitted work or rewrites history.
+  'reset', 'clean', 'prune', 'gc', 'filter-branch', 'filter-repo',
+  // Publishes, or changes something other people see.
+  'push', 'publish', 'deploy', 'release',
+  // Removes things.
+  'rm', 'destroy', 'purge', 'drop',
+  // Arbitrary execution or credential handling.
+  'exec', 'eval', 'sh', 'bash', 'auth', 'login', 'token', 'credential',
+] as const;
+
+/** A `--flag` is not a verb; only bare words are checked. */
+const isVerbWord = (s: string): boolean => /^[a-z][a-z0-9-]*$/.test(s);
+
+export function findForbiddenVerb(argv: readonly string[]): string | undefined {
+  return argv.find(
+    (a) => isVerbWord(a) && (FORBIDDEN_COMMAND_VERBS as readonly string[]).includes(a),
+  );
+}
+
+/**
+ * Every command surface this system can reach, classified.
+ *
+ * `verb` is the identifying prefix, not the whole argv: the rest is repository
+ * references and `--json` selectors that the individual tables already
+ * constrain. A surface that is not listed here is not reachable, because there
+ * is no dynamic command construction anywhere -- `runArgv` refuses a shell
+ * string and every caller passes a frozen table entry.
+ */
+export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
+  // -- gh, read-only inspection (packages/adapters/src/github/gh-cli.ts) -----
+  { bin: 'gh', verb: ['repo', 'view'], cls: 'read_only', note: 'Repository metadata only.' },
+  { bin: 'gh', verb: ['pr', 'list'], cls: 'read_only', note: 'Open pull requests.' },
+  { bin: 'gh', verb: ['pr', 'view'], cls: 'read_only', note: 'One pull request.' },
+  { bin: 'gh', verb: ['pr', 'checks'], cls: 'read_only', note: 'Check results for one PR.' },
+
+  // -- git, executor workspace resolution (packages/executor/src/workspace.ts)
+  //
+  // Every entry is READ-ONLY, and that is the whole point: workspace
+  // resolution decides whether a job may proceed and never itself changes the
+  // repository. The verbs that would -- reset, clean, push -- are on
+  // FORBIDDEN_COMMAND_VERBS and could not be added here without tripping it.
+  { bin: 'git', verb: ['rev-parse'], cls: 'read_only', note: 'Resolves a ref; writes nothing.' },
+  { bin: 'git', verb: ['symbolic-ref'], cls: 'read_only', note: 'Reads a symbolic ref; --quiet, no write form used.' },
+  { bin: 'git', verb: ['status'], cls: 'read_only', note: 'Working tree state.' },
+  { bin: 'git', verb: ['stash', 'list'], cls: 'read_only', note: 'Lists stashes; never applies, pops or drops one.' },
+  { bin: 'git', verb: ['worktree', 'list'], cls: 'read_only', note: 'Lists worktrees; never adds or removes one.' },
+
+  // -- herdr, orchestration (packages/adapters/src/herdr/herdr-cli.ts) -------
+  { bin: 'herdr', verb: ['agent', 'list'], cls: 'read_only', note: 'Agent inventory.' },
+  { bin: 'herdr', verb: ['workspace', 'list'], cls: 'read_only', note: 'Workspace inventory.' },
+  {
+    bin: 'herdr', verb: ['workspace', 'create'], cls: 'local_mutation',
+    note: 'Creates a Ducky-labelled workspace on this host only.',
+  },
+  {
+    bin: 'herdr', verb: ['workspace', 'report-metadata'], cls: 'local_mutation',
+    note: 'Annotates a workspace Ducky already owns.',
+  },
+  {
+    bin: 'herdr', verb: ['worktree', 'create'], cls: 'local_mutation',
+    note: 'Checks out a linked worktree under a Herdr-managed path.',
+  },
+  {
+    bin: 'herdr', verb: ['pane', 'split'], cls: 'local_mutation',
+    note: 'Opens a pane in a Ducky-owned workspace.',
+  },
+  {
+    bin: 'herdr', verb: ['agent', 'start'], cls: 'local_mutation',
+    note: 'Starts a Ducky-owned agent. Unverified on this host; the orchestrator reports experimental.',
+  },
+  {
+    bin: 'herdr', verb: ['agent', 'prompt'], cls: 'local_mutation',
+    note: 'Sends a prompt to a Ducky-owned agent. Unverified on this host.',
+  },
+]);
+
+const matchesVerb = (argv: readonly string[], verb: readonly string[]): boolean =>
+  verb.every((v, i) => argv[i] === v);
+
+/**
+ * Classifies an argv against the policy, longest match first.
+ *
+ * Returns undefined for anything unlisted, and an unlisted command is a
+ * REFUSAL rather than a default: `assertCommandAllowed` will not let one
+ * through, so a new surface has to be classified deliberately.
+ */
+export function classifyCommand(
+  bin: string,
+  argv: readonly string[],
+): CommandPolicyEntry | undefined {
+  return [...COMMAND_POLICY]
+    .filter((e) => e.bin === bin && matchesVerb(argv, e.verb))
+    .sort((a, b) => b.verb.length - a.verb.length)[0];
+}
+
+export interface CommandRefusal {
+  readonly reason: 'unclassified' | 'forbidden_verb' | 'class_not_allowed';
+  readonly detail: string;
+  readonly cls?: CommandClass;
+}
+
+/**
+ * The single decision point. Returns undefined when the command is allowed,
+ * or a structured refusal.
+ *
+ * Callers use this in addition to their own frozen argv table, not instead of
+ * it: the table decides what can be constructed at all, and this decides
+ * whether what was constructed is a thing this phase permits to run.
+ */
+export function checkCommandAllowed(
+  bin: string,
+  argv: readonly string[],
+): CommandRefusal | undefined {
+  const forbidden = findForbiddenVerb(argv);
+  if (forbidden !== undefined) {
+    return { reason: 'forbidden_verb', detail: `\`${forbidden}\` is never permitted.` };
+  }
+  const entry = classifyCommand(bin, argv);
+  if (!entry) {
+    return { reason: 'unclassified', detail: `\`${bin}\` ${argv[0] ?? ''} is not a classified command.` };
+  }
+  if (exceedsAllowedClass(entry.cls)) {
+    return {
+      reason: 'class_not_allowed',
+      cls: entry.cls,
+      detail: `\`${bin}\` ${entry.verb.join(' ')} is ${entry.cls.replace(/_/g, ' ')} and is not performed in this phase.`,
+    };
+  }
+  return undefined;
+}

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
-  type ConversationProvider,
+  type ConversationProvider, type DependencyChecker,
 } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
 import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
@@ -79,6 +79,8 @@ export interface HarnessOptions {
   readonly conversation?: ConversationProvider;
   /** Injected download `fetch` for conversation attachments. */
   readonly conversationFetch?: typeof fetch;
+  /** Answers dependency checks. Omitted means the shipped never-ready default. */
+  readonly dependencyChecker?: DependencyChecker;
 }
 
 /**
@@ -140,6 +142,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       ...(realTransport ? {} : { transport }),
       allowlistJson: REPOS_JSON,
       ...(opts.clock ? { clock: opts.clock } : {}),
+      ...(opts.dependencyChecker ? { dependencyChecker: opts.dependencyChecker } : {}),
       ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
@@ -181,6 +184,30 @@ export const implementedResult = (over: Record<string, unknown> = {}) => ({
   verification: { commands: [{ cmd: 'pnpm test', exitCode: 0, summary: 'green' }], passed: true },
   proposedActions: [],
   ...over,
+});
+
+/**
+ * A result that reports a dependency. Mirrors `implementedResult`'s shape so a
+ * test can submit one through exactly the same path.
+ */
+export const dependencyResult = (over: Record<string, unknown> = {}) => ({
+  schemaVersion: 1,
+  verdict: 'waiting_on_dependency',
+  summary: 'blocked on the release pipeline',
+  changedFiles: [],
+  review: { performed: false, independent: false, verdict: 'skipped', notes: '' },
+  verification: { commands: [], passed: false },
+  proposedActions: [],
+  dependency: {
+    type: 'ci_run',
+    description: 'the upstream build to go green',
+    externalKey: 'run-1234',
+    nextCheckInSeconds: 60,
+    maxChecks: 3,
+    deadlineInSeconds: 3600,
+    ...((over['dependency'] as Record<string, unknown>) ?? {}),
+  },
+  ...Object.fromEntries(Object.entries(over).filter(([k]) => k !== 'dependency')),
 });
 
 export const commitAction = (message = 'feat: add a') => ({

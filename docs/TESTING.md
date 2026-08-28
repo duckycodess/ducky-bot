@@ -10,6 +10,24 @@ payloads are strictly typed, so `question` is required only for
 `needs_owner_input` and actions only accompany `implemented`; repository-relative
 paths reject absolute, traversal, UNC, drive, home and NUL forms.
 
+**contracts / lifecycle** — `waiting_on_dependency` is nonterminal, holds no
+lease, is reachable only from `running` and leaves in exactly four ways; its
+reservation TTL outlives the longest permitted wait, so the sweep cannot fail a
+job that is still on schedule; every state has a phase, a label and both
+next-step strings, and the shared copy says the detail is private;
+`LEASE_BEARING_STATES` is still exactly `['running']`; the work-phase machine
+accepts the real loop, refuses walking backwards to planning, treats the same
+phase as a no-op, and every edge names a known phase; and the detailed owner
+label refines only a running job, never rendering a stale phase on a paused or
+finished one.
+
+**contracts / command policy** — nothing in the table is classified above a
+local mutation; no forbidden verb appears anywhere in the table itself; an
+unclassified command and an unknown subcommand are REFUSED rather than allowed
+by default; a forbidden verb is caught before the table is consulted and even
+when buried mid-argv; a `--flag` is not mistaken for a verb; the longest verb
+match wins; and every argv the frozen `gh` table can actually produce passes.
+
 **contracts / time** — a timezone is validated against the runtime's own ICU
 data and a bad one throws at startup; a civil day starts at local midnight, not
 UTC midnight, and stepping days across a `Europe/London` spring-forward lands on
@@ -20,6 +38,19 @@ at; `2026-02-31` is an error, not the third of March; a cron expression is
 refused as a repeat interval; and a stored schedule wall clock is read in the
 owner's zone, with anything unparseable returning undefined so the raw text can
 be shown instead.
+
+**persistence / lifecycle** — migration 8 is forward-only and idempotent; every
+existing job starts with no work phase; the phase column refuses a value off
+the allowlist; **the single-writer index is still keyed on `running` only** —
+a second running job is refused while a dependency wait is not; the dependency
+schema requires a waiting row to have a cursor and a resolved one not to,
+permits only one OPEN dependency per job while allowing any number of closed
+ones, and refuses an unknown type or a zero check budget; the due query respects
+the cursor and the batch cap; recording a check is a compare-and-set so two
+overlapping passes cannot both spend one; resolving clears the cursor and
+cannot happen twice; the audit repo clamps a long detail, never throws, and
+prunes in bounded batches; and **no repository that decides anything ever reads
+`audit_log`**.
 
 **persistence / assistant** — the schema itself refuses a half-specified
 recurrence (a one-shot with an interval, an interval reminder without one, a
@@ -74,6 +105,36 @@ executed; schedule previews leaving **every** table untouched until confirmation
 transport sanitization with a fake client that never sees a raw secret;
 `discord.js` imported by exactly one module; executor auth including rotation
 and the nonce-not-burned-on-failure property; rate limits.
+
+**coordinator / dependency waits** — recording one parks the job, releases the
+lease (so the expiry sweep does not see it) and RETAINS the reservation, with
+the work phase cleared; the dependency lands in the same transaction as the
+transition; a schedule outside the ceilings is REFUSED by the contract rather
+than clamped, leaving the job still running under its own lease; defaults are
+applied when only the essentials are given; `ready` requeues the job and it can
+genuinely be claimed again; `failed` fails it and releases the repository;
+pending reschedules with growing backoff until the budget is spent and then
+hands the job to the OWNER; the wall-clock deadline stops it even with checks
+left; a throwing checker still spends a check; one pass checks at most the batch
+size; cancelling closes the dependency so even a `ready` checker cannot
+resurrect the job; a dependency whose job moved on is closed rather than polled;
+a brand-new resolver picks up the durable cursor after a restart; two
+overlapping ticks share one pass; and a `ready` from an UNVERIFIED checker is
+not believed. The shipped default is asserted to answer only `pending`, to take
+a wait to `needs_owner_input`, and to say so in `/status`.
+
+**coordinator / work phases and audit** — a claim starts at `preparing`;
+progress reports advance the phase and report it back; the same phase is
+idempotent and writes no new event; a backwards edge is refused and leaves the
+phase untouched; a heartbeat with no phase still renews the lease; the phase is
+cleared when the job pauses; a stale lease is refused; the phase shows on the
+owner's surface and on no shared one. The audit log records creation, claim,
+phase change, approval, failure and cancellation; a REFUSED phase change is
+recorded as refused (outside the transaction, so it is not rolled back with the
+rejected write); the executor is named by id and the owner by role, never by
+Discord id; after a full lifecycle the dump contains none of the forbidden
+substrings, no live bearer or HMAC, and no lease id; an action's details are
+not copied into the record; and a forged audit row confers nothing.
 
 **coordinator / daily assistant** — a task is a different record from a capture
 and adding one never writes the other; a due time is resolved in the owner's

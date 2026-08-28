@@ -40,6 +40,15 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   // Already validated in createApp; reported so the owner can see WHICH zone
   // every due date, reminder and briefing day boundary is computed in.
   add('owner timezone', true, app.clock.timeZone);
+  // Not a warning: refusing to resume a job on an unchecked dependency is the
+  // correct state, not a degraded one.
+  add(
+    'dependency checker',
+    true,
+    app.dependencies.checkerVerified
+      ? `${app.dependencies.checkerName} (verified)`
+      : `${app.dependencies.checkerName} — waits expire to the owner, never auto-resume`,
+  );
   add('repositories', app.allowlist.list().length > 0, `${app.allowlist.list().length} allowlisted`);
   add('executors', true, `${app.store.executors.listExecutors().length} registered`);
   return out;

@@ -49,6 +49,30 @@ export const JOB_MAX_WALL_CLOCK_MS = 2 * 60 * 60_000;
 export const RECOVERY_WAIT_MS = 15 * 60_000;
 export const EXECUTOR_OFFLINE_AFTER_MS = 3 * 60_000;
 
+/**
+ * How long a dependency wait may last, and how often it may be checked.
+ *
+ * Every one of these is a CEILING, not a default: an executor proposes a
+ * schedule and the coordinator clamps it. There is no configuration that makes
+ * a dependency wait unbounded, because the reservation it holds blocks the
+ * repository for as long as it lasts.
+ */
+export const DEPENDENCY_MAX_WAIT_MS = 24 * 60 * 60_000;
+export const DEPENDENCY_DEFAULT_WAIT_MS = 6 * 60 * 60_000;
+export const DEPENDENCY_MIN_CHECK_INTERVAL_MS = 30_000;
+export const DEPENDENCY_DEFAULT_CHECK_INTERVAL_MS = 5 * 60_000;
+export const DEPENDENCY_MAX_CHECKS = 100;
+export const DEPENDENCY_DEFAULT_MAX_CHECKS = 24;
+/** Exponential, from the first interval, capped. Deterministic: no jitter. */
+export const DEPENDENCY_BACKOFF_FACTOR = 2;
+export const DEPENDENCY_BACKOFF_MAX_MS = 60 * 60_000;
+/** How many dependencies one reconciliation tick will ever check. */
+export const DEPENDENCY_CHECK_BATCH = 20;
+export const DEPENDENCY_CHECK_TIMEOUT_MS = 15_000;
+export const DEPENDENCY_DESCRIPTION_MAX = 500;
+export const DEPENDENCY_EXTERNAL_KEY_MAX = 200;
+export const DEPENDENCY_DETAIL_MAX = 300;
+
 /** Reservation TTL per job state. `null` means "never expires" (orphan_agent). */
 export const RESERVATION_TTL_MS: Record<string, number | null> = {
   queued: 24 * 60 * 60_000,
@@ -57,6 +81,9 @@ export const RESERVATION_TTL_MS: Record<string, number | null> = {
   needs_owner_input: 24 * 60 * 60_000,
   // must outlive the approvals themselves so the normal expiry path runs first
   needs_approval: APPROVAL_TTL_MS + 60 * 60_000,
+  // must outlive the longest dependency wait, or the reservation sweep would
+  // fail a job that was still legitimately waiting and still on schedule
+  waiting_on_dependency: DEPENDENCY_MAX_WAIT_MS + 60 * 60_000,
 };
 
 // ---- schedule ---------------------------------------------------------------
@@ -175,3 +202,11 @@ export const CONVERSATION_ATTACHMENT_TIMEOUT_MS = 20_000;
 export const CONVERSATION_ATTACHMENTS_PER_HOUR = 20;
 /** One at a time. Several files in one message is refused, never partly read. */
 export const CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE = 1;
+
+// ---- audit log --------------------------------------------------------------
+/** Every free-text audit detail is redacted and then clamped to this. */
+export const AUDIT_DETAIL_MAX = 300;
+export const AUDIT_SUBJECT_REF_MAX = 128;
+/** Rows older than this are pruned by the reconciler, so the table is bounded. */
+export const AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
+export const AUDIT_PRUNE_BATCH = 500;

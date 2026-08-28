@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { JobResultFileSchema } from './job-result.js';
+import { JOB_WORK_PHASES } from './job-state.js';
 import { EXECUTOR_ID_RE, PUBLIC_JOB_ID_RE } from './ids.js';
 import { CLAIM_MAX_WAIT_MS, MAX_ANSWER, MAX_PROGRESS_MESSAGE, MAX_QUESTION } from './limits.js';
 
@@ -77,11 +78,25 @@ export const ClaimResponseSchema = z.strictObject({
 });
 export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
 
+/**
+ * A progress report.
+ *
+ * `phase` is an ALLOWLISTED enum, not a free string: it moves the job through
+ * the engineering loop, so an unrecognised value has to be a refusal rather
+ * than something that gets stored and later rendered. `kind` and `message`
+ * stay free text because they are only ever displayed, and both are redacted
+ * and clamped before they are persisted.
+ */
+export const JobProgressSchema = z.strictObject({
+  kind: z.string().max(64),
+  message: z.string().max(MAX_PROGRESS_MESSAGE),
+  phase: z.enum(JOB_WORK_PHASES).optional(),
+});
+export type JobProgress = z.infer<typeof JobProgressSchema>;
+
 export const JobHeartbeatRequestSchema = z.strictObject({
   leaseId: z.string().min(1).max(128),
-  progress: z
-    .strictObject({ kind: z.string().max(64), message: z.string().max(MAX_PROGRESS_MESSAGE) })
-    .optional(),
+  progress: JobProgressSchema.optional(),
 });
 export type JobHeartbeatRequest = z.infer<typeof JobHeartbeatRequestSchema>;
 

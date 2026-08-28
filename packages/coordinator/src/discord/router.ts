@@ -524,6 +524,7 @@ export class DuckyRouter {
             detail.approvals,
             detail.result?.summaryRedacted ?? null,
             rows,
+            detail.dependencies,
           );
         }
       }

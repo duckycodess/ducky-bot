@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ProposedActionSchema } from './approval.js';
+import { DependencyRequestSchema } from './dependency.js';
 import { isRepoRelativePath } from './paths.js';
 import {
   MAX_CHANGED_FILES, MAX_PATH_LEN, MAX_PROPOSED_ACTIONS, MAX_QUESTION,
@@ -59,6 +60,22 @@ export const JobResultFileSchema = z.discriminatedUnion('verdict', [
   z.strictObject({
     ...common,
     verdict: z.literal('failed'),
+    proposedActions: z.tuple([]),
+  }),
+  /**
+   * The work cannot continue until something outside this system happens.
+   *
+   * Distinct from `failed`, because the job is expected to resume, and
+   * distinct from `needs_owner_input`, because there is no question for the
+   * owner to answer -- there is a thing to wait for. It carries a CLOSED
+   * dependency shape so the coordinator can hold the repository reservation
+   * and check on a bounded schedule rather than being told "wait" and left to
+   * guess for how long.
+   */
+  z.strictObject({
+    ...common,
+    verdict: z.literal('waiting_on_dependency'),
+    dependency: DependencyRequestSchema,
     proposedActions: z.tuple([]),
   }),
 ]);

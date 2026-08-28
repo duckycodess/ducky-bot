@@ -1,4 +1,4 @@
-import type { JobState } from './job-state.js';
+import type { JobState, JobWorkPhase } from './job-state.js';
 
 /**
  * The visibility vocabulary for jobs, kept in contracts because two very
@@ -19,6 +19,7 @@ import type { JobState } from './job-state.js';
 export const JOB_PHASES = [
   'queued',
   'working',
+  'awaiting_dependency',
   'awaiting_owner_input',
   'awaiting_approval',
   'complete',
@@ -39,6 +40,7 @@ export const JOB_STATE_PHASE = {
   queued: 'queued',
   waiting_for_executor: 'queued',
   running: 'working',
+  waiting_on_dependency: 'awaiting_dependency',
   needs_owner_input: 'awaiting_owner_input',
   needs_approval: 'awaiting_approval',
   completed: 'complete',
@@ -52,6 +54,7 @@ export const phaseOf = (state: JobState): JobPhase => JOB_STATE_PHASE[state];
 export const JOB_PHASE_LABEL = {
   queued: 'Queued — waiting to start',
   working: 'Working',
+  awaiting_dependency: 'Paused — waiting on something else',
   awaiting_owner_input: 'Paused — waiting for an answer',
   awaiting_approval: 'Paused — waiting for approval',
   complete: 'Complete',
@@ -66,6 +69,9 @@ export const JOB_PHASE_LABEL = {
 export const OWNER_NEXT_STEP = {
   queued: 'Nothing to do. It starts as soon as an executor picks it up.',
   working: 'Nothing to do. You are notified when it needs you or finishes.',
+  awaiting_dependency:
+    'Nothing to do yet. It is checking on a schedule and resumes on its own if the dependency clears; ' +
+    'if the check budget runs out it comes back to you.',
   awaiting_owner_input:
     'Answer the question — use the Answer button, or `/job answer id:<id> answer:<text>`.',
   awaiting_approval:
@@ -86,6 +92,7 @@ export const OWNER_NEXT_STEP = {
 export const SHARED_NEXT_STEP = {
   queued: 'Waiting for a development host to pick it up.',
   working: 'A development agent is working on it now.',
+  awaiting_dependency: 'Paused until something it depends on is ready. What it is waiting for is private.',
   awaiting_owner_input: 'Paused until the owner answers a question. The question itself is private.',
   awaiting_approval: 'Paused until the owner approves the proposed changes. The details are private.',
   complete: 'Finished. The summary here is the whole shared record.',
@@ -93,7 +100,37 @@ export const SHARED_NEXT_STEP = {
   cancelled: 'Stopped by the owner before it finished.',
 } as const satisfies Record<JobPhase, string>;
 
+/**
+ * Plain-language label for the engineering work phase, shown ONLY on the
+ * owner's private surface. A shared channel never sees it: how far through a
+ * review the agent is, is detail about the work, and the shared projection has
+ * no field that could carry it.
+ */
+export const WORK_PHASE_LABEL = {
+  preparing: 'preparing the workspace',
+  planning: 'planning',
+  implementing: 'implementing',
+  reviewing: 'reviewing',
+  fixing: 'fixing review findings',
+  verifying: 'verifying',
+} as const satisfies Record<JobWorkPhase, string>;
+
+export const workPhaseLabel = (phase: JobWorkPhase): string => WORK_PHASE_LABEL[phase];
+
 export const ownerStateLabel = (state: JobState): string => JOB_PHASE_LABEL[phaseOf(state)];
+
+/**
+ * The owner's label, refined by the work phase when there is one.
+ *
+ * A phase only exists while the job is lease-bearing, so this reads "Working —
+ * reviewing" for a running job and falls back to the plain state label
+ * everywhere else. The phase is never invented: a null phase renders exactly
+ * what Phase 1 rendered.
+ */
+export const ownerDetailedLabel = (state: JobState, phase: JobWorkPhase | null): string =>
+  phase === null || phaseOf(state) !== 'working'
+    ? ownerStateLabel(state)
+    : `${JOB_PHASE_LABEL.working} — ${WORK_PHASE_LABEL[phase]}`;
 export const ownerNextStep = (state: JobState): string => OWNER_NEXT_STEP[phaseOf(state)];
 export const sharedNextStep = (state: JobState): string => SHARED_NEXT_STEP[phaseOf(state)];
 

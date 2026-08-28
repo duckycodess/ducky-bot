@@ -1,7 +1,7 @@
 import {
   RESERVATION_TTL_MS,
-  assertTransition,
-  type JobState,
+  assertTransition, assertWorkPhaseTransition, isLeaseBearing,
+  type JobState, type JobWorkPhase,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { isoPlus, nowIso } from '../db.js';
@@ -16,6 +16,7 @@ const mapJob = (r: Record<string, unknown>): JobRow => ({
   context: r['context'] == null ? null : String(r['context']),
   bootstrap: toBool(r['bootstrap']),
   state: String(r['state']) as JobState,
+  workPhase: r['work_phase'] == null ? null : (String(r['work_phase']) as JobWorkPhase),
   cancelRequested: toBool(r['cancel_requested']),
   attempts: Number(r['attempts']),
   maxAttempts: Number(r['max_attempts']),
@@ -33,6 +34,23 @@ const mapJob = (r: Record<string, unknown>): JobRow => ({
   startedAt: r['started_at'] == null ? null : String(r['started_at']),
   finishedAt: r['finished_at'] == null ? null : String(r['finished_at']),
 });
+
+/**
+ * Turns a transition actor into an audit actor kind plus a SAFE reference.
+ *
+ * `owner:<discord id>` becomes `('owner', 'owner')`: there is exactly one
+ * owner, so the id adds nothing an auditor could use and would be unnecessary
+ * personal data in a long-lived table. An executor id is not a secret and is
+ * genuinely identifying, so it is kept.
+ */
+const splitActor = (actor: string): [string, string] => {
+  const [prefix, ...rest] = actor.split(':');
+  const tail = rest.join(':');
+  if (prefix === 'owner') return ['owner', 'owner'];
+  if (prefix === 'executor') return ['executor', tail || 'unknown'];
+  if (prefix === 'system' && tail === 'reconciler') return ['reconciler', 'reconciler'];
+  return ['system', tail || prefix || 'system'];
+};
 
 const mapReservation = (r: Record<string, unknown>): ReservationRow => ({
   repoSlug: String(r['repo_slug']),
@@ -165,6 +183,7 @@ export class JobsRepo {
       retainedWorkspaceId: string | null;
       startedAt: string | null;
       finishedAt: string | null;
+      workPhase: JobWorkPhase | null;
     }> = {},
   ): JobRow {
     const job = this.byId(jobId);
@@ -188,6 +207,14 @@ export class JobsRepo {
     if ('retainedWorkspaceId' in patch) put('retained_workspace_id', patch.retainedWorkspaceId ?? null);
     if ('startedAt' in patch) put('started_at', patch.startedAt ?? null);
     if ('finishedAt' in patch) put('finished_at', patch.finishedAt ?? null);
+
+    // The work phase belongs to a live lease and to nothing else. Leaving a
+    // stale `reviewing` on a job that has since been cancelled, paused on a
+    // dependency or completed would render a lie, so any move OUT of a
+    // lease-bearing state clears it unless the caller set one explicitly.
+    if ('workPhase' in patch) put('work_phase', patch.workPhase ?? null);
+    else if (!isLeaseBearing(to)) put('work_phase', null);
+
     args.push(jobId);
 
     this.db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...(args as never[]));
@@ -197,6 +224,23 @@ export class JobsRepo {
          VALUES (?,?,?,?,?,?)`,
       )
       .run(jobId, job.state, to, reason, actor, ts);
+
+    // Audited HERE because this is the single point of state change, so
+    // coverage is structural rather than a thing every caller has to remember.
+    // It shares this transaction: a rolled-back transition must not leave an
+    // audit row claiming it happened.
+    //
+    // The actor string is already a role-prefixed reference the callers
+    // construct (`owner:<id>`, `executor:<id>`, `system:<component>`); only its
+    // KIND and the non-identifying half are kept, so a Discord user id never
+    // lands in the audit table.
+    const [actorKind, actorTail] = splitActor(actor);
+    this.db
+      .prepare(
+        `INSERT INTO audit_log (at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+         VALUES (?, 'job.transitioned', ?, ?, 'job', ?, 'ok', ?)`,
+      )
+      .run(ts, actorKind, actorTail, job.publicId, `${job.state} -> ${to} (${reason})`);
 
     this.refreshReservationForState(job.repoSlug, jobId, to);
     return this.byId(jobId)!;
@@ -216,6 +260,33 @@ export class JobsRepo {
           at: String(r['created_at']),
         };
       });
+  }
+
+  /**
+   * Moves a running job's engineering phase.
+   *
+   * Refuses on three independent grounds, and each is a real one:
+   *
+   * - the job must be lease-bearing, because a phase describes work in
+   *   progress and there is none otherwise;
+   * - the edge must be allowed by `ALLOWED_WORK_PHASE_TRANSITIONS`, so a
+   *   report cannot walk backwards from implementing to planning; and
+   * - reporting the SAME phase is a no-op that returns true, because a
+   *   retried heartbeat is normal traffic and must not be an error.
+   *
+   * Throws `InvalidWorkPhaseTransitionError` on a bad edge; returns false when
+   * the job simply is not in a state that has phases.
+   */
+  setWorkPhase(jobId: string, phase: JobWorkPhase): boolean {
+    const job = this.byId(jobId);
+    if (!job) throw new Error(`job ${jobId} not found`);
+    if (!isLeaseBearing(job.state)) return false;
+    assertWorkPhaseTransition(job.workPhase, phase);
+    if (job.workPhase === phase) return true;
+    this.db
+      .prepare('UPDATE jobs SET work_phase = ?, updated_at = ? WHERE id = ?')
+      .run(phase, nowIso(), jobId);
+    return true;
   }
 
   setCancelRequested(jobId: string): void {
@@ -372,6 +443,14 @@ export class JobsRepo {
       .run(leaseExpiresAt, nowIso(), jobId);
   }
 
+  /**
+   * Jobs whose lease has gone stale.
+   *
+   * Scoped to `running` exactly as in Phase 1, and correctly so: it is the
+   * only lease-bearing state. A job waiting on a dependency holds a
+   * reservation but NO lease, so it must not appear here -- it is not stalled,
+   * it is on schedule.
+   */
   expiredLeases(now = nowIso()): JobRow[] {
     return this.db
       .prepare(

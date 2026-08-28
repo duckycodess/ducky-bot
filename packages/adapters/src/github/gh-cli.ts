@@ -1,6 +1,7 @@
 import {
   DuckyError, GH_OWNER_RE, GH_REPO_RE, GH_TIMEOUT_MS,
   PrChecksSchema, PrListSchema, PrViewSchema, RepoViewSchema,
+  checkCommandAllowed,
 } from '@ducky/contracts';
 import type { PrChecks, PrList, PrView, RepoView } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
@@ -55,6 +56,13 @@ export class GhCliReader implements GitHubReader {
     const build = GH_OPERATIONS[op];
     if (!build) throw new DuckyError('invalid_input', 'Unsupported GitHub lookup.');
     const argv = build(ref, n);
+
+    // The frozen table decides what can be CONSTRUCTED; the central policy
+    // decides whether what was constructed may RUN in this phase. Two
+    // independent gates, so adding a write verb to the table above still does
+    // not reach a subprocess.
+    const refusal = checkCommandAllowed('gh', argv);
+    if (refusal) throw new DuckyError('not_enabled_in_phase1', refusal.detail);
 
     const res = await runArgv(this.bin, argv, {
       timeoutMs: this.timeoutMs,

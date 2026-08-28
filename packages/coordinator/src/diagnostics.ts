@@ -60,6 +60,15 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   // Already validated in createApp; reported so the owner can see WHICH zone
   // every due date, reminder and briefing day boundary is computed in.
   add('owner timezone', true, app.clock.timeZone);
+  // Not a warning either way: a pulled briefing is the default, and a pushed one
+  // is a choice.
+  add(
+    'proactive briefings',
+    true,
+    app.briefingNotifier.enabled
+      ? 'enabled — morning and evening, to your DM, on the reconcile interval'
+      : 'disabled — /briefing only',
+  );
   // Not a warning: refusing to resume a job on an unchecked dependency is the
   // correct state, not a degraded one.
   add(

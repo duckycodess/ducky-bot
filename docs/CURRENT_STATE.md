@@ -59,6 +59,21 @@ diagnostics and in `/status`.
     from the hour in the owner's zone. Assembled from stored tasks, reminders
     and schedule rows by counting them. `BriefingService` holds no provider, so
     no sentence in a briefing can be generated; every briefing says so.
+  - **Proactive briefings, OFF by default** — the piece 2B deferred, because
+    pushing one needs a delivery time. `DUCKY_BRIEFING_ENABLED` plus two LOCAL
+    times (`07:30` / `20:30` by default), validated at startup so a typo fails at
+    boot rather than at 07:00. Delivered to the **owner's DM only** over a
+    durable `briefing_deliveries` outbox with the same guarantees the reminder
+    ledger has: a row from the moment a slot comes due, a unique
+    `(user, kind, day_key)` index that makes delivery idempotent, isolated
+    retries, and abandonment as a RECORD after a bounded number of failures.
+    Rides the same coordinator interval — still one scheduler.
+    **One rule reminders do not have:** a briefing more than
+    `BRIEFING_STALE_AFTER_MS` (6 h) late is marked `skipped` rather than sent. A
+    reminder names a commitment and is worth having late; a briefing is a summary
+    OF A DAY, and this morning's summary arriving tonight describes a day that has
+    already happened. There is no backfill for a day the host was off, either.
+    The body is assembled at DELIVERY time and nothing rendered is stored.
   - **Timezone** — one configured `DUCKY_OWNER_TIMEZONE` (default `UTC`),
     validated at startup against the runtime's own ICU data and reported in
     `/status` and the boot diagnostics. Used ONLY as a projection: instants are

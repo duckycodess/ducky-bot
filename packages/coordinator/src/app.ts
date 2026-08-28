@@ -15,7 +15,7 @@ import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -39,6 +39,7 @@ import { TasksService } from './domain/tasks.service.js';
 import { RemindersService } from './domain/reminders.service.js';
 import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
+import { BriefingNotifier } from './domain/briefing-notifications.service.js';
 import { DependencyResolver } from './domain/dependency-resolver.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
@@ -105,6 +106,8 @@ export interface App {
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
+  /** Pushes the morning/evening briefing. Off unless the operator enabled it. */
+  readonly briefingNotifier: BriefingNotifier;
   readonly dependencies: DependencyResolver;
   readonly retention: RetentionService;
   readonly forget: ForgetService;
@@ -263,6 +266,13 @@ export function createApp(
   const reminderNotifier = new ReminderNotifier({
     store, transport, ownerId: authz.ownerId, clock,
   });
+  // Rides the SAME interval as everything else, holds no provider, and sends to
+  // the owner's DM only. Off by default: a briefing is pulled unless somebody
+  // deliberately asks for it to be pushed.
+  const briefingNotifier = new BriefingNotifier({
+    store, transport, ownerId: authz.ownerId, clock, briefing,
+    config: resolveBriefingSchedule(env),
+  });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
   });
@@ -293,6 +303,9 @@ export function createApp(
         : `mock (no ${discordProfile.profile} token)`,
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     conversationAttachments: attachmentAvailability(conversation, conversationAttachments),
+    proactiveBriefings: briefingNotifier.enabled
+      ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
+      : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
       ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread; /forget conversation deletes them`
       : 'off — nothing you say in conversation is stored',
@@ -366,7 +379,8 @@ export function createApp(
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
     approvals, github, githubWatches, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
-    clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments, dependencies,
+    clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
+    conversationAttachments, dependencies,
     retention, forget, conversationMemory,
     close: () => store.db.close(),
   };

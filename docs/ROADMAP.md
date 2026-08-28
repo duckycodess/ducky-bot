@@ -100,8 +100,14 @@ Still open, and deliberately deferred:
   is a good design, but it depends on a verified conversation provider, which
   we do not have (see 2D). `/task` and `/reminder` are explicit commands until
   then.
-- 🔶 **Proactive briefings.** A briefing is pulled, not pushed. Pushing one
-  needs a delivery-time preference and reopens the channel-role question above.
+- ✅ **Proactive briefings — DELIVERED by the final milestone, off by default.**
+  The delivery-time preference that was missing is now two validated local times
+  (`DUCKY_BRIEFING_MORNING_AT` / `_EVENING_AT`). The channel-role question stays
+  answered the same way: the owner's DM only, no shared policy injected, no
+  channel branch to configure wrongly. Same durable-outbox architecture, same
+  single scheduler, plus one new rule — a briefing more than six hours late is
+  skipped rather than delivered, because a summary of a day that has already
+  happened is worse than none.
 
 ---
 

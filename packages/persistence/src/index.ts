@@ -16,6 +16,7 @@ export * from './repositories/audit.repo.js';
 export * from './repositories/notifications.repo.js';
 export * from './repositories/tasks.repo.js';
 export * from './repositories/reminders.repo.js';
+export * from './repositories/briefings.repo.js';
 export * from './repositories/dependencies.repo.js';
 export * from './repositories/audit-log.repo.js';
 export * from './repositories/retention.repo.js';
@@ -35,6 +36,7 @@ import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
 import { NotificationsRepo } from './repositories/notifications.repo.js';
 import { TasksRepo } from './repositories/tasks.repo.js';
 import { RemindersRepo } from './repositories/reminders.repo.js';
+import { BriefingsRepo } from './repositories/briefings.repo.js';
 import { DependenciesRepo } from './repositories/dependencies.repo.js';
 import { RetentionRepo } from './repositories/retention.repo.js';
 import { AuditLogRepo } from './repositories/audit-log.repo.js';
@@ -60,6 +62,8 @@ export interface Store {
   readonly notifications: NotificationsRepo;
   readonly tasks: TasksRepo;
   readonly reminders: RemindersRepo;
+  /** The proactive-briefing outbox. Present whether or not briefings are on. */
+  readonly briefings: BriefingsRepo;
   readonly dependencies: DependenciesRepo;
   /**
    * The general structured audit log. Distinct from `audit`, which is the
@@ -87,6 +91,7 @@ export function createStore(db: Db): Store {
     notifications: new NotificationsRepo(db),
     tasks: new TasksRepo(db),
     reminders: new RemindersRepo(db),
+    briefings: new BriefingsRepo(db),
     dependencies: new DependenciesRepo(db),
     auditLog: new AuditLogRepo(db),
     retention: new RetentionRepo(db),

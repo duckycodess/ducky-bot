@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { assertValidSlotTime } from './domain/briefing-notifications.service.js';
 import {
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
@@ -120,6 +121,18 @@ export const EnvSchema = z.object({
   DUCKY_CONVERSATION_MEMORY_TURNS: z.coerce
     .number().int().min(2).max(CONVERSATION_MEMORY_TURNS_MAX)
     .default(CONVERSATION_MEMORY_TURNS_DEFAULT),
+
+  /**
+   * Proactive briefings, pushed to the owner's DM. Default OFF.
+   *
+   * A briefing was pulled until now, and pushing one needs a delivery time --
+   * which is exactly why 2B deferred it rather than guessing an hour. Times are
+   * LOCAL wall clock in `DUCKY_OWNER_TIMEZONE` and validated at startup, so a
+   * typo fails at boot rather than at 07:00.
+   */
+  DUCKY_BRIEFING_ENABLED: bool(false),
+  DUCKY_BRIEFING_MORNING_AT: z.string().max(5).default('07:30'),
+  DUCKY_BRIEFING_EVENING_AT: z.string().max(5).default('20:30'),
 
   SCHEDULE_BINARY_EXTRACTION_ENABLED: bool(false),
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
@@ -367,6 +380,22 @@ export const resolveConversationMemory = (env: Env): {
   enabled: env.DUCKY_CONVERSATION_MEMORY_ENABLED,
   turns: env.DUCKY_CONVERSATION_MEMORY_TURNS,
   excludedThreadKeys: resolveSharedChannelIds(env),
+});
+
+/**
+ * The proactive-briefing schedule, validated.
+ *
+ * Both times are checked here, at startup, for the same reason the timezone is:
+ * a briefing that fired at an hour nobody configured would be worse than none.
+ */
+export const resolveBriefingSchedule = (env: Env): {
+  enabled: boolean;
+  morningAt: string;
+  eveningAt: string;
+} => ({
+  enabled: env.DUCKY_BRIEFING_ENABLED,
+  morningAt: assertValidSlotTime(env.DUCKY_BRIEFING_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT'),
+  eveningAt: assertValidSlotTime(env.DUCKY_BRIEFING_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT'),
 });
 
 export const cdnHosts = (env: Env): string[] =>

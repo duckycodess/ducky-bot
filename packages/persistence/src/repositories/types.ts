@@ -43,6 +43,29 @@ export interface ConversationTurnRow {
   createdAt: string;
 }
 
+/** Which slot of the day a proactive briefing covers. */
+export type BriefingSlotKind = 'morning' | 'evening';
+export type BriefingDeliveryStatus = 'pending' | 'delivered' | 'abandoned' | 'skipped';
+
+/**
+ * One proactive briefing, from due to settled.
+ *
+ * `dayKey` is the owner's own civil day (`YYYY-MM-DD` in their zone), because
+ * "today's briefing" is a civil-day concept and the zone is a projection.
+ */
+export interface BriefingDeliveryRow {
+  id: string;
+  discordUserId: string;
+  kind: BriefingSlotKind;
+  dayKey: string;
+  dueAt: string;
+  status: BriefingDeliveryStatus;
+  attempts: number;
+  lastErrorAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+}
+
 export interface JobRow {
   id: string;
   publicId: string;

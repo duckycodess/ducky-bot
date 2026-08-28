@@ -91,6 +91,11 @@ async function main(): Promise<void> {
     app.reminderNotifier.tick().catch((err: unknown) => {
       log.error('reminders.tick_failed', { err });
     });
+    // Proactive briefings ride the same interval as well. Claiming a due slot
+    // is idempotent on a unique index, so a repeated tick sends nothing twice.
+    app.briefingNotifier.tick().catch((err: unknown) => {
+      log.error('briefings.tick_failed', { err });
+    });
     // Dependency waits ride the same interval too. Bounded per pass and
     // bounded per dependency, so this can never become a polling loop.
     app.dependencies.tick().catch((err: unknown) => {
@@ -117,6 +122,7 @@ async function main(): Promise<void> {
     // triggering a new one.
     await app.notifier.waitForIdle();
     await app.reminderNotifier.waitForIdle();
+    await app.briefingNotifier.waitForIdle();
     await app.dependencies.waitForIdle();
     await app.githubWatches.waitForIdle();
     await app.transport.stop();

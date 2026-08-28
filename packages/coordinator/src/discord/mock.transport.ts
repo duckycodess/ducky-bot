@@ -21,7 +21,17 @@ export class MockDiscordTransport implements DiscordTransport {
     this.#handler = undefined;
   }
 
+  /**
+   * Set to model a transport that cannot deliver right now.
+   *
+   * Every proactive path retries on a durable ledger rather than in memory, and
+   * "the send failed" is the branch that proves it: without a way to fail, a
+   * test can only ever exercise the happy path.
+   */
+  failSends = false;
+
   async send(target: SendTarget, message: OutboundMessage): Promise<void> {
+    if (this.failSends) throw new Error('mock transport: delivery refused');
     this.sent.push({ target, message: sanitizeOutbound(message) });
   }
 

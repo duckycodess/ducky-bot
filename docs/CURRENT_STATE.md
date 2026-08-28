@@ -17,7 +17,8 @@ diagnostics and in `/status`.
   (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
   `/status`, `/task` (add, list, done, cancel), `/reminder` (add, list,
   cancel), `/briefing`, `/watch` (add, list, remove), `/forget` (job,
-  conversation)
+  conversation). **The manifest is closed:** no command was added by the final
+  milestone, and `AGENTS.md` forbids widening the owner-only surface.
 - Opt-in shared job visibility (milestone 2A), **off by default**. With
   `DUCKY_SHARED_CHANNEL_IDS` empty the feature is unreachable. When a channel
   is listed, anyone who can read it gets a safe projection from `/jobs` and
@@ -71,6 +72,35 @@ diagnostics and in `/status`.
     reminder is late by at most one `DUCKY_RECONCILE_INTERVAL_MS`.
 - Text and CSV schedule extraction → preview → correction modal → explicit
   confirm
+- **Bounded conversation continuity, OFF by default.** See
+  [decisions/0021](decisions/0021-bounded-conversation-continuity.md)
+  - `DUCKY_CONVERSATION_MEMORY_ENABLED` defaults to false, and with it off
+    nothing is read and nothing is written: the previous guarantee ("no
+    transcript exists") holds exactly.
+  - When enabled, turns are stored **scoped to one (user, thread)**. Every
+    repository method takes the user id and puts it in the WHERE clause; there is
+    no `byId`, no `listAll` and no thread-only read, so there is no method that
+    could return another account's words. Two people in the same channel have two
+    histories.
+  - **A configured shared channel is excluded from both reading and writing.** A
+    message event carries no channel context, but its thread key IS the channel
+    id, so the two can be compared — and a channel other people can read never
+    becomes a store of the owner's words nor a source of replayed context.
+  - Bounded three ways: a replay window (`DUCKY_CONVERSATION_MEMORY_TURNS`,
+    default 10), a hard row cap per thread enforced in the same transaction as
+    the insert, and a per-turn length cap. An over-long turn is stored **visibly
+    truncated** rather than silently halved.
+  - Retention has two windows because the owner and a guest are not the same
+    thing: **30 days** for the owner's own history, **7** for anyone else on the
+    chat whitelist. Both configurable, both only consulted when retention is
+    enabled.
+  - The `role` column allows `user` and `assistant` only. There is deliberately
+    no `system` role: a stored preamble would be configuration masquerading as
+    history.
+  - **Close to inert on this host**, and honestly so: no conversation provider is
+    verified, so the only thing that can consume history is the marked mock. The
+    storage, isolation and deletion rules are built now because they are the part
+    that must not be retrofitted around a provider later.
 - **Conversation attachments (milestone 2C): the PIPELINE only, and closed on
   this host.** See
   [decisions/0015](decisions/0015-provider-agnostic-conversation-attachments.md)
@@ -274,12 +304,15 @@ Three different things, and they are not interchangeable:
 - **Every pass is recorded twice** — in `retention_runs` and in the audit log —
   with counts only, including a pass that deleted nothing.
 - **`/forget job <id>` and `/forget conversation`**, owner-only, on the
-  owner-only manifest, never shared-readable. Two-step: the command shows what
-  will go and returns a signed control bound to the owner; only pressing it
-  deletes. An unknown id and somebody else's id are answered identically.
-  `/forget conversation` says plainly that nothing is stored — there is no
-  transcript table — and exists so the answer is a fact rather than a missing
-  command.
+  owner-only manifest, never shared-readable. `/forget job` is two-step: the
+  command shows what will go and returns a signed control bound to the owner;
+  only pressing it deletes. An unknown id and somebody else's id are answered
+  identically. **`/forget conversation` now deletes for real** — every stored
+  turn of every thread for that owner, one step (there is no id to confirm and
+  no live-work reason it could be refused), reporting and auditing the COUNT. It
+  works even when continuity has since been switched off, because rows an
+  earlier run stored are still the owner's to remove; and when nothing is stored
+  it says so plainly.
 - **No wipe-all path at any layer.** `FORGET_TARGETS` cannot express one.
 
 Both `/forget` and the scheduled pass use the SAME deletion implementation, so

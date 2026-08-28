@@ -80,10 +80,33 @@ export interface ManagedConversationAttachment extends ConversationAttachment {
   dispose(): Promise<void>;
 }
 
+/**
+ * One earlier turn of the SAME conversation, supplied as context.
+ *
+ * DCStro's rule, kept: only the owner's own messages and Ducky's own output can
+ * ever appear here, because anyone who can post in a channel can post in a
+ * thread on it. The coordinator enforces that by scoping every stored turn to
+ * one (user, thread) -- a provider is handed history, never a way to ask for
+ * somebody else's.
+ */
+export interface ConversationHistoryTurn {
+  readonly role: 'user' | 'assistant';
+  readonly text: string;
+}
+
 export interface ConversationInput {
   readonly userId: string;
   readonly text: string;
   readonly threadKey: string;
+  /**
+   * Earlier turns of this conversation, oldest first, already bounded by the
+   * coordinator. Absent when continuity is disabled, when this is the first
+   * message of a thread, or when the thread is not one memory applies to.
+   *
+   * Optional so a provider that ignores context is still correct: continuity is
+   * the coordinator's feature, and a provider is never obliged to use it.
+   */
+  readonly history?: readonly ConversationHistoryTurn[];
   /**
    * Present only when the provider is verified, attachment-capable, the
    * operator has opted in, and the sender is the owner. Valid for the

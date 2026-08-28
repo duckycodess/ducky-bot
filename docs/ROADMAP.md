@@ -294,11 +294,12 @@ committed and exits 2 with the blocker; no route, body or auth model is guessed.
 - 🔶 **The API itself.** Still not known: OpenClaw is not installed, and
   installing it is a host-wide environment mutation that needs its own
   approval. Everything else here remains contingent.
-- 🔶 **Conversation memory.** How much history is sent, and is it stored? A
-  thread key exists today and nothing is persisted. DCStro's rule is worth
-  keeping: only the owner's own messages and the assistant's own output enter
-  a prompt, because anyone who can post in a channel can post in a thread on
-  it.
+- ✅ **Conversation memory — RESOLVED.** Bounded continuity, off by default, is
+  shipped: see [ADR 0021](decisions/0021-bounded-conversation-continuity.md).
+  DCStro's rule is kept and made structural rather than promised — every stored
+  turn is scoped to one (user, thread), the repository has no method that could
+  read another account's words, and a configured shared channel takes no part in
+  memory at all.
 - 🔶 **Failure behaviour.** When the provider is down mid-conversation: fail
   loudly, or fall back to the marked mock? Silent degradation to a mock in a
   *conversation* is the kind of plausible-looking fake `PROJECT_CONTEXT.md`

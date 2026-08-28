@@ -753,4 +753,76 @@ CREATE INDEX ix_audit_log_at ON audit_log(at);
 CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
 `,
   },
+  {
+    version: 16,
+    name: 'conversation_turns',
+    sql: `
+-- Bounded conversation continuity, and the first table that stores anything
+-- the owner SAID rather than something they filed.
+--
+-- Until now "conversation retention" was answered by "nothing is stored", which
+-- was true and also meant Ducky could not answer a follow-up question. This
+-- table exists so it can -- and it is written so the honest answer stays
+-- available: the feature is OFF unless an operator enables it, every row is
+-- scoped to one (user, thread), and /forget conversation deletes rather than
+-- explaining that there is nothing to delete.
+--
+-- The role column is closed to the two participants. There is deliberately no
+-- system role: a stored prompt preamble would be configuration masquerading
+-- as history, and nothing may inject text into this table that the owner or
+-- Ducky did not actually say.
+CREATE TABLE conversation_turns (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  -- The Discord channel the message arrived in. Isolation is by (user, thread),
+  -- so one person's DM history can never be read into another's, and a channel
+  -- conversation can never be read into a DM.
+  thread_key      TEXT NOT NULL,
+  role            TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content         TEXT NOT NULL,
+  created_at      TEXT NOT NULL
+);
+
+-- The only read path: the most recent turns of one thread, for one user.
+CREATE INDEX ix_conversation_turns_thread
+  ON conversation_turns(discord_user_id, thread_key, created_at, id);
+-- Retention selects on age alone.
+CREATE INDEX ix_conversation_turns_age ON conversation_turns(created_at);
+`,
+  },
+  {
+    version: 17,
+    name: 'audit_subject_kinds_v4',
+    sql: `
+-- One more subject kind: conversation, for the deletion of stored turns.
+--
+-- Third time this table has been widened, and the reason it keeps needing a
+-- migration is the reason it is worth doing: AuditLogRepo.record never throws,
+-- so a subject kind the enum allows and this constraint does not is dropped
+-- SILENTLY. schema.test.ts asserts the enums and this constraint agree.
+CREATE TABLE audit_log_v4 (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  actor_kind   TEXT NOT NULL CHECK (actor_kind IN ('owner','executor','system','reconciler')),
+  actor_ref    TEXT,
+  subject_kind TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                 ('job','approval','executor','dependency','credential','retention','route',
+                  'config','provider','conversation')),
+  subject_ref  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','failed')),
+  detail       TEXT
+);
+
+INSERT INTO audit_log_v4 (id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+  SELECT id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail
+    FROM audit_log;
+
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v4 RENAME TO audit_log;
+
+CREATE INDEX ix_audit_log_at ON audit_log(at);
+CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
+`,
+  },
 ];

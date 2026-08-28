@@ -3,7 +3,8 @@ import { z } from 'zod';
 import {
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
-  CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES, DEFAULT_OWNER_TIMEZONE,
+  CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES,
+  CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   blankToUndefined, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
@@ -104,6 +105,22 @@ export const EnvSchema = z.object({
   CONVERSATION_ATTACHMENTS_PER_HOUR: z.coerce
     .number().int().positive().default(CONVERSATION_ATTACHMENTS_PER_HOUR),
 
+  /**
+   * Bounded conversation continuity. Default OFF.
+   *
+   * Until this existed the honest answer to "is my conversation stored?" was
+   * "nothing is stored", and `/forget conversation` said so. Enabling this
+   * changes that answer, so it is a decision an operator makes rather than one
+   * they inherit -- see ADR 0021. With it off, nothing is written, nothing is
+   * replayed, and `/forget conversation` still deletes anything an earlier run
+   * stored.
+   */
+  DUCKY_CONVERSATION_MEMORY_ENABLED: bool(false),
+  /** How many earlier turns are replayed as context. */
+  DUCKY_CONVERSATION_MEMORY_TURNS: z.coerce
+    .number().int().min(2).max(CONVERSATION_MEMORY_TURNS_MAX)
+    .default(CONVERSATION_MEMORY_TURNS_DEFAULT),
+
   SCHEDULE_BINARY_EXTRACTION_ENABLED: bool(false),
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),
@@ -126,6 +143,12 @@ export const EnvSchema = z.object({
   DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: z.coerce.number().int().min(1).default(365),
   DUCKY_RETENTION_WATCH_EVENTS_DAYS: z.coerce.number().int().min(1).default(90),
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: z.coerce.number().int().min(1).default(7),
+  /**
+   * Stored conversation turns, by who said them. The owner's own history is
+   * kept longer than a whitelist guest's, because they are not the same thing.
+   */
+  DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: z.coerce.number().int().min(1).default(30),
+  DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: z.coerce.number().int().min(1).default(7),
   DUCKY_RETENTION_BATCH: z.coerce.number().int().min(1).max(10_000).default(200),
 
   /**
@@ -309,6 +332,24 @@ export const resolveOwnerTimeZone = (env: Env): string =>
  */
 export const resolveConversationProvider = (env: Env): ConversationProviderMode =>
   resolveConversationMode(env.DUCKY_CONVERSATION_PROVIDER, env.DUCKY_PROFILE);
+
+/**
+ * Conversation continuity, resolved for this profile.
+ *
+ * The excluded thread keys are the configured SHARED channels. A conversation
+ * message carries no channel context, but its thread key IS the channel id --
+ * so this is the one place the two can be compared, and a channel other people
+ * can read never becomes a store of the owner's words nor a source of context.
+ */
+export const resolveConversationMemory = (env: Env): {
+  enabled: boolean;
+  turns: number;
+  excludedThreadKeys: readonly string[];
+} => ({
+  enabled: env.DUCKY_CONVERSATION_MEMORY_ENABLED,
+  turns: env.DUCKY_CONVERSATION_MEMORY_TURNS,
+  excludedThreadKeys: resolveSharedChannelIds(env),
+});
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

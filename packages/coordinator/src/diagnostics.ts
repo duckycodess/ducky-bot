@@ -47,6 +47,16 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   // Not a warning when unavailable: refusing to hand files to an unverified
   // provider is the correct state, not a degraded one.
   add('chat attachments', true, attachmentAvailability(app.conversation, app.conversationAttachments));
+  // Not a warning either way: storing nothing is the safe default, and storing
+  // a bounded, deletable history because the operator asked for it is a choice,
+  // not a degradation.
+  add(
+    'chat memory',
+    true,
+    app.conversationMemory.enabled
+      ? `enabled — bounded per (user, thread); /forget conversation deletes it`
+      : 'disabled — no conversation turn is stored',
+  );
   // Already validated in createApp; reported so the owner can see WHICH zone
   // every due date, reminder and briefing day boundary is computed in.
   add('owner timezone', true, app.clock.timeZone);

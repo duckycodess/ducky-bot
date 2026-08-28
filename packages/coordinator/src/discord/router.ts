@@ -16,6 +16,7 @@ import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
 import type { GitHubWatchService } from '../domain/github-watches.service.js';
 import type { ForgetService } from '../domain/forget.service.js';
+import type { ConversationMemoryService } from '../domain/conversation-memory.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
@@ -54,6 +55,12 @@ export interface RouterDeps {
    * which is the safe direction for a command that removes data.
    */
   readonly forget?: ForgetService;
+  /**
+   * Bounded conversation continuity. OMITTING IT DISABLES IT ENTIRELY, which is
+   * the same fail-closed posture `forget` and the attachment config take: an
+   * unwired router stores nothing and replays nothing.
+   */
+  readonly memory?: ConversationMemoryService;
   /**
    * Notified when a provider refuses or fails at the boundary. Fire-and-forget:
    * the owner's reply must not depend on the audit log being writable.
@@ -282,7 +289,12 @@ export class DuckyRouter {
     const attachments = event.attachments ?? [];
 
     if (attachments.length === 0) {
-      return this.converse({ userId: actor.discordUserId, text: event.text, threadKey: event.threadKey });
+      return this.converse({
+        actor,
+        userId: actor.discordUserId,
+        text: event.text,
+        threadKey: event.threadKey,
+      });
     }
     return this.handleConversationAttachment(actor, event, attachments);
   }
@@ -345,6 +357,7 @@ export class DuckyRouter {
     const handle = await downloadConversationAttachment(meta, provider, config);
     try {
       return await this.converse({
+        actor,
         userId: actor.discordUserId,
         text: event.text,
         threadKey: event.threadKey,
@@ -358,15 +371,34 @@ export class DuckyRouter {
     }
   }
 
+  /**
+   * One conversational turn, with continuity when it is configured.
+   *
+   * The history is read for THIS actor and THIS thread only, and the exchange is
+   * recorded only after a reply actually came back -- a stored question with no
+   * answer would be replayed as if Ducky had ignored it. Both are no-ops when
+   * continuity is off, when the router has no memory service, or when the thread
+   * is a configured shared channel.
+   */
   private async converse(input: {
+    actor: ActorContext;
     userId: string;
     text: string;
     threadKey: string;
     attachment?: ConversationAttachment;
   }): Promise<OutboundMessage> {
+    const memory = this.deps.memory;
+    const history = memory?.history(input.actor, input.threadKey) ?? [];
+
     let reply;
     try {
-      reply = await this.deps.conversation.reply(input);
+      reply = await this.deps.conversation.reply({
+        userId: input.userId,
+        text: input.text,
+        threadKey: input.threadKey,
+        ...(input.attachment ? { attachment: input.attachment } : {}),
+        ...(history.length > 0 ? { history } : {}),
+      });
     } catch (err) {
       // "The owner asked and got no answer" was invisible in the trail. Records
       // the PROVIDER and the error code, never the message the owner sent and
@@ -379,7 +411,13 @@ export class DuckyRouter {
     }
     // A stand-in reply is always visibly marked so it cannot be mistaken for a
     // real assistant answer.
-    return { content: reply.mock ? `[mock] ${reply.text}` : reply.text, ephemeral: false };
+    const content = reply.mock ? `[mock] ${reply.text}` : reply.text;
+    // Recorded AFTER the reply exists, and it can never fail the reply.
+    memory?.record(input.actor, input.threadKey, {
+      userText: input.text,
+      assistantText: content,
+    });
+    return { content, ephemeral: false };
   }
 
   // ------------------------------------------------------------- commands --
@@ -404,6 +442,8 @@ export class DuckyRouter {
 
       const target = String(e.options['target'] ?? 'job');
       if (target === 'conversation') {
+        // One step, not two: deleting stored turns cannot be refused for a
+        // live-work reason the way a job can, and there is no id to confirm.
         return { content: forget.forgetConversation(actor).message, ephemeral: true };
       }
 

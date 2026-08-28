@@ -46,6 +46,17 @@ export interface RetentionPolicy {
   readonly cancelledWatchDays: number;
   /** Retention's own run log. */
   readonly runLogDays: number;
+  /**
+   * Stored conversation turns, split by WHO said them.
+   *
+   * The owner is talking to their own assistant; everyone else on the chat
+   * whitelist is a guest whose words Ducky keeps for as short a time as the
+   * feature can work with. Two windows rather than one, because collapsing them
+   * would mean choosing between keeping a guest's messages as long as the
+   * owner's or throwing the owner's away as fast as a guest's.
+   */
+  readonly conversationOwnerDays: number;
+  readonly conversationOtherDays: number;
   /** Rows removed per table per pass, so a tick is never long. */
   readonly batch: number;
 }
@@ -63,6 +74,8 @@ export const DEFAULT_RETENTION: RetentionPolicy = Object.freeze({
   idempotencyDays: 7,
   cancelledWatchDays: 365,
   runLogDays: 365,
+  conversationOwnerDays: 30,
+  conversationOtherDays: 7,
   batch: 200,
 });
 
@@ -94,6 +107,7 @@ export interface RetentionCounts {
   readonly workspacesDeleted: number;
   readonly idempotencyKeysDeleted: number;
   readonly runLogRowsDeleted: number;
+  readonly conversationTurnsDeleted: number;
 }
 
 export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
@@ -110,6 +124,7 @@ export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
   workspacesDeleted: 0,
   idempotencyKeysDeleted: 0,
   runLogRowsDeleted: 0,
+  conversationTurnsDeleted: 0,
 });
 
 export const totalRetentionDeletions = (c: RetentionCounts): number =>
@@ -124,7 +139,8 @@ export const totalRetentionDeletions = (c: RetentionCounts): number =>
   c.watchEventsDeleted +
   c.workspacesDeleted +
   c.idempotencyKeysDeleted +
-  c.runLogRowsDeleted;
+  c.runLogRowsDeleted +
+  c.conversationTurnsDeleted;
 
 /**
  * What the owner may delete by hand, and nothing broader.

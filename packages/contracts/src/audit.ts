@@ -34,6 +34,12 @@ export const AUDIT_SUBJECT_KINDS = [
   'config',
   /** A provider, by its own reported name. */
   'provider',
+  /**
+   * Stored conversation turns, referenced by scope (`all`, or a thread) and
+   * never by content. A deletion record that quoted what it deleted would
+   * defeat the deletion.
+   */
+  'conversation',
 ] as const;
 export type AuditSubjectKind = (typeof AUDIT_SUBJECT_KINDS)[number];
 

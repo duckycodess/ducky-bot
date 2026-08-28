@@ -4,6 +4,7 @@ export { MIGRATIONS, type Migration } from './migrations.js';
 export * from './repositories/types.js';
 export * from './repositories/repos.repo.js';
 export * from './repositories/captures.repo.js';
+export * from './repositories/conversations.repo.js';
 export * from './repositories/schedules.repo.js';
 export * from './repositories/jobs.repo.js';
 export * from './repositories/results.repo.js';
@@ -22,6 +23,7 @@ export * from './repositories/retention.repo.js';
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
 import { CapturesRepo } from './repositories/captures.repo.js';
+import { ConversationsRepo } from './repositories/conversations.repo.js';
 import { SchedulesRepo } from './repositories/schedules.repo.js';
 import { JobsRepo } from './repositories/jobs.repo.js';
 import { ResultsRepo } from './repositories/results.repo.js';
@@ -41,6 +43,12 @@ export interface Store {
   readonly db: Db;
   readonly repos: ReposRepo;
   readonly captures: CapturesRepo;
+  /**
+   * Stored conversation turns. Present whether or not the feature is enabled:
+   * the SERVICE decides whether anything is written, and `/forget` must be able
+   * to delete rows an earlier run stored even after the flag goes off again.
+   */
+  readonly conversations: ConversationsRepo;
   readonly schedules: SchedulesRepo;
   readonly jobs: JobsRepo;
   readonly results: ResultsRepo;
@@ -67,6 +75,7 @@ export function createStore(db: Db): Store {
     db,
     repos: new ReposRepo(db),
     captures: new CapturesRepo(db),
+    conversations: new ConversationsRepo(db),
     schedules: new SchedulesRepo(db),
     jobs: new JobsRepo(db),
     results: new ResultsRepo(db),

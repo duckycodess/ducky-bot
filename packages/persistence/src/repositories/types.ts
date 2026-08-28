@@ -1,6 +1,6 @@
 import type {
   ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
-  CaptureState, DependencyCheckStatus, DependencyState, DependencyType,
+  CaptureState, ConversationRole, DependencyCheckStatus, DependencyState, DependencyType,
   GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
   TaskPriority, TaskState,
 } from '@ducky/contracts';
@@ -24,6 +24,23 @@ export interface CaptureRow {
   status: CaptureState;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * One stored conversation turn.
+ *
+ * Only ever read back for the SAME (user, thread) it was written for -- see
+ * `ConversationsRepo`, which has no method that could return another account's
+ * words.
+ */
+export interface ConversationTurnRow {
+  id: string;
+  discordUserId: string;
+  /** The Discord channel the message arrived in. */
+  threadKey: string;
+  role: ConversationRole;
+  content: string;
+  createdAt: string;
 }
 
 export interface JobRow {

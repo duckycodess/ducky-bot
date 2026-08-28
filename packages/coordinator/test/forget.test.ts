@@ -161,11 +161,29 @@ describe('/forget job', () => {
 });
 
 describe('/forget conversation', () => {
-  it('says plainly that nothing is stored', () => {
+  it('says plainly that nothing is stored while continuity is off', () => {
+    // Continuity defaults to off, so this is the shipped behaviour. The wording
+    // no longer claims there is no table -- there is one, and ADR 0021 explains
+    // why -- it says the honest thing: nothing was stored.
     const h = makeHarness();
     const out = h.app.forget.forgetConversation(h.owner);
+    expect(out.turnsDeleted).toBe(0);
     expect(out.message).toMatch(/nothing to forget/i);
-    expect(out.message).toMatch(/no transcript table/i);
+    expect(out.message).toMatch(/continuity is off/i);
+    h.close();
+  });
+
+  it('deletes stored turns and reports the count when there are some', () => {
+    const h = makeHarness({ env: { DUCKY_CONVERSATION_MEMORY_ENABLED: 'true' } });
+    h.store.conversations.append({
+      id: 'turn-1', discordUserId: h.owner.discordUserId, threadKey: 'dm-1',
+      role: 'user', content: 'something said', rowCap: 200,
+    });
+
+    const out = h.app.forget.forgetConversation(h.owner);
+
+    expect(out.turnsDeleted).toBe(1);
+    expect(out.message).toMatch(/Deleted 1 stored conversation turn/);
     h.close();
   });
 

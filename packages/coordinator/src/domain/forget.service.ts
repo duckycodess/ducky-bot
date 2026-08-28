@@ -4,10 +4,17 @@ import {
 } from '@ducky/contracts';
 import type { Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
+import type { ConversationMemoryService } from './conversation-memory.service.js';
 
 export interface ForgetServiceDeps {
   readonly store: Store;
   readonly authz: Authorizer;
+  /**
+   * Stored conversation turns. OMITTING IT means `/forget conversation` reports
+   * that nothing is stored -- which is exactly true of an instance with no
+   * memory service wired.
+   */
+  readonly memory?: ConversationMemoryService;
 }
 
 export interface ForgetJobResult {
@@ -113,20 +120,67 @@ export class ForgetService {
   }
 
   /**
-   * Answers honestly about conversation history.
+   * Deletes the owner's stored conversation turns -- or says plainly that there
+   * are none.
    *
-   * Nothing is stored: `router.converse` writes no row and there is no
-   * transcript table. This exists so the answer is a statement of fact rather
-   * than a missing command, and so it becomes the obvious place to hook real
-   * deletion if 2D ever produces a provider that retains history.
+   * This used to be a statement of fact ("nothing is stored"), and it was true.
+   * Bounded continuity (ADR 0021) made it a real deletion, and the honest
+   * answer now depends on what is actually in the table rather than on what the
+   * feature flag says: rows an earlier run stored are deleted even if
+   * continuity has since been switched off.
+   *
+   * Audited by COUNT. A record of a deletion that quoted what it deleted would
+   * defeat the deletion.
+   *
+   * No attachment byte is involved either way: none is ever kept, and none is
+   * ever derived, so there is nothing of that kind to remove.
    */
-  forgetConversation(actor: ActorContext): { message: string } {
+  forgetConversation(actor: ActorContext): { message: string; turnsDeleted: number } {
     this.deps.authz.requireOwner(actor);
+
+    const memory = this.deps.memory;
+    if (!memory) {
+      return {
+        turnsDeleted: 0,
+        message:
+          'There is nothing to forget: conversation continuity is not configured on this ' +
+          'instance, so no turn is stored. No attachment byte has ever been kept either.',
+      };
+    }
+
+    const { turnsDeleted, enabled } = memory.forgetConversationFor(actor);
+    this.record('conversation', 'all', turnsDeleted);
+
+    if (turnsDeleted === 0) {
+      return {
+        turnsDeleted,
+        message: enabled
+          ? 'Nothing to forget: no conversation turn is stored for you yet.'
+          : 'Nothing to forget: conversation continuity is off, so no turn was stored.',
+      };
+    }
     return {
+      turnsDeleted,
       message:
-        'There is nothing to forget: no conversation transcript is stored. Replies are not ' +
-        'persisted, there is no transcript table, and no attachment byte has ever been kept. ' +
-        'If a future provider stores history, this command is where deleting it will live.',
+        `Deleted ${turnsDeleted} stored conversation turn(s) across every thread. ` +
+        'This cannot be undone. No attachment byte was ever kept.',
     };
+  }
+
+  /** One audit row per deletion, counts only. Never throws. */
+  private record(subjectKind: 'conversation', subjectRef: string, rows: number): void {
+    try {
+      this.deps.store.auditLog.record({
+        event: 'data.deleted',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind,
+        subjectRef,
+        outcome: 'ok',
+        detail: `rows ${rows}`,
+      });
+    } catch {
+      /* a record is never worth failing a deletion the owner asked for */
+    }
   }
 }

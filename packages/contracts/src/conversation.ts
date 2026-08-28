@@ -12,6 +12,16 @@ import type { DuckyProfile } from './profile.js';
  * fake, and the profile isolation rules say production fails closed rather than
  * borrowing a development stand-in.
  */
+/**
+ * Who said a stored turn.
+ *
+ * Closed to the two participants. There is deliberately no `system` role: a
+ * stored preamble would be configuration masquerading as history, and nothing
+ * may put words in this table that the owner or Ducky did not actually say.
+ */
+export const CONVERSATION_ROLES = ['user', 'assistant'] as const;
+export type ConversationRole = (typeof CONVERSATION_ROLES)[number];
+
 export const CONVERSATION_PROVIDERS = ['mock', 'disabled', 'openclaw'] as const;
 export type ConversationProviderMode = (typeof CONVERSATION_PROVIDERS)[number];
 

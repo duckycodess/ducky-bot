@@ -134,6 +134,67 @@ export class RetentionRepo {
     ).map((r) => r.id);
   }
 
+  /**
+   * Deletes the DETAILED payload of a terminal job while keeping the job.
+   *
+   * The two have genuinely different lifetimes. A result snapshot carries the
+   * summary, the review notes, the verification output and the changed-file
+   * list -- the most detailed thing Ducky stores about a repository -- while the
+   * job row and its transitions are the shape of what happened, which is what a
+   * later question is usually about. So the payload goes at 30 days and the
+   * metadata at 90.
+   *
+   * Safe because every reader already treats a missing result as normal: a
+   * queued job has none, so both `JobsService.detail` and the shared projection
+   * were written to handle its absence from the start.
+   *
+   * Only ever rows of jobs that are terminal AND finished before the cutoff.
+   * A live job's result is untouchable here.
+   */
+  deleteOldJobDetails(cutoffIso: string, limit: number): { results: number; events: number; ownerInputs: number } {
+    const ids = (
+      this.db
+        .prepare(
+          `SELECT id FROM jobs
+            WHERE state IN ('completed','failed','cancelled')
+              AND finished_at IS NOT NULL
+              AND finished_at < ?
+            ORDER BY finished_at
+            LIMIT ?`,
+        )
+        .all(cutoffIso, limit) as { id: string }[]
+    ).map((r) => r.id);
+
+    let results = 0;
+    let events = 0;
+    let ownerInputs = 0;
+    const resultStmt = this.db.prepare('DELETE FROM job_results WHERE job_id = ?');
+    const eventStmt = this.db.prepare('DELETE FROM job_events WHERE job_id = ?');
+    const inputStmt = this.db.prepare('DELETE FROM job_owner_inputs WHERE job_id = ?');
+    for (const id of ids) {
+      results += resultStmt.run(id).changes as number;
+      events += eventStmt.run(id).changes as number;
+      ownerInputs += inputStmt.run(id).changes as number;
+    }
+    return { results, events, ownerInputs };
+  }
+
+  /**
+   * Prunes the general audit log.
+   *
+   * Moved here from the reconciler's own fixed 90-day prune so that ONE policy
+   * describes every window. The reconciler's prune stays where it is for an
+   * instance with retention disabled -- an audit log is bounded whether or not
+   * an operator opted into retention.
+   */
+  deleteOldAuditRows(cutoffIso: string, limit: number): number {
+    return this.runLimited(
+      'DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE at < ? LIMIT ?)',
+      cutoffIso,
+      limit,
+    );
+  }
+
   // Each of the following deletes only rows the policy has finished with. The
   // predicates are duplicated in the partial indexes of migration 12, so the
   // planner can satisfy them without a scan.

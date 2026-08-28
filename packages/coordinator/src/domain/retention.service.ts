@@ -13,6 +13,15 @@ export interface RetentionServiceDeps {
    * Defaults to UTC, which is also the configuration default.
    */
   readonly timeZone?: string;
+  /**
+   * The owner's Discord id, from frozen configuration.
+   *
+   * Needed only to tell the owner's stored conversation turns from a guest's,
+   * which have different windows. Omitting it skips conversation pruning
+   * entirely rather than guessing -- the same fail-closed direction every other
+   * missing dependency takes here.
+   */
+  readonly ownerId?: string;
   readonly now?: () => Date;
   readonly log?: (event: string, fields?: Record<string, unknown>) => void;
 }
@@ -55,6 +64,7 @@ export class RetentionService {
   private readonly store: Store;
   private readonly policy: RetentionPolicy;
   private readonly timeZone: string;
+  private readonly ownerId: string | undefined;
   private readonly now: () => Date;
   private readonly log: (event: string, fields?: Record<string, unknown>) => void;
   #running = false;
@@ -63,6 +73,7 @@ export class RetentionService {
     this.store = deps.store;
     this.policy = deps.policy;
     this.timeZone = deps.timeZone ?? DEFAULT_OWNER_TIMEZONE;
+    this.ownerId = deps.ownerId;
     this.now = deps.now ?? (() => new Date());
     this.log = deps.log ?? ((): void => {});
   }
@@ -160,6 +171,21 @@ export class RetentionService {
       c.watchEventsDeleted += w.events;
     });
 
+    // Conversation turns, split by who said them: the owner's own history and a
+    // whitelist guest's are not the same thing. Requires an owner id, which the
+    // service is given rather than reading from the database -- authorization
+    // and identity never come from SQLite.
+    if (this.ownerId !== undefined) {
+      withTransaction(this.store.db, () => {
+        c.conversationTurnsDeleted = this.store.conversations.pruneOlderThan({
+          ownerId: this.ownerId!,
+          ownerCutoffIso: cutoff(p.conversationOwnerDays),
+          otherCutoffIso: cutoff(p.conversationOtherDays),
+          batch: p.batch,
+        });
+      });
+    }
+
     withTransaction(this.store.db, () => {
       c.workspacesDeleted = r.deleteClosedWorkspaces(cutoff(p.terminalJobDays), p.batch);
       c.idempotencyKeysDeleted = r.deleteIdempotencyKeys(cutoff(p.idempotencyDays), p.batch);
@@ -216,7 +242,8 @@ export class RetentionService {
         `schedules ${counts.schedulesDeleted}; watches ${counts.watchesDeleted}; ` +
         `watch events ${counts.watchEventsDeleted}; ` +
         `workspaces ${counts.workspacesDeleted}; ` +
-        `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}`,
+        `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}; ` +
+        `conversation turns ${counts.conversationTurnsDeleted}`,
     });
   }
 }
@@ -228,6 +255,8 @@ export function retentionPolicyFrom(env: {
   DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: number;
   DUCKY_RETENTION_WATCH_EVENTS_DAYS: number;
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: number;
+  DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: number;
+  DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: number;
   DUCKY_RETENTION_BATCH: number;
 }): RetentionPolicy {
   return Object.freeze({
@@ -237,6 +266,8 @@ export function retentionPolicyFrom(env: {
     closedAssistantDays: env.DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS,
     watchEventDays: env.DUCKY_RETENTION_WATCH_EVENTS_DAYS,
     idempotencyDays: env.DUCKY_RETENTION_IDEMPOTENCY_DAYS,
+    conversationOwnerDays: env.DUCKY_RETENTION_CONVERSATION_OWNER_DAYS,
+    conversationOtherDays: env.DUCKY_RETENTION_CONVERSATION_OTHER_DAYS,
     batch: env.DUCKY_RETENTION_BATCH,
   });
 }

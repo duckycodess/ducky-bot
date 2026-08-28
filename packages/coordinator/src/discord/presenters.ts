@@ -225,6 +225,8 @@ export interface ProviderStatus {
   readonly conversation: string;
   /** Whether the conversation provider may be handed files, and why not. */
   readonly conversationAttachments: string;
+  /** Whether anything the owner says in conversation is stored, and for how long. */
+  readonly conversationMemory: string;
   readonly orchestrator: string;
   readonly scheduleExtraction: string;
   readonly actions: string;
@@ -248,6 +250,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Discord', value: p.discord, inline: true },
           { name: 'Conversation', value: p.conversation, inline: true },
           { name: 'Chat attachments', value: p.conversationAttachments, inline: true },
+          { name: 'Chat memory', value: p.conversationMemory, inline: true },
           { name: 'Orchestrator', value: p.orchestrator, inline: true },
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },
           { name: 'Approved actions', value: p.actions, inline: true },

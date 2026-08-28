@@ -12,9 +12,10 @@ import {
 } from '@ducky/contracts';
 import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
 import { ForgetService } from './domain/forget.service.js';
+import { ConversationMemoryService } from './domain/conversation-memory.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -107,6 +108,8 @@ export interface App {
   readonly dependencies: DependencyResolver;
   readonly retention: RetentionService;
   readonly forget: ForgetService;
+  /** Bounded conversation continuity. Off unless the operator enabled it. */
+  readonly conversationMemory: ConversationMemoryService;
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
@@ -206,8 +209,18 @@ export function createApp(
     // `schedules.starts_at` is wall-clock text in this zone (ADR 0014), so
     // retention needs it to decide whether an event is genuinely past.
     timeZone: resolveOwnerTimeZone(env),
+    // From frozen configuration, never from the database: conversation windows
+    // differ for the owner and for a whitelist guest.
+    ownerId: authz.ownerId,
   });
-  const forget = new ForgetService({ store, authz });
+  // Continuity is off by default. The service exists regardless, because
+  // `/forget conversation` must be able to delete rows an earlier run stored
+  // even after the flag has been turned off again.
+  const conversationMemory = new ConversationMemoryService({
+    store,
+    config: resolveConversationMemory(env),
+  });
+  const forget = new ForgetService({ store, authz, memory: conversationMemory });
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
@@ -280,6 +293,9 @@ export function createApp(
         : `mock (no ${discordProfile.profile} token)`,
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     conversationAttachments: attachmentAvailability(conversation, conversationAttachments),
+    conversationMemory: conversationMemory.enabled
+      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread; /forget conversation deletes them`
+      : 'off — nothing you say in conversation is stored',
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
@@ -312,6 +328,7 @@ export function createApp(
     briefing,
     conversation,
     forget,
+    memory: conversationMemory,
     buckets,
     onProviderFailure: ({ provider, code }) => {
       try {
@@ -350,7 +367,7 @@ export function createApp(
     approvals, github, githubWatches, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments, dependencies,
-    retention, forget,
+    retention, forget, conversationMemory,
     close: () => store.db.close(),
   };
 }

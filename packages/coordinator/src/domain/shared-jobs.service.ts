@@ -27,11 +27,17 @@ const clamp = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(
  * reviewer sees the diff.
  *
  * It reads the store directly and takes no `ActorContext`, because it has no
- * authorization decision to make: the router has already established that the
- * request came from a configured shared channel, and everything this returns
- * is safe for anyone who can read that channel. Giving it an actor would
- * invite somebody to widen it later with an `if (isOwner)` branch, which is
- * exactly the reuse this separation exists to prevent.
+ * *identity* decision to make. Giving it an actor would invite somebody to
+ * widen it later with an `if (isOwner)` branch, which is exactly the reuse
+ * this separation exists to prevent.
+ *
+ * It does take a CHANNEL, and every read is scoped to it. Being safe to show
+ * is not the same as being meant for this audience: a job submitted in a DM,
+ * or in a different shared channel, was never offered to the people reading
+ * this one, and its status, timing and result summary are still the owner's
+ * to disclose. Scoping is therefore part of the query rather than a filter a
+ * caller could forget, and the channel id is a required argument rather than
+ * an option, so there is no call shape that reads across channels.
  */
 export class SharedJobsService {
   private readonly store: Store;
@@ -43,28 +49,33 @@ export class SharedJobsService {
   }
 
   /**
-   * Recent jobs, newest first.
+   * Recent jobs submitted from `channelId`, newest first.
    *
-   * Deliberately not scoped to a Discord user. This is a single-owner
-   * product, so every job is the owner's; scoping by the *requesting* user
-   * would return an empty list to every collaborator, and scoping by the
-   * owner's id would mean passing an identity into a service that must not
-   * have one. What keeps this safe is the projection, not a row filter.
+   * Not scoped to a Discord *user*: this is a single-owner product, so every
+   * job is the owner's, and scoping by the requesting user would return an
+   * empty list to every collaborator. It is scoped to the CHANNEL, which is
+   * the thing that actually says who a job was shared with.
    */
-  list(limit = 10): SharedJobProjection[] {
-    return this.store.jobs.listAllRecent(limit).map((job) => this.project(job));
+  list(channelId: string, limit = 10): SharedJobProjection[] {
+    return this.store.jobs
+      .listByOriginSharedChannel(channelId, limit)
+      .map((job) => this.project(job));
   }
 
   /**
-   * One job by its public id.
+   * One job by its public id, if it originated in `channelId`.
    *
-   * A malformed id, an unknown id and a stale id all produce the SAME
-   * `not_found`, so the shared surface cannot be used to probe which job ids
-   * have ever existed.
+   * A malformed id, an unknown id, a job submitted in a DM and a job from a
+   * different shared channel all produce the SAME `not_found`. That matters
+   * beyond tidiness: a distinguishable refusal would turn this into an oracle
+   * for which job ids exist and which channel each belongs to, which is most
+   * of what the projection is careful not to say.
    */
-  detail(publicId: string, atState?: JobState): SharedJobProjection {
+  detail(channelId: string, publicId: string, atState?: JobState): SharedJobProjection {
     const id = publicId.trim();
-    const job = PUBLIC_JOB_ID_RE.test(id) ? this.store.jobs.byPublicId(id) : undefined;
+    const job = PUBLIC_JOB_ID_RE.test(id)
+      ? this.store.jobs.byPublicIdForSharedChannel(id, channelId)
+      : undefined;
     if (!job) throw new DuckyError('not_found', 'No job with that id.');
     return this.project(job, atState);
   }

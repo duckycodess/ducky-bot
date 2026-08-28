@@ -23,11 +23,15 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
 
 Job *status* can be made visible without exposing job *content*. Add channel
 ids to `DUCKY_DEV_SHARED_CHANNEL_IDS` (default empty, which switches the
-feature off) and anyone who can read that channel may run `/jobs` and
-`/job status` there and see a safe projection: public job id, allowlisted
-repository slug, plain-language state, safe timestamps, sanitized result
-summary and verdict, and what happens next. Lifecycle updates for jobs
-submitted in that channel are posted back to it.
+feature off). Anyone who can read that channel may run `/jobs` and
+`/job status` there and see a safe projection **of the jobs submitted in that
+channel**: public job id, allowlisted repository slug, plain-language state,
+safe timestamps, sanitized result summary and verdict, and what happens next.
+Lifecycle updates for those jobs are posted back to the same channel.
+
+A job submitted in a DM, or in a different shared channel, is not visible
+there at all — not listed, and not reachable by id. Sharing a channel shares
+the work you start in it, not your whole job history.
 
 Never shared: task or context text, the owner's id, questions, answers, events,
 workspace paths, action details, or any control. This is a **visibility**

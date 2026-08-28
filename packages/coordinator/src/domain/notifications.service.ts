@@ -190,7 +190,7 @@ export class JobNotifier {
     }
     const channelId = this.shareableChannel(row);
     if (!channelId) return undefined;
-    const body = this.buildSharedMessage(row);
+    const body = this.buildSharedMessage(row, channelId);
     if (!body) return undefined;
     return { to: channelTarget(channelId), body };
   }
@@ -226,13 +226,22 @@ export class JobNotifier {
    * job that vanishes from the channel the moment its owner cancels it is
    * exactly the confusion this milestone exists to remove.
    */
-  private buildSharedMessage(row: PendingNotificationRow): OutboundMessage | undefined {
+  private buildSharedMessage(
+    row: PendingNotificationRow,
+    channelId: string,
+  ): OutboundMessage | undefined {
     if (!NOTIFIABLE_STATES.has(row.toState)) return undefined;
     try {
+      // Scoped to the channel being posted to, which for a notification is by
+      // definition the job's own origin -- so this is a consistency check
+      // rather than a filter, and it goes through the SAME channel-scoped
+      // read the interactive path uses. There is no unscoped lookup for a
+      // future change to reach for.
+      //
       // Reported as of THIS transition, not as the job stands now: a sweep
       // that runs after several transitions must post the sequence, not the
       // same current state several times over.
-      const projection = this.sharedJobs?.detail(row.publicId, row.toState);
+      const projection = this.sharedJobs?.detail(channelId, row.publicId, row.toState);
       return projection ? sharedJobNotification(projection) : undefined;
     } catch {
       // A job that cannot be projected has nothing safe to say about it.

@@ -101,18 +101,40 @@ export class JobsRepo {
   }
 
   /**
-   * Recent jobs across every submitter.
+   * Recent jobs that were submitted from one specific shared channel.
    *
-   * Exists for the shared projection, which has no requesting identity to
-   * scope by and must not be handed one. It returns whole `JobRow`s like any
-   * repository method -- narrowing to what is safe to show is the projection
-   * service's job, not the repository's.
+   * Exists for the shared projection. The channel scope is part of the query
+   * rather than a filter applied afterwards: a job submitted in a DM or in a
+   * different channel must never be a row this returns, so there is nothing
+   * for a caller to forget to filter.
+   *
+   * `origin_shared_channel_id` is NULL for every privately submitted job, and
+   * `= ?` never matches NULL in SQL, so those are excluded by the comparison
+   * itself.
+   *
+   * It returns whole `JobRow`s like any repository method -- narrowing to
+   * what is safe to *show* is the projection service's job, not the
+   * repository's. Scoping which jobs exist at all is this method's.
    */
-  listAllRecent(limit: number): JobRow[] {
+  listByOriginSharedChannel(channelId: string, limit: number): JobRow[] {
     return this.db
-      .prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?')
-      .all(limit)
+      .prepare(
+        'SELECT * FROM jobs WHERE origin_shared_channel_id = ? ORDER BY created_at DESC LIMIT ?',
+      )
+      .all(channelId, limit)
       .map((r) => mapJob(r as Record<string, unknown>));
+  }
+
+  /**
+   * One job by public id, but only if it originated in the given shared
+   * channel. Returns undefined otherwise, so an unknown id and a private or
+   * foreign-channel job are indistinguishable to the caller.
+   */
+  byPublicIdForSharedChannel(publicId: string, channelId: string): JobRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM jobs WHERE public_id = ? AND origin_shared_channel_id = ?')
+      .get(publicId, channelId);
+    return r ? mapJob(r as Record<string, unknown>) : undefined;
   }
 
   listByState(state: JobState): JobRow[] {

@@ -180,6 +180,12 @@ export class DuckyRouter {
    * It never calls `jobs.list` or `jobs.detail`. The projection service is
    * the only thing it can reach, so there is no code path from here to a
    * private field.
+   *
+   * Both reads are scoped to THIS channel. `isSharedRequest` has already
+   * established that `context.channelId` is a configured shared channel, and
+   * that same id is what the projection service scopes by -- so a channel can
+   * only ever show the jobs submitted in it, never one from a DM or from
+   * another shared channel.
    */
   private async handleSharedRead(
     actor: ActorContext,
@@ -189,12 +195,20 @@ export class DuckyRouter {
     if (!sharedJobs) return undefined;
     if (!isSharedReadableRoute(event.name, event.subcommand)) return undefined;
 
+    // `isSharedRequest` returned true, so this is present and configured.
+    // Re-checked rather than asserted: a missing id must fall through to the
+    // private owner-only path, never read across every channel.
+    const channelId = event.context?.channelId;
+    if (channelId === undefined) return undefined;
+
     // Rate limited like any other read, keyed by the requesting user, so a
     // shared channel cannot be used to hammer the database.
     this.buckets.check('jobRead', actor.discordUserId);
 
-    if (event.name === 'jobs') return shared.sharedJobsList(sharedJobs.list());
-    return shared.sharedJobDetail(sharedJobs.detail(String(event.options['id'] ?? '')));
+    if (event.name === 'jobs') return shared.sharedJobsList(sharedJobs.list(channelId));
+    return shared.sharedJobDetail(
+      sharedJobs.detail(channelId, String(event.options['id'] ?? '')),
+    );
   }
 
   private async handleComponent(

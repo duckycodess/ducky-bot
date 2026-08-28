@@ -275,6 +275,45 @@ describe('shared-channel job notifications', () => {
     h.close();
   });
 
+  it('posts each job only to its own originating channel', async () => {
+    const SECOND_CHANNEL = '900000000000000003';
+    const h = makeHarness({
+      env: { DUCKY_DEV_SHARED_CHANNEL_IDS: `${SHARED_CHANNEL},${SECOND_CHANNEL}` },
+    });
+
+    // Two jobs, two channels, plus one submitted privately.
+    const first = h.app.jobs.submit(
+      h.owner, { repoSlug: 'demo', task: 't1', bootstrap: false },
+      { sharedChannelId: SHARED_CHANNEL },
+    );
+    const c1 = h.app.jobs.claim(h.executorId, 'k1')!;
+    h.app.jobs.reportFailure(h.executorId, c1.jobId, c1.leaseId, 'no_result', {});
+
+    const second = h.app.jobs.submit(
+      h.owner, { repoSlug: 'other', task: 't2', bootstrap: false },
+      { sharedChannelId: SECOND_CHANNEL },
+    );
+    const c2 = h.app.jobs.claim(h.executorId, 'k2')!;
+    h.app.jobs.reportFailure(h.executorId, c2.jobId, c2.leaseId, 'no_result', {});
+
+    const priv = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 't3', bootstrap: false });
+
+    await notifierFor(h).deliverPending();
+
+    const posts = bothTargets(h.transport.sent).channel;
+    const idsFor = (channelId: string) =>
+      posts
+        .filter((p) => p.target.kind === 'channel' && p.target.channelId === channelId)
+        .map((p) => p.message.embeds![0]!.title!);
+
+    // Each channel hears about its own job and no other, and the privately
+    // submitted one is announced nowhere.
+    expect(idsFor(SHARED_CHANNEL).every((t) => t.includes(first.publicId))).toBe(true);
+    expect(idsFor(SECOND_CHANNEL).every((t) => t.includes(second.publicId))).toBe(true);
+    expect(JSON.stringify(posts)).not.toContain(priv.publicId);
+    h.close();
+  });
+
   it('does not double-send when two sweeps overlap', async () => {
     const h = boot();
     const c = startInChannel(h);

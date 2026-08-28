@@ -20,7 +20,9 @@ diagnostics and in `/status`.
   is listed, anyone who can read it gets a safe projection from `/jobs` and
   `/job status` — public job id, allowlisted repo slug, coarse state, safe
   timestamps, sanitized summary and verdict, next-step copy — and nothing
-  else. Task, context, owner id, questions, answers, events, workspace
+  else. **Scoped to that channel:** only jobs submitted in it are listed or
+  reachable by id. A job from a DM or another shared channel is refused
+  identically to one that never existed. Task, context, owner id, questions, answers, events, workspace
   ids/paths, action details and signed controls never appear there. Writes,
   captures, schedules, approvals and every control stay owner-only and
   ephemeral. See [decisions/0012](decisions/0012-opt-in-shared-job-visibility.md)

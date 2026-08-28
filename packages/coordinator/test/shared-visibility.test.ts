@@ -105,12 +105,18 @@ describe('shared channel policy', () => {
 describe('shared channel reads', () => {
   it('lets any member of a configured channel see the safe job list', async () => {
     const h = await boot();
-    h.app.jobs.submit(h.owner, {
-      repoSlug: 'demo',
-      task: 'rotate the production database credentials',
-      context: 'the old one is in 1password',
-      bootstrap: false,
-    });
+    h.app.jobs.submit(
+      h.owner,
+      {
+        repoSlug: 'demo',
+        task: 'rotate the production database credentials',
+        context: 'the old one is in 1password',
+        bootstrap: false,
+      },
+      // Submitted IN this channel, which is what makes it visible here at
+      // all. A job submitted anywhere else is covered below.
+      { sharedChannelId: SHARED_CHANNEL },
+    );
 
     // A stranger: not the owner, not even on the chat whitelist.
     const reply = await h.transport.dispatch({
@@ -129,12 +135,18 @@ describe('shared channel reads', () => {
 
   it('serves the shared view to the OWNER too, so the private view is never posted publicly', async () => {
     const h = await boot();
-    h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'secret task text', bootstrap: false });
+    const job = h.app.jobs.submit(
+      h.owner,
+      { repoSlug: 'demo', task: 'secret task text', bootstrap: false },
+      { sharedChannelId: SHARED_CHANNEL },
+    );
 
     const inChannel = await h.transport.dispatch({
       kind: 'command', name: 'jobs', userId: OWNER, context: inShared, options: {},
     });
     expect(inChannel?.ephemeral).toBe(false);
+    // The job IS there -- it was submitted here -- but only its safe shape.
+    expect(flat(inChannel)).toContain(job.publicId);
     expect(flat(inChannel)).not.toContain('secret task text');
 
     // The same owner, in a DM, still gets the full private view.
@@ -148,9 +160,11 @@ describe('shared channel reads', () => {
 
   it('shows a single job with a state label and next step, and nothing else', async () => {
     const h = await boot();
-    const job = h.app.jobs.submit(h.owner, {
-      repoSlug: 'demo', task: 'private task', bootstrap: false,
-    });
+    const job = h.app.jobs.submit(
+      h.owner,
+      { repoSlug: 'demo', task: 'private task', bootstrap: false },
+      { sharedChannelId: SHARED_CHANNEL },
+    );
 
     const reply = await h.transport.dispatch({
       kind: 'command', name: 'job', subcommand: 'status', userId: CHAT,
@@ -209,7 +223,11 @@ describe('shared channel reads', () => {
 
   it('shares the redacted result summary and verdict, never the raw snapshot', async () => {
     const h = await boot();
-    h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'private task', bootstrap: false });
+    h.app.jobs.submit(
+      h.owner,
+      { repoSlug: 'demo', task: 'private task', bootstrap: false },
+      { sharedChannelId: SHARED_CHANNEL },
+    );
     const c = h.app.jobs.claim(h.executorId, 'k1')!;
     h.app.jobs.submitResult(
       h.executorId, c.jobId, c.leaseId,
@@ -229,6 +247,166 @@ describe('shared channel reads', () => {
     // The snapshot's file list is never shared.
     expect(s).not.toContain('src/a.ts');
     assertNoPrivateData(reply, ['private task']);
+    h.close();
+  });
+});
+
+describe('a shared channel sees only the jobs submitted in it', () => {
+  const SECOND_CHANNEL = '900000000000000003';
+  const inSecond: IncomingContext = { channelId: SECOND_CHANNEL, guildId: GUILD };
+
+  /** Both channels configured, so neither is refused for being unlisted. */
+  const bootTwo = async () => {
+    const h = makeHarness({
+      env: { DUCKY_DEV_SHARED_CHANNEL_IDS: `${SHARED_CHANNEL},${SECOND_CHANNEL}` },
+    });
+    await h.transport.start((e) => h.app.router.handle(e));
+    return h;
+  };
+
+  /** Submits and runs a job to completion so it has a result to leak. */
+  const finishedJob = (
+    h: Awaited<ReturnType<typeof bootTwo>>,
+    repoSlug: string,
+    task: string,
+    key: string,
+    sharedChannelId?: string,
+  ) => {
+    const job = h.app.jobs.submit(
+      h.owner,
+      { repoSlug, task, bootstrap: false },
+      sharedChannelId === undefined ? {} : { sharedChannelId },
+    );
+    const c = h.app.jobs.claim(h.executorId, key)!;
+    h.app.jobs.submitResult(
+      h.executorId, c.jobId, c.leaseId,
+      implementedResult({ summary: `result of ${key}` }),
+      500,
+    );
+    return job;
+  };
+
+  it('does not list a privately submitted job in a shared channel', async () => {
+    const h = await bootTwo();
+    const priv = finishedJob(h, 'demo', 'private DM job', 'k1');
+    expect(priv.originSharedChannelId).toBeNull();
+
+    const listed = await h.transport.dispatch({
+      kind: 'command', name: 'jobs', userId: STRANGER, context: inShared, options: {},
+    });
+
+    // Nothing about it: not the id, not the repository, not the summary. The
+    // owner submitted it in a DM and never offered it to this audience.
+    const s = flat(listed);
+    expect(s).not.toContain(priv.publicId);
+    expect(s).not.toContain('result of k1');
+    expect(listed?.content).toBe('No development jobs to show yet.');
+    h.close();
+  });
+
+  it('refuses a direct lookup of a privately submitted job, indistinguishably', async () => {
+    const h = await bootTwo();
+    const priv = finishedJob(h, 'demo', 'private DM job', 'k1');
+
+    const asked = async (id: string) =>
+      h.transport.dispatch({
+        kind: 'command', name: 'job', subcommand: 'status', userId: STRANGER,
+        context: inShared, options: { id },
+      });
+
+    const real = await asked(priv.publicId);
+    const invented = await asked('jzzzzz');
+
+    // Knowing a real id must gain an attacker nothing over guessing one, or
+    // the refusal itself becomes an oracle for which jobs exist.
+    expect(real?.content).toBe('No job with that id.');
+    expect(real).toEqual(invented);
+    expect(flat(real)).not.toContain('result of k1');
+    h.close();
+  });
+
+  it('does not let one shared channel see another shared channel\'s jobs', async () => {
+    const h = await bootTwo();
+    const mine = finishedJob(h, 'demo', 'job in channel one', 'k1', SHARED_CHANNEL);
+    const theirs = finishedJob(h, 'other', 'job in channel two', 'k2', SECOND_CHANNEL);
+
+    const first = await h.transport.dispatch({
+      kind: 'command', name: 'jobs', userId: STRANGER, context: inShared, options: {},
+    });
+    const second = await h.transport.dispatch({
+      kind: 'command', name: 'jobs', userId: STRANGER, context: inSecond, options: {},
+    });
+
+    // Each channel sees its own job and only its own.
+    expect(flat(first)).toContain(mine.publicId);
+    expect(flat(first)).not.toContain(theirs.publicId);
+    expect(flat(first)).not.toContain('result of k2');
+
+    expect(flat(second)).toContain(theirs.publicId);
+    expect(flat(second)).not.toContain(mine.publicId);
+    expect(flat(second)).not.toContain('result of k1');
+
+    // And a direct lookup across channels is refused the same way.
+    const crossed = await h.transport.dispatch({
+      kind: 'command', name: 'job', subcommand: 'status', userId: STRANGER,
+      context: inSecond, options: { id: mine.publicId },
+    });
+    expect(crossed?.content).toBe('No job with that id.');
+    h.close();
+  });
+
+  it('still shows a job submitted in this very channel, with its result', async () => {
+    const h = await bootTwo();
+    const mine = finishedJob(h, 'demo', 'job in channel one', 'k1', SHARED_CHANNEL);
+
+    const detail = await h.transport.dispatch({
+      kind: 'command', name: 'job', subcommand: 'status', userId: STRANGER,
+      context: inShared, options: { id: mine.publicId },
+    });
+
+    // The positive case, so scoping cannot be "fixed" by returning nothing.
+    expect(detail!.embeds![0]!.title).toContain(mine.publicId);
+    expect(flat(detail)).toContain('implemented');
+    expect(flat(detail)).toContain('result of k1');
+    expect(detail?.ephemeral).toBe(false);
+    // Still no private data, and still no controls.
+    assertNoPrivateData(detail, ['job in channel one']);
+    h.close();
+  });
+
+  it('scopes the owner too: the shared view in a channel is not a private index', async () => {
+    const h = await bootTwo();
+    const priv = finishedJob(h, 'demo', 'private DM job', 'k1');
+
+    // The owner reading in a shared channel gets that channel's view, not
+    // their own full list -- otherwise the private job is posted publicly.
+    const inChannel = await h.transport.dispatch({
+      kind: 'command', name: 'jobs', userId: OWNER, context: inShared, options: {},
+    });
+    expect(flat(inChannel)).not.toContain(priv.publicId);
+
+    // The owner's DM is unaffected and still lists everything.
+    const inPrivate = await h.transport.dispatch({
+      kind: 'command', name: 'jobs', userId: OWNER, context: inDm, options: {},
+    });
+    expect(flat(inPrivate)).toContain(priv.publicId);
+    expect(flat(inPrivate)).toContain('private DM job');
+    h.close();
+  });
+
+  it('hides a job whose channel was unlisted after it was submitted', async () => {
+    const h = await bootTwo();
+    const mine = finishedJob(h, 'demo', 'job in channel one', 'k1', SHARED_CHANNEL);
+
+    // Still configured: visible.
+    expect(h.app.sharedJobs.list(SHARED_CHANNEL).map((j) => j.publicId)).toEqual([mine.publicId]);
+
+    // A channel that is not this job's origin sees nothing, whatever the
+    // stored id says -- the scope is the requesting channel, not the row.
+    expect(h.app.sharedJobs.list(SECOND_CHANNEL)).toEqual([]);
+    expect(() => h.app.sharedJobs.detail(SECOND_CHANNEL, mine.publicId)).toThrow(
+      /No job with that id/,
+    );
     h.close();
   });
 });
@@ -382,10 +560,15 @@ describe('the shared surface cannot grow by accident', () => {
 
   it('never reaches the owner-only services from the shared projection', () => {
     const h = makeHarness();
-    h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'private task', bootstrap: false });
+    h.app.jobs.submit(
+      h.owner,
+      { repoSlug: 'demo', task: 'private task', bootstrap: false },
+      { sharedChannelId: SHARED_CHANNEL },
+    );
     // The projection service has no ActorContext parameter at all, so there
     // is no identity to escalate and no owner-only method it can call.
-    const s = flat(h.app.sharedJobs.list());
+    const s = flat(h.app.sharedJobs.list(SHARED_CHANNEL));
+    expect(s).toContain('demo'); // it really did return the job
     expect(s).not.toContain('private task');
     expect(s).not.toContain(OWNER);
     h.close();

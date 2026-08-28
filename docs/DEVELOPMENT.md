@@ -39,8 +39,8 @@ Fill in the env file:
   `DUCKY_EXECUTOR_CREDENTIALS` — give each profile its own file
 - `DUCKY_DEV_SHARED_CHANNEL_IDS` — optional, default empty. Comma-separated
   Discord **channel** ids where `/jobs` and `/job status` answer anyone who
-  can read the channel, with a safe projection only. Empty switches the
-  feature off entirely. Production reads only `DUCKY_PROD_SHARED_CHANNEL_IDS`.
+  can read the channel, with a safe projection of the jobs submitted in that
+  channel only. Empty switches the feature off entirely. Production reads only `DUCKY_PROD_SHARED_CHANNEL_IDS`.
   Lock the channel down in Discord first: membership is enforced by channel
   permissions, not by Ducky. It grants no ability to act — every write stays
   owner-only.

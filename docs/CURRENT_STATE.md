@@ -87,6 +87,32 @@ diagnostics and in `/status`.
     reminder is late by at most one `DUCKY_RECONCILE_INTERVAL_MS`.
 - Text and CSV schedule extraction → preview → correction modal → explicit
   confirm
+- **Deterministic-first natural language, owner-only, no new command.** A fixed
+  rule table over the owner's own messages on the EXISTING conversation route.
+  No provider is consulted, so none of it waits on 2D, and none of it can
+  generate a sentence.
+  - **Reads** are answered immediately: a briefing (the same assembly `/briefing`
+    uses, same provenance line), a **Filipino meal suggestion** from a short
+    fixed list in Ducky's own source, and a **study plan** that arranges the
+    owner's own topic into a fixed schedule. Both helpers state their own limits
+    in the reply — the meal list says it is neither generated nor complete, the
+    study plan says Ducky knows nothing about the subject, has read nothing and
+    kept nothing.
+  - **Writes are PROPOSED, never applied on inference.** "i need to renew the
+    domain" produces a proposal; the owner replies `yes` (or `no`) in their own
+    words, and only then does `TasksService` — the same service `/task add` uses
+    — write anything. One proposal per (user, thread), expiring after ten
+    minutes, so a later `yes` cannot mean something the owner had stopped
+    thinking about.
+  - **Ambiguity produces nothing.** Two rules matching, a reminder with no time,
+    an over-long message: all mean nothing rather than a guess.
+  - **A non-owner reaches none of it.** A whitelist user's message is ordinary
+    conversation, exactly as before.
+  - **No command and no interaction kind was added**, and `OWNER_ONLY_COMMANDS`
+    is unchanged. `/meal`, `/study` and a one-press confirm button would each
+    widen the owner-only surface, which `AGENTS.md` forbids; conversation is an
+    existing permitted route and the owner gate on it is the one conversation
+    attachments already use.
 - **Bounded conversation continuity, OFF by default.** See
   [decisions/0021](decisions/0021-bounded-conversation-continuity.md)
   - `DUCKY_CONVERSATION_MEMORY_ENABLED` defaults to false, and with it off

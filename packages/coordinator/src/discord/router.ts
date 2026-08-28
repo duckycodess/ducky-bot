@@ -18,6 +18,7 @@ import type { GitHubService } from '../domain/github.service.js';
 import type { GitHubWatchService } from '../domain/github-watches.service.js';
 import type { ForgetService } from '../domain/forget.service.js';
 import type { ConversationMemoryService } from '../domain/conversation-memory.service.js';
+import type { IntentsService } from '../domain/intents.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
@@ -62,6 +63,11 @@ export interface RouterDeps {
    * unwired router stores nothing and replays nothing.
    */
   readonly memory?: ConversationMemoryService;
+  /**
+   * Deterministic natural-language intents on the conversation route. OMITTING
+   * IT means every message goes straight to the provider, exactly as before.
+   */
+  readonly intents?: IntentsService;
   /**
    * Notified when a provider refuses or fails at the boundary. Fire-and-forget:
    * the owner's reply must not depend on the audit log being writable.
@@ -290,6 +296,21 @@ export class DuckyRouter {
     const attachments = event.attachments ?? [];
 
     if (attachments.length === 0) {
+      // Deterministic rules FIRST, and only for the owner. A matched intent is
+      // answered from stored records or a fixed local table; a matched WRITE is
+      // proposed and never applied until the owner confirms in their own words.
+      // Everything else -- almost every message -- falls through to the provider
+      // exactly as it did before.
+      const handled = this.deps.intents?.handle(actor, event.threadKey, event.text);
+      if (handled) {
+        // Recorded like any other exchange, so a follow-up question still has
+        // the context of what was just proposed or answered.
+        this.deps.memory?.record(actor, event.threadKey, {
+          userText: event.text,
+          assistantText: handled.content ?? '',
+        });
+        return handled;
+      }
       return this.converse({
         actor,
         userId: actor.discordUserId,

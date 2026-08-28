@@ -95,11 +95,15 @@ Decisions resolved (see
 
 Still open, and deliberately deferred:
 
-- 🔶 **Natural-language capture.** DCStro guessed intent from plain messages,
-  deterministic rules first and AI only to improve a low-confidence read. That
-  is a good design, but it depends on a verified conversation provider, which
-  we do not have (see 2D). `/task` and `/reminder` are explicit commands until
-  then.
+- ✅ **Natural-language capture — DELIVERED by the final milestone, without a
+  provider.** DCStro's design was rules first, AI only to improve a low-confidence
+  read; the rules half needs no provider, so it shipped. A fixed table over the
+  owner's own messages proposes a task, reminder or capture and applies it only
+  after an explicit `yes`, through the same services the slash commands use.
+  Ambiguity produces nothing. A non-owner reaches none of it. No command and no
+  interaction kind was added — `AGENTS.md` forbids widening the owner-only
+  surface, so the confirmation is a message rather than a button. The AI half
+  still waits on 2D and improves nothing until then.
 - ✅ **Proactive briefings — DELIVERED by the final milestone, off by default.**
   The delivery-time preference that was missing is now two validated local times
   (`DUCKY_BRIEFING_MORNING_AT` / `_EVENING_AT`). The channel-role question stays

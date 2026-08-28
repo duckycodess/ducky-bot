@@ -40,6 +40,7 @@ import { RemindersService } from './domain/reminders.service.js';
 import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
 import { BriefingNotifier } from './domain/briefing-notifications.service.js';
+import { IntentsService } from './domain/intents.service.js';
 import { DependencyResolver } from './domain/dependency-resolver.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
@@ -113,6 +114,8 @@ export interface App {
   readonly forget: ForgetService;
   /** Bounded conversation continuity. Off unless the operator enabled it. */
   readonly conversationMemory: ConversationMemoryService;
+  /** Deterministic natural-language intents. Owner-only, provider-free. */
+  readonly intents: IntentsService;
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
@@ -245,6 +248,11 @@ export function createApp(
   const reminders = new RemindersService({ store, authz, clock });
   const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
+  // Deterministic rules over the owner's own messages: no provider, no new
+  // command, and no inferred write applied without an explicit confirmation.
+  const intents = new IntentsService({
+    clock, tasks, reminders, captures, briefing, ownerId: authz.ownerId,
+  });
 
   // Which checker answers a dependency wait. The default still answers
   // `pending` for everything, so a wait ends at the owner's desk rather than
@@ -351,6 +359,7 @@ export function createApp(
     conversation,
     forget,
     memory: conversationMemory,
+    intents,
     buckets,
     onProviderFailure: ({ provider, code }) => {
       try {
@@ -390,7 +399,7 @@ export function createApp(
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
-    retention, forget, conversationMemory,
+    retention, forget, conversationMemory, intents,
     close: () => store.db.close(),
   };
 }

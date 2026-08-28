@@ -105,7 +105,9 @@ export function findForbiddenVerb(
 }
 
 /** Force and hook-bypass flags are never accepted, including after approval. */
-const FORBIDDEN_COMMAND_FLAGS = ['--force', '--force-with-lease', '--no-verify', '-f'] as const;
+const FORBIDDEN_COMMAND_FLAGS = [
+  '--force', '--force-with-lease', '--no-verify', '--amend', '-f',
+] as const;
 
 export function findForbiddenFlag(argv: readonly string[]): string | undefined {
   return argv.find((a) => (FORBIDDEN_COMMAND_FLAGS as readonly string[]).includes(a));
@@ -141,8 +143,8 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   { bin: 'git', verb: ['symbolic-ref'], cls: 'read_only', note: 'Reads a symbolic ref; --quiet, no write form used.' },
   { bin: 'git', verb: ['status'], cls: 'read_only', note: 'Working tree state.' },
   { bin: 'git', verb: ['diff'], cls: 'read_only', note: 'Changed-file or diff-summary inspection.' },
-  { bin: 'git', verb: ['branch'], cls: 'read_only', note: 'Current branch inspection.' },
-  { bin: 'git', verb: ['remote'], cls: 'read_only', note: 'Configured remote inspection.' },
+  { bin: 'git', verb: ['branch', '--show-current'], cls: 'read_only', note: 'Current branch inspection.' },
+  { bin: 'git', verb: ['remote', 'get-url'], cls: 'read_only', note: 'Configured remote inspection.' },
   { bin: 'git', verb: ['add'], cls: 'local_mutation', note: 'Stages only explicitly approved repository-relative files.' },
   { bin: 'git', verb: ['commit'], cls: 'local_mutation', note: 'Creates a local commit from an approved proposal.' },
   { bin: 'git', verb: ['push'], cls: 'external_mutation', note: 'Publishes a branch; only the approved-action path may run it.' },

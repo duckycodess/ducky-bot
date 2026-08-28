@@ -144,6 +144,12 @@ export class DependencyResolver {
    * unbounded retry loop.
    */
   private async checkOnce(dep: DependencyRow): Promise<DependencyCheckOutcome> {
+    if (!this.checker.supports.includes(dep.type)) {
+      return {
+        status: 'pending',
+        detail: `No configured checker supports ${DEPENDENCY_TYPE_LABEL[dep.type]}.`,
+      };
+    }
     const input = {
       dependencyId: dep.id,
       type: dep.type,
@@ -196,9 +202,11 @@ export class DependencyResolver {
       }
 
       if (status === 'ready') {
-        this.store.dependencies.resolve({
+        const resolved = this.store.dependencies.resolve({
           id: dep.id, state: 'ready', detail, atIso, countCheck: true, status: 'ready',
+          expectedChecksMade: dep.checksMade,
         });
+        if (!resolved) return;
         this.store.jobs.transition(
           job.id, 'queued', DEPENDENCY_RESOLUTIONS.ready, 'system:dependency',
         );
@@ -221,9 +229,11 @@ export class DependencyResolver {
       }
 
       if (status === 'failed') {
-        this.store.dependencies.resolve({
+        const resolved = this.store.dependencies.resolve({
           id: dep.id, state: 'failed', detail, atIso, countCheck: true, status: 'failed',
+          expectedChecksMade: dep.checksMade,
         });
+        if (!resolved) return;
         this.store.jobs.transition(
           job.id, 'failed', DEPENDENCY_RESOLUTIONS.failed, 'system:dependency',
           { finishedAt: atIso },
@@ -244,9 +254,11 @@ export class DependencyResolver {
 
       // Still pending.
       if (budgetSpent) {
-        this.store.dependencies.resolve({
+        const resolved = this.store.dependencies.resolve({
           id: dep.id, state: 'expired', detail, atIso, countCheck: true, status: 'pending',
+          expectedChecksMade: dep.checksMade,
         });
+        if (!resolved) return;
         this.store.jobs.transition(
           job.id, 'needs_owner_input', DEPENDENCY_RESOLUTIONS.expired, 'system:dependency',
         );
@@ -268,7 +280,7 @@ export class DependencyResolver {
       }
 
       const nextCheckAt = new Date(at.getTime() + this.backoffMs(checksAfter)).toISOString();
-      this.store.dependencies.recordCheck({
+      const recorded = this.store.dependencies.recordCheck({
         id: dep.id,
         expectedChecksMade: dep.checksMade,
         status: 'pending',
@@ -276,6 +288,7 @@ export class DependencyResolver {
         nextCheckAt,
         atIso,
       });
+      if (!recorded) return;
       this.store.auditLog.record({
         event: 'dependency.checked', actorKind: 'system', actorRef: this.checker.name,
         subjectKind: 'dependency', subjectRef: dep.id, outcome: 'ok',

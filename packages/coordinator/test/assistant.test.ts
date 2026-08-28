@@ -192,6 +192,23 @@ describe('the assistant Discord surface', () => {
     h.close();
   });
 
+  it('promotes an open capture into a task and marks the capture done', async () => {
+    const { h } = await boot();
+    const capture = h.app.captures.create(h.owner, 'send the invoice');
+    const inbox = await h.transport.dispatch({
+      kind: 'command', name: 'inbox', userId: OWNER, options: {},
+    });
+    const taskButton = inbox?.rows?.[0]?.buttons.find((b) => b.label.startsWith('task'));
+    expect(taskButton).toBeDefined();
+    const promoted = await h.transport.dispatch({
+      kind: 'component', customId: taskButton!.customId, userId: OWNER,
+    });
+    expect(promoted?.content).toMatch(/promoted to task/);
+    expect(h.app.tasks.list(h.owner, 'open')[0]?.title).toBe('send the invoice');
+    expect(h.app.captures.list(h.owner, 'all').find((r) => r.id === capture.id)?.status).toBe('done');
+    h.close();
+  });
+
   it('never mints a control a non-owner could reuse', async () => {
     const { h } = await boot();
     h.app.tasks.add(h.owner, { title: 'private' });

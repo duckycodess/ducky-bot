@@ -1,5 +1,6 @@
-import type {
-  DependencyCheckInput, DependencyCheckOutcome, DependencyType,
+import {
+  DEPENDENCY_TYPES,
+  type DependencyCheckInput, type DependencyCheckOutcome, type DependencyType,
 } from '@ducky/contracts';
 
 /**
@@ -69,7 +70,7 @@ export interface ScriptedOutcome extends DependencyCheckOutcome {
  */
 export class ScriptedDependencyChecker implements DependencyChecker {
   readonly name = 'scripted';
-  readonly supports: readonly DependencyType[] = [];
+  readonly supports: readonly DependencyType[] = DEPENDENCY_TYPES;
   readonly calls: DependencyCheckInput[] = [];
 
   #queue: DependencyCheckOutcome[];

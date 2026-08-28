@@ -4,7 +4,7 @@ import {
   TASK_LIST_PAGE_SIZE, TaskAddInputSchema, newPublicTaskId, parseWhen,
   type TaskListFilter, type TaskState,
 } from '@ducky/contracts';
-import type { Store, TaskRow } from '@ducky/persistence';
+import { withTransaction, type Store, type TaskRow } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
 
@@ -79,6 +79,45 @@ export class TasksService {
       dueAllDay,
       priority: input.priority,
       createdAt: isoOf(nowMs),
+    });
+  }
+
+  /**
+   * Turns one owner-owned open capture into a task and marks that capture done
+   * in the same transaction. A capture longer than the task title limit is
+   * refused rather than silently truncated; the owner can edit the capture
+   * first.
+   */
+  promoteCapture(actor: ActorContext, captureId: string): TaskRow {
+    this.authz.requireOwner(actor);
+    const capture = this.store.captures.get(captureId);
+    if (!capture || capture.discordUserId !== actor.discordUserId) {
+      throw new DuckyError('not_found', 'That capture no longer exists.');
+    }
+    if (capture.status !== 'open') {
+      throw new DuckyError('invalid_input', 'Only an open capture can become a task.');
+    }
+    if (this.store.tasks.countOpen(actor.discordUserId) >= MAX_OPEN_TASKS_PER_OWNER) {
+      throw new DuckyError(
+        'invalid_input',
+        `You already have ${MAX_OPEN_TASKS_PER_OWNER} open tasks. Close some before promoting a capture.`,
+      );
+    }
+    const input = TaskAddInputSchema.parse({ title: capture.content });
+    const nowMs = this.clock.nowMs();
+    return withTransaction(this.store.db, () => {
+      const task = this.store.tasks.insert({
+        id: randomUUID(),
+        publicId: this.freshPublicId(),
+        discordUserId: actor.discordUserId,
+        title: input.title,
+        dueAt: null,
+        dueAllDay: false,
+        priority: 'normal',
+        createdAt: isoOf(nowMs),
+      });
+      this.store.captures.setStatus(capture.id, 'done');
+      return task;
     });
   }
 

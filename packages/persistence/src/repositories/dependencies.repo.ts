@@ -144,7 +144,19 @@ export class DependenciesRepo {
     /** Count this closing observation as a check, when it was one. */
     countCheck?: boolean;
     status?: DependencyCheckStatus;
+    /** Optional compare-and-set for a resolver result. */
+    expectedChecksMade?: number;
   }): boolean {
+    const cas = input.expectedChecksMade === undefined ? '' : ' AND checks_made = ?';
+    const args: unknown[] = [
+      input.state, input.atIso, input.atIso,
+      input.countCheck ? 1 : 0,
+      input.countCheck ? 1 : 0, input.atIso,
+      input.status ?? null,
+      input.detail,
+      input.id,
+    ];
+    if (input.expectedChecksMade !== undefined) args.push(input.expectedChecksMade);
     const info = this.db
       .prepare(
         `UPDATE job_dependencies
@@ -153,16 +165,9 @@ export class DependenciesRepo {
                 last_check_at = CASE WHEN ? = 1 THEN ? ELSE last_check_at END,
                 last_status = COALESCE(?, last_status),
                 last_detail = COALESCE(?, last_detail)
-          WHERE id = ? AND state = 'waiting'`,
+          WHERE id = ? AND state = 'waiting'${cas}`,
       )
-      .run(
-        input.state, input.atIso, input.atIso,
-        input.countCheck ? 1 : 0,
-        input.countCheck ? 1 : 0, input.atIso,
-        input.status ?? null,
-        input.detail,
-        input.id,
-      );
+      .run(...(args as never[]));
     return Number(info.changes) === 1;
   }
 

@@ -375,11 +375,22 @@ export class DuckyRouter {
       const status = (e.options['status'] as CaptureState | 'all' | undefined) ?? 'open';
       const rows = d.captures.list(actor, status);
       const buttons: OutboundRow[] = rows.slice(0, 5).map((r) => ({
-        buttons: (['inbox_done', 'inbox_archive', 'inbox_delete'] as const).map((kind) => ({
-          customId: d.signer.sign({ kind, entityId: r.id, actorUserId: actor.discordUserId }),
-          label: `${kind.split('_')[1]} ${r.id.slice(0, 4)}`,
-          style: kind === 'inbox_delete' ? ('danger' as const) : ('secondary' as const),
-        })),
+        buttons: [
+          ...(['inbox_done', 'inbox_archive', 'inbox_delete'] as const).map((kind) => ({
+            customId: d.signer.sign({ kind, entityId: r.id, actorUserId: actor.discordUserId }),
+            label: `${kind.split('_')[1]} ${r.id.slice(0, 4)}`,
+            style: kind === 'inbox_delete' ? ('danger' as const) : ('secondary' as const),
+          })),
+          ...(r.status === 'open'
+            ? [{
+                customId: d.signer.sign({
+                  kind: 'inbox_task', entityId: r.id, actorUserId: actor.discordUserId,
+                }),
+                label: `task ${r.id.slice(0, 4)}`,
+                style: 'primary' as const,
+              }]
+            : []),
+        ],
       }));
       return present.inboxList(rows, buttons);
     });
@@ -738,6 +749,9 @@ export class DuckyRouter {
       d.captures.delete(actor, entityId);
       return { content: 'Deleted.', ephemeral: true };
     });
+    this.components.set('inbox_task', async (actor, entityId) =>
+      assistant.taskPromoted(d.tasks.promoteCapture(actor, entityId), d.tasks.timeZone),
+    );
 
     this.components.set('sched_confirm', async (actor, entityId) => {
       const { saved } = d.schedules.confirm(actor, entityId);

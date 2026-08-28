@@ -49,6 +49,8 @@ describe('the command policy', () => {
     expect(checkCommandAllowed('git', ['push', 'origin', 'main', '--force'], 'external_mutation')?.reason).toBe(
       'forbidden_verb',
     );
+    expect(checkCommandAllowed('git', ['branch', '-D', 'main'])?.reason).toBe('unclassified');
+    expect(checkCommandAllowed('git', ['remote', 'remove', 'origin'])?.reason).toBe('unclassified');
   });
 
   it('does not mistake a flag for a verb', () => {

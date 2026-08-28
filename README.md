@@ -16,7 +16,7 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
                                                             → Herdr → Pi → Claude
                                                             → independent review
                                                             → verification
-                                                            → owner approval → (deferred)
+                                                            → owner approval → explicit action (opt-in)
 ```
 
 ## Job lifecycle
@@ -52,8 +52,9 @@ Beside the development controller, Ducky keeps the owner's day:
 
 - `/task add|list|done|cancel` — commitments with an optional due time and a
   priority. A task is a different record from a `/capture`: a capture is an
-  unsorted thought, a task is something you have decided to do. `list` filters
-  by `today` and `overdue` against your own civil day.
+  unsorted thought, a task is something you have decided to do. Open inbox
+  rows also have a signed promote-to-task control. `list` filters by `today`
+  and `overdue` against your own civil day.
 - `/reminder add|list|cancel` — one-shot, or a fixed interval with an explicit
   occurrence count, delivered to your DM. There is no cron grammar and no
   open-ended schedule: every recurrence is bounded at input and again by the

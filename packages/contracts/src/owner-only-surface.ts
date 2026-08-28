@@ -30,6 +30,7 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'inbox_done',
   'inbox_archive',
   'inbox_delete',
+  'inbox_task',
   'sched_confirm',
   'sched_discard',
   'sched_edit',

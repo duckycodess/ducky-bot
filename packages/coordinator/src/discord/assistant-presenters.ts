@@ -67,6 +67,16 @@ export function taskAdded(task: TaskRow, tz: string): OutboundMessage {
   };
 }
 
+export function taskPromoted(task: TaskRow, tz: string): OutboundMessage {
+  const due = taskDue(task, tz);
+  return {
+    content:
+      `Capture promoted to task \`${task.publicId}\` (normal priority)` +
+      (due === '' ? '; the capture is marked done.' : `, due ${due}; the capture is marked done.`),
+    ephemeral: true,
+  };
+}
+
 export function taskClosed(task: TaskRow): OutboundMessage {
   return {
     content: `Task \`${task.publicId}\` is now ${TASK_STATE_LABEL[task.status].toLowerCase()}.`,

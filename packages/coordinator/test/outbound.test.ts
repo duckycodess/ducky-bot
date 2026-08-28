@@ -6,6 +6,7 @@ import { sanitizeOutbound } from '../src/discord/sanitize-outbound.js';
 import { DiscordJsTransport } from '../src/discord/discordjs.transport.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { DiscordSink } from '../src/discord/transport.js';
+import { channelTarget, dmTarget } from '../src/discord/message.js';
 import type { OutboundMessage } from '../src/discord/message.js';
 
 const SECRETS = [
@@ -70,7 +71,7 @@ describe('no transport can bypass the choke point', () => {
     };
     const transport = new DiscordJsTransport('token-not-used', () => sink, sink);
 
-    await transport.send({ userId: '1' }, poisoned());
+    await transport.send(dmTarget('1'), poisoned());
     await transport.start(async () => poisoned());
 
     expect(seen).toHaveLength(1);
@@ -83,7 +84,7 @@ describe('no transport can bypass the choke point', () => {
   it('the mock transport sanitizes identically', async () => {
     const transport = new MockDiscordTransport();
     await transport.start(async () => poisoned());
-    await transport.send({ userId: '1' }, poisoned());
+    await transport.send(dmTarget('1'), poisoned());
     const replied = await transport.dispatch({ kind: 'message', userId: '1', text: 'x', threadKey: 't' });
 
     for (const message of [...transport.sent.map((s) => s.message), replied!]) {

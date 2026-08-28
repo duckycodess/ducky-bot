@@ -1,6 +1,7 @@
 import {
   CONVERSATIONAL_ROUTE, DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
-  OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, isDuckyError,
+  OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
+  isDuckyError, isSharedReadableRoute,
   type CaptureState, type OwnerOnlyCommand, type OwnerOnlyInteractionKind,
 } from '@ducky/contracts';
 import type { ConversationProvider } from '@ducky/adapters';
@@ -11,10 +12,13 @@ import type { SchedulesService } from '../domain/schedules.service.js';
 import type { JobsService } from '../domain/jobs.service.js';
 import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
+import type { SharedJobsService } from '../domain/shared-jobs.service.js';
+import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
 import type { Incoming } from './transport.js';
 import { CommandBuckets } from './command-buckets.js';
 import * as present from './presenters.js';
+import * as shared from './shared-presenters.js';
 
 export interface RouterDeps {
   readonly authz: Authorizer;
@@ -27,6 +31,14 @@ export interface RouterDeps {
   readonly conversation: ConversationProvider;
   readonly status: () => present.ProviderStatus;
   readonly buckets?: CommandBuckets;
+  /**
+   * Shared-channel visibility. BOTH must be supplied for any shared read to
+   * happen; omitting either leaves every request on the private, owner-only
+   * path. Failing closed is deliberate -- an incompletely wired router must
+   * lose visibility, never publish.
+   */
+  readonly sharedPolicy?: SharedChannelPolicy;
+  readonly sharedJobs?: SharedJobsService;
   /** Supplied by the transport so /schedule can accept a text attachment. */
   readonly readAttachment?: (a: NonNullable<Extract<Incoming, { kind: 'command' }>['attachment']>) => Promise<string>;
 }
@@ -47,9 +59,15 @@ export class DuckyRouter {
   private readonly commands = new Map<string, CommandHandler>();
   private readonly components = new Map<string, ComponentHandler>();
   private readonly buckets: CommandBuckets;
+  private readonly sharedPolicy: SharedChannelPolicy;
 
   constructor(private readonly deps: RouterDeps) {
     this.buckets = deps.buckets ?? new CommandBuckets();
+    // An empty policy answers false to everything, so an unwired router is a
+    // fully private one. `handleSharedRead` additionally requires
+    // `deps.sharedJobs`, so both halves must be present for anything to be
+    // shared.
+    this.sharedPolicy = deps.sharedPolicy ?? new SharedChannelPolicy();
     this.registerCommands();
     this.registerComponents();
     this.assertSurfaceMatchesManifest();
@@ -79,6 +97,34 @@ export class DuckyRouter {
     if (kinds.size > 0) {
       throw new Error(`interaction outside OWNER_ONLY_INTERACTION_KINDS: ${[...kinds].join(', ')}`);
     }
+    this.assertSharedSurfaceIsReadOnly();
+  }
+
+  /**
+   * The shared surface may only ever name commands that exist, and may never
+   * name an interaction kind.
+   *
+   * Every registered command is already asserted to be in
+   * OWNER_ONLY_COMMANDS above, so a shared route naming a registered command
+   * is by construction a *narrowed view* of an owner-only command rather than
+   * a new, unlisted surface. Interaction kinds are excluded outright: a
+   * component is a signed control, and no control belongs in a channel other
+   * people can read.
+   */
+  private assertSharedSurfaceIsReadOnly(): void {
+    for (const route of SHARED_READABLE_ROUTES) {
+      if (!this.commands.has(route.command)) {
+        throw new Error(`shared route names an unregistered command: ${route.command}`);
+      }
+      if (this.components.has(route.command)) {
+        throw new Error(`shared route names an interaction kind: ${route.command}`);
+      }
+    }
+    for (const kind of OWNER_ONLY_INTERACTION_KINDS) {
+      if (isSharedReadableRoute(kind)) {
+        throw new Error(`interaction kind is shared-readable: ${kind}`);
+      }
+    }
   }
 
   async handle(event: Incoming): Promise<OutboundMessage | undefined> {
@@ -104,9 +150,51 @@ export class DuckyRouter {
     const handler = this.commands.get(event.name);
     // Unknown commands are refused before any authorization detail leaks.
     if (!handler) return { content: 'Unknown command.', ephemeral: true };
+
+    // A configured shared channel serves the shared projection for the two
+    // read routes -- to EVERYONE there, the owner included. Giving the owner
+    // the private view here instead would put task text, questions and signed
+    // controls into a channel other people can read, which is precisely the
+    // accident this branch exists to prevent. The owner reads the private
+    // view in a DM.
+    if (this.sharedPolicy.isSharedRequest(event.context)) {
+      const projected = await this.handleSharedRead(actor, event);
+      if (projected) return projected;
+    }
+
     // Owner-only at the router AND again inside every service method.
     this.deps.authz.requireOwner(actor);
     return handler(actor, event);
+  }
+
+  /**
+   * The shared-channel read path.
+   *
+   * Returns undefined for anything that is not a shared-readable route, which
+   * falls through to the normal owner-only path: a non-owner is refused
+   * exactly as they are anywhere else, and the owner keeps full control from
+   * the channel with an ephemeral reply. That is what keeps writes owner-only
+   * while still letting the owner submit a job from the channel it should be
+   * reported in.
+   *
+   * It never calls `jobs.list` or `jobs.detail`. The projection service is
+   * the only thing it can reach, so there is no code path from here to a
+   * private field.
+   */
+  private async handleSharedRead(
+    actor: ActorContext,
+    event: Extract<Incoming, { kind: 'command' }>,
+  ): Promise<OutboundMessage | undefined> {
+    const sharedJobs = this.deps.sharedJobs;
+    if (!sharedJobs) return undefined;
+    if (!isSharedReadableRoute(event.name, event.subcommand)) return undefined;
+
+    // Rate limited like any other read, keyed by the requesting user, so a
+    // shared channel cannot be used to hammer the database.
+    this.buckets.check('jobRead', actor.discordUserId);
+
+    if (event.name === 'jobs') return shared.sharedJobsList(sharedJobs.list());
+    return shared.sharedJobDetail(sharedJobs.detail(String(event.options['id'] ?? '')));
   }
 
   private async handleComponent(
@@ -238,7 +326,12 @@ export class DuckyRouter {
             ...(e.options['context'] === undefined ? {} : { context: String(e.options['context']) }),
             bootstrap: e.options['bootstrap'] === true,
           });
-          const job = d.jobs.submit(actor, input);
+          // Recorded only when this really is a configured shared channel, so
+          // the column can never hold an id that was not shared at write time.
+          const sharedChannelId = this.sharedPolicy.isSharedRequest(e.context)
+            ? e.context?.channelId
+            : undefined;
+          const job = d.jobs.submit(actor, input, { sharedChannelId });
           return {
             content: `Job \`${job.publicId}\` created for \`${job.repoSlug}\` (${job.state.replace(/_/g, ' ')}).`,
             ephemeral: true,

@@ -4,7 +4,15 @@ import { JobNotifier } from '../src/domain/notifications.service.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { DiscordTransport } from '../src/discord/transport.js';
 import type { OutboundMessage, SendTarget } from '../src/discord/message.js';
+import { ownerStateLabel } from '@ducky/contracts';
+import { dmTarget } from '../src/discord/message.js';
 import { makeHarness, implementedResult, commitAction, OWNER } from './helpers.js';
+
+/** Finds the notification for a state by its contract label, not by wording. */
+const forState = (
+  sent: { message: { embeds?: readonly { description?: string }[] } }[],
+  state: Parameters<typeof ownerStateLabel>[0],
+) => sent.find((s) => s.message.embeds?.[0]?.description?.includes(ownerStateLabel(state)));
 
 const start = (h: ReturnType<typeof makeHarness>) => {
   h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
@@ -47,13 +55,15 @@ describe('job notification delivery', () => {
     // Two notifiable transitions land from claim+failure: 'claimed' -> running
     // and the failure itself -> failed. Both are executor-authored, so both
     // are delivered rather than skipped.
-    expect(result).toEqual({ delivered: 2, skipped: 0, failed: 0 });
+    expect(result).toMatchObject({ delivered: 2, skipped: 0, failed: 0 });
+    // No shared channel is configured, so every delivery is an owner DM.
+    expect(result.deliveredByTarget).toEqual({ owner_dm: 2, shared_channel: 0 });
     expect(h.transport.sent).toHaveLength(2);
-    expect(h.transport.sent[0]!.target).toEqual({ userId: OWNER });
+    expect(h.transport.sent[0]!.target).toEqual(dmTarget(OWNER));
     const last = h.transport.sent.at(-1)!.message;
     const embed = last.embeds![0]!;
     expect(embed.title).toContain(c.publicId);
-    expect(embed.description).toContain('failed');
+    expect(embed.description).toContain(ownerStateLabel('failed'));
     h.close();
   });
 
@@ -69,7 +79,7 @@ describe('job notification delivery', () => {
 
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     const result = await notifier.deliverPending();
-    expect(result).toEqual({ delivered: 0, skipped: 1, failed: 0 });
+    expect(result).toMatchObject({ delivered: 0, skipped: 1, failed: 0 });
     expect(h.transport.sent).toHaveLength(0);
     h.close();
   });
@@ -115,15 +125,15 @@ describe('job notification delivery', () => {
     const notifier = new JobNotifier({ store: h.store, transport: flaky, ownerId: OWNER, signer: h.app.signer });
 
     const first = await notifier.deliverPending();
-    expect(first).toEqual({ delivered: 0, skipped: 0, failed: 1 });
+    expect(first).toMatchObject({ delivered: 0, skipped: 0, failed: 1 });
     expect(flaky.inner.sent).toHaveLength(0);
 
     const second = await notifier.deliverPending();
-    expect(second).toEqual({ delivered: 1, skipped: 0, failed: 0 });
+    expect(second).toMatchObject({ delivered: 1, skipped: 0, failed: 0 });
     expect(flaky.inner.sent).toHaveLength(1);
 
     const third = await notifier.deliverPending();
-    expect(third).toEqual({ delivered: 0, skipped: 0, failed: 0 });
+    expect(third).toMatchObject({ delivered: 0, skipped: 0, failed: 0 });
     expect(flaky.inner.sent).toHaveLength(1);
     h.close();
   });
@@ -156,7 +166,7 @@ describe('job notification delivery', () => {
 
     // Each job contributes two notifiable transitions (claimed, failed). Only
     // the very first send attempt fails; the batch keeps going regardless.
-    expect(result).toEqual({ delivered: 3, skipped: 0, failed: 1 });
+    expect(result).toMatchObject({ delivered: 3, skipped: 0, failed: 1 });
     expect(transport.inner.sent).toHaveLength(3);
     h.close();
   });
@@ -213,7 +223,7 @@ describe('job notification delivery', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const completed = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('completed'));
+    const completed = forState(h.transport.sent, 'completed');
     expect(completed).toBeDefined();
     const resultField = completed!.message.embeds![0]!.fields!.find((f) => f.name === 'Result');
     expect(resultField).toBeDefined();
@@ -270,7 +280,7 @@ describe('job notification delivery', () => {
 
     expect(h.transport.sent.length).toBeGreaterThan(0);
     for (const sent of h.transport.sent) {
-      expect(sent.target).toEqual({ userId: rogueOwner });
+      expect(sent.target).toEqual(dmTarget(rogueOwner));
     }
     h.close();
   });
@@ -399,9 +409,13 @@ describe('job_notifications baseline backfill on migration', () => {
       name       TEXT NOT NULL,
       applied_at TEXT NOT NULL
     )`);
-    // Apply every migration except the one that introduces job_notifications,
-    // simulating an existing deployment upgrading into this feature.
-    const preExisting = MIGRATIONS.filter((m) => m.name !== 'job_notifications');
+    // Apply every migration BEFORE the notification ledger existed,
+    // simulating an existing deployment upgrading into this feature. Both
+    // ledger migrations are withheld: migration 6 rewrites migration 5's
+    // table, so applying one without the other is not a state that ever
+    // existed.
+    const LEDGER_MIGRATIONS = ['job_notifications', 'shared_job_visibility'];
+    const preExisting = MIGRATIONS.filter((m) => !LEDGER_MIGRATIONS.includes(m.name));
     for (const m of preExisting) {
       db.exec(m.sql);
       db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
@@ -423,22 +437,21 @@ describe('job_notifications baseline backfill on migration', () => {
       bootstrapAllowedEntries: ['.git'],
       enabled: true,
     });
-    const job = store.jobs.create({
-      id: 'j1',
-      publicId: 'p1',
-      discordUserId: OWNER,
-      repoSlug: 'demo',
-      task: 't',
-      context: null,
-      bootstrap: false,
-      maxAttempts: 3,
-      maxOwnerInputRounds: 3,
-      state: 'queued',
-    });
+    // Written with raw SQL, not `store.jobs.create`: today's repository code
+    // writes today's columns, and the whole point of this test is a database
+    // that predates them. Using the repository here would either fail on the
+    // missing column or quietly stop simulating an old deployment.
+    const ts = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO jobs (id, public_id, discord_user_id, repo_slug, task, context, bootstrap,
+         state, max_attempts, max_owner_input_rounds, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run('j1', 'p1', OWNER, 'demo', 't', null, 0, 'failed', 3, 3, ts, ts);
     // A pre-upgrade transition history the owner already knows about.
-    store.jobs.transition(job.id, 'failed', 'no_result', 'executor:e1', {
-      finishedAt: new Date().toISOString(),
-    });
+    db.prepare(
+      `INSERT INTO job_transitions (job_id, from_state, to_state, reason, actor, created_at)
+       VALUES (?,?,?,?,?,?)`,
+    ).run('j1', 'queued', 'failed', 'no_result', 'executor:e1', ts);
 
     // Now apply the migration that introduces the notifications feature.
     runMigrations(db);
@@ -490,7 +503,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs owner input'));
+    const sent = forState(h.transport.sent, 'needs_owner_input');
     expect(sent).toBeDefined();
     const question = sent!.message.embeds![0]!.fields!.find((f) => f.name === 'Question');
     expect(question).toBeDefined();
@@ -529,7 +542,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const stale = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs owner input'));
+    const stale = forState(h.transport.sent, 'needs_owner_input');
     expect(stale).toBeDefined();
     expect(stale!.message.rows ?? []).toHaveLength(0);
     h.close();
@@ -557,7 +570,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'));
+    const sent = forState(h.transport.sent, 'needs_approval');
     expect(sent).toBeDefined();
     expect(sent!.message.rows).toHaveLength(2);
 
@@ -596,7 +609,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    const sent = forState(h.transport.sent, 'needs_approval')!;
     expect(sent.message.rows).toHaveLength(4);
     h.close();
   });
@@ -628,7 +641,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'));
+    const sent = forState(h.transport.sent, 'needs_approval');
     expect(sent).toBeDefined();
     expect(sent!.message.rows).toHaveLength(1);
     const only = sent!.message.rows![0]!.buttons[0]!;
@@ -658,7 +671,7 @@ describe('job notification delivery: interactive components', () => {
 
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    const sent = forState(h.transport.sent, 'needs_approval')!;
     const approveButton = sent.message.rows![0]!.buttons.find((b) => b.label.startsWith('approve'))!;
 
     // The owner decides through the interactive path first...
@@ -683,7 +696,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('completed'))!;
+    const sent = forState(h.transport.sent, 'completed')!;
     const fields = sent.message.embeds![0]!.fields!;
     expect(fields.find((f) => f.name === 'Result')!.value).toContain('All done.');
     expect(fields.find((f) => f.name === 'Verdict')!.value).toBe('implemented');
@@ -705,7 +718,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('failed'))!;
+    const sent = forState(h.transport.sent, 'failed')!;
     const fields = sent.message.embeds![0]!.fields!;
     expect(fields.find((f) => f.name === 'Result')!.value).toContain('Could not reproduce');
     expect(fields.find((f) => f.name === 'Verdict')!.value).toBe('failed');
@@ -732,7 +745,7 @@ describe('job notification delivery: interactive components', () => {
     const notifier = new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
     await notifier.deliverPending();
 
-    const sent = h.transport.sent.find((s) => s.message.embeds?.[0]?.description?.includes('needs approval'))!;
+    const sent = forState(h.transport.sent, 'needs_approval')!;
     // MockDiscordTransport.send runs every message through sanitizeOutbound,
     // which drops any button whose customId does not match the exact signed
     // shape -- if these buttons survived, they passed that check too.

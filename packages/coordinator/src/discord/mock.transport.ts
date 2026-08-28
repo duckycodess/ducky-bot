@@ -1,4 +1,5 @@
 import { sanitizeOutbound } from './sanitize-outbound.js';
+import { dmTarget } from './message.js';
 import type { OutboundMessage, SendTarget } from './message.js';
 import type { DiscordTransport, Incoming, IncomingHandler } from './transport.js';
 
@@ -30,7 +31,7 @@ export class MockDiscordTransport implements DiscordTransport {
     const reply = await this.#handler(event);
     if (reply) {
       const safe = sanitizeOutbound(reply);
-      this.sent.push({ target: { userId: event.userId }, message: safe });
+      this.sent.push({ target: dmTarget(event.userId), message: safe });
       return safe;
     }
     return undefined;

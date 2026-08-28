@@ -1,8 +1,12 @@
-import type { JobState } from '@ducky/contracts';
-import type { PendingNotificationRow, Store } from '@ducky/persistence';
+import { ownerNextStep, ownerStateLabel, type JobState } from '@ducky/contracts';
+import type { NotificationTarget, PendingNotificationRow, Store } from '@ducky/persistence';
 import type { ComponentSigner } from '../security/component-signing.js';
 import type { DiscordTransport } from '../discord/transport.js';
 import type { OutboundEmbedField, OutboundMessage, OutboundRow } from '../discord/message.js';
+import { channelTarget, dmTarget } from '../discord/message.js';
+import type { SharedChannelPolicy } from './shared-visibility.js';
+import type { SharedJobsService } from './shared-jobs.service.js';
+import { sharedJobNotification } from '../discord/shared-presenters.js';
 
 /**
  * States worth waking the owner up for. `queued` and `waiting_for_executor`
@@ -28,16 +32,37 @@ export interface JobNotifierDeps {
   readonly transport: DiscordTransport;
   readonly ownerId: string;
   readonly signer: ComponentSigner;
+  /**
+   * Omitting either disables shared-channel delivery entirely -- every
+   * shared target is skipped and marked so, and only the owner DM is sent.
+   * Failing closed here matters: a wiring mistake must lose visibility, never
+   * publish something.
+   */
+  readonly sharedPolicy?: SharedChannelPolicy;
+  readonly sharedJobs?: SharedJobsService;
 }
 
 export interface NotificationSweepResult {
   readonly delivered: number;
   readonly skipped: number;
   readonly failed: number;
+  /** Per-target breakdown of `delivered`, so a test can prove each ran once. */
+  readonly deliveredByTarget: Readonly<Record<NotificationTarget, number>>;
 }
 
 /**
- * Delivers high-level job lifecycle updates to the owner's Discord DM.
+ * Delivers job lifecycle updates to up to two independent places: the
+ * owner's Discord DM, and -- when the job was submitted from a configured
+ * shared channel and that channel is STILL configured -- a deliberately
+ * coarser projection posted in that channel.
+ *
+ * The two are not variants of one message. The DM carries the private
+ * detail and the signed controls; the shared post carries only
+ * `SharedJobProjection`, built by `SharedJobsService` and rendered by a
+ * presenter that accepts nothing else, so no owner-only field can reach a
+ * channel even by mistake. They are also delivered independently: separate
+ * ledger rows, separate retries, and a failure of one neither blocks nor
+ * duplicates the other.
  *
  * Reads only the durable job_transitions ledger that jobs.repo already writes
  * on every state change, plus (when one exists for the job) the already
@@ -76,6 +101,8 @@ export class JobNotifier {
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
   private readonly signer: ComponentSigner;
+  private readonly sharedPolicy: SharedChannelPolicy | undefined;
+  private readonly sharedJobs: SharedJobsService | undefined;
   private sweeping: Promise<NotificationSweepResult> | null = null;
 
   constructor(deps: JobNotifierDeps) {
@@ -83,6 +110,8 @@ export class JobNotifier {
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
     this.signer = deps.signer;
+    this.sharedPolicy = deps.sharedPolicy;
+    this.sharedJobs = deps.sharedJobs;
   }
 
   deliverPending(limit = 50): Promise<NotificationSweepResult> {
@@ -108,33 +137,106 @@ export class JobNotifier {
     let delivered = 0;
     let skipped = 0;
     let failed = 0;
+    const deliveredByTarget: Record<NotificationTarget, number> = {
+      owner_dm: 0,
+      shared_channel: 0,
+    };
 
     for (const row of pending) {
-      if (!this.shouldNotify(row)) {
-        this.store.notifications.markDelivered(row.transitionId, row.jobId);
-        skipped += 1;
-        continue;
-      }
-      try {
-        await this.transport.send({ userId: this.ownerId }, this.buildMessage(row));
-        this.store.notifications.markDelivered(row.transitionId, row.jobId);
-        delivered += 1;
-      } catch {
-        // Left undelivered on purpose: the next sweep retries this exact
-        // transition. Do not mark it and do not let it stop the batch.
-        failed += 1;
+      // Each target is decided, sent and marked INDEPENDENTLY. A transition
+      // owing both an owner DM and a shared-channel message has two ledger
+      // rows, so one failing leaves exactly that one pending: the other is
+      // neither re-sent nor lost.
+      for (const target of this.outstandingTargets(row)) {
+        const message = this.messageFor(row, target);
+        if (!message) {
+          // Deliberately skipped counts as delivered, or the sweep would
+          // reconsider the same non-notifiable transition forever.
+          this.store.notifications.markDelivered(row.transitionId, row.jobId, target.target);
+          skipped += 1;
+          continue;
+        }
+        try {
+          await this.transport.send(message.to, message.body);
+          this.store.notifications.markDelivered(row.transitionId, row.jobId, target.target);
+          delivered += 1;
+          deliveredByTarget[target.target] += 1;
+        } catch {
+          // Left undelivered on purpose: the next sweep retries this exact
+          // (transition, target). Do not mark it, and do not let it stop the
+          // rest of the batch or the other target.
+          failed += 1;
+        }
       }
     }
-    return { delivered, skipped, failed };
+    return { delivered, skipped, failed, deliveredByTarget };
+  }
+
+  /** Only the targets this transition still owes something to. */
+  private outstandingTargets(row: PendingNotificationRow): { target: NotificationTarget }[] {
+    const out: { target: NotificationTarget }[] = [];
+    if (!row.ownerDelivered) out.push({ target: 'owner_dm' });
+    if (!row.sharedDelivered) out.push({ target: 'shared_channel' });
+    return out;
+  }
+
+  private messageFor(
+    row: PendingNotificationRow,
+    target: { target: NotificationTarget },
+  ): { to: ReturnType<typeof dmTarget>; body: OutboundMessage } | undefined {
+    if (target.target === 'owner_dm') {
+      if (!this.shouldNotifyOwner(row)) return undefined;
+      return { to: dmTarget(this.ownerId), body: this.buildMessage(row) };
+    }
+    const channelId = this.shareableChannel(row);
+    if (!channelId) return undefined;
+    const body = this.buildSharedMessage(row);
+    if (!body) return undefined;
+    return { to: channelTarget(channelId), body };
   }
 
   /**
    * Owner-initiated transitions (cancel, answer, approve/reject) already got
    * a synchronous reply in the same request, so a DM would just be an echo.
    */
-  private shouldNotify(row: PendingNotificationRow): boolean {
+  private shouldNotifyOwner(row: PendingNotificationRow): boolean {
     if (row.actor.startsWith('owner:')) return false;
     return NOTIFIABLE_STATES.has(row.toState);
+  }
+
+  /**
+   * The shared channel to post this transition to, or undefined.
+   *
+   * The stored id is NOT trusted on its own. It is re-checked against the
+   * live, frozen configuration every time, so removing a channel from
+   * `DUCKY_SHARED_CHANNEL_IDS` immediately stops updates for jobs that were
+   * already submitted from it -- the same "configuration is the sole
+   * authority, never the database" rule authorization follows.
+   */
+  private shareableChannel(row: PendingNotificationRow): string | undefined {
+    if (!this.sharedPolicy || !this.sharedJobs) return undefined;
+    const id = row.originSharedChannelId;
+    if (!id || !this.sharedPolicy.has(id)) return undefined;
+    return id;
+  }
+
+  /**
+   * Unlike the owner DM, an owner-authored transition IS worth posting here:
+   * the owner's own reply was ephemeral, so nobody in the channel saw it. A
+   * job that vanishes from the channel the moment its owner cancels it is
+   * exactly the confusion this milestone exists to remove.
+   */
+  private buildSharedMessage(row: PendingNotificationRow): OutboundMessage | undefined {
+    if (!NOTIFIABLE_STATES.has(row.toState)) return undefined;
+    try {
+      const projection = this.sharedJobs?.detail(row.publicId);
+      return projection ? sharedJobNotification(projection) : undefined;
+    } catch {
+      // A job that cannot be projected has nothing safe to say about it.
+      // Returning undefined marks the target skipped; letting the throw
+      // escape would count as a failure and retry it forever.
+      return undefined;
+    }
   }
 
   /**
@@ -144,7 +246,10 @@ export class JobNotifier {
    * is who is DMed even if a historical row's stored id were ever stale.
    */
   private buildMessage(row: PendingNotificationRow): OutboundMessage {
-    const fields: OutboundEmbedField[] = [{ name: 'Reason', value: humanize(row.reason) }];
+    const fields: OutboundEmbedField[] = [
+      { name: 'What happens next', value: ownerNextStep(row.toState) },
+      { name: 'Reason', value: humanize(row.reason) },
+    ];
     const rows: OutboundRow[] = [];
 
     const result = this.store.results.byJobId(row.jobId);
@@ -163,7 +268,9 @@ export class JobNotifier {
       embeds: [
         {
           title: `Job ${row.publicId}`,
-          description: `${row.repoSlug} — ${humanize(row.toState)}`,
+          // The plain-language label, not the raw state identifier. The
+          // persisted state machine is unchanged; only the wording is.
+          description: `${row.repoSlug} — ${ownerStateLabel(row.toState)}`,
           fields,
         },
       ],

@@ -51,7 +51,22 @@ export class JobsService {
 
   // ============================================================ owner side ==
 
-  submit(actor: ActorContext, input: JobSubmitInput): JobRow {
+  /**
+   * `origin.sharedChannelId` is set by the router ONLY when the submission
+   * arrived from a channel that was in the configured shared set at that
+   * moment. It is the address later lifecycle updates are posted to, so a job
+   * started in a shared channel keeps reporting there instead of going quiet
+   * in a DM nobody else can read.
+   *
+   * It is not authorization and grants nothing: it is re-checked against live
+   * configuration before every send, so removing a channel from
+   * configuration silences it immediately.
+   */
+  submit(
+    actor: ActorContext,
+    input: JobSubmitInput,
+    origin: { sharedChannelId?: string | undefined } = {},
+  ): JobRow {
     this.authz.requireOwner(actor);
     const repo = this.allowlist.resolve(input.repoSlug);
     if (input.bootstrap && !repo.allowBootstrap) {
@@ -74,6 +89,7 @@ export class JobsService {
         maxAttempts: DEFAULT_MAX_ATTEMPTS,
         maxOwnerInputRounds: MAX_OWNER_INPUT_ROUNDS,
         state: 'queued',
+        originSharedChannelId: origin.sharedChannelId ?? null,
       });
       if (state !== 'queued') {
         this.store.jobs.transition(job.id, state, 'no_executor_online', 'system:submit');

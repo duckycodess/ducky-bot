@@ -9,6 +9,7 @@ import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   loadEnv, cdnHosts, readReposFile, resolvePaths, resolveProfileSecrets,
+  resolveSharedChannelIds,
   type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
@@ -24,6 +25,8 @@ import { DeferredActionPerformer } from './domain/action-performer.js';
 import { GitHubService } from './domain/github.service.js';
 import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
+import { SharedJobsService } from './domain/shared-jobs.service.js';
+import { SharedChannelPolicy } from './domain/shared-visibility.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
@@ -59,6 +62,8 @@ export interface App {
   readonly github: GitHubService;
   readonly reconciler: Reconciler;
   readonly notifier: JobNotifier;
+  readonly sharedPolicy: SharedChannelPolicy;
+  readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
   readonly transport: DiscordTransport;
   readonly credentials: ExecutorCredentialStore;
@@ -112,8 +117,15 @@ export function createApp(
   const github = new GitHubService(authz, allowlist, githubReader);
   const reconciler = new Reconciler({ store, approvals, pending });
 
+  // Opt-in, profile-scoped, and empty by default: with nothing configured the
+  // shared surface does not exist at all.
+  const sharedPolicy = new SharedChannelPolicy(resolveSharedChannelIds(env));
+  const sharedJobs = new SharedJobsService({ store, allowlist });
+
   const transport = overrides.transport ?? transportForProfile(discordProfile);
-  const notifier = new JobNotifier({ store, transport, ownerId: authz.ownerId, signer });
+  const notifier = new JobNotifier({
+    store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
+  });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
 
@@ -129,6 +141,9 @@ export function createApp(
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
     })`,
+    sharedChannels: sharedPolicy.enabled
+      ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
+      : 'none (all job information is owner-only)',
     actions: 'recorded, not executed (Phase 1)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
   });
@@ -143,6 +158,8 @@ export function createApp(
     github,
     conversation,
     status,
+    sharedPolicy,
+    sharedJobs,
     readAttachment: async (a) => {
       attachmentBudget.check(authz.ownerId);
       const { text } = await fetchTextAttachment(a, {
@@ -157,7 +174,8 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, reconciler, notifier, router, transport, credentials, conversation, status,
+    approvals, github, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
+    credentials, conversation, status,
     close: () => store.db.close(),
   };
 }
@@ -200,13 +218,44 @@ function credentialStoreFor(
 function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
   return new DiscordJsTransport(config.token, (client) => ({
+    /**
+     * The message arrives here ALREADY sanitized -- `DiscordJsTransport.send`
+     * calls `sanitizeOutbound` before any sink is consulted, so both branches
+     * below are past the egress choke point and neither can reintroduce raw
+     * text.
+     *
+     * `ephemeral` is forced false on both: a proactive message has no
+     * interaction token to be ephemeral against. For the channel branch that
+     * is also the intent -- it is meant to be seen.
+     *
+     * Typed structurally rather than against discord.js, because this module
+     * must not import it (asserted by a test).
+     */
     deliver: async (target, message) => {
       const c = client as {
         users?: { fetch(id: string): Promise<{ send(payload: unknown): Promise<unknown> }> };
+        channels?: { fetch(id: string): Promise<unknown> };
       };
+      const payload = toDiscordPayload({ ...message, ephemeral: false });
+
+      if (target.kind === 'channel') {
+        if (!c.channels) throw new DuckyError('not_found', 'The Discord client is not connected.');
+        const channel = (await c.channels.fetch(target.channelId)) as
+          | { isTextBased?: () => boolean; send?: (p: unknown) => Promise<unknown> }
+          | null;
+        // A missing, non-text or unsendable channel fails loudly rather than
+        // silently dropping the update: the notifier leaves the transition
+        // pending and retries on the next sweep.
+        if (!channel || channel.isTextBased?.() === false || typeof channel.send !== 'function') {
+          throw new DuckyError('not_found', 'That shared channel cannot receive messages.');
+        }
+        await channel.send(payload);
+        return;
+      }
+
       if (!c.users) throw new DuckyError('not_found', 'The Discord client is not connected.');
       const user = await c.users.fetch(target.userId);
-      await user.send(toDiscordPayload({ ...message, ephemeral: false }));
+      await user.send(payload);
     },
   }));
 }

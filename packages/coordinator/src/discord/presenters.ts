@@ -1,5 +1,5 @@
 import type { ApprovalRow, CaptureRow, JobRow } from '@ducky/persistence';
-import type { RepoStatusSummary } from '@ducky/contracts';
+import { ownerNextStep, ownerStateLabel, type RepoStatusSummary } from '@ducky/contracts';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
 import type { PendingDraft } from '../domain/pending-schedules.js';
 
@@ -37,13 +37,21 @@ export function schedulePreview(draft: PendingDraft, rows: OutboundRow[]): Outbo
   return { embeds: [embed], rows, ephemeral: true };
 }
 
+/**
+ * The owner's private list.
+ *
+ * States are shown as the plain-language label rather than the raw
+ * identifier, and each row says what happens next, so "needs_owner_input"
+ * never has to be decoded into "it is waiting for me". The persisted state
+ * machine is untouched -- this is wording, not behaviour.
+ */
 export function jobsList(rows: readonly JobRow[]): OutboundMessage {
   if (rows.length === 0) return { content: 'No jobs yet.', ephemeral: true };
   const embed: OutboundEmbed = {
     title: 'Recent jobs',
     fields: rows.map((j) => ({
-      name: `${j.publicId} · ${j.state}`,
-      value: `${j.repoSlug} — ${short(j.task, 120)}`,
+      name: `${j.publicId} · ${ownerStateLabel(j.state)}`,
+      value: `${j.repoSlug} — ${short(j.task, 120)}\n-# ${ownerNextStep(j.state)}`,
     })),
   };
   return { embeds: [embed], ephemeral: true };
@@ -58,7 +66,8 @@ export function jobDetail(
 ): OutboundMessage {
   const fields: OutboundEmbedField[] = [
     { name: 'Repository', value: job.repoSlug, inline: true },
-    { name: 'State', value: job.state, inline: true },
+    { name: 'State', value: ownerStateLabel(job.state), inline: true },
+    { name: 'What happens next', value: ownerNextStep(job.state) },
     { name: 'Task', value: short(job.task, 500) },
   ];
   if (summary) fields.push({ name: 'Result', value: short(summary, 900) });
@@ -105,6 +114,7 @@ export interface ProviderStatus {
   readonly scheduleExtraction: string;
   readonly actions: string;
   readonly executors: string;
+  readonly sharedChannels: string;
 }
 
 /** Always visible, so the owner is never guessing which providers are real. */
@@ -121,6 +131,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },
           { name: 'Approved actions', value: p.actions, inline: true },
           { name: 'Executors', value: p.executors, inline: true },
+          { name: 'Shared visibility', value: p.sharedChannels },
         ],
       },
     ],

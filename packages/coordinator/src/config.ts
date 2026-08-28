@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import {
-  DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE, PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
+  DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
+  PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, blankToUndefined, resolveDuckyProfile,
   type DuckyProfile,
 } from '@ducky/contracts';
@@ -40,6 +41,19 @@ export const EnvSchema = z.object({
   DISCORD_PROD_GUILD_ID: z.string().optional(),
 
   DISCORD_CDN_HOSTS: z.string().default('cdn.discordapp.com,media.discordapp.net'),
+
+  /**
+   * Opt-in shared job visibility. Comma-separated Discord channel ids;
+   * default empty, which is the whole feature switched off.
+   *
+   * Profile-scoped like every other cross-profile setting. The unscoped name
+   * stays accepted for a single-profile development box; production reads
+   * ONLY its own, because inheriting a development channel id would publish
+   * real job activity into a test channel.
+   */
+  DUCKY_SHARED_CHANNEL_IDS: z.string().optional(),
+  DUCKY_DEV_SHARED_CHANNEL_IDS: z.string().optional(),
+  DUCKY_PROD_SHARED_CHANNEL_IDS: z.string().optional(),
 
   // Profile-scoped secrets. The shared names remain accepted for a
   // single-profile development box, but production requires its own.
@@ -171,6 +185,38 @@ function blankValuesToUndefined(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   return EnvSchema.parse(blankValuesToUndefined(source));
+}
+
+/**
+ * The channels in which a non-owner may see the safe job projection.
+ *
+ * This is a *visibility* setting, not an authorization one: it says WHERE
+ * information may be shown, never WHO may act. Every write stays owner-only
+ * and every owner-only reply stays ephemeral regardless of what is listed
+ * here. Membership of a listed channel is enforced by Discord's own channel
+ * permissions, so the channel must be locked down to the people intended to
+ * see it -- exactly as the environment documentation says.
+ *
+ * Ids are validated as snowflakes at boot rather than trusted, so a typo
+ * fails loudly instead of silently never matching.
+ */
+export function resolveSharedChannelIds(env: Env): readonly string[] {
+  const names = PROFILE_ENV[env.DUCKY_PROFILE];
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scoped = isProd ? env.DUCKY_PROD_SHARED_CHANNEL_IDS : env.DUCKY_DEV_SHARED_CHANNEL_IDS;
+  // Production never inherits the unscoped variable.
+  const raw = scoped ?? (isProd ? undefined : env.DUCKY_SHARED_CHANNEL_IDS);
+
+  const ids = (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const id of ids) {
+    if (!DISCORD_SNOWFLAKE.test(id)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.sharedChannels} contains a value that is not a Discord channel id.`,
+      );
+    }
+  }
+  return Object.freeze([...new Set(ids)]);
 }
 
 export const cdnHosts = (env: Env): string[] =>

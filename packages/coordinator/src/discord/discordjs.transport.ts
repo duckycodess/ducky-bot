@@ -112,6 +112,13 @@ export class DiscordJsTransport implements DiscordTransport {
       name: interaction.commandName,
       subcommand: interaction.options.getSubcommand(false) ?? undefined,
       userId: interaction.user.id,
+      // `guildId` is null in a DM. Normalizing it to undefined is what lets
+      // the shared-channel policy tell a DM from a guild channel without ever
+      // matching a configured id against a private conversation.
+      context: {
+        channelId: interaction.channelId ?? undefined,
+        guildId: interaction.guildId ?? undefined,
+      },
       options,
       attachment: file
         ? {

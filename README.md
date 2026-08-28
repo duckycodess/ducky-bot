@@ -146,8 +146,9 @@ active profile is shown in the startup diagnostics and in `/status`.
 | `pnpm register-commands --apply --profile <development\|production>` | actually register, for one named bot |
 | `pnpm dev:coordinator:prod` | run the production profile locally |
 
-Every Discord surface except plain conversation is **owner-only**. See
-`docs/SECURITY.md`.
+Every write and every personal-data surface is **owner-only**. The only
+non-owner route is plain conversation plus the explicitly scoped safe job-status
+projection. See `docs/SECURITY.md`.
 
 ## Documentation
 

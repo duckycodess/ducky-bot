@@ -1,6 +1,7 @@
 # Current state
 
-What is actually true today. Phase 1, no deployment performed.
+What is actually true today. Phase 1 plus milestone 2A, no deployment
+performed.
 
 ## Two Discord identities
 
@@ -14,6 +15,15 @@ diagnostics and in `/status`.
 
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup), `/jobs`, `/repo status`, `/status`
+- Opt-in shared job visibility (milestone 2A), **off by default**. With
+  `DUCKY_SHARED_CHANNEL_IDS` empty the feature is unreachable. When a channel
+  is listed, anyone who can read it gets a safe projection from `/jobs` and
+  `/job status` — public job id, allowlisted repo slug, coarse state, safe
+  timestamps, sanitized summary and verdict, next-step copy — and nothing
+  else. Task, context, owner id, questions, answers, events, workspace
+  ids/paths, action details and signed controls never appear there. Writes,
+  captures, schedules, approvals and every control stay owner-only and
+  ephemeral. See [decisions/0012](decisions/0012-opt-in-shared-job-visibility.md)
 - Captures and inbox with per-row management
 - Text and CSV schedule extraction → preview → correction modal → explicit
   confirm
@@ -22,13 +32,25 @@ diagnostics and in `/status`.
   rounds, per-repo reservations, durable workspace registration, crash
   recovery, reconciliation
 - Per-action approvals, decided individually, recorded and **not executed**
-- Proactive owner notifications on job lifecycle transitions (running,
-  needs_owner_input, needs_approval, completed, failed, cancelled), with the
-  same signed Answer/Approve/Reject components `/job status` offers — swept
-  off the durable `job_transitions` ledger on the existing reconcile
-  interval, **not pushed instantly**: delivery lags by up to one interval,
-  and an upgrade backfills prior history as already delivered rather than
-  replaying it
+- Proactive job notifications on lifecycle transitions (running,
+  needs_owner_input, needs_approval, completed, failed, cancelled), delivered
+  to up to two independent targets:
+  - the **owner DM**, with the same signed Answer/Approve/Reject components
+    `/job status` offers;
+  - the **originating shared channel**, when the job was submitted from one
+    and that channel is still configured — the safe projection only, never a
+    control.
+
+  Both are swept off the durable `job_transitions` ledger on the existing
+  reconcile interval, **not pushed instantly**: delivery lags by up to one
+  interval. The ledger is keyed per `(transition, target)`, so the two
+  succeed, fail and retry independently and neither can be double-sent. An
+  upgrade backfills prior history as already delivered rather than replaying
+  it. An owner-caused transition is skipped for the DM (already answered
+  synchronously) but is posted to the channel, where nobody saw that reply.
+- Plain-language job state labels and explicit "what happens next" copy on
+  both the private and shared surfaces, derived exhaustively from the
+  persisted state. The state machine is unchanged.
 - Authenticated, signed, replay-resistant, rate-limited executor API
 - Executor: outbound polling, fail-closed workspace resolution, single-writer
   lock, Herdr/Pi orchestration behind a port
@@ -74,6 +96,8 @@ and `/status` reports `experimental`.
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
 | Real Discord gateway | The development bot successfully connected during a local smoke test, and the bot/guild REST checks returned HTTP 200. A human DM/slash-command interaction has not yet been exercised; Message Content intent must be enabled in the portal for message bodies. Proactive job notifications use this same path, so their delivery is still not verified by an owner-initiated live DM. |
+| Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |
+| Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
 | Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | Deliberately absent. |
@@ -81,7 +105,8 @@ and `/status` reports `experimental`.
 
 ## Deferred
 
-Multi-user permissions; public bot; autonomous deployment; automatic GitHub or
+Collaborator job submission (visibility shipped; writes stay owner-only);
+multi-user permissions beyond shared visibility; public bot; autonomous deployment; automatic GitHub or
 Azure writes; arbitrary shell; browser automation; container sandboxing;
 concurrent implementation writers; Tailscale provisioning.
 
@@ -89,3 +114,8 @@ concurrent implementation writers; Tailscale provisioning.
 
 `pnpm typecheck`, `pnpm test`, `pnpm build` all pass. See
 [TESTING.md](TESTING.md).
+
+## Next
+
+[ROADMAP.md](ROADMAP.md) — the serial Phase 2 milestones, with every
+unresolved product or API decision marked rather than guessed.

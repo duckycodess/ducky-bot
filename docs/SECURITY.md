@@ -33,6 +33,55 @@ well. Command routing is not part of the security argument.
 The chat whitelist reaches **conversation only**. The conversational service is
 constructed with no reference to any privileged service.
 
+## Shared visibility is not authorization
+
+`DUCKY_SHARED_CHANNEL_IDS` (profile-scoped, default empty) lists channels in
+which job *status* may be shown to people other than the owner. It answers
+"may this be seen here?" and never "may this person do this?".
+
+Nothing about it widens what anyone can do:
+
+- Every write stays owner-only, re-checked in the router and again in every
+  service method.
+- Every owner-only reply stays ephemeral.
+- No signed control is ever emitted into a shared channel, and the router
+  asserts at construction that no interaction kind is shared-readable.
+
+So a mis-listed channel widens what is **visible** and can never widen what is
+**possible**.
+
+What a shared reader may see is a fixed `SharedJobProjection`: public job id,
+allowlisted repository slug, coarse state, safe timestamps, sanitized result
+summary and verdict, and next-step copy. Task text, context, the owner's
+Discord id, questions, answers, job events, transitions, raw executor output,
+workspace ids and paths, executor and lease ids, and approval action details
+are never present.
+
+That is enforced structurally rather than by a redaction pass:
+`SharedJobsService` builds the projection field by field from named sources
+and never calls the owner-facing `list`/`detail`; it takes no `ActorContext`,
+so there is no identity to escalate; and `shared-presenters.ts` accepts
+`SharedJobProjection` and nothing else, making a richer object a type error.
+A field added to `JobRow` is invisible on the shared surface until somebody
+deliberately shares it.
+
+Every ambiguous case fails closed to private: no channel context, a DM
+(identified by the absence of a guild id, so a configured id can never match a
+private conversation), an unconfigured channel, or an incompletely wired
+router.
+
+A job records the channel it was submitted from, but that stored id confers
+nothing on its own — it is re-checked against live configuration before every
+send, so unlisting a channel silences it immediately, including for jobs
+already running in it. Configuration is the sole authority here exactly as it
+is for authorization.
+
+**Residual risk.** Channel membership is enforced by Discord's own channel
+permissions, not by Ducky. An operator who lists a public channel exposes the
+projection to everyone in it. Shared messages also persist in Discord's
+history, unlike an ephemeral reply; retention for that history is an open
+decision recorded in [ROADMAP.md](ROADMAP.md).
+
 ## Profile isolation
 
 The development and production bots are separate identities, not a flag on one

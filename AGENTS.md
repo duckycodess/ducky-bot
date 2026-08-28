@@ -20,15 +20,24 @@ is the development profile, `pnpm dev:coordinator:prod` the production one.
 1. Source, tests, migrations, configuration
 2. `docs/CURRENT_STATE.md`
 3. `docs/ARCHITECTURE.md` and the ADRs in `docs/decisions/`
-4. `PROJECT_CONTEXT.md`
+4. `PROJECT_CONTEXT.md` and `docs/ROADMAP.md`
 
 Report contradictions rather than picking whichever reads best.
 
 ## Constraints
 
-- **Never widen the owner-only surface.** `OWNER_ONLY_SURFACE` in
+- **Never widen the owner-only surface.** `OWNER_ONLY_COMMANDS` in
   `@ducky/contracts` is the manifest; the router asserts against it at
-  construction. Conversation is the only non-privileged route.
+  construction. The non-privileged routes are conversation, and the two
+  shared-channel READS named in `SHARED_READABLE_ROUTES` — both narrowed
+  views of commands already on that manifest.
+- **Shared visibility is never authorization.** A configured shared channel
+  says where information may be shown, never who may act. Non-owner output
+  goes through `SharedJobsService` and `shared-presenters.ts`, which accept
+  only `SharedJobProjection`; never reuse the owner-facing `jobs.list` /
+  `jobs.detail` or a redaction pass over `JobRow`. Every ambiguous case (no
+  context, a DM, an unconfigured channel, an unwired router) fails closed to
+  private.
 - **Authorization never reads the database.** Frozen env config is the sole
   authority; `authorized_user_audit` is an audit trail with no power.
 - **No secret ever reaches SQLite or a log.** The database holds a bearer

@@ -37,6 +37,13 @@ Fill in the env file:
   `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`
 - `DUCKY_EXECUTOR_CREDENTIALS_FILE` or, outside production only,
   `DUCKY_EXECUTOR_CREDENTIALS` — give each profile its own file
+- `DUCKY_DEV_SHARED_CHANNEL_IDS` — optional, default empty. Comma-separated
+  Discord **channel** ids where `/jobs` and `/job status` answer anyone who
+  can read the channel, with a safe projection only. Empty switches the
+  feature off entirely. Production reads only `DUCKY_PROD_SHARED_CHANNEL_IDS`.
+  Lock the channel down in Discord first: membership is enforced by channel
+  permissions, not by Ducky. It grants no ability to act — every write stays
+  owner-only.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
 

@@ -7,6 +7,8 @@
 | understand the system | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | run it locally | [DEVELOPMENT.md](DEVELOPMENT.md) |
 | know what actually works today | [CURRENT_STATE.md](CURRENT_STATE.md) |
+| know what is coming next | [ROADMAP.md](ROADMAP.md) |
+| share job status without leaking | [decisions/0012](decisions/0012-opt-in-shared-job-visibility.md) |
 | understand the security model | [SECURITY.md](SECURITY.md) |
 | know what is tested | [TESTING.md](TESTING.md) |
 | deploy it later | [DEPLOYMENT.md](DEPLOYMENT.md) |

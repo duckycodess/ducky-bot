@@ -16,6 +16,7 @@ reverse. Trivial implementation choices do not get one.
 | [0009](0009-env-config-sole-authorization-authority.md) | Environment config is the only authorization authority |
 | [0010](0010-per-repo-reservations.md) | Per-repository reservations as the single-writer boundary |
 | [0011](0011-capability-honest-schedule-extraction.md) | Capability-honest schedule extraction |
+| [0012](0012-opt-in-shared-job-visibility.md) | Opt-in shared job visibility through a projection |
 
 ## Format
 

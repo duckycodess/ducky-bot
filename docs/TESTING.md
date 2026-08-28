@@ -44,6 +44,31 @@ transport sanitization with a fake client that never sees a raw secret;
 `discord.js` imported by exactly one module; executor auth including rotation
 and the nonce-not-burned-on-failure property; rate limits.
 
+**coordinator / shared visibility** — a shared-channel member (and a stranger,
+and a chat-whitelist user) sees the projection and never the task, context,
+owner id or a signed control; an unconfigured channel, a DM whose channel id
+deliberately collides with a configured one, and an unconfigured run all refuse
+a non-owner; every non-read command is refused for a non-owner in a shared
+channel and nothing is written; the owner gets the shared view in a channel and
+the private view in a DM; a stale, foreign and malformed job id produce the
+identical refusal; a repository since removed from the allowlist is reported as
+unlisted rather than named; production inherits neither the unscoped nor the
+development channel variable; the projection's key set is asserted against the
+contract, so the shared shape cannot grow a field unreviewed; every persisted
+state has a phase, a label and both next-step strings, and no label equals its
+raw identifier.
+
+**coordinator / shared notifications** — both targets deliver exactly once and
+a second sweep sends nothing; a channel outage retries only the channel message
+and never re-sends the DM that succeeded; unlisting a channel silences it
+immediately without re-sending the DM; a job with no origin has no shared
+target at all; an owner-caused transition is skipped for the DM but posted to
+the channel; every notifiable state reaches the channel and reports the state
+as of its transition rather than at sweep time; overlapping sweeps share one
+in-flight promise; the real sink routes a channel target to a channel and a
+user target to a DM, sanitizes both at the same boundary, and fails loudly on
+an unsendable channel so the notifier retries.
+
 **executor** — fail-closed workspace resolution: bootstrap refuses any directory
 holding something unexpected, with commits, dirty, stashed or mid-operation;
 worktree mode verifies the base ref before Herdr is called; a dirty main working

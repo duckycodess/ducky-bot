@@ -19,6 +19,23 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
                                                             → owner approval → (deferred)
 ```
 
+## Sharing job status (milestone 2A)
+
+Job *status* can be made visible without exposing job *content*. Add channel
+ids to `DUCKY_DEV_SHARED_CHANNEL_IDS` (default empty, which switches the
+feature off) and anyone who can read that channel may run `/jobs` and
+`/job status` there and see a safe projection: public job id, allowlisted
+repository slug, plain-language state, safe timestamps, sanitized result
+summary and verdict, and what happens next. Lifecycle updates for jobs
+submitted in that channel are posted back to it.
+
+Never shared: task or context text, the owner's id, questions, answers, events,
+workspace paths, action details, or any control. This is a **visibility**
+setting only — every write stays owner-only, so listing a channel can never
+let anyone act. Channel membership is enforced by Discord's own permissions,
+so lock the channel down first. See
+[`docs/decisions/0012`](docs/decisions/0012-opt-in-shared-job-visibility.md).
+
 ## Phase 1 limitations, stated plainly
 
 - **Document and image schedule extraction is not supported.** No verified

@@ -21,6 +21,10 @@ documents:
     purpose: What is implemented, verified, mocked, or deferred
     authority: state
     update_trigger: Any behaviour change; verification status changes
+  - path: docs/ROADMAP.md
+    purpose: Serial Phase 2 milestones and the unresolved decisions each needs
+    authority: plan
+    update_trigger: A milestone lands, or an open decision is resolved
   - path: docs/DEVELOPMENT.md
     purpose: Local setup, environment variables, Discord setup
     authority: process

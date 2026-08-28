@@ -207,11 +207,21 @@ diagnostics and in `/status`.
   - Outcomes: `ready` → requeued keeping its reservation; `failed` → job fails
     and the repository is released; `pending` with budget → rescheduled;
     **budget spent → `needs_owner_input`**.
-  - **The shipped checker never reports ready.** Nothing on this host can
-    observe a CI run or a registry, so `UnavailableDependencyChecker` answers
-    `pending` for everything and a wait ends at the owner's desk rather than
-    being resumed on a check that did not happen. A `ready` from an unverified
-    checker is downgraded, not believed.
+  - **The DEFAULT checker never reports ready.** `UnavailableDependencyChecker`
+    answers `pending` for everything, so a wait ends at the owner's desk rather
+    than being resumed on a check that did not happen. A `ready` from an
+    unverified checker is downgraded, not believed.
+  - **A real one now exists, opt-in and still unverified.**
+    `DUCKY_DEPENDENCY_CHECKER=github` selects `GitHubCiDependencyChecker`, which
+    reads CI status for `<repo slug>#<pr number>` through the same read-only `gh`
+    surface everything else uses. It answers `ci_run` only; anything else stays
+    `pending` rather than a confident guess. It reports itself **unverified** —
+    no GitHub repository is configured here, so no live check has run — which
+    means on this host it can **fail** a job whose CI definitely failed and
+    **cannot resume** one. That asymmetry is the correct one: failing on a
+    definite failure is safe, resuming on an unexercised integration is not. A
+    malformed key, an unknown repository or a `gh` error is `pending`, never
+    `failed`: a lookup problem is not evidence about the work.
   - Cancelling a waiting job closes its dependency in the same transaction, so
     the resolver cannot later requeue a job the owner stopped. The cursor is
     durable, so a restart resumes from it.
@@ -517,7 +527,7 @@ stays `false` and `/status` reports `experimental`.
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
 | GitHub repository watches | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
-| Dependency checking | **No real checker exists.** The port ships with `UnavailableDependencyChecker`, which only ever answers `pending`, so a dependency wait always ends at the owner's desk on this host. The resume-on-ready and fail-on-failed paths are unit-tested against a scripted fake; neither has ever run against a real external system. |
+| Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
 | Azure deployment | Documented only; nothing provisioned. |
 
 ## Deferred

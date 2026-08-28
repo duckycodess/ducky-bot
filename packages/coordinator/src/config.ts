@@ -138,6 +138,18 @@ export const EnvSchema = z.object({
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),
 
+  /**
+   * Which checker answers "is this dependency ready yet?".
+   *
+   * `none` (the default) is the shipped `UnavailableDependencyChecker`: it
+   * answers `pending` for everything, so a wait always ends at the owner's desk.
+   * `github` reads CI status from the existing READ-ONLY `gh` surface. It can
+   * fail a job on a definite CI failure; it cannot resume one here, because it
+   * reports itself unverified and the resolver refuses a `ready` from an
+   * unexercised checker.
+   */
+  DUCKY_DEPENDENCY_CHECKER: z.enum(['none', 'github']).default('none'),
+
   DUCKY_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
 
   /** `json` (default) or `text` for a readable local run. */

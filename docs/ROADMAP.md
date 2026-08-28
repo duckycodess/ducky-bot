@@ -141,8 +141,11 @@ Delivered:
 
 Deliberately NOT delivered: `approved` and `executing_approved_action` job
 states — approvals and execution remain separate so the existing lifecycle is
-not rewritten; and any real dependency checker — the shipped one only ever
-answers `pending`, so no job is resumed on a check that did not happen. A
+not rewritten. A real dependency checker arrived in the final milestone
+(`DUCKY_DEPENDENCY_CHECKER=github`, CI status over the read-only `gh` surface),
+opt-in and still reporting itself unverified, so it can fail a job on a definite
+CI failure and cannot resume one; the default still only ever answers `pending`,
+so no job is resumed on a check that did not happen. A
 same-filesystem, opt-in performer now supports explicit owner-approved commit,
 push and PR actions, with a durable per-approval execution ledger; production
 executor routing and other action kinds remain deferred.

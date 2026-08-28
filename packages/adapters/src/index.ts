@@ -11,6 +11,7 @@ export * from './github/gh-cli.js';
 export * from './github/github.mock.js';
 export * from './attachments/policy.js';
 export * from './dependency/checker.port.js';
+export * from './dependency/github-ci.checker.js';
 export * from './openclaw/private-url.js';
 export * from './openclaw/openclaw.port.js';
 export * from './openclaw/openclaw.mock.js';

@@ -2,7 +2,7 @@ import {
   DeterministicScheduleExtractor, FileCredentialStore, GhCliReader, HerdrCli,
   DisabledConversationProvider, MemoryCredentialStore, MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
-  UnavailableDependencyChecker,
+  GitHubCiDependencyChecker, UnavailableDependencyChecker,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
   type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
@@ -246,10 +246,19 @@ export function createApp(
   const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
 
-  // No real checker ships. The default answers `pending` for everything, so a
-  // dependency wait runs out its bounded budget and goes to the owner rather
-  // than being declared ready by something that never looked.
-  const dependencyChecker = overrides.dependencyChecker ?? new UnavailableDependencyChecker();
+  // Which checker answers a dependency wait. The default still answers
+  // `pending` for everything, so a wait ends at the owner's desk rather than
+  // being declared ready by something that never looked. `github` reads CI
+  // status from the read-only `gh` surface: it can FAIL a job on a definite CI
+  // failure, and it cannot resume one, because it reports itself unverified and
+  // the resolver refuses a `ready` from an unexercised checker.
+  const dependencyChecker = overrides.dependencyChecker ??
+    (env.DUCKY_DEPENDENCY_CHECKER === 'github'
+      ? new GitHubCiDependencyChecker(githubReader, (slug) => {
+          const repo = allowlist.list().find((r) => r.slug === slug);
+          return repo?.github ? { owner: repo.github.owner, repo: repo.github.repo } : undefined;
+        })
+      : new UnavailableDependencyChecker());
   const dependencies = new DependencyResolver({ store, checker: dependencyChecker });
 
   // Opt-in, profile-scoped, and empty by default: with nothing configured the

@@ -398,3 +398,33 @@ describe('the shipped default checker', () => {
     h.close();
   });
 });
+
+/**
+ * The composed app's choice of checker.
+ *
+ * The wiring is the part that decides whether a dependency wait can ever end
+ * anywhere but the owner's desk, so it is asserted here rather than assumed.
+ */
+describe('which checker the app selects', () => {
+  it('defaults to the one that never reports ready', () => {
+    const h = makeHarness();
+    expect(h.app.dependencies.checkerName).toBe('none');
+    expect(h.app.dependencies.checkerVerified).toBe(false);
+    h.close();
+  });
+
+  it('selects the GitHub CI checker when asked, still unverified', () => {
+    const h = makeHarness({ env: { DUCKY_DEPENDENCY_CHECKER: 'github' } });
+    expect(h.app.dependencies.checkerName).toBe('github-ci');
+    // Unverified on this host: no GitHub repository is configured, so no live
+    // check has ever run. It can fail a job; it cannot resume one.
+    expect(h.app.dependencies.checkerVerified).toBe(false);
+    h.close();
+  });
+
+  it('says so in /status rather than implying a wait can auto-resume', () => {
+    const h = makeHarness({ env: { DUCKY_DEPENDENCY_CHECKER: 'github' } });
+    expect(h.app.status().dependencyChecker).toMatch(/never auto-resumed/);
+    h.close();
+  });
+});

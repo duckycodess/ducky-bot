@@ -60,6 +60,11 @@ export function resolveDuckyProfile(raw: string | undefined): DuckyProfile {
  * executor credential file would let a development executor claim production
  * jobs, and sharing a component signing key would make a control minted by one
  * bot verify on the other.
+ *
+ * `sharedChannels` is not a secret, but it IS profile-scoped for the same
+ * reason: it decides where job information becomes visible to people other
+ * than the owner, and a development channel id inherited by production would
+ * publish real job activity into a test channel.
  */
 export const PROFILE_ENV = {
   development: {
@@ -68,6 +73,7 @@ export const PROFILE_ENV = {
     guildId: 'DISCORD_DEV_GUILD_ID',
     credentialsFile: 'DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
+    sharedChannels: 'DUCKY_DEV_SHARED_CHANNEL_IDS',
   },
   production: {
     token: 'DISCORD_PROD_TOKEN',
@@ -75,10 +81,18 @@ export const PROFILE_ENV = {
     guildId: 'DISCORD_PROD_GUILD_ID',
     credentialsFile: 'DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
+    sharedChannels: 'DUCKY_PROD_SHARED_CHANNEL_IDS',
   },
 } as const satisfies Record<
   DuckyProfile,
-  { token: string; appId: string; guildId: string; credentialsFile: string; componentKey: string }
+  {
+    token: string;
+    appId: string;
+    guildId: string;
+    credentialsFile: string;
+    componentKey: string;
+    sharedChannels: string;
+  }
 >;
 
 /**

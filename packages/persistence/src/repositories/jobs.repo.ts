@@ -26,6 +26,8 @@ const mapJob = (r: Record<string, unknown>): JobRow => ({
   leaseExpiresAt: r['lease_expires_at'] == null ? null : String(r['lease_expires_at']),
   executorId: r['executor_id'] == null ? null : String(r['executor_id']),
   retainedWorkspaceId: r['retained_workspace_id'] == null ? null : String(r['retained_workspace_id']),
+  originSharedChannelId:
+    r['origin_shared_channel_id'] == null ? null : String(r['origin_shared_channel_id']),
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
   startedAt: r['started_at'] == null ? null : String(r['started_at']),
@@ -51,6 +53,12 @@ export interface CreateJobInput {
   maxAttempts: number;
   maxOwnerInputRounds: number;
   state: JobState;
+  /**
+   * The configured shared channel the job was submitted from, if any. Set by
+   * the caller only when the channel was shared AT SUBMIT TIME, so this column
+   * never holds an id that was not configured when it was written.
+   */
+  originSharedChannelId?: string | null;
 }
 
 export class JobsRepo {
@@ -63,13 +71,14 @@ export class JobsRepo {
     this.db
       .prepare(
         `INSERT INTO jobs (id, public_id, discord_user_id, repo_slug, task, context, bootstrap,
-           state, max_attempts, max_owner_input_rounds, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           state, max_attempts, max_owner_input_rounds, origin_shared_channel_id,
+           created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         input.id, input.publicId, input.discordUserId, input.repoSlug, input.task,
         input.context, fromBool(input.bootstrap), input.state, input.maxAttempts,
-        input.maxOwnerInputRounds, ts, ts,
+        input.maxOwnerInputRounds, input.originSharedChannelId ?? null, ts, ts,
       );
     return this.byId(input.id)!;
   }
@@ -88,6 +97,21 @@ export class JobsRepo {
     return this.db
       .prepare('SELECT * FROM jobs WHERE discord_user_id = ? ORDER BY created_at DESC LIMIT ?')
       .all(ownerId, limit)
+      .map((r) => mapJob(r as Record<string, unknown>));
+  }
+
+  /**
+   * Recent jobs across every submitter.
+   *
+   * Exists for the shared projection, which has no requesting identity to
+   * scope by and must not be handed one. It returns whole `JobRow`s like any
+   * repository method -- narrowing to what is safe to show is the projection
+   * service's job, not the repository's.
+   */
+  listAllRecent(limit: number): JobRow[] {
+    return this.db
+      .prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?')
+      .all(limit)
       .map((r) => mapJob(r as Record<string, unknown>));
   }
 

@@ -21,7 +21,12 @@ const fresh = () => {
   return { db, store };
 };
 
-const makeJob = (store: ReturnType<typeof fresh>['store'], id: string, publicId: string) =>
+const makeJob = (
+  store: ReturnType<typeof fresh>['store'],
+  id: string,
+  publicId: string,
+  originSharedChannelId: string | null = null,
+) =>
   store.jobs.create({
     id,
     publicId,
@@ -33,12 +38,14 @@ const makeJob = (store: ReturnType<typeof fresh>['store'], id: string, publicId:
     maxAttempts: 3,
     maxOwnerInputRounds: 3,
     state: 'queued',
+    originSharedChannelId,
   });
 
 describe('NotificationsRepo', () => {
-  it('lists a transition as pending until it is marked delivered', () => {
+  it('lists a transition as pending until every target is marked delivered', () => {
     const { store } = fresh();
-    const job = makeJob(store, 'j1', 'p1');
+    // Submitted from a shared channel, so this transition owes BOTH targets.
+    const job = makeJob(store, 'j1', 'p1', '900000000000000001');
     store.jobs.transition(job.id, 'failed', 'no_result', 'executor:e1', {
       finishedAt: new Date().toISOString(),
     });
@@ -55,18 +62,29 @@ describe('NotificationsRepo', () => {
       actor: 'executor:e1',
     });
 
-    store.notifications.markDelivered(pending[0]!.transitionId, job.id);
+    // Two independent targets. Marking one leaves the transition pending for
+    // the other, which is the whole point of the per-target ledger.
+    store.notifications.markDelivered(pending[0]!.transitionId, job.id, 'owner_dm');
+    const stillPending = store.notifications.pending(10);
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0]).toMatchObject({ ownerDelivered: true, sharedDelivered: false });
+
+    store.notifications.markDelivered(pending[0]!.transitionId, job.id, 'shared_channel');
     expect(store.notifications.pending(10)).toHaveLength(0);
   });
 
-  it('marking the same transition delivered twice is a no-op, not an error', () => {
+  it('marking the same transition and target delivered twice is a no-op, not an error', () => {
     const { store } = fresh();
-    const job = makeJob(store, 'j1', 'p1');
+    const job = makeJob(store, 'j1', 'p1', '900000000000000001');
     store.jobs.transition(job.id, 'failed', 'no_result', 'executor:e1', {});
 
     const [row] = store.notifications.pending(10);
-    store.notifications.markDelivered(row!.transitionId, job.id);
-    expect(() => store.notifications.markDelivered(row!.transitionId, job.id)).not.toThrow();
+    for (const target of ['owner_dm', 'shared_channel'] as const) {
+      store.notifications.markDelivered(row!.transitionId, job.id, target);
+      expect(() =>
+        store.notifications.markDelivered(row!.transitionId, job.id, target),
+      ).not.toThrow();
+    }
     expect(store.notifications.pending(10)).toHaveLength(0);
   });
 
@@ -79,6 +97,21 @@ describe('NotificationsRepo', () => {
 
     const pending = store.notifications.pending(10);
     expect(pending.map((p) => p.jobId)).toEqual([a.id, b.id]);
+  });
+
+  it('reports no shared target for a job that was not submitted from a shared channel', () => {
+    const { store } = fresh();
+    const job = makeJob(store, 'j1', 'p1');
+    store.jobs.transition(job.id, 'failed', 'no_result', 'executor:e1', {});
+
+    const [row] = store.notifications.pending(10);
+    // Nowhere to share it, so that target is satisfied by construction and
+    // never becomes a ledger row.
+    expect(row).toMatchObject({ ownerDelivered: false, sharedDelivered: true });
+    expect(row!.originSharedChannelId).toBeNull();
+
+    store.notifications.markDelivered(row!.transitionId, job.id, 'owner_dm');
+    expect(store.notifications.pending(10)).toHaveLength(0);
   });
 
   it('respects the limit', () => {

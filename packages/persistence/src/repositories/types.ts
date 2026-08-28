@@ -40,6 +40,12 @@ export interface JobRow {
   leaseExpiresAt: string | null;
   executorId: string | null;
   retainedWorkspaceId: string | null;
+  /**
+   * The configured shared channel this job was submitted from, or null.
+   * Written only when the channel was configured-shared at submit time, and
+   * re-validated against live configuration before any delivery.
+   */
+  originSharedChannelId: string | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -111,18 +117,36 @@ export interface OwnerInputRow {
   answer: string;
 }
 
-/** A job_transitions row not yet recorded in job_notifications, joined with the fields the owner-facing notifier needs. */
+/**
+ * Where a job notification can go. Tracked separately per transition so the
+ * two can succeed, fail and retry independently.
+ */
+export const NOTIFICATION_TARGETS = ['owner_dm', 'shared_channel'] as const;
+export type NotificationTarget = (typeof NOTIFICATION_TARGETS)[number];
+
+/**
+ * A job_transitions row with at least one target still undelivered, joined
+ * with the fields the notifier needs.
+ *
+ * `ownerDelivered` / `sharedDelivered` say which targets are already
+ * satisfied, so the notifier sends only what is actually outstanding rather
+ * than re-deciding the whole transition.
+ */
 export interface PendingNotificationRow {
   transitionId: number;
   jobId: string;
   publicId: string;
   discordUserId: string;
   repoSlug: string;
+  /** Never trusted on its own; re-checked against live configuration at send time. */
+  originSharedChannelId: string | null;
   fromState: JobState;
   toState: JobState;
   reason: string;
   actor: string;
   createdAt: string;
+  ownerDelivered: boolean;
+  sharedDelivered: boolean;
 }
 
 export const toBool = (v: unknown): boolean => Number(v) === 1;

@@ -288,4 +288,53 @@ INSERT INTO job_notifications (transition_id, job_id, delivered_at)
 SELECT id, job_id, created_at FROM job_transitions;
 `,
   },
+  {
+    version: 6,
+    name: 'shared_job_visibility',
+    sql: `
+-- Where a job was submitted from, when that was a CONFIGURED shared channel.
+-- NULL for a DM, an unconfigured channel, or any job created before this
+-- migration. Recorded only when the channel was shared at submit time, and
+-- re-checked against live configuration before anything is ever sent to it,
+-- so a channel removed from configuration stops receiving updates for jobs
+-- that were already running in it.
+ALTER TABLE jobs ADD COLUMN origin_shared_channel_id TEXT;
+
+-- Delivery ledger, now keyed per TARGET rather than per transition.
+--
+-- One transition can owe a message to two different places -- the owner's DM
+-- and the originating shared channel -- and those can fail independently. A
+-- single row per transition could only record "sent" or "not sent" for both
+-- at once, so a shared-channel outage would either re-send the owner's DM on
+-- every retry or strand the channel message forever. The composite primary
+-- key is what makes each target idempotent on its own: a retried sweep
+-- cannot double-send either one, and a failure of one never blocks or
+-- duplicates the other.
+CREATE TABLE job_notification_deliveries (
+  transition_id INTEGER NOT NULL REFERENCES job_transitions(id),
+  target        TEXT NOT NULL CHECK (target IN ('owner_dm','shared_channel')),
+  job_id        TEXT NOT NULL REFERENCES jobs(id),
+  delivered_at  TEXT NOT NULL,
+  PRIMARY KEY (transition_id, target)
+);
+
+CREATE INDEX idx_job_notification_deliveries_job ON job_notification_deliveries (job_id);
+
+-- Carry the existing ledger forward. Every transition previously recorded as
+-- delivered was an owner DM, because that was the only target that existed.
+-- Transitions NOT listed there were still pending and stay pending.
+INSERT INTO job_notification_deliveries (transition_id, target, job_id, delivered_at)
+SELECT transition_id, 'owner_dm', job_id, delivered_at FROM job_notifications;
+
+-- No baseline row is needed for the NEW target. origin_shared_channel_id was
+-- only just added, so it is NULL for every job that already exists, and a job
+-- with no originating shared channel has no shared target at all -- the
+-- pending query reports it as already satisfied rather than manufacturing one.
+-- The first sweep after this upgrade therefore cannot replay any history into
+-- a channel, without writing a row per historical transition to say so.
+
+-- Fully superseded: every row was copied above and nothing reads it any more.
+DROP TABLE job_notifications;
+`,
+  },
 ];

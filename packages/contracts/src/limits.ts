@@ -96,6 +96,8 @@ export const COMMAND_BUCKETS = {
   jobSubmit: { max: 5, windowMs: 60_000 },
   jobRead: { max: 20, windowMs: 60_000 },
   interaction: { max: 60, windowMs: 60_000 },
+  /** /task, /reminder and /briefing. Owner-only, so this is self-protection. */
+  assistant: { max: 30, windowMs: 60_000 },
 } as const;
 
 // ---- subprocess -------------------------------------------------------------
@@ -111,3 +113,52 @@ export const DUCKY_AGENT_PREFIX = 'ducky-pi-';
 export const DUCKY_WORKSPACE_LABEL_PREFIX = 'ducky-mgd:';
 /** Herdr agent names must match [a-z][a-z0-9_-]{0,31}; the prefix eats 9 chars. */
 export const MAX_SLUG_KEY_LEN = 22;
+
+// ---- daily assistant: tasks -------------------------------------------------
+export const TASK_TITLE_MIN = 1;
+export const TASK_TITLE_MAX = 200;
+/** How much of a typed time expression is ever read. Bounds the parser's work. */
+export const WHEN_INPUT_MAX = 64;
+export const TASK_LIST_PAGE_SIZE = 20;
+/** Open tasks only. Done and cancelled rows are history and are not counted. */
+export const MAX_OPEN_TASKS_PER_OWNER = 500;
+
+// ---- daily assistant: reminders --------------------------------------------
+export const REMINDER_TEXT_MIN = 1;
+export const REMINDER_TEXT_MAX = 500;
+export const REMINDER_LIST_PAGE_SIZE = 20;
+export const MAX_SCHEDULED_REMINDERS_PER_OWNER = 100;
+
+/**
+ * Recurrence is a FIXED interval with an explicit occurrence count -- never a
+ * cron expression and never open-ended. Both bounds are enforced at input, so
+ * no stored reminder can describe an unbounded or a pathologically tight loop.
+ */
+export const REMINDER_MIN_INTERVAL_MINUTES = 5;
+export const REMINDER_MAX_INTERVAL_MINUTES = 365 * 24 * 60;
+export const REMINDER_MIN_OCCURRENCES = 2;
+export const REMINDER_MAX_OCCURRENCES = 100;
+export const REMINDER_DEFAULT_OCCURRENCES = 10;
+/** A reminder may not be scheduled further out than this. */
+export const REMINDER_MAX_HORIZON_MS = 5 * 365 * 24 * 60 * 60_000;
+
+/**
+ * Assistant tick bounds. Each sweep materializes at most this many reminders
+ * and delivers at most this many occurrences, so a long outage drains over
+ * several ticks instead of one unbounded pass.
+ */
+export const REMINDER_MATERIALIZE_BATCH = 50;
+export const REMINDER_DELIVERY_BATCH = 25;
+/**
+ * After this many failed delivery attempts an occurrence is abandoned rather
+ * than retried forever. Recorded, never silently dropped.
+ */
+export const REMINDER_MAX_DELIVERY_ATTEMPTS = 8;
+
+// ---- daily assistant: briefing ---------------------------------------------
+/**
+ * Per section, so a briefing cannot outgrow one Discord embed. Anything beyond
+ * it is reported as a count -- the briefing says how many it did not list
+ * rather than quietly dropping them.
+ */
+export const BRIEFING_SECTION_MAX = 10;

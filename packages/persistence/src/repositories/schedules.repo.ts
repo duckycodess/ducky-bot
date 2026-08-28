@@ -9,6 +9,18 @@ export interface ScheduleRow extends ScheduleEntry {
   confirmedAt: string;
 }
 
+const mapRow = (r: Record<string, unknown>): ScheduleRow => ({
+  id: String(r['id']),
+  discordUserId: String(r['discord_user_id']),
+  title: String(r['title']),
+  startsAt: String(r['starts_at']),
+  endsAt: r['ends_at'] == null ? null : String(r['ends_at']),
+  location: r['location'] == null ? null : String(r['location']),
+  notes: r['notes'] == null ? null : String(r['notes']),
+  sourceKind: String(r['source_kind']) as 'text' | 'file',
+  confirmedAt: String(r['confirmed_at']),
+});
+
 export class SchedulesRepo {
   constructor(private readonly db: Db) {}
 
@@ -37,20 +49,34 @@ export class SchedulesRepo {
     return this.db
       .prepare('SELECT * FROM schedules WHERE discord_user_id = ? ORDER BY starts_at LIMIT ?')
       .all(ownerId, limit)
-      .map((raw) => {
-        const r = raw as Record<string, unknown>;
-        return {
-          id: String(r['id']),
-          discordUserId: String(r['discord_user_id']),
-          title: String(r['title']),
-          startsAt: String(r['starts_at']),
-          endsAt: r['ends_at'] == null ? null : String(r['ends_at']),
-          location: r['location'] == null ? null : String(r['location']),
-          notes: r['notes'] == null ? null : String(r['notes']),
-          sourceKind: String(r['source_kind']) as 'text' | 'file',
-          confirmedAt: String(r['confirmed_at']),
-        };
-      });
+      .map((raw) => mapRow(raw as Record<string, unknown>));
+  }
+
+  /**
+   * Schedule entries whose stored DATE falls in `[startDate, endDateExclusive)`.
+   *
+   * Both bounds are `YYYY-MM-DD` strings in the owner's own zone, and the
+   * comparison is against the first ten characters of `starts_at`, because
+   * that column holds the wall-clock text the owner typed rather than a UTC
+   * instant. Matching on the date prefix therefore needs no conversion, cannot
+   * be thrown off by a timezone change, and never rewrites a stored row.
+   */
+  listForOwnerBetweenDates(
+    ownerId: string,
+    startDate: string,
+    endDateExclusive: string,
+    limit = 25,
+  ): ScheduleRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM schedules
+          WHERE discord_user_id = ?
+            AND substr(starts_at, 1, 10) >= ?
+            AND substr(starts_at, 1, 10) < ?
+          ORDER BY starts_at ASC LIMIT ?`,
+      )
+      .all(ownerId, startDate, endDateExclusive, limit)
+      .map((raw) => mapRow(raw as Record<string, unknown>));
   }
 
   count(): number {

@@ -19,6 +19,35 @@ Discord → coordinator → durable queue → (outbound poll) → WSL executor
                                                             → owner approval → (deferred)
 ```
 
+## Daily assistant (milestone 2B)
+
+Beside the development controller, Ducky keeps the owner's day:
+
+- `/task add|list|done|cancel` — commitments with an optional due time and a
+  priority. A task is a different record from a `/capture`: a capture is an
+  unsorted thought, a task is something you have decided to do. `list` filters
+  by `today` and `overdue` against your own civil day.
+- `/reminder add|list|cancel` — one-shot, or a fixed interval with an explicit
+  occurrence count, delivered to your DM. There is no cron grammar and no
+  open-ended schedule: every recurrence is bounded at input and again by the
+  database. If the host is off when reminders come due, the catch-up
+  **collapses** — one message per reminder, saying how many occurrences it
+  stands for, never a storm and never a silent drop. See
+  [`docs/decisions/0013`](docs/decisions/0013-bounded-reminder-recurrence-and-catch-up.md).
+- `/briefing morning|evening|today` — assembled from your stored tasks,
+  reminders and schedule by counting them. No provider is reachable from the
+  assembly path, so nothing in a briefing can be generated; a briefing that
+  invents a deadline is worse than no briefing.
+- `DUCKY_OWNER_TIMEZONE` sets which day is "today" and what `tomorrow 09:00`
+  means. Instants stay stored as UTC and existing schedule rows keep the text
+  you typed — the zone is a projection, not storage, so changing it re-renders
+  rather than migrates. Times render as Discord timestamps, so each reader sees
+  their own zone. See
+  [`docs/decisions/0014`](docs/decisions/0014-single-owner-timezone-as-a-projection.md).
+
+All of it is owner-only. Tasks, reminders and briefings have no shared
+projection and no shared route.
+
 ## Sharing job status (milestone 2A)
 
 Job *status* can be made visible without exposing job *content*. Add channel
@@ -58,9 +87,11 @@ so lock the channel down first. See
   it reports itself `experimental`. See `docs/integrations/herdr.md`.
 - **The development Discord gateway has now been smoke-tested live.** The
   configured bot and guild returned HTTP 200, the coordinator connected, and
-  the seven development commands were registered. A human DM/slash-command
-  interaction has not yet been exercised; Message Content intent still must
-  be enabled in the portal.
+  the seven development commands then defined were registered. The three added
+  by 2B (`/task`, `/reminder`, `/briefing`) are defined but not yet registered;
+  registering is an external write and is never done at boot. A human
+  DM/slash-command interaction has not yet been exercised; Message Content
+  intent still must be enabled in the portal.
 
 ## Quick start
 

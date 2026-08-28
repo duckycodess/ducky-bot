@@ -115,6 +115,8 @@ export interface ProviderStatus {
   readonly actions: string;
   readonly executors: string;
   readonly sharedChannels: string;
+  /** The configured owner timezone every assistant readback is rendered in. */
+  readonly ownerTimezone: string;
 }
 
 /** Always visible, so the owner is never guessing which providers are real. */
@@ -131,6 +133,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },
           { name: 'Approved actions', value: p.actions, inline: true },
           { name: 'Executors', value: p.executors, inline: true },
+          { name: 'Your timezone', value: p.ownerTimezone, inline: true },
           { name: 'Shared visibility', value: p.sharedChannels },
         ],
       },

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { OWNER_ONLY_COMMANDS } from '@ducky/contracts';
 import { ComponentSigner } from '../src/security/component-signing.js';
 import { commandPayload } from '../src/discord/register-commands.js';
 import { CHAT, OWNER, implementedResult, makeHarness, secret } from './helpers.js';
@@ -160,9 +161,10 @@ describe('command routing', () => {
 describe('command registration', () => {
   it('defines every owner-only command and never registers at boot', () => {
     const payload = commandPayload() as { name: string }[];
-    expect(payload.map((c) => c.name).sort()).toEqual(
-      ['capture', 'inbox', 'job', 'jobs', 'repo', 'schedule', 'status'],
-    );
+    // Derived from the manifest rather than restated: a new owner-only
+    // command must be DEFINED here as well as routed, and neither list may
+    // grow a name the other does not have.
+    expect(payload.map((c) => c.name).sort()).toEqual([...OWNER_ONLY_COMMANDS].sort());
   });
 });
 

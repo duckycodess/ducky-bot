@@ -33,6 +33,9 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       : 'not applicable to the mock transport',
   );
   add('conversation', app.conversation.verified, `${app.conversation.name}`);
+  // Already validated in createApp; reported so the owner can see WHICH zone
+  // every due date, reminder and briefing day boundary is computed in.
+  add('owner timezone', true, app.clock.timeZone);
   add('repositories', app.allowlist.list().length > 0, `${app.allowlist.list().length} allowlisted`);
   add('executors', true, `${app.store.executors.listExecutors().length} registered`);
   return out;

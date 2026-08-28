@@ -44,6 +44,11 @@ Fill in the env file:
   Lock the channel down in Discord first: membership is enforced by channel
   permissions, not by Ducky. It grants no ability to act — every write stays
   owner-only.
+- `DUCKY_OWNER_TIMEZONE` — your IANA timezone (`Asia/Manila`, `Europe/London`),
+  default `UTC`. It decides which civil day "due today" and the briefing cover,
+  and what `tomorrow 09:00` means. Instants are still stored as UTC, so
+  changing it re-renders existing rows rather than rewriting them, and there is
+  nothing to migrate. A name the runtime does not recognise fails at startup.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
 
@@ -62,8 +67,13 @@ pnpm dev:executor           # second shell
 `.env.production`; neither reads the other's file. Set `DUCKY_PROFILE` in the
 matching env file so the loaded values and the selected profile agree.
 
-Startup prints a diagnostic line per subsystem. `/status` reports the same
-provider table inside Discord.
+Startup prints a diagnostic line per subsystem, including the resolved owner
+timezone. `/status` reports the same provider table inside Discord.
+
+One `setInterval`, at `DUCKY_RECONCILE_INTERVAL_MS` (30 s by default), drives
+the reconciler, the job-notification sweep and the daily assistant tick. There
+is deliberately no second scheduler, so that interval is also the worst-case
+lateness of a reminder.
 
 ## Issuing executor credentials
 
@@ -122,7 +132,7 @@ pnpm probe:herdr  # records live Herdr fixtures; creates and removes a temp repo
 ## Layout
 
 ```
-packages/contracts     schemas, state machine, limits, owner-only manifest
+packages/contracts     schemas, state machine, limits, time/timezone, owner-only manifest
 packages/persistence   SQLite, migrations, repositories
 packages/adapters      credentials, github, herdr, pi, openclaw, schedule, redaction
 packages/coordinator   authz, discord, http, domain services, reconciler

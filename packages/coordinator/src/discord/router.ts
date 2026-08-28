@@ -1,8 +1,9 @@
 import {
   CONVERSATIONAL_ROUTE, DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
-  isDuckyError, isSharedReadableRoute,
+  isBriefingKind, isDuckyError, isSharedReadableRoute, isTaskListFilter,
   type CaptureState, type OwnerOnlyCommand, type OwnerOnlyInteractionKind,
+  type ReminderListFilter, type TaskListFilter,
 } from '@ducky/contracts';
 import type { ConversationProvider } from '@ducky/adapters';
 import type { ActorContext, Authorizer } from '../security/authz.js';
@@ -13,12 +14,16 @@ import type { JobsService } from '../domain/jobs.service.js';
 import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
+import type { TasksService } from '../domain/tasks.service.js';
+import type { RemindersService } from '../domain/reminders.service.js';
+import type { BriefingService } from '../domain/briefing.service.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
 import type { Incoming } from './transport.js';
 import { CommandBuckets } from './command-buckets.js';
 import * as present from './presenters.js';
 import * as shared from './shared-presenters.js';
+import * as assistant from './assistant-presenters.js';
 
 export interface RouterDeps {
   readonly authz: Authorizer;
@@ -28,6 +33,13 @@ export interface RouterDeps {
   readonly jobs: JobsService;
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
+  /**
+   * The daily assistant. Owner-only in full: none of these is reachable from
+   * `handleSharedRead`, and no shared route names any of their commands.
+   */
+  readonly tasks: TasksService;
+  readonly reminders: RemindersService;
+  readonly briefing: BriefingService;
   readonly conversation: ConversationProvider;
   readonly status: () => present.ProviderStatus;
   readonly buckets?: CommandBuckets;
@@ -425,6 +437,124 @@ export class DuckyRouter {
       d.authz.requireOwner(actor);
       return present.statusEmbed(d.status());
     });
+
+    // ---- daily assistant (2B). Owner-only, ephemeral, never shared. --------
+
+    this.commands.set('task', async (actor, e) => {
+      this.buckets.check('assistant', actor.discordUserId);
+      switch (e.subcommand ?? 'list') {
+        case 'add': {
+          const row = d.tasks.add(actor, {
+            title: String(e.options['title'] ?? ''),
+            ...(e.options['due'] === undefined ? {} : { due: String(e.options['due']) }),
+            ...(e.options['priority'] === undefined
+              ? {}
+              : { priority: String(e.options['priority']) }),
+          });
+          return assistant.taskAdded(row, d.tasks.timeZone);
+        }
+        case 'done':
+          return assistant.taskClosed(d.tasks.complete(actor, String(e.options['id'] ?? '')));
+        case 'cancel':
+          return assistant.taskClosed(d.tasks.cancel(actor, String(e.options['id'] ?? '')));
+        default: {
+          const raw = e.options['filter'];
+          const filter: TaskListFilter = isTaskListFilter(raw) ? raw : 'open';
+          const rows = d.tasks.list(actor, filter);
+          return assistant.tasksList(rows, d.tasks.timeZone, filter, this.taskRows(actor, rows));
+        }
+      }
+    });
+
+    this.commands.set('reminder', async (actor, e) => {
+      this.buckets.check('assistant', actor.discordUserId);
+      switch (e.subcommand ?? 'list') {
+        case 'add': {
+          const row = d.reminders.add(actor, {
+            text: String(e.options['text'] ?? ''),
+            at: String(e.options['at'] ?? ''),
+            ...(e.options['every'] === undefined ? {} : { every: String(e.options['every']) }),
+            ...(e.options['count'] === undefined ? {} : { count: e.options['count'] }),
+          });
+          return assistant.reminderAdded(row, d.reminders.timeZone);
+        }
+        case 'cancel':
+          return assistant.reminderCancelled(
+            d.reminders.cancel(actor, String(e.options['id'] ?? '')),
+          );
+        default: {
+          const filter: ReminderListFilter = e.options['filter'] === 'all' ? 'all' : 'scheduled';
+          const rows = d.reminders.list(actor, filter);
+          return assistant.remindersList(
+            rows,
+            d.reminders.timeZone,
+            filter,
+            this.reminderRows(actor, rows),
+          );
+        }
+      }
+    });
+
+    /**
+     * Deterministic in full: `BriefingService` reads stored rows and counts
+     * them. No provider is reachable from here, so nothing in a briefing can
+     * be generated -- which is the point, because a briefing that invents a
+     * deadline is worse than no briefing at all.
+     */
+    this.commands.set('briefing', async (actor, e) => {
+      this.buckets.check('assistant', actor.discordUserId);
+      const raw = e.options['when'];
+      // An unrecognised value falls back to the time-of-day default rather
+      // than erroring: the owner asked for a briefing either way.
+      const kind = isBriefingKind(raw) ? raw : undefined;
+      return assistant.briefingMessage(d.briefing.build(actor, kind));
+    });
+  }
+
+  /**
+   * Controls for the first few OPEN tasks.
+   *
+   * Bounded by Discord's five-action-row limit, and attached only to open
+   * rows: a Done button on a cancelled task is a control that cannot act.
+   * Signed and actor-bound like every other component, and verified through
+   * the identical path on the way back in.
+   */
+  private taskRows(actor: ActorContext, rows: readonly { publicId: string; status: string }[]): OutboundRow[] {
+    return rows
+      .filter((r) => r.status === 'open')
+      .slice(0, 4)
+      .map((r) => ({
+        buttons: (['task_done', 'task_cancel'] as const).map((kind) => ({
+          customId: this.deps.signer.sign({
+            kind,
+            entityId: r.publicId,
+            actorUserId: actor.discordUserId,
+          }),
+          label: `${kind === 'task_done' ? 'done' : 'cancel'} ${r.publicId}`,
+          style: kind === 'task_done' ? ('success' as const) : ('secondary' as const),
+        })),
+      }));
+  }
+
+  private reminderRows(
+    actor: ActorContext,
+    rows: readonly { publicId: string; status: string }[],
+  ): OutboundRow[] {
+    const cancellable = rows.filter((r) => r.status === 'scheduled').slice(0, 5);
+    if (cancellable.length === 0) return [];
+    return [
+      {
+        buttons: cancellable.map((r) => ({
+          customId: this.deps.signer.sign({
+            kind: 'reminder_cancel',
+            entityId: r.publicId,
+            actorUserId: actor.discordUserId,
+          }),
+          label: `cancel ${r.publicId}`,
+          style: 'secondary' as const,
+        })),
+      },
+    ];
   }
 
   // ----------------------------------------------------------- components --
@@ -537,6 +667,20 @@ export class DuckyRouter {
       const outcome = d.approvals.decide(actor, entityId, 'rejected');
       return { content: `${outcome.note} Job is now ${outcome.jobState}.`, ephemeral: true };
     });
+
+    // The entity id is the short public handle, not the internal UUID: the
+    // outbound redactor rewrites any bare GUID it sees, so a UUID shown in a
+    // label would reach the owner unreadable. The service re-checks owner
+    // ownership on the way in regardless of what the signature says.
+    this.components.set('task_done', async (actor, entityId) =>
+      assistant.taskClosed(d.tasks.complete(actor, entityId)),
+    );
+    this.components.set('task_cancel', async (actor, entityId) =>
+      assistant.taskClosed(d.tasks.cancel(actor, entityId)),
+    );
+    this.components.set('reminder_cancel', async (actor, entityId) =>
+      assistant.reminderCancelled(d.reminders.cancel(actor, entityId)),
+    );
   }
 }
 

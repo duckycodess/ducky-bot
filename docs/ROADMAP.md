@@ -44,48 +44,64 @@ own decision and its own milestone.
 
 ---
 
-## 2B — Daily owner assistant
+## 2B — Daily owner assistant ✅ delivered
 
 The half of the product `PROJECT_CONTEXT.md` always described and Phase 1 only
-started: captures and schedules exist, but nothing brings them together.
+started: captures and schedules existed, but nothing brought them together.
 
-Scope:
+Delivered:
 
-- **Tasks** — a real task record (title, due date, priority, state), distinct
-  from a capture. A capture is an unsorted thought; a task is a commitment.
-  Promoting one to the other is the point of the inbox.
-- **Reminders** — one-shot and recurring, delivered proactively over the same
-  durable ledger 2A built, not a second notification mechanism.
-- **Briefings** — a morning and an evening summary assembled *from stored
-  records*. DCStro's rule is worth keeping verbatim: AI may supply an opening
-  or closing sentence and nothing else. A briefing that hallucinates a
-  deadline is worse than no briefing.
-- **Schedule and timezone** — schedules are already stored; they are not yet
-  read back, and every timestamp is currently UTC. A single configured owner
-  timezone (DCStro defaulted to `Asia/Manila`) with Discord relative
-  timestamps (`<t:…:R>`) so rendering stays correct without re-sending.
+- **Tasks** — a real task record (title, optional due instant, priority,
+  open/done/cancelled), deliberately distinct from a capture. `/task`
+  add/list/done/cancel, with `today` and `overdue` filters and signed
+  per-row controls. Promoting a capture to a task stays a decision the owner
+  makes; nothing does it automatically.
+- **Reminders** — one-shot and fixed-interval recurring, delivered to the
+  owner's DM over the same durable-ledger architecture 2A built, not a second
+  notification mechanism. `/reminder` add/list/cancel.
+- **Briefings** — `/briefing` with `morning`, `evening` and `today`, assembled
+  from stored records only. DCStro's rule is kept and made structural rather
+  than promised: `BriefingService` holds no provider, so there is no path by
+  which a generated sentence could become a fact. Every briefing states its own
+  provenance.
+- **Schedule and timezone** — `DUCKY_OWNER_TIMEZONE`, validated at startup and
+  reported in `/status`. Schedules are read back for the first time. Every
+  instant is still stored as UTC and Phase 1's schedule rows keep the
+  wall-clock text the owner typed; the zone is a projection, never storage.
+  Times render as Discord relative timestamps.
+- **One scheduler** — the assistant tick rides the existing coordinator
+  interval. No cron, no per-reminder timer, and a worst-case lateness of one
+  interval that is visible in configuration.
 
-Owner-only in full. Tasks, reminders and briefings are personal data: they
-never reach a shared channel, and 2A's projection has no field that could
-carry them.
+Owner-only in full. Tasks, reminders and briefings never reach a shared
+channel, 2A's projection has no field that could carry them, and a test asserts
+that no shared route names any of the three commands.
 
-Open decisions:
+Decisions resolved (see
+[ADR 0013](decisions/0013-bounded-reminder-recurrence-and-catch-up.md) and
+[ADR 0014](decisions/0014-single-owner-timezone-as-a-projection.md)):
 
-- 🔶 **Recurrence grammar.** Fixed intervals only, or a cron-like expression?
-  A DSL is a parsing surface and a support burden; fixed intervals may not
-  survive contact with real use.
-- 🔶 **Briefing delivery target.** DCStro split briefing / chat / general
-  channel roles because a daily summary landing mid-conversation is bad, and
-  "add milk" typed during a conversation being turned into a task is worse.
-  That split is sound. Whether Ducky needs it before it has more than one
-  destination is not yet clear.
-- 🔶 **Missed-reminder policy.** After the host is offline for a day: fire
-  everything, fire only the most recent, or summarise? Each is defensible and
-  they are not interchangeable.
+- **Recurrence grammar** → fixed intervals with an explicit occurrence count.
+  No cron; both bounds enforced at input *and* by table CHECK constraints, so
+  an unbounded schedule cannot be written by any path.
+- **Missed-reminder policy** → collapse, count, and still deliver. At most one
+  message per reminder per tick however long the outage; the skipped
+  occurrences are recorded and named in the message; nothing is dropped for
+  being stale; the recurrence advances exactly once.
+- **Briefing delivery target** → the owner's ephemeral reply for now. Ducky has
+  one destination, so DCStro's channel-role split would be structure without a
+  problem to solve. Proactive scheduled briefings, which is where that split
+  starts to matter, are not in this milestone.
+
+Still open, and deliberately deferred:
+
 - 🔶 **Natural-language capture.** DCStro guessed intent from plain messages,
   deterministic rules first and AI only to improve a low-confidence read. That
   is a good design, but it depends on a verified conversation provider, which
-  we do not have (see 2D).
+  we do not have (see 2D). `/task` and `/reminder` are explicit commands until
+  then.
+- 🔶 **Proactive briefings.** A briefing is pulled, not pushed. Pushing one
+  needs a delivery-time preference and reopens the channel-role question above.
 
 ---
 

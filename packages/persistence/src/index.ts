@@ -12,6 +12,8 @@ export * from './repositories/executors.repo.js';
 export * from './repositories/herdr-workspaces.repo.js';
 export * from './repositories/audit.repo.js';
 export * from './repositories/notifications.repo.js';
+export * from './repositories/tasks.repo.js';
+export * from './repositories/reminders.repo.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
@@ -24,6 +26,8 @@ import { ExecutorsRepo } from './repositories/executors.repo.js';
 import { HerdrWorkspacesRepo } from './repositories/herdr-workspaces.repo.js';
 import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
 import { NotificationsRepo } from './repositories/notifications.repo.js';
+import { TasksRepo } from './repositories/tasks.repo.js';
+import { RemindersRepo } from './repositories/reminders.repo.js';
 
 export interface Store {
   readonly db: Db;
@@ -37,6 +41,8 @@ export interface Store {
   readonly herdrWorkspaces: HerdrWorkspacesRepo;
   readonly audit: AuthorizedUserAuditRepo;
   readonly notifications: NotificationsRepo;
+  readonly tasks: TasksRepo;
+  readonly reminders: RemindersRepo;
 }
 
 export function createStore(db: Db): Store {
@@ -52,5 +58,7 @@ export function createStore(db: Db): Store {
     herdrWorkspaces: new HerdrWorkspacesRepo(db),
     audit: new AuthorizedUserAuditRepo(db),
     notifications: new NotificationsRepo(db),
+    tasks: new TasksRepo(db),
+    reminders: new RemindersRepo(db),
   };
 }

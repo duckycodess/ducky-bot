@@ -36,6 +36,13 @@ async function main(): Promise<void> {
     app.notifier.deliverPending().catch((err: unknown) => {
       process.stderr.write(`notification sweep error: ${(err as Error).message}\n`);
     });
+    // The daily assistant rides the SAME interval. There is deliberately no
+    // second scheduler and no per-reminder timer: one loop, one bound, and a
+    // worst-case reminder lateness of one interval that is visible in
+    // configuration rather than hidden in a timer table.
+    app.reminderNotifier.tick().catch((err: unknown) => {
+      process.stderr.write(`reminder tick error: ${(err as Error).message}\n`);
+    });
   }, app.env.DUCKY_RECONCILE_INTERVAL_MS);
   timer.unref();
 
@@ -45,6 +52,7 @@ async function main(): Promise<void> {
     // for it to settle before the store closes underneath it, without
     // triggering a new one.
     await app.notifier.waitForIdle();
+    await app.reminderNotifier.waitForIdle();
     await app.transport.stop();
     await server.close();
     app.close();

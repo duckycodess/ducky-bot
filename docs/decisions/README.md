@@ -17,6 +17,8 @@ reverse. Trivial implementation choices do not get one.
 | [0010](0010-per-repo-reservations.md) | Per-repository reservations as the single-writer boundary |
 | [0011](0011-capability-honest-schedule-extraction.md) | Capability-honest schedule extraction |
 | [0012](0012-opt-in-shared-job-visibility.md) | Opt-in shared job visibility through a projection |
+| [0013](0013-bounded-reminder-recurrence-and-catch-up.md) | Bounded reminder recurrence, and a collapsing catch-up after an outage |
+| [0014](0014-single-owner-timezone-as-a-projection.md) | One configured owner timezone, applied as a projection |
 
 ## Format
 

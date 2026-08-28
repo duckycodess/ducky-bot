@@ -8,7 +8,7 @@ import {
 import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  loadEnv, cdnHosts, readReposFile, resolvePaths, resolveProfileSecrets,
+  loadEnv, cdnHosts, readReposFile, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets,
   resolveSharedChannelIds,
   type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
@@ -27,6 +27,11 @@ import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
 import { SharedChannelPolicy } from './domain/shared-visibility.js';
+import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
+import { TasksService } from './domain/tasks.service.js';
+import { RemindersService } from './domain/reminders.service.js';
+import { BriefingService } from './domain/briefing.service.js';
+import { ReminderNotifier } from './domain/reminder-notifications.service.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
@@ -45,6 +50,12 @@ export interface AppOverrides {
   readonly transport?: DiscordTransport;
   readonly allowlistJson?: string;
   readonly herdrVerified?: boolean;
+  /**
+   * Injected clock for the daily assistant. Tests drive reminder
+   * materialization, due dates and briefing day boundaries through this
+   * instead of waiting for real time to pass.
+   */
+  readonly clock?: OwnerClock;
 }
 
 export interface App {
@@ -62,6 +73,11 @@ export interface App {
   readonly github: GitHubService;
   readonly reconciler: Reconciler;
   readonly notifier: JobNotifier;
+  readonly clock: OwnerClock;
+  readonly tasks: TasksService;
+  readonly reminders: RemindersService;
+  readonly briefing: BriefingService;
+  readonly reminderNotifier: ReminderNotifier;
   readonly sharedPolicy: SharedChannelPolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
@@ -109,12 +125,19 @@ export function createApp(
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
+  // One clock and one timezone for the whole assistant, validated here so a
+  // bad DUCKY_OWNER_TIMEZONE fails at boot rather than at the first briefing.
+  const clock = overrides.clock ?? new ConfiguredOwnerClock(resolveOwnerTimeZone(env));
+
   const pending = new PendingScheduleStore();
   const captures = new CapturesService(store, authz);
   const schedules = new SchedulesService({ store, authz, pending, extractor });
   const jobs = new JobsService({ store, authz, allowlist });
   const approvals = new ApprovalsService({ store, authz, performer: new DeferredActionPerformer() });
   const github = new GitHubService(authz, allowlist, githubReader);
+  const tasks = new TasksService({ store, authz, clock });
+  const reminders = new RemindersService({ store, authz, clock });
+  const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
 
   // Opt-in, profile-scoped, and empty by default: with nothing configured the
@@ -125,6 +148,11 @@ export function createApp(
   const transport = overrides.transport ?? transportForProfile(discordProfile);
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
+  });
+  // Reminders go to the owner's DM and nowhere else: no shared policy, no
+  // shared projection service, no channel branch to configure wrongly.
+  const reminderNotifier = new ReminderNotifier({
+    store, transport, ownerId: authz.ownerId, clock,
   });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
@@ -141,6 +169,7 @@ export function createApp(
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
     })`,
+    ownerTimezone: clock.timeZone,
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',
@@ -156,6 +185,9 @@ export function createApp(
     jobs,
     approvals,
     github,
+    tasks,
+    reminders,
+    briefing,
     conversation,
     status,
     sharedPolicy,
@@ -176,6 +208,7 @@ export function createApp(
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
     approvals, github, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
+    clock, tasks, reminders, briefing, reminderNotifier,
     close: () => store.db.close(),
   };
 }

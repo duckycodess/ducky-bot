@@ -1,4 +1,6 @@
-import type { ApprovalState, CaptureState, JobState } from '@ducky/contracts';
+import type {
+  ApprovalState, CaptureState, JobState, RecurrenceKind, ReminderState, TaskPriority, TaskState,
+} from '@ducky/contracts';
 
 export interface RepoRow {
   slug: string;
@@ -147,6 +149,93 @@ export interface PendingNotificationRow {
   createdAt: string;
   ownerDelivered: boolean;
   sharedDelivered: boolean;
+}
+
+/**
+ * A task: a commitment with a state that can be completed, deliberately
+ * distinct from a `CaptureRow`, which is an unsorted thought with neither a
+ * due time nor a priority.
+ *
+ * `dueAt` is an ISO-8601 UTC instant like every other timestamp here.
+ * `dueAllDay` records that the owner gave a date with no time of day, so a
+ * presenter can show a date rather than a 00:00 nobody typed.
+ */
+export interface TaskRow {
+  id: string;
+  publicId: string;
+  discordUserId: string;
+  title: string;
+  dueAt: string | null;
+  dueAllDay: boolean;
+  priority: TaskPriority;
+  status: TaskState;
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}
+
+/**
+ * A reminder schedule.
+ *
+ * `nextFireAt` is the ONLY cursor: it is non-null exactly while the reminder
+ * is `scheduled`, and advancing it past an occurrence is what stops a repeated
+ * tick from firing the same occurrence twice. `intervalMinutes` is a fixed
+ * interval and `maxOccurrences` a hard count, so a stored recurrence is always
+ * bounded.
+ */
+export interface ReminderRow {
+  id: string;
+  publicId: string;
+  discordUserId: string;
+  text: string;
+  recurrenceKind: RecurrenceKind;
+  intervalMinutes: number | null;
+  maxOccurrences: number;
+  firedCount: number;
+  nextFireAt: string | null;
+  status: ReminderState;
+  createdAt: string;
+  updatedAt: string;
+  firstFireAt: string;
+  lastFiredAt: string | null;
+  closedAt: string | null;
+}
+
+/**
+ * One due occurrence of a reminder: the durable delivery unit, the same shape
+ * of ledger `job_notification_deliveries` is for job transitions.
+ *
+ * `missedCount` is how many earlier occurrences were collapsed into this one
+ * after an outage. Recorded rather than dropped, so a catch-up message can say
+ * plainly what it stands for.
+ */
+export interface ReminderOccurrenceRow {
+  id: string;
+  reminderId: string;
+  occurrenceNo: number;
+  scheduledFor: string;
+  missedCount: number;
+  createdAt: string;
+  deliveredAt: string | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+  abandonedAt: string | null;
+}
+
+/** An undelivered occurrence joined with the reminder it belongs to. */
+export interface PendingReminderOccurrenceRow {
+  occurrenceId: string;
+  reminderId: string;
+  publicId: string;
+  discordUserId: string;
+  text: string;
+  occurrenceNo: number;
+  scheduledFor: string;
+  missedCount: number;
+  attempts: number;
+  recurrenceKind: RecurrenceKind;
+  maxOccurrences: number;
+  nextFireAt: string | null;
 }
 
 export const toBool = (v: unknown): boolean => Number(v) === 1;

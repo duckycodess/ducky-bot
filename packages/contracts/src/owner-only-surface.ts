@@ -4,8 +4,9 @@
  * exactly one conversational route -- so a new command cannot silently become
  * reachable by a non-owner.
  *
- * Captures, inbox, schedules, jobs and repository data are private personal
- * data: the chat whitelist never reaches any of them.
+ * Captures, inbox, schedules, tasks, reminders, briefings, jobs and repository
+ * data are private personal data: the chat whitelist never reaches any of
+ * them.
  */
 export const OWNER_ONLY_COMMANDS = [
   'capture',
@@ -15,6 +16,12 @@ export const OWNER_ONLY_COMMANDS = [
   'jobs',
   'repo',
   'status',
+  // The daily assistant (milestone 2B). Tasks, reminders and briefings are
+  // personal data in the same class as captures and schedules: they are
+  // owner-only in full, and no shared route names any of them.
+  'task',
+  'reminder',
+  'briefing',
 ] as const;
 export type OwnerOnlyCommand = (typeof OWNER_ONLY_COMMANDS)[number];
 
@@ -29,6 +36,9 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'job_cleanup',
   'approve',
   'reject',
+  'task_done',
+  'task_cancel',
+  'reminder_cancel',
 ] as const;
 export type OwnerOnlyInteractionKind = (typeof OWNER_ONLY_INTERACTION_KINDS)[number];
 

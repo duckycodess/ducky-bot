@@ -36,6 +36,57 @@ const COMMANDS = [
   ] },
   { name: 'repo', description: 'Read-only repository status (owner only)', options: [{ name: 'slug', type: 3, required: true, description: 'Repository slug' }] },
   { name: 'status', description: 'Show which providers are live (owner only)' },
+  { name: 'task', description: 'Your tasks (owner only)', options: [
+    { name: 'add', type: 1, description: 'Add a task', options: [
+      { name: 'title', type: 3, required: true, description: 'What needs doing' },
+      { name: 'due', type: 3, required: false, description: 'e.g. tomorrow 09:00, in 2h, 2026-09-01' },
+      { name: 'priority', type: 3, required: false, description: 'low | normal | high', choices: [
+        { name: 'low', value: 'low' },
+        { name: 'normal', value: 'normal' },
+        { name: 'high', value: 'high' },
+      ] },
+    ] },
+    { name: 'list', type: 1, description: 'List tasks', options: [
+      { name: 'filter', type: 3, required: false, description: 'open | today | overdue | done | cancelled | all', choices: [
+        { name: 'open', value: 'open' },
+        { name: 'today', value: 'today' },
+        { name: 'overdue', value: 'overdue' },
+        { name: 'done', value: 'done' },
+        { name: 'cancelled', value: 'cancelled' },
+        { name: 'all', value: 'all' },
+      ] },
+    ] },
+    { name: 'done', type: 1, description: 'Mark a task done', options: [
+      { name: 'id', type: 3, required: true, description: 'Task id' },
+    ] },
+    { name: 'cancel', type: 1, description: 'Cancel a task', options: [
+      { name: 'id', type: 3, required: true, description: 'Task id' },
+    ] },
+  ] },
+  { name: 'reminder', description: 'Reminders delivered to your DM (owner only)', options: [
+    { name: 'add', type: 1, description: 'Set a reminder', options: [
+      { name: 'text', type: 3, required: true, description: 'What to remind you about' },
+      { name: 'at', type: 3, required: true, description: 'e.g. in 30m, 18:00, tomorrow 09:00' },
+      { name: 'every', type: 3, required: false, description: 'Repeat interval, e.g. 30m, 2h, 1d' },
+      { name: 'count', type: 4, required: false, description: 'How many times in total (needs every)' },
+    ] },
+    { name: 'list', type: 1, description: 'List reminders', options: [
+      { name: 'filter', type: 3, required: false, description: 'scheduled | all', choices: [
+        { name: 'scheduled', value: 'scheduled' },
+        { name: 'all', value: 'all' },
+      ] },
+    ] },
+    { name: 'cancel', type: 1, description: 'Cancel a reminder', options: [
+      { name: 'id', type: 3, required: true, description: 'Reminder id' },
+    ] },
+  ] },
+  { name: 'briefing', description: 'Summary of your stored tasks, reminders and schedule (owner only)', options: [
+    { name: 'when', type: 3, required: false, description: 'morning | evening | today', choices: [
+      { name: 'morning', value: 'morning' },
+      { name: 'evening', value: 'evening' },
+      { name: 'today', value: 'today' },
+    ] },
+  ] },
 ];
 
 export function commandPayload(): unknown[] {

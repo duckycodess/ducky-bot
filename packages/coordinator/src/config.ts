@@ -3,7 +3,9 @@ import { z } from 'zod';
 import {
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
-  SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, blankToUndefined, resolveDuckyProfile,
+  DEFAULT_OWNER_TIMEZONE,
+  SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
+  blankToUndefined, resolveDuckyProfile,
   type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -73,6 +75,20 @@ export const EnvSchema = z.object({
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),
 
   DUCKY_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+
+  /**
+   * The owner's own timezone, as an IANA name (`Asia/Manila`, `UTC`).
+   *
+   * Used ONLY as a projection: to decide which civil day an instant falls in,
+   * and to turn a typed wall-clock time into an instant. Every timestamp is
+   * still stored as ISO-8601 UTC, so changing this re-renders existing rows
+   * and never rewrites them.
+   *
+   * Validated at startup rather than at first use -- see `assertValidTimeZone`
+   * -- so a typo fails loudly at boot instead of silently shifting a day
+   * boundary months later.
+   */
+  DUCKY_OWNER_TIMEZONE: z.string().max(64).default(DEFAULT_OWNER_TIMEZONE),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -218,6 +234,15 @@ export function resolveSharedChannelIds(env: Env): readonly string[] {
   }
   return Object.freeze([...new Set(ids)]);
 }
+
+/**
+ * The configured owner timezone, validated.
+ *
+ * Not profile-scoped: it describes the person, not the bot, and the two
+ * profiles are the same person's development and production assistants.
+ */
+export const resolveOwnerTimeZone = (env: Env): string =>
+  assertValidTimeZone(env.DUCKY_OWNER_TIMEZONE.trim());
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

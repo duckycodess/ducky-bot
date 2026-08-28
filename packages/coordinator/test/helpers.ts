@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import { MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
+import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { ActorContext } from '../src/security/authz.js';
 
@@ -65,6 +66,37 @@ export interface HarnessOptions {
   readonly env?: Record<string, string | undefined>;
   readonly registerExecutor?: boolean;
   readonly github?: MockGitHubReader;
+  /**
+   * Drives the daily assistant's clock. Reminder materialization, due dates
+   * and briefing day boundaries are all read through this, so a test can move
+   * time without waiting for it.
+   */
+  readonly clock?: TestClock;
+}
+
+/**
+ * A hand-wound clock in a chosen timezone.
+ *
+ * `advance` is what makes the missed-reminder policy testable: a long outage
+ * is one call, not a wait.
+ */
+export class TestClock extends ConfiguredOwnerClock {
+  #ms: number;
+
+  constructor(startIso: string, timeZone = 'UTC') {
+    let self: TestClock;
+    super(timeZone, () => self.#ms);
+    self = this;
+    this.#ms = Date.parse(startIso);
+  }
+
+  advance(ms: number): void {
+    this.#ms += ms;
+  }
+
+  set(iso: string): void {
+    this.#ms = Date.parse(iso);
+  }
 }
 
 export function makeHarness(opts: HarnessOptions = {}, realTransport = false): Harness {
@@ -100,6 +132,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       // Omitting the override exercises the real selection path in app.ts.
       ...(realTransport ? {} : { transport }),
       allowlistJson: REPOS_JSON,
+      ...(opts.clock ? { clock: opts.clock } : {}),
       conversation: new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
     },

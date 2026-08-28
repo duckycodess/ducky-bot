@@ -337,4 +337,102 @@ SELECT transition_id, 'owner_dm', job_id, delivered_at FROM job_notifications;
 DROP TABLE job_notifications;
 `,
   },
+  {
+    version: 7,
+    name: 'daily_assistant',
+    sql: `
+-- A task is a COMMITMENT and is a different record from a capture, which is an
+-- unsorted thought. Owner-only in full: there is no projection of this table
+-- and no shared route can reach it.
+--
+-- due_at is an ISO-8601 UTC instant like every other timestamp in this schema.
+-- due_all_day records that the owner gave a DATE with no time of day, so the
+-- readback can show a date instead of inventing a 00:00 that was never typed.
+CREATE TABLE tasks (
+  id              TEXT PRIMARY KEY,
+  public_id       TEXT NOT NULL UNIQUE,
+  discord_user_id TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  due_at          TEXT,
+  due_all_day     INTEGER NOT NULL DEFAULT 0,
+  priority        TEXT NOT NULL CHECK (priority IN ('low','normal','high')),
+  status          TEXT NOT NULL CHECK (status IN ('open','done','cancelled')),
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  closed_at       TEXT
+);
+
+CREATE INDEX ix_tasks_owner_status ON tasks(discord_user_id, status, due_at);
+CREATE INDEX ix_tasks_owner_due ON tasks(discord_user_id, due_at) WHERE status = 'open';
+
+-- A reminder is a SCHEDULE, not a delivery. next_fire_at is the only cursor
+-- the tick reads, and advancing it is what makes a repeated tick idempotent:
+-- once an occurrence is materialized the cursor has already moved past it, so
+-- a second tick in the same second finds nothing due.
+--
+-- Recurrence is deliberately narrow. interval_minutes is a fixed interval and
+-- max_occurrences is a hard count, both bounded at input, so no row here can
+-- describe an unbounded schedule. There is no cron column to grow one.
+CREATE TABLE reminders (
+  id               TEXT PRIMARY KEY,
+  public_id        TEXT NOT NULL UNIQUE,
+  discord_user_id  TEXT NOT NULL,
+  text             TEXT NOT NULL,
+  recurrence_kind  TEXT NOT NULL CHECK (recurrence_kind IN ('once','interval')),
+  interval_minutes INTEGER,
+  max_occurrences  INTEGER NOT NULL CHECK (max_occurrences >= 1),
+  fired_count      INTEGER NOT NULL DEFAULT 0,
+  next_fire_at     TEXT,
+  status           TEXT NOT NULL CHECK (status IN ('scheduled','completed','cancelled')),
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  first_fire_at    TEXT NOT NULL,
+  last_fired_at    TEXT,
+  closed_at        TEXT,
+  -- A one-shot has no interval and fires once; an interval reminder must have
+  -- one. Enforced by the schema so no code path can write a half-specified
+  -- recurrence.
+  CHECK (
+    (recurrence_kind = 'once'     AND interval_minutes IS NULL AND max_occurrences = 1)
+    OR
+    (recurrence_kind = 'interval' AND interval_minutes IS NOT NULL AND interval_minutes > 0)
+  ),
+  -- A scheduled reminder always has a cursor; a finished one never does.
+  CHECK ((status = 'scheduled') = (next_fire_at IS NOT NULL))
+);
+
+CREATE INDEX ix_reminders_due ON reminders(next_fire_at) WHERE status = 'scheduled';
+CREATE INDEX ix_reminders_owner ON reminders(discord_user_id, status, next_fire_at);
+
+-- The durable delivery ledger, the same shape as job_notification_deliveries:
+-- a row exists once an occurrence is DUE, and carries delivered_at once it has
+-- actually been sent. Nothing is ever sent without a row, and a row can only
+-- be created once per (reminder, occurrence_no) -- that unique key is what
+-- makes a retried or overlapping tick unable to double-deliver.
+--
+-- missed_count records how many earlier occurrences of a repeating reminder
+-- were collapsed into this one after an outage. It is never silently zero: a
+-- catch-up that skipped four occurrences says so in the message.
+CREATE TABLE reminder_occurrences (
+  id             TEXT PRIMARY KEY,
+  reminder_id    TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+  occurrence_no  INTEGER NOT NULL,
+  scheduled_for  TEXT NOT NULL,
+  missed_count   INTEGER NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL,
+  delivered_at   TEXT,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  -- Set when delivery has failed too many times to keep retrying. An
+  -- abandoned occurrence stays in the ledger as a record; it is not deleted
+  -- and it is not re-queued.
+  abandoned_at   TEXT,
+  UNIQUE (reminder_id, occurrence_no)
+);
+
+CREATE INDEX ix_reminder_occurrences_pending
+  ON reminder_occurrences(scheduled_for)
+  WHERE delivered_at IS NULL AND abandoned_at IS NULL;
+`,
+  },
 ];

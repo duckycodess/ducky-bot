@@ -221,6 +221,9 @@ erDiagram
   executors ||--o{ executor_credentials : "one per key id"
   captures }o--|| owner : ""
   schedules }o--|| owner : "only after confirmation"
+  tasks }o--|| owner : ""
+  reminders }o--|| owner : ""
+  reminders ||--o{ reminder_occurrences : "one per due occurrence"
 ```
 
 `job_results` holds one immutable row per executor turn, keyed by
@@ -229,7 +232,39 @@ erDiagram
 rows; the snapshot is the record of truth.
 
 `schedules` is the only table that ever holds schedule content, and only after
-explicit confirmation — pending previews live in memory alone.
+explicit confirmation — pending previews live in memory alone. Its `starts_at`
+holds the wall-clock text the owner typed rather than a UTC instant, and is
+read back as a wall clock in the configured owner timezone; it is never
+rewritten (see [decisions/0014](decisions/0014-single-owner-timezone-as-a-projection.md)).
+
+`tasks` and `reminders` are the daily assistant's records, owner-only in full
+with no shared projection. `reminder_occurrences` is the durable delivery
+outbox: one row per occurrence that has come due, unique on
+`(reminder_id, occurrence_no)`, carrying `delivered_at`, an attempt count and
+an `abandoned_at`. It is the same shape as `job_notification_deliveries` and
+for the same reason — recording a delivery must be idempotent, and a failure
+must be retryable without being re-sendable.
+
+`reminders.next_fire_at` is the single scheduling cursor. Materializing an
+occurrence and advancing that cursor happen in one transaction guarded by a
+compare-and-set on `fired_count`, which is what makes a repeated or overlapping
+tick advance a recurrence exactly once. Recurrence is bounded by construction:
+`interval_minutes` with `max_occurrences`, enforced by CHECK constraints, and
+there is no cron column
+(see [decisions/0013](decisions/0013-bounded-reminder-recurrence-and-catch-up.md)).
+
+## The assistant tick
+
+The daily assistant has **no scheduler of its own**. `ReminderNotifier.tick()`
+runs on the coordinator's existing interval, beside `Reconciler.run()` and
+`JobNotifier.deliverPending()`, and each of the three is isolated: a failure in
+one never blocks the others. A tick materializes what has come due, then
+delivers what is outstanding, and is re-entrancy guarded so two overlapping
+passes cannot both read an occurrence as undelivered.
+
+The consequence is a worst-case reminder lateness of one
+`DUCKY_RECONCILE_INTERVAL_MS`, visible in configuration rather than hidden in a
+timer table, and nothing scheduled in memory to be lost on restart.
 
 ## Decisions
 

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { makeHarness } from './helpers.js';
 
 /**
- * Captures, inbox, schedules, jobs and repository data are private personal
- * data. Every one of these is exercised at the SERVICE layer with the command
+ * Captures, inbox, schedules, tasks, reminders, briefings, jobs and repository
+ * data are private personal data. Every one of these is exercised at the SERVICE layer with the command
  * router bypassed, so the guarantee does not depend on routing.
  */
 describe('private data is owner-only at the service layer', () => {
@@ -36,6 +36,16 @@ describe('private data is owner-only at the service layer', () => {
       expect(() => h.app.jobs.cleanup(actor, 'jabcde', false)).toThrow(/not authorized/i);
       expect(() => h.app.approvals.decide(actor, 'approval', 'approved')).toThrow(/not authorized/i);
       await expect(h.app.github.repoStatus(actor, 'demo')).rejects.toThrow(/not authorized/i);
+      // The daily assistant (2B) joins the same class of private data.
+      expect(() => h.app.tasks.add(actor, { title: 'x' })).toThrow(/not authorized/i);
+      expect(() => h.app.tasks.list(actor)).toThrow(/not authorized/i);
+      expect(() => h.app.tasks.complete(actor, 'tabcde')).toThrow(/not authorized/i);
+      expect(() => h.app.reminders.add(actor, { text: 'x', at: 'in 1h' })).toThrow(
+        /not authorized/i,
+      );
+      expect(() => h.app.reminders.list(actor)).toThrow(/not authorized/i);
+      expect(() => h.app.reminders.cancel(actor, 'rabcde')).toThrow(/not authorized/i);
+      expect(() => h.app.briefing.build(actor)).toThrow(/not authorized/i);
     }
     h.close();
   });

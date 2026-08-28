@@ -1,0 +1,46 @@
+#cloud-config
+# TEMPLATE. Never applied from this repository; see README.md.
+#
+# First boot only: the user, the directories and the permissions. It installs
+# no application code, writes no secret, and starts no service -- those are
+# deliberate steps somebody takes over SSH, in the order the README gives.
+
+package_update: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+
+users:
+  - default
+  # A service account with no login shell and no sudo. The coordinator runs as
+  # this user; it never needs to become anybody else.
+  - name: ducky
+    system: true
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+
+write_files:
+  # Placeholders, EMPTY and 0600. Filled in over SSH. A cloud-init that carried
+  # the real values would put them in the VM's instance metadata.
+  - path: /etc/ducky/production.env
+    owner: ducky:ducky
+    permissions: '0600'
+    content: |
+      # Fill in from .env.example. Every secret here is PROFILE-SCOPED.
+      # Production reads none of the unscoped or development variables.
+  - path: /etc/ducky/development.env
+    owner: ducky:ducky
+    permissions: '0600'
+    content: |
+      # Only if this host runs the development profile too. Usually it does not.
+
+runcmd:
+  # The data disk holds the SQLite file and should survive a rebuild of the VM.
+  - [ bash, -lc, "mkdir -p /var/lib/ducky /opt/ducky" ]
+  - [ bash, -lc, "chown ducky:ducky /var/lib/ducky && chmod 0700 /var/lib/ducky" ]
+  - [ bash, -lc, "chmod 0700 /etc/ducky && chown -R ducky:ducky /etc/ducky" ]
+  # Password SSH is already disabled by the template; asserted here so a later
+  # image change cannot quietly re-enable it.
+  - [ bash, -lc, "sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config" ]
+  - [ bash, -lc, "systemctl restart ssh || systemctl restart sshd || true" ]

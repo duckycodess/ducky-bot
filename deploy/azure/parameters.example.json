@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "_comment": [
+    "PLACEHOLDERS. Copy to parameters.json, fill in, and do not commit it.",
+    "No secret belongs here except the SSH PUBLIC key, which is not one.",
+    "Env files and the executor credential are written over SSH afterwards,",
+    "because a secret passed as a deployment parameter lives in Azure's",
+    "deployment history."
+  ],
+  "parameters": {
+    "adminUsername": { "value": "REPLACE-ME" },
+    "adminPublicKey": { "value": "ssh-ed25519 REPLACE-ME" },
+    "sshSourceAddressPrefix": { "value": "203.0.113.10/32" },
+    "namePrefix": { "value": "ducky" },
+    "vmSize": { "value": "Standard_B2s" },
+    "customData": { "value": "REPLACE-ME-base64-of-cloud-init.yaml" }
+  }
+}

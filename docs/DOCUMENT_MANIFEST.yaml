@@ -49,6 +49,14 @@ documents:
     purpose: Herdr binding, probe procedure, verified vs unverified commands
     authority: integration
     update_trigger: Probe coverage changes
+  - path: docs/SMOKE_CHECKLIST.md
+    purpose: What to run to check an instance, and what each step does not prove
+    authority: process
+    update_trigger: A command, probe or external-write step changes
+  - path: deploy/
+    purpose: Deployment templates - systemd, Azure, Tailscale. Never executed here
+    authority: deployment
+    update_trigger: The intended deployment shape changes
   - path: docs/decisions/
     purpose: Architecture decision records
     authority: decision

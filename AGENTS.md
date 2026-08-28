@@ -13,6 +13,9 @@ pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs mod
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
 pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
+pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
+pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
+pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
 ```
 
 The two agent probes start a **real Pi agent**. `probe:live-job` refuses to run

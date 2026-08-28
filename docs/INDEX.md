@@ -16,6 +16,9 @@
 | rotate executor credentials | [runbooks/credential-rotation.md](runbooks/credential-rotation.md) |
 | recover a stuck job | [runbooks/orphan-recovery.md](runbooks/orphan-recovery.md) |
 | delete data, or bound the database | [runbooks/retention-and-deletion.md](runbooks/retention-and-deletion.md) |
+| back up, verify or restore | [runbooks/backup-and-restore.md](runbooks/backup-and-restore.md) |
+| upgrade, or roll one back | [runbooks/upgrade-and-rollback.md](runbooks/upgrade-and-rollback.md) |
+| check an instance end to end | [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) |
 | finish the OpenClaw integration | [integrations/openclaw.md](integrations/openclaw.md) |
 | understand the Herdr binding | [integrations/herdr.md](integrations/herdr.md) |
 | write the completion report | [COMPLETION_REPORT_TEMPLATE.md](COMPLETION_REPORT_TEMPLATE.md) |

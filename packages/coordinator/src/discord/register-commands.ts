@@ -123,6 +123,28 @@ const COMMANDS = [
   ] },
 ];
 
+/**
+ * A human-readable inventory of the surface, for the smoke checklist.
+ *
+ * OFFLINE and read-only: it contacts nothing. It exists because "are all the
+ * commands registered?" is really two questions -- what this build DEFINES, and
+ * what Discord currently HAS -- and only the first can be answered without a
+ * write token. Answering the first honestly, and saying that it is only the
+ * first, beats implying both.
+ */
+export function commandInventory(): string[] {
+  return COMMANDS.map((c) => {
+    const subs = (c.options ?? []).filter((o) => o.type === 1).map((o) => o.name);
+    const opts = (c.options ?? []).filter((o) => o.type !== 1).map((o) => o.name);
+    const detail = subs.length > 0
+      ? `subcommands: ${subs.join(', ')}`
+      : opts.length > 0
+        ? `options: ${opts.join(', ')}`
+        : 'no options';
+    return `/${c.name} — ${detail}`;
+  });
+}
+
 export function commandPayload(): unknown[] {
   const names = new Set(COMMANDS.map((c) => c.name));
   for (const c of OWNER_ONLY_COMMANDS) {
@@ -200,6 +222,15 @@ const invokedDirectly =
 if (invokedDirectly) {
   if (process.argv.includes('--apply')) {
     void apply(flag('profile'));
+  } else if (process.argv.includes('--list')) {
+    // The inventory, for the smoke checklist. Writes nothing, contacts nothing.
+    process.stdout.write(`${commandInventory().join('\n')}\n`);
+    process.stdout.write(
+      `\n${commandPayload().length} command(s) DEFINED by this build, and every entry on ` +
+        'OWNER_ONLY_COMMANDS has a definition (asserted here and by a test).\n' +
+        'What Discord currently HAS is a different question, and needs a token: this command ' +
+        'does not ask.\n',
+    );
   } else {
     process.stdout.write(`${JSON.stringify(commandPayload(), null, 2)}\n`);
     process.stdout.write(

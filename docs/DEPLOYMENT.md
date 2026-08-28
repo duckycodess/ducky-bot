@@ -33,6 +33,19 @@ development bot, and production never registers into the development guild.
 The active profile appears in the startup diagnostics and in `/status`, so an
 instance is never ambiguous.
 
+## Azure templates — written, never executed
+
+[`deploy/azure/`](../deploy/azure/) now carries a Bicep template, a cloud-init
+file and an example parameter file. **Nothing there has been run**: no `az` call
+has been made from this repository, no subscription has been touched, and no
+resource exists. They describe one small VM, one data disk, and an NSG that opens
+SSH from one address and nothing else — deliberately no public IP for the API.
+
+Secrets are **not** deployment parameters: cloud-init creates the env files empty
+and `0600`, and you fill them in over SSH, because a parameter lives in Azure's
+deployment history. See [`deploy/azure/README.md`](../deploy/azure/README.md) for
+the order to do it in.
+
 ## Coordinator (Azure VM)
 
 - Ubuntu 24.04 LTS x64, a small B-series instance
@@ -54,9 +67,11 @@ instance is never ambiguous.
 
 ### Backups
 
-`node:sqlite` exposes `backup`, so a consistent snapshot can be taken without
-stopping the service. Back up the database and the credential file separately;
-the credential file is the trust root and must never land in a shared backup.
+`pnpm backup` takes a consistent snapshot through SQLite's online backup API,
+without stopping the service, and writes it `0600`. `pnpm backup:verify` proves
+the copy is restorable before you need it to be. The credential file is **not**
+included: it is the trust root and must never land in the same artifact. See
+[runbooks/backup-and-restore.md](runbooks/backup-and-restore.md).
 
 ## Executor (WSL)
 
@@ -96,9 +111,13 @@ executor claim production jobs.
 ## Networking
 
 Long term: Tailscale on both hosts, the coordinator reachable only over the
-tailnet, and no public listener at all. Tailscale is **not installed** here yet;
-the private-URL guard already accepts the `100.64.0.0/10` range and `.ts.net`
-names, so the code is ready for it.
+tailnet, and no public listener at all. Tailscale is **not installed** here, and
+nothing in this repository installs it; the private-URL guard already accepts
+loopback, the `100.64.0.0/10` range and `.ts.net` names (and now `ws:`/`wss:`,
+which is what OpenClaw actually speaks), so the code is ready for it. The
+intended tags, ACL and the things that must never happen — no auth key in the
+repository, no `tailscale funnel` — are written down in
+[`deploy/tailscale/README.md`](../deploy/tailscale/README.md).
 
 The executor always dials out. There is no inbound path to WSL, and a test
 asserts the package has no listener.
@@ -107,6 +126,12 @@ asserts the package has no listener.
 
 Forward-only, transactional, versioned, and applied at boot. `pnpm migrate
 --dry` lists what is pending. Credential rotation needs no migration.
+
+Forward-only means rollback is **restore the backup you took first**, not "run
+the down migrations" — there are none, and inventing them would silently drop
+rows a newer schema accepted. The whole procedure, including how to tell whether
+the database has to go back too, is in
+[runbooks/upgrade-and-rollback.md](runbooks/upgrade-and-rollback.md).
 
 ## Recovery
 

@@ -10,7 +10,7 @@ import { makeHarness, implementedResult, commitAction, OWNER } from './helpers.j
 
 /** Finds the notification for a state by its contract label, not by wording. */
 const forState = (
-  sent: { message: { embeds?: readonly { description?: string }[] } }[],
+  sent: readonly { target: SendTarget; message: OutboundMessage }[],
   state: Parameters<typeof ownerStateLabel>[0],
 ) => sent.find((s) => s.message.embeds?.[0]?.description?.includes(ownerStateLabel(state)));
 

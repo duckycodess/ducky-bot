@@ -1,7 +1,7 @@
 import {
   DuckyError, PUBLIC_JOB_ID_RE, SHARED_SUMMARY_MAX, UNLISTED_REPO_SLUG,
   JOB_PHASE_LABEL, SHARED_NEXT_STEP, phaseOf,
-  type SharedJobProjection,
+  type JobState, type SharedJobProjection,
 } from '@ducky/contracts';
 import type { JobRow, Store } from '@ducky/persistence';
 import type { RepoAllowlist } from './allowlist.js';
@@ -62,11 +62,11 @@ export class SharedJobsService {
    * `not_found`, so the shared surface cannot be used to probe which job ids
    * have ever existed.
    */
-  detail(publicId: string): SharedJobProjection {
+  detail(publicId: string, atState?: JobState): SharedJobProjection {
     const id = publicId.trim();
     const job = PUBLIC_JOB_ID_RE.test(id) ? this.store.jobs.byPublicId(id) : undefined;
     if (!job) throw new DuckyError('not_found', 'No job with that id.');
-    return this.project(job);
+    return this.project(job, atState);
   }
 
   /**
@@ -75,9 +75,15 @@ export class SharedJobsService {
    * Every field is named explicitly. `job.task`, `job.context`,
    * `job.discordUserId`, `job.retainedWorkspaceId`, `job.executorId`,
    * `job.leaseId` and the whole result snapshot are never read here.
+   *
+   * `atState` reports the job AS OF a particular transition rather than as it
+   * stands now. A proactive notification needs that: by the time a sweep runs,
+   * the job may already have moved on, and posting "working" and "paused" as
+   * two identical "paused" messages would misreport the history the channel
+   * is watching. An interactive read passes nothing and gets the live state.
    */
-  project(job: JobRow): SharedJobProjection {
-    const phase = phaseOf(job.state);
+  project(job: JobRow, atState?: JobState): SharedJobProjection {
+    const phase = phaseOf(atState ?? job.state);
     const result = this.store.results.byJobId(job.id);
     return {
       publicId: job.publicId,

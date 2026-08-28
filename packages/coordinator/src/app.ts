@@ -32,7 +32,7 @@ import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
 import { fetchTextAttachment } from './discord/attachments.js';
 import { HourlyBudget } from './discord/command-buckets.js';
-import type { DiscordTransport } from './discord/transport.js';
+import type { DiscordSink, DiscordTransport } from './discord/transport.js';
 import { toDiscordPayload } from './discord/payload.js';
 import type { ProviderStatus } from './discord/presenters.js';
 
@@ -217,25 +217,31 @@ function credentialStoreFor(
  */
 function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
-  return new DiscordJsTransport(config.token, (client) => ({
-    /**
-     * The message arrives here ALREADY sanitized -- `DiscordJsTransport.send`
-     * calls `sanitizeOutbound` before any sink is consulted, so both branches
-     * below are past the egress choke point and neither can reintroduce raw
-     * text.
-     *
-     * `ephemeral` is forced false on both: a proactive message has no
-     * interaction token to be ephemeral against. For the channel branch that
-     * is also the intent -- it is meant to be seen.
-     *
-     * Typed structurally rather than against discord.js, because this module
-     * must not import it (asserted by a test).
-     */
+  return new DiscordJsTransport(config.token, channelAwareSink);
+}
+
+/**
+ * Delivers a proactive message to either a user's DM or a channel.
+ *
+ * The message arrives here ALREADY sanitized -- `DiscordJsTransport.send`
+ * calls `sanitizeOutbound` before any sink is consulted -- so both branches
+ * are past the egress choke point and neither can reintroduce raw text.
+ *
+ * `ephemeral` is forced false on both: a proactive message has no interaction
+ * token to be ephemeral against. For the channel branch that is also the
+ * intent -- it is meant to be seen.
+ *
+ * The client is typed STRUCTURALLY rather than against discord.js, because
+ * this module must not import it (asserted by a test).
+ */
+export function channelAwareSink(client: unknown): DiscordSink {
+  const c = client as {
+    users?: { fetch(id: string): Promise<{ send(payload: unknown): Promise<unknown> }> };
+    channels?: { fetch(id: string): Promise<unknown> };
+  };
+
+  return {
     deliver: async (target, message) => {
-      const c = client as {
-        users?: { fetch(id: string): Promise<{ send(payload: unknown): Promise<unknown> }> };
-        channels?: { fetch(id: string): Promise<unknown> };
-      };
       const payload = toDiscordPayload({ ...message, ephemeral: false });
 
       if (target.kind === 'channel') {
@@ -243,9 +249,9 @@ function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
         const channel = (await c.channels.fetch(target.channelId)) as
           | { isTextBased?: () => boolean; send?: (p: unknown) => Promise<unknown> }
           | null;
-        // A missing, non-text or unsendable channel fails loudly rather than
-        // silently dropping the update: the notifier leaves the transition
-        // pending and retries on the next sweep.
+        // A missing, non-text or unsendable channel fails LOUDLY rather than
+        // silently dropping the update: the notifier then leaves that
+        // transition pending and retries it on the next sweep.
         if (!channel || channel.isTextBased?.() === false || typeof channel.send !== 'function') {
           throw new DuckyError('not_found', 'That shared channel cannot receive messages.');
         }
@@ -257,7 +263,7 @@ function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
       const user = await c.users.fetch(target.userId);
       await user.send(payload);
     },
-  }));
+  };
 }
 
 function conversationFromEnv(env: Env): ConversationProvider {

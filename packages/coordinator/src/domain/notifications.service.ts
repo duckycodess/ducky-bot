@@ -229,7 +229,10 @@ export class JobNotifier {
   private buildSharedMessage(row: PendingNotificationRow): OutboundMessage | undefined {
     if (!NOTIFIABLE_STATES.has(row.toState)) return undefined;
     try {
-      const projection = this.sharedJobs?.detail(row.publicId);
+      // Reported as of THIS transition, not as the job stands now: a sweep
+      // that runs after several transitions must post the sequence, not the
+      // same current state several times over.
+      const projection = this.sharedJobs?.detail(row.publicId, row.toState);
       return projection ? sharedJobNotification(projection) : undefined;
     } catch {
       // A job that cannot be projected has nothing safe to say about it.

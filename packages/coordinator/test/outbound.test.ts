@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { CUSTOM_ID_MAX, DISCORD_CONTENT_MAX, EMBED_FIELD_VALUE_MAX } from '@ducky/contracts';
 import { sanitizeOutbound } from '../src/discord/sanitize-outbound.js';
 import { DiscordJsTransport } from '../src/discord/discordjs.transport.js';
+import { channelAwareSink } from '../src/app.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { DiscordSink } from '../src/discord/transport.js';
 import { channelTarget, dmTarget } from '../src/discord/message.js';
@@ -79,6 +80,71 @@ describe('no transport can bypass the choke point', () => {
       const flat = flatten(message);
       for (const s of SECRETS) expect(flat, s).not.toContain(s);
     }
+  });
+
+  it('the real transport sanitizes a CHANNEL send at the same boundary', async () => {
+    // A shared-channel message is the one outbound that is deliberately
+    // visible to people other than the owner, so it must be provably past the
+    // same choke point as everything else.
+    const seen: { target: unknown; message: OutboundMessage }[] = [];
+    const sink: DiscordSink = {
+      deliver: async (target, message) => {
+        seen.push({ target, message });
+      },
+    };
+    const transport = new DiscordJsTransport('token-not-used', () => sink, sink);
+
+    await transport.send(channelTarget('900000000000000001'), poisoned());
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.target).toEqual(channelTarget('900000000000000001'));
+    const flat = flatten(seen[0]!.message);
+    for (const s of SECRETS) expect(flat, s).not.toContain(s);
+    expect(flat).toContain('[REDACTED:github-token]');
+  });
+
+  it('the real sink routes a channel target to the channel and a user target to a DM', async () => {
+    // Exercises the sink app.ts builds, against a structurally-typed stand-in
+    // client -- app.ts must not import discord.js, so the sink is written
+    // against the shape rather than the library.
+    const channelSends: unknown[] = [];
+    const dmSends: unknown[] = [];
+    const client = {
+      users: {
+        fetch: async () => ({
+          send: async (p: unknown) => {
+            dmSends.push(p);
+          },
+        }),
+      },
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          send: async (p: unknown) => {
+            channelSends.push(p);
+          },
+        }),
+      },
+    };
+    const sink = channelAwareSink(client);
+
+    await sink.deliver(channelTarget('900000000000000001'), { content: 'to the channel' });
+    await sink.deliver(dmTarget('100000000000000001'), { content: 'to the owner' });
+
+    expect(channelSends).toHaveLength(1);
+    expect(dmSends).toHaveLength(1);
+    // A proactive message has no interaction token, so neither is ephemeral.
+    expect((channelSends[0] as { flags?: number }).flags).toBeUndefined();
+  });
+
+  it('the real sink refuses a channel it cannot send to, so the notifier retries', async () => {
+    const sink = channelAwareSink({
+      channels: { fetch: async () => null },
+      users: { fetch: async () => ({ send: async () => undefined }) },
+    });
+    await expect(
+      sink.deliver(channelTarget('900000000000000001'), { content: 'x' }),
+    ).rejects.toThrow(/cannot receive messages/);
   });
 
   it('the mock transport sanitizes identically', async () => {

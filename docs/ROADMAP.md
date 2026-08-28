@@ -226,6 +226,39 @@ on this host.
 
 ---
 
+## 2C″ — Live Herdr/Pi contract, recorded ✅ delivered (integration NOT certified)
+
+Not a numbered milestone originally. Taken on because the Herdr/Pi path had
+never been run for real, and running it found five defects that no unit test
+could have caught — the mocks were all *more helpful* than the live CLI.
+
+Delivered: a per-call subprocess budget (a 30-second `execFile` cap was killing
+every real Pi turn and reporting it as a Herdr outage while the agent kept
+writing); failure classification on Herdr's machine `code` rather than its
+prose; `agent prompt` returning the settled agent so `blocked` is
+distinguishable from finished; orphan-safe prompt failure that retains both the
+writer lock and the reservation; `worktree create --label` so the ownership
+proof can actually pass; tolerance for `agent_prompt_stalled` and
+`agent_not_ready`; the brief handed over as a file because a 3.3 KB paste was
+left unsent; and work phases that are genuinely reported, with
+`implementing`/`reviewing`/`verifying` coming from a file Pi writes about
+itself.
+
+**Observed once** by `pnpm probe:live-job` on the production code path:
+`preparing → planning → implementing → reviewing → fixing → verifying →
+completed` in 271 seconds, with an independent passing review and real
+verification exit codes.
+
+**Not certified.** Other runs failed with `agent_prompt_stalled`, so
+repeatability is not established and the milestone is complete only in the sense
+that the contract is pinned and the defects are fixed — not that the integration
+is dependable. `HerdrPiOrchestrator.verified` stays `false` and
+`DUCKY_HERDR_VERIFIED` is deliberately unset. See
+[integrations/herdr.md](integrations/herdr.md) and
+[CURRENT_STATE.md](CURRENT_STATE.md).
+
+---
+
 ## 2D — Verified OpenClaw adapter contract
 
 The conversation provider is the last major unverified integration:
@@ -250,7 +283,16 @@ include verifying its attachment contract, not only its text one.
 
 Open decisions:
 
-- 🔶 **The API itself.** Not yet known. Everything else here is contingent.
+**Boundary delivered, contract still blocked.** `DUCKY_CONVERSATION_PROVIDER`
+now makes the choice explicit and **production fails at startup** rather than
+silently booting on the marked mock (which it previously did whenever
+`OPENCLAW_BASE_URL` was unset — the default). `disabled` is a real mode that
+refuses to answer instead of generating a sentence. `pnpm probe:openclaw` is
+committed and exits 2 with the blocker; no route, body or auth model is guessed.
+
+- 🔶 **The API itself.** Still not known: OpenClaw is not installed, and
+  installing it is a host-wide environment mutation that needs its own
+  approval. Everything else here remains contingent.
 - 🔶 **Conversation memory.** How much history is sent, and is it stored? A
   thread key exists today and nothing is persisted. DCStro's rule is worth
   keeping: only the owner's own messages and the assistant's own output enter
@@ -263,7 +305,53 @@ Open decisions:
 
 ---
 
-## 2E — Privacy and retention decisions
+## 2E — Privacy and retention ✅ delivered (retention ships disabled)
+
+Delivered:
+
+- **Centralised redacted logging** (`obs/logger.ts`). Eleven sites had been
+  interpolating raw error messages into stderr while `redact()` sat unused two
+  imports away.
+- **Migrations 11–13.** 11 indexes three queries `EXPLAIN QUERY PLAN` showed as
+  full table scans (including `job_transitions`, which had no index at all);
+  12 adds `retention_runs` and the partial age indexes each policy selects on;
+  13 widens `audit_log.subject_kind`, which had been silently dropping rows.
+- **A meaningful `/readyz`** — migrations, a loaded credential and a
+  recently-seen executor, not `SELECT 1`.
+- **Bounded retention**, off by default, table-by-table, batched, idempotent,
+  with six per-job guards and skips counted rather than swallowed. Six tables
+  have no delete path at all.
+- **Owner deletion controls** — `/forget job <id>` and `/forget conversation`,
+  owner-only, per-entity, confirm-then-act, with **no wipe-all path at any
+  layer**.
+- **Security audit events** — `auth.failed`, `auth.replay_detected`,
+  `authz.refused`, `rate_limit.exceeded`, `credential.reloaded`,
+  `retention.pruned`, `data.deleted`.
+
+Decisions resolved (see
+[ADR 0020](decisions/0020-conservative-retention-and-per-entity-deletion.md)):
+
+- **Job data retention** → 180 days from `finished_at`, and pruning DOES cascade
+  to the notification ledger: the delivery row and its transition are removed in
+  the same transaction, which is what stops a pruned transition reappearing as
+  undelivered.
+- **Assistant data retention** → 365 days from the column that marks the record
+  closed. Nothing open is ever in scope.
+- **Conversation retention** → nothing is stored, so there is nothing to retain.
+  `/forget conversation` says so rather than pretending to act.
+- **Attachment retention** → no byte is kept and none is derived, so there is
+  nothing to age out.
+- **The owner's own deletion controls** → per-entity, confirm-then-act, audited
+  by count. Deliberately no bulk form.
+- **What survives a profile switch** → nothing: the profiles share no database,
+  so retention is per profile and the runbook says so.
+
+Still open:
+
+- 🔶 **Shared channel history.** Projection messages persist in Discord. Ducky
+  will not delete them: that needs a Manage Messages write the bot deliberately
+  does not hold. Unchanged, and now recorded as a residual rather than an open
+  implementation question.
 
 Currently implicit and due to be written down. 2A already created one new
 retention surface — a shared channel keeps its history, where an ephemeral

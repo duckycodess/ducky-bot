@@ -3,6 +3,24 @@
 `pnpm test` runs everything with Vitest. No test touches the network, a real
 Discord gateway, a cloud API, or performs a git write.
 
+**Live probes are reported, never asserted.** `pnpm probe:herdr --with-agent`
+and `pnpm probe:live-job` start a real Pi agent, so their results are recorded
+in a completion report and in `CURRENT_STATE.md` — a test that needs a live
+agent is not a test. What the suite does assert is the *contract* those probes
+recorded, as fixtures.
+
+**Two test-authoring hazards found the hard way**, both worth knowing before
+adding a case here:
+
+- A `sleep` stub that resolves immediately (`async () => {}`) combined with a
+  WALL-CLOCK-bounded loop spins instead of advancing, and allocates until the
+  heap dies. The orchestrator suites use a real short sleep and small windows.
+- A mock that is *more helpful* than the real thing hides defects. `MockHerdr`
+  used to synthesise a `ducky-mgd:` workspace label regardless of what it was
+  given, so every test believed cleanup could prove ownership — while the live
+  CLI, given no `--label`, named the workspace after the branch and cleanup
+  silently refused on every real job. Mocks must mirror, not improve.
+
 ## What each suite guarantees
 
 **contracts** — the state machine accepts exactly the intended edges; result
@@ -86,8 +104,130 @@ checks type before size before host, so the cheapest decisive check runs first;
 and the schedule surface still layers its own capability-honest image/PDF
 wording on top of the same shared rules.
 
+**persistence / retention** — the six job guards each refuse independently
+(non-terminal, no `finished_at`, reservation held, workspace open, approval
+pending, dependency open); a refused guard deletes NOTHING, not even a child
+row; a deleted unit leaves `PRAGMA foreign_key_check` empty; the notification
+delivery row goes together with its transition, so a pruned transition cannot
+resurface as undelivered; a reservation row is never touched; only terminal jobs
+past the cutoff are offered, oldest first, within the batch cap; an open
+capture, task and reminder occurrence survive however old; and the repository
+source names none of `RETENTION_FORBIDDEN_TABLES` in a `DELETE`.
+
+**persistence / audit vocabulary** — every declared `AUDIT_EVENTS`,
+`AUDIT_ACTOR_KINDS` and `AUDIT_SUBJECT_KINDS` value round-trips into the table.
+This exists because `record()` never throws, so an enum the CHECK constraint did
+not know about was dropped silently; the test is the thing that would have
+caught it. Migration 13's rebuild is asserted to preserve existing rows.
+
+**coordinator / retention** — disabled by default and in the composed app;
+enabled, it removes a terminal job past the window and keeps one inside it;
+a second pass over a settled database deletes nothing (idempotence); the batch
+cap is respected and the next pass resumes; a job holding a reservation is
+SKIPPED and counted, not deleted; every pass is recorded in `retention_runs` and
+the audit log with counts and no task text, including a pass that deleted
+nothing; active credentials, the repo mirror and the authorized-user trail all
+survive a one-day window; the service source names no forbidden table and has no
+`deleteAll`/`purge`/`wipe`/`truncate`.
+
+**coordinator / forget** — deletes one job and its children and ONLY the named
+job; refuses a chat user and a stranger at the service layer with the router
+bypassed; answers an unknown id and a foreign id identically; refuses a running
+job, an open workspace (saying uncommitted work may be there) and an empty id;
+records counts and never the task text, including on a refusal; leaves no
+foreign key violation. On the route: `/forget` is on the owner-only manifest and
+no shared route names it; the command shows and does not delete; the signed
+control deletes; a stranger cannot reuse the owner's control; and
+`FORGET_TARGETS` cannot express a wipe-all, asserted alongside a source scan for
+bulk methods.
+
+**coordinator / conversation provider** — production refuses `openclaw` while no
+contract is recorded, says why, points at the probe rather than a flag, and names
+the mode that works today; production still boots on `disabled`, so an instance
+is never bricked; the contract constant is asserted not to read `process.env`.
+
+**coordinator / audit coverage** — `approval.requested` records action KINDS and
+a count and never an action's details; `approval.expired` is recorded by the
+reconciler; `provider.failed` carries the provider and the error code and never
+the owner's message; HTTP `rate_limit.exceeded` carries the route. Local
+commit/push/PR outcomes are asserted against the existing `approval.execution_*`
+mapping rather than duplicated as new events.
+
+**coordinator / retention time zones** — a confirmed schedule whose EVENT has not
+passed the window is kept; one well past it goes; the zone is able to change the
+verdict at the boundary (otherwise the zone is being ignored, which was the
+defect); an unparseable stored time is kept; an all-day date is treated as local
+midnight rather than UTC midnight. Also asserts which windows are configurable
+and that the two fixed ones ignore the environment.
+
+**coordinator / security audit** — an unsigned request records `auth.failed`
+with the route; a bad bearer and a wrong signature appear nowhere in the log and
+neither does any of `AUDIT_FORBIDDEN_SUBSTRINGS`; a malformed executor id is
+recorded as absent rather than echoed; `authz.refused` carries the ROLE and
+never a Discord id; the owner passing through records nothing;
+`rate_limit.exceeded` carries the BUCKET and never a user id, driven through the
+real router until the bucket exhausts.
+
+**adapters / brief permissions** — a `.ducky/` directory and `brief.md` that
+already exist at 0755/0644 are tightened to 0700/0600 on overwrite, and stay
+owner-only on every round rather than only the first; no temp file is left
+behind. `mode` on `mkdir`/`writeFile` applies only on creation and is masked by
+the umask even then, and Pi creates that directory too.
+
+**adapters / stale phase** — a phase left by a previous turn is cleared, the
+clear is silent when there is nothing there, and it leaves `result.json` alone.
+At the orchestrator level the order is asserted to be clear → brief → prompt, on
+a fresh turn and on a RESUMED one, because a resumed job reuses its workspace and
+would otherwise report the phase the last turn finished on.
+
+**coordinator / observability** — every level carries a `correlationId` even on a
+logger built with no options; a caller-supplied id wins; a child keeps the
+parent's. Key-aware redaction replaces the value of any field whose name contains
+a sensitive part (twenty names asserted, including the hyphenated `x-api-key`),
+including when the value is an object or an array, while leaving innocent
+neighbours like `jobId` and `phase` intact.
+
+**adapters / herdr subprocess budgets** — a blocking `agent prompt` is spawned
+with a subprocess timeout strictly GREATER than the wait it hosts, and the same
+wait is passed to herdr, so the two cannot drift; `agent start` sends an
+explicit readiness timeout; ordinary commands keep the default. This is the
+regression test for a 30-second `execFile` cap that killed every real Pi turn
+and reported it as a Herdr outage while the agent kept writing.
+
+**adapters / herdr failure classification** — against stderr **recorded from
+this host**: `agent_not_found` is an absent target, `agent_prompt_stalled` gets
+its own code and is never an outage, `agent_not_ready` is transient,
+`dirty_worktree_requires_force` is the normal result of cleaning up after real
+work, an exit-2 syntax error is an outage, and a secret in a failure message
+never reaches the error text. Classification is on the machine `code`, with the
+old wording match kept only as a fallback.
+
+**adapters / brief handover** — the brief travels as a `0600` file in a `0700`
+directory and only a one-line pointer is pasted; the pointer is one line, under
+300 characters, names a forward-slash path, and tells the agent to do the work
+rather than acknowledge and stop. Measured cause: 3.3 KB over 66 lines was left
+unsent in Pi's input buffer.
+
+**adapters / phase file** — every real phase word is accepted, whitespace and
+casing tolerated, and an absent, empty, oversized, directory-shaped or
+unrecognised file yields no phase at all rather than an invented one; the shared
+machine predicate declines an edge the coordinator would refuse.
+
+**executor / phase reporting** — a report reaches the coordinator without
+waiting for the regular lease beat; the ACCEPTED phase is read back; a burst
+coalesces into one request; a refused phase is never resent; a transport failure
+retries; a lease beat still happens with no phase to report; Pi's phase file is
+picked up only once a workspace exists; a throwing reader never disturbs the
+beat.
+
+**executor / orphan writer lock** — an orphan outcome RETAINS the host writer
+lock, and an ordinary or unavailable outcome releases it. The release used to be
+unconditional and ran before the orphan branch, so a retry could start a second
+writer beside a live agent.
+
 **adapters / herdr contract** — the production schemas parse **recorded live
-responses** from `pnpm probe:herdr`. Until fixtures exist the cases skip and the
+responses** from `pnpm probe:herdr`, now including `agent start`, `agent prompt`,
+`agent get` and a result file a real Pi agent wrote. Until fixtures exist the cases skip and the
 orchestrator stays experimental: passing mocks is not evidence.
 
 **adapters / pi-herdr** — recovery behaviour: a working agent is reattached, not

@@ -15,6 +15,7 @@
 | add a repository | [runbooks/repo-onboarding.md](runbooks/repo-onboarding.md) |
 | rotate executor credentials | [runbooks/credential-rotation.md](runbooks/credential-rotation.md) |
 | recover a stuck job | [runbooks/orphan-recovery.md](runbooks/orphan-recovery.md) |
+| delete data, or bound the database | [runbooks/retention-and-deletion.md](runbooks/retention-and-deletion.md) |
 | finish the OpenClaw integration | [integrations/openclaw.md](integrations/openclaw.md) |
 | understand the Herdr binding | [integrations/herdr.md](integrations/herdr.md) |
 | write the completion report | [COMPLETION_REPORT_TEMPLATE.md](COMPLETION_REPORT_TEMPLATE.md) |

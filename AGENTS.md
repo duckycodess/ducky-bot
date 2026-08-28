@@ -9,7 +9,20 @@ pnpm test             # vitest run
 pnpm build            # tsc --build
 pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
+pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
+pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
+pnpm probe:openclaw   # exits 2 with the blocker while OpenClaw is absent
 ```
+
+The two agent probes start a **real Pi agent**. `probe:live-job` refuses to run
+unless the target repository carries a committed `.ducky-disposable` marker, is
+clean with no `ducky/*` branches, and the database has no non-terminal job and no
+held repository reservation — a reservation blocks every claim, so a run against
+one measures nothing. It asserts its evidence and exits non-zero when any is
+missing (4) or when teardown left something behind (5); `probe:herdr` exits 3 the
+same way. `PROBE_TASK` cannot be overridden and `PROBE_TIMEOUT_MS` is clamped;
+a non-numeric value is refused. **A probe that cannot fail is not a certifier**, so never soften those
+exits to keep a run green.
 
 Scripts load `.env` then `.env.<profile>` with Node's native
 `--env-file-if-exists`; Node reads nothing implicitly. `pnpm dev:coordinator`
@@ -53,6 +66,13 @@ Report contradictions rather than picking whichever reads best.
   key and executor credential file are all per profile. Production reads none
   of the unscoped or development variables.
 - Nothing in Phase 1 commits, pushes, deploys, or mutates a cloud resource.
+- **No wipe-all deletion path, at any layer.** `FORGET_TARGETS` cannot express
+  one and `RETENTION_FORBIDDEN_TABLES` names what retention may never touch;
+  both are asserted by tests that scan the source. Retention only ever removes
+  records that are already finished, and a job that is still live in any sense
+  is skipped whole and counted.
+- **Deletion is audited by count, never by content.** A record of a deletion
+  that quoted what it deleted would defeat the deletion.
 
 ## Validation expectations
 

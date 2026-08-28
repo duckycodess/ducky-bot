@@ -112,9 +112,13 @@ so lock the channel down first. See
   are implemented for a same-filesystem development topology, but the flag is
   off by default (`DUCKY_DEV_APPROVED_ACTIONS_ENABLED=false`). Issue, deploy,
   Azure and high-risk actions remain recorded-only.
-- **Conversation replies come from a marked mock.** OpenClaw is not installed
-  here, so its API could not be verified. Every mock reply is prefixed
-  `[mock]`; the real HTTP provider throws rather than guessing an API.
+- **Conversation replies come from a marked mock, and that is now an explicit
+  choice.** OpenClaw is not installed here, so its API could not be verified.
+  `DUCKY_CONVERSATION_PROVIDER` selects `mock`, `disabled` or `openclaw`;
+  development defaults to the mock and every mock reply is prefixed `[mock]`.
+  **Production must choose and refuses to start otherwise**, and `mock` is
+  refused for production outright. The real HTTP provider throws rather than
+  guessing an API.
 - **Conversation attachments are built but closed.** You can attach one image
   or file to a chat message, and the whole pipeline — capability handshake,
   metadata policy, bounded download, private temp file, explicit disposal — is
@@ -127,17 +131,43 @@ so lock the channel down first. See
   capability is claimed. Attachments are owner-only even though plain chat is
   not. See
   [`docs/decisions/0015`](docs/decisions/0015-provider-agnostic-conversation-attachments.md).
-- **The Herdr/Pi orchestrator is partly verified.** Workspace, pane and
-  worktree creation are checked against recorded live responses
-  (`pnpm probe:herdr`); starting and prompting a Pi agent was not exercised, so
-  it reports itself `experimental`. See `docs/integrations/herdr.md`.
-- **The development Discord gateway has now been smoke-tested live.** The
-  configured bot and guild returned HTTP 200, the coordinator connected, and
-  the seven development commands then defined were registered. The three added
-  by 2B (`/task`, `/reminder`, `/briefing`) are defined but not yet registered;
-  registering is an external write and is never done at boot. A human
-  DM/slash-command interaction has not yet been exercised; Message Content
-  intent still must be enabled in the portal.
+- **The Herdr/Pi orchestrator has been run for real, and is still
+  `experimental`.** `pnpm probe:herdr --with-agent` records the agent contract,
+  and `pnpm probe:live-job` drives the production code path with a real Pi
+  agent. **One run was observed to pass the full evidence gate** —
+  `preparing → planning → implementing → reviewing → fixing → verifying →
+  completed` in 271 seconds, with an independent passing review and real
+  verification exit codes.
+  **That is one observed success, not a certified integration:** other runs
+  failed with `agent_prompt_stalled`, so repeatability is not established.
+  Running it for real did find five defects no unit test could have caught,
+  because every mock was more accommodating than the live CLI. `verified` stays
+  `false` and `DUCKY_HERDR_VERIFIED` is unset — it is a deliberate operator act
+  and nothing in the code sets it. See `docs/integrations/herdr.md`.
+- **A completed worktree job keeps its workspace.** Herdr refuses to remove a
+  checkout holding uncommitted work, and Ducky does not force — that checkout
+  holds the implementation the job produced. The repository reservation is
+  released, so nothing is blocked; clear it with `/job cleanup`.
+- **Retention exists but ships disabled.** `DUCKY_RETENTION_ENABLED=false` means
+  nothing is ever deleted automatically, so a default instance still grows
+  without bound — deliberately: an unbounded database is recoverable, deleted
+  history is not. When enabled it prunes only *finished* records, table by
+  table, batched, on the existing interval; six tables have no delete path at
+  all. Copy the SQLite file before turning it on.
+- **`/forget job <id>` and `/forget conversation`** let the owner delete one
+  named thing, confirm-then-act. **There is no wipe-all path at any layer** —
+  the contract cannot express one. `/forget conversation` reports that nothing
+  is stored, because nothing is.
+- **The development Discord gateway has been smoke-tested live, once.** The
+  configured bot and guild returned HTTP 200 and the coordinator connected. At
+  that time the seven commands which then existed were registered — the only
+  live registration on record.
+  **Twelve owner commands are defined today**, so the five added since
+  (`/task`, `/reminder`, `/briefing`, `/watch`, `/forget`) have never been
+  written to Discord. Registering is an external write, is never done at boot,
+  and has not been done since. A human DM or slash-command interaction has
+  **never** been exercised, and the privileged Message Content intent still has
+  to be enabled in the portal, so message bodies are unavailable.
 
 ## Quick start
 

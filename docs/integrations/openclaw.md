@@ -1,15 +1,56 @@
 # OpenClaw integration
 
-## Status: not installed, API unverified
+## Status: not installed, API unverified — and now explicit about it
 
-OpenClaw is not present on this host — not on `PATH`, not in the global package
-list, and no configuration directory exists. The package is published on npm as
-`openclaw`, described as a *multi-channel AI gateway with extensible messaging
-integrations*, with a bin of the same name and an engines range that accepts
-this Node version.
+Re-confirmed this run: `openclaw` is not on `PATH`, not in the global npm tree
+(`@earendil-works/pi-coding-agent`, `@railway/cli`, `corepack`, `npm`, `pnpm`,
+`tsx`, `typescript`, `vercel`), and no configuration directory exists at
+`~/.openclaw`, `~/.config/openclaw`, `~/.local/share/openclaw` or
+`/etc/openclaw`. A read-only registry query reports `openclaw@2026.7.1-2`, bin
+`openclaw`, engines accepting Node 24.15.0.
 
-That is the extent of what could be established without installing it, which was
-outside the scope of this run.
+### Provider modes
+
+`DUCKY_CONVERSATION_PROVIDER` now decides, explicitly:
+
+| Mode | development | production |
+|---|---|---|
+| unset | `mock` | **refused at startup** |
+| `mock` | allowed, every reply prefixed `[mock]` | **refused at startup** |
+| `disabled` | allowed | allowed — the honest choice today |
+| `openclaw` | allowed; needs a private `OPENCLAW_BASE_URL`, fails per request | **refused at startup** while no contract is recorded |
+
+This replaced `if (!OPENCLAW_BASE_URL) return mock`, which had **no profile
+check at all** — so a production instance with the variable unset (the default;
+it was not even in `.env.example`) silently answered the owner from a canned
+mock. The mode is resolved before any filesystem or database work, so a
+misconfigured instance fails on the cheapest possible check.
+
+### The initialisation contract
+
+`RECORDED_CONTRACT_VERSION` in `openclaw.contract.ts` is `null`, and
+`HttpOpenClawProvider.initializable()` reports not-initializable because of it.
+Production selecting `openclaw` is refused at startup as a result — a private URL
+proves the address is not public, not that anything there speaks a contract we
+have recorded.
+
+It is a **source constant, not an environment variable**, on purpose: an operator
+can set a variable but cannot conjure a recorded request/response shape, and
+`verified` has to mean "a contract was recorded" or it means nothing. The check
+is non-networked: reachability at boot would not prove the API either, and a
+gateway that is merely down should not block a correctly configured instance.
+
+Development may still select `openclaw` and find out per request. That is a local
+box choosing to experiment, not an instance answering the owner.
+
+`DisabledConversationProvider` refuses with `integration_not_verified` rather
+than returning prose. It is deliberately not the mock: a mock invents a
+sentence, and on a production instance the owner asking a question and getting
+prose back is the failure mode, not the fallback.
+
+The registry describes it as a *multi-channel AI gateway with extensible
+messaging integrations*. That is the extent of what can be established without
+installing it, and installing it has not been approved.
 
 ## What ships instead
 
@@ -30,8 +71,12 @@ startup.
 
 ## Finishing the integration
 
-1. Install it deliberately (`npm i -g openclaw`) — an environment mutation that
-   needs its own approval.
+0. Run `pnpm probe:openclaw`. With OpenClaw absent it exits 2 and prints the
+   blocker rather than recording anything; it never guesses a route, a body or
+   an auth model. It captures configuration KEY NAMES and the auth header NAME
+   only — a recorded fixture containing a token would be worse than no fixture.
+1. Install it deliberately (`npm i -g openclaw`) — a host-wide environment
+   mutation that needs its own approval. **Not done in this run.**
 2. Probe the real surface: `openclaw --help`, the subcommand help, and whatever
    HTTP routes it exposes when bound to loopback.
 3. Record what the request and response actually look like, the auth model, and

@@ -163,6 +163,178 @@ and row-ownership re-authorization, so compromising this key alone grants
 nothing. Binding the actor id into the signature makes a copied component id
 useless to anyone else.
 
+## Logging
+
+One module writes every log line, and it lives in `@ducky/adapters` so BOTH
+processes use it — the coordinator and the executor emit the same shape, and a
+correlation id can be followed across them. Each field passes through `redact()`
+and is clamped, an `Error` is reduced to its message (a stack trace carries
+absolute paths, and for a wrapped error sometimes the offending value), and one
+event is one JSON line so a correlation id is greppable. There is no way to emit
+an unredacted field through it.
+
+**Every logger has a correlation id**, generated when the caller does not supply
+one. A logger built with no base used to emit none — and the lines that matter
+during an incident are exactly the ones nobody remembered to decorate.
+
+**Redaction is key-aware as well as pattern-based.** A field whose NAME contains
+`authorization`, `cookie`, `token`, `secret`, `password`, `apikey`, `credential`,
+`bearer`, `signature`, `privatekey`, `session`, `hmac` or `auth` is replaced
+wholesale, whatever its value looks like and even when that value is an object or
+an array. Separators are stripped first, so `x-api-key`, `api_key` and `apiKey`
+are the same name. Pattern matching alone catches a token with a recognisable
+shape; it does not catch `Basic dXNlcjpwdw==`, a short opaque session id, or a
+cookie jar — and those are exactly the fields somebody logs while debugging.
+
+**Exactly one write is not a structured log line**, and it is documented at the
+call site as such: the boot diagnostics block, which is **operator display** —
+written for a human reading the terminal, where a JSON blob is strictly worse.
+The same facts are also emitted as one structured record immediately below it, so
+nothing a collector consumes falls outside the guarantee.
+
+Startup failures are **not** an exception any more. Both processes build a boot
+logger before configuration is read, so a startup error is redacted and carries a
+`correlationId` like every other line — and the `child` logger created after
+configuration inherits that id, so one run is one id across both phases. It was
+previously a hand-built JSON line with no correlation id, which was the wrong
+line to make an exception of: it is the one most likely to be the only one
+anybody sees.
+
+`error` level goes to **stderr**, other levels to stdout, so routing a startup
+failure through the logger does not quietly move it off the stream an operator, a
+systemd unit and a CI step all read.
+
+This exists because the alternative was demonstrably leaky: eleven call sites
+interpolated `(err as Error).message` straight into `process.stderr.write`
+while `redact()` sat unused two imports away — and an error message is exactly
+where a path, a URL or a token-shaped fragment turns up.
+
+**What still writes outside the logger, exactly.** In the long-running
+processes: only the boot diagnostics block described above, which is operator
+display and is mirrored as a structured record. Startup failures are no longer
+among them — both `main`s use `bootLog`.
+
+The rest are **one-shot operator CLIs**, which are a terminal transcript rather
+than a log stream:
+
+- `register-commands` — its one error path that can quote a Discord response
+  calls `redact()`; the others print fixed strings and an HTTP status.
+- `executor:issue-credential` — deliberately prints the **plaintext bearer token
+  and HMAC secret once**, because minting them is the only moment they exist
+  outside the credential file. That output is the secret, so it must never be
+  piped into a log, a ticket or a chat. See
+  [runbooks/credential-rotation.md](runbooks/credential-rotation.md).
+
+## Conversation provider selection
+
+`DUCKY_CONVERSATION_PROVIDER` is explicit and is resolved **before any
+filesystem or database work**, so a misconfigured instance fails on the
+cheapest check. Production must choose; an unset value is refused and `mock` is
+refused outright, because a canned reply must never be mistaken for a real one.
+`disabled` refuses to answer rather than generating a sentence, and is the
+correct production mode while no provider is verified.
+
+**Production additionally requires the provider to be able to initialise.** A
+private URL proves the address is not public; it proves nothing about whether
+anything there speaks a contract we have recorded. So production selecting
+`openclaw` is refused at startup while `RECORDED_CONTRACT_VERSION` is `null` —
+which it is, because OpenClaw is not installed and no fixtures exist. The check
+is non-networked on purpose: reachability at boot would not prove the API either,
+and a gateway that is merely down should not stop a correctly configured instance
+from starting. It is a source constant, not an environment variable: an operator
+can set a variable, but cannot conjure a recorded request/response shape.
+
+The previous selection had no profile check at all, so a production instance
+with `OPENCLAW_BASE_URL` unset — the default — silently answered the owner from
+the marked mock.
+
+## Retention and deletion
+
+The only two code paths that remove the owner's data, and both go through one
+implementation (`RetentionRepo.deleteJobUnitGuarded`) so there is a single
+deletion order and a single set of guards.
+
+**Retention** is off unless configured. Every policy selects on a column that
+exists only because a record is finished (`finished_at`, `closed_at`,
+`delivered_at`), and for jobs that is not sufficient on its own: six independent
+guards refuse a job that is non-terminal, holds a repository reservation, has an
+open workspace, has a pending approval, or has an open dependency. A refusal is
+**counted, not swallowed** — a terminal job still holding a reservation is an
+inconsistency somebody should see. Every table is capped per pass, so a tick is
+short and the pass is idempotent: run it twice on a settled database and the
+second run deletes nothing.
+
+`RETENTION_FORBIDDEN_TABLES` names what retention may never touch — `repos`,
+`authorized_user_audit`, `executors`, `executor_credentials`,
+`repo_reservations`, `schema_migrations` — and tests assert the source of both
+the repository and the service mentions none of them in a `DELETE`.
+
+**`/forget`** is the owner acting deliberately on one named entity. It is
+owner-only, on the `OWNER_ONLY_COMMANDS` manifest, never shared-readable, and
+two-step: the command shows what will go and returns a signed control bound to
+the owner; only pressing it deletes. An id that does not exist and an id
+belonging to somebody else are answered **identically**, so the command cannot
+be used to discover that a job exists.
+
+**There is no wipe-all path at any layer.** `FORGET_TARGETS` is
+`['job', 'conversation']` and the contract cannot express "everything", so no
+layer above it can offer one. `/forget job` requires an explicit id; there is no
+plural form, no filter and no wildcard. Tests assert the service source contains
+no bulk method and never enumerates jobs.
+
+Both events are audited, and both record **counts only**. A deletion record that
+quoted what it deleted would defeat the deletion.
+
+### The audit log's silent failure mode
+
+`AuditLogRepo.record` never throws, deliberately: a job rolled back because
+bookkeeping failed would be worse than one that ran and was not written down.
+The cost is that a value the TypeScript enum allows and the table's CHECK
+constraint does not is **dropped without a sound** — the log simply loses the
+row. That happened when three subject kinds were added to the enum and the
+constraint still listed four. Migration 13 widens it, and a test now asserts
+every declared event, actor kind and subject kind is actually persistable.
+
+## Security audit events
+
+The audit log recorded the lifecycle in detail and recorded nothing about who
+was turned away. It now records:
+
+| Event | Where | What it carries |
+|---|---|---|
+| `auth.failed` | the single `authed` wrapper on every executor route | the route, and the claimed executor id only if it is well-formed |
+| `auth.replay_detected` | same | same |
+| `authz.refused` | `Authorizer.requireOwner` / `requireConversational` | the **role** (`chat`/`none`), never a Discord id |
+| `rate_limit.exceeded` | `CommandBuckets` | the **bucket**, never a user id |
+| `credential.reloaded` | the reconcile tick | that a reload happened, and how many keys are active |
+| `retention.pruned` | every retention pass | counts, including skips |
+| `data.deleted` | `/forget` | counts, and the outcome when refused |
+| `approval.requested` | result intake, when actions are proposed | action KINDS and a count, never an action's details |
+| `approval.expired` | the reconciler | how many lapsed unanswered |
+| `provider.failed` | the conversation boundary | the provider name and the error CODE, never the owner's message |
+| `config.rejected` | credential-file reload | the variable NAME, never a path or a value |
+
+**Local commit / push / PR outcomes** are covered by the existing
+`approval.execution_started` / `_succeeded` / `_failed` events, whose `detail`
+carries the `ApprovalActionKind` (`git_commit`, `git_push`, `github_pr`, …). A
+failure now also carries the redacted reason, so the trail says whether a remote
+refused or policy declined rather than only that a push failed. This is a
+deliberate mapping onto existing events rather than a second parallel set for the
+same facts; tests assert it.
+
+**Startup configuration errors are logged, not audited.** They happen before the
+database exists, so there is nowhere to write them. `config.rejected` covers the
+cases where persistence IS possible — today, a credential file rejected on
+reload. The distinction is deliberate rather than an omission.
+
+HTTP rate limiting is observed through the plugin's `onExceeded` hook, not an
+`errorResponseBuilder`: the builder owns the response, and returning a body
+without a `statusCode` silently turned a 429 into a 500.
+
+None of them says WHY authentication failed — that would make the audit trail an
+oracle the 401 deliberately is not. None records the material that failed.
+Recording is wrapped so a failure to write can never turn a 401 into a 500.
+
 ## Egress and redaction
 
 `sanitizeOutbound` is the single choke point and is called as the **first
@@ -306,3 +478,24 @@ shared state if it were ever scaled out.
   keyring or Key Vault can be swapped in behind the existing port.
 - Pi has no sandbox. The executor is a trusted host by design.
 - Prompt injection from repository content cannot be prevented at this layer.
+- **The brief now lives in the workspace** as `0600` in a `0700` directory
+  (`.ducky/brief.md`), because a large brief could not be pasted reliably. It
+  holds the owner's task text, is removed with the worktree, and never crosses
+  a terminal — which also means no part of it can be reinterpreted as key
+  presses. It is still redacted and control-stripped before being written.
+  Permissions are applied with an explicit `chmod` and the file is written to a
+  temp name and renamed: `mode` on `mkdir`/`writeFile` applies only on CREATION
+  and is masked by the umask even then, so a second round used to inherit
+  whatever `.ducky/` already had — and Pi creates that directory too.
+- **A completed worktree job keeps its workspace.** `herdr worktree remove`
+  refuses a checkout holding uncommitted work, and Ducky does not force,
+  because that checkout holds the implementation the job produced. The
+  repository reservation is released, so nothing is blocked, but the owner's
+  work — and the task text in the brief file — stays on disk until the owner
+  clears it or the reconciler sweeps it after `HERDR_WORKSPACE_TTL_MS`.
+- **Retention is implemented but ships disabled**, so on a default instance the
+  domain tables still grow without bound. Enabling it is an operator decision,
+  and the runbook says to copy the SQLite file first.
+- **A `/forget job` cannot be undone.** The confirm step, the per-entity scope
+  and the identical answer for unknown and foreign ids are the mitigations; there
+  is no soft-delete and no restore.

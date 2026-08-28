@@ -22,6 +22,9 @@ reverse. Trivial implementation choices do not get one.
 | [0015](0015-provider-agnostic-conversation-attachments.md) | Provider-agnostic conversation attachments, refused before download |
 | [0016](0016-work-phases-dependency-waits-and-audit.md) | Work phases beside the state machine, bounded dependency waits, and a structured audit log |
 | [0017](0017-explicit-approved-git-actions.md) | Explicit, opt-in execution of approved Git actions |
+| [0018](0018-live-certified-herdr-pi-contract.md) | The Herdr/Pi contract is what the live CLI does, not what its help says |
+| [0019](0019-explicit-conversation-provider-modes.md) | Explicit conversation-provider modes; production fails closed |
+| [0020](0020-conservative-retention-and-per-entity-deletion.md) | Conservative retention, per-entity deletion, and no wipe-all |
 
 ## Format
 

@@ -16,7 +16,8 @@ diagnostics and in `/status`.
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
   `/status`, `/task` (add, list, done, cancel), `/reminder` (add, list,
-  cancel), `/briefing`, `/watch` (add, list, remove)
+  cancel), `/briefing`, `/watch` (add, list, remove), `/forget` (job,
+  conversation)
 - Opt-in shared job visibility (milestone 2A), **off by default**. With
   `DUCKY_SHARED_CHANNEL_IDS` empty the feature is unreachable. When a channel
   is listed, anyone who can read it gets a safe projection from `/jobs` and
@@ -107,10 +108,11 @@ diagnostics and in `/status`.
   (supervised mid-turn, acknowledged only once a stop is observed), owner-input
   rounds, per-repo reservations, durable workspace registration, crash
   recovery, reconciliation
-- **Engineering work phases.** `preparing`, `planning`, `implementing`,
-  `reviewing`, `fixing`, `verifying`, persisted beside the job state rather
-  than replacing it. Set on claim, moved by an **allowlisted** `phase` on the
-  executor's job heartbeat, validated against an exhaustive phase machine
+- **Engineering work phases, now actually reported.** `preparing`, `planning`,
+  `implementing`, `reviewing`, `fixing`, `verifying`, persisted beside the job
+  state rather than replacing it. Set on claim, moved by an **allowlisted**
+  `phase` on the executor's job heartbeat, validated against an exhaustive
+  phase machine
   (a report cannot walk backwards from implementing to planning), idempotent
   for a repeated report, and cleared whenever the job stops being lease-bearing
   so a paused job never renders a stale phase. Shown privately as
@@ -121,6 +123,25 @@ diagnostics and in `/status`.
   deliberately NOT added: the performer is still unimplemented, so they would
   be dead states. See
   [decisions/0016](decisions/0016-work-phases-dependency-waits-and-audit.md)
+
+  **Where each phase comes from, exactly.** Until this milestone no executor
+  code path ever sent `progress.phase` at all, so a live job sat at `preparing`
+  from claim to terminal state while this document claimed otherwise. Now:
+  - `preparing` — set by the coordinator on claim.
+  - `planning` — emitted by the orchestrator when the brief is handed over.
+    That is a fact it observes.
+  - `implementing`, `reviewing`, `fixing`, `verifying` — read from
+    `.ducky/phase`, a one-word file **Pi writes about itself**, which the brief
+    asks for. Herdr can only report `idle | working | blocked | done | unknown`,
+    so nothing else could observe these; inferring them from a terminal scrape
+    would be a guess dressed as an observation. If Pi does not write the file,
+    the job honestly stays at `implementing` or earlier.
+  A report is carried by a **coalesced immediate heartbeat** (2 s debounce, one
+  in flight, the regular lease interval never reset), so a phase appears in
+  seconds rather than after a full interval. A phase the machine would refuse
+  is not sent, and one the coordinator refuses is not resent — a refused report
+  fails the whole heartbeat, and losing a lease renewal to it would be a bad
+  trade.
 - **Explicit approved Git actions.** An owner can use `/job execute` after a
   per-action approval; the immutable proposal and a durable execution ledger
   are checked before the opt-in same-filesystem performer can commit, push or
@@ -211,6 +232,115 @@ Three different things, and they are not interchangeable:
 - **Unavailable** — the dependency is not installed or not probed, and the code
   says so at runtime rather than pretending.
 
+## Retention and deletion (milestone 2E, the substance of it)
+
+- **Bounded retention, OFF by default.** `DUCKY_RETENTION_ENABLED=false` means
+  no window is consulted and nothing is deleted. When enabled it rides the
+  existing coordinator interval — no second scheduler — and every table is
+  capped at `DUCKY_RETENTION_BATCH` per pass, so a tick is short and a pass that
+  hits the cap resumes on the next one.
+- **Table-by-table.** Terminal jobs (and every row referencing them) at 180
+  days; closed tasks, closed reminders, done/archived captures and past
+  confirmed schedules at 365; settled GitHub watch events at 90; idempotency
+  keys at 7. `audit_log` (90 days) and `executor_nonces` keep their existing
+  prunes, unchanged. Cancelled watches and the run log are fixed at 365 days and
+  deliberately not configurable.
+- **Schedules are time-zone correct.** `schedules.starts_at` is wall-clock text
+  in the owner's zone, so a schedule goes only when it was confirmed longer ago
+  than the window AND its event is genuinely past in `DUCKY_OWNER_TIMEZONE`. The
+  SQL selects on `confirmed_at` (a real instant); the zone-aware test happens in
+  TypeScript. An unparseable stored time is kept, never deleted.
+- **Six guards per job, and a skip is counted.** A job is skipped whole — never
+  partially deleted — if it is non-terminal, has no `finished_at`, holds a
+  repository reservation, has an open workspace, has a pending approval, or has
+  an open dependency. A terminal job still holding a reservation is an
+  inconsistency somebody should see, so `jobsSkipped` is reported rather than
+  swallowed.
+- **Never reachable at all:** `repos`, `authorized_user_audit`, `executors`,
+  `executor_credentials`, `repo_reservations`, `schema_migrations`. Tests assert
+  the source of both the repository and the service names none of them in a
+  `DELETE`.
+- **Every pass is recorded twice** — in `retention_runs` and in the audit log —
+  with counts only, including a pass that deleted nothing.
+- **`/forget job <id>` and `/forget conversation`**, owner-only, on the
+  owner-only manifest, never shared-readable. Two-step: the command shows what
+  will go and returns a signed control bound to the owner; only pressing it
+  deletes. An unknown id and somebody else's id are answered identically.
+  `/forget conversation` says plainly that nothing is stored — there is no
+  transcript table — and exists so the answer is a fact rather than a missing
+  command.
+- **No wipe-all path at any layer.** `FORGET_TARGETS` cannot express one.
+
+Both `/forget` and the scheduled pass use the SAME deletion implementation, so
+there is one child-first order and one set of guards rather than two that could
+drift apart.
+
+## Security audit events
+
+The audit log recorded the lifecycle in detail and nothing about who was turned
+away. It now also records `auth.failed`, `auth.replay_detected`,
+`authz.refused` (the **role**, never a Discord id), `rate_limit.exceeded` — for
+both the Discord buckets (the **bucket**) and the HTTP routes (the **route**) —
+`credential.reloaded`, `retention.pruned`, `data.deleted`,
+`approval.requested`, `approval.expired`, `provider.failed` and
+`config.rejected`. None says why authentication failed, and none records the
+material that failed.
+
+Local commit/push/PR outcomes map onto the existing `approval.execution_*`
+events, whose detail carries the action kind and, on failure, the redacted
+reason. Startup configuration errors are logged rather than audited: they happen
+before the database exists. Both distinctions are documented in
+[SECURITY.md](SECURITY.md) and asserted by tests.
+
+`AuditLogRepo.record` never throws by design, which means an enum value the
+table's CHECK constraint does not allow is dropped **silently**. That happened;
+migration 13 widens the constraint and a test now asserts every declared event,
+actor kind and subject kind is actually persistable.
+
+## Certified on the production code path
+
+`pnpm probe:live-job` drives the **shipped** chain — router → `JobsService` →
+real Fastify HTTP with bearer/HMAC/nonce auth → `CoordinatorClient` →
+`ExecutorLoop` → `runClaimedJob` → `resolveWorkspace` (real git) →
+`acquireWriterLock` → `HerdrPiOrchestrator` → `HerdrCli` → Herdr → Pi →
+`.ducky/result.json` → `FileResultReader` → `ResultIntake`. Only the Discord
+transport is mocked, and deliberately: a certification run must never open a
+gateway.
+
+A successful run against the disposable allowlisted repository recorded:
+
+- `orchestrator=herdr-pi` (not the mock) from the executor's own selection;
+- `queued → running → completed (result_implemented)`;
+- the **full engineering loop**, `preparing → planning → implementing →
+  reviewing → fixing → verifying`, including the review⇄fixing back-edge;
+- audit rows for creation, claim, every transition and every phase change, with
+  none of `AUDIT_FORBIDDEN_SUBSTRINGS` present;
+- a `herdr_workspaces` row with `mode=worktree` and a checkout path under
+  `~/.herdr/worktrees`;
+- the exact Herdr argv sequence, including `worktree create --label ducky-mgd:…`
+  and `worktree remove`;
+- an accepted result: `verdict=implemented`, an independent passing review, four
+  verification commands with real exit codes, `changedFiles=["README.md"]`;
+- **271 seconds elapsed** — direct evidence that the 30-second subprocess cap
+  which used to kill every real turn is gone.
+
+Not certified by that run, and stated plainly: no Discord gateway interaction,
+no OpenClaw, and `DUCKY_HERDR_VERIFIED` was not set.
+
+**One successful production-path run has been OBSERVED. Repeatability is NOT
+certified.** Of the runs attempted after the orchestration fixes landed, two
+reached `completed` with an accepted `implemented` result (271 s and 240 s) — and
+only the 271 s run was checked against the full evidence gate, because the gate
+was added after the first. Three failed with `agent_prompt_stalled`, because
+`agent start` reported `interactive_ready: true` while Pi was still painting
+startup banners and the prompt was silently dropped.
+
+Ducky reports that honestly — its own error code, bounded observation, never a
+re-prompt, workspace and reservation retained, and the probe exits non-zero — but
+the integration is intermittent. **`HerdrPiOrchestrator.verified` stays `false`,
+`/status` still reports `experimental`, and `DUCKY_HERDR_VERIFIED` is unset.**
+See [integrations/herdr.md](integrations/herdr.md).
+
 ## Verified against the live host
 
 - SQLite behaviour (`node:sqlite`, WAL, partial unique indexes, triggers)
@@ -220,29 +350,43 @@ Three different things, and they are not interchangeable:
 - The `gh` read-only JSON surface
 - Development Discord bot identity and configured guild REST access (HTTP 200)
 - Development coordinator gateway startup on `127.0.0.1:8787`
-- Seven development slash commands registered to the configured test guild.
-  **The three added by 2B (`/task`, `/reminder`, `/briefing`) are defined but
-  NOT yet registered** — registering is an external write and is never done at
-  boot. Run `pnpm register-commands --apply --profile development`
-  deliberately.
+- Slash-command registration, stated as two separate facts because they have
+  drifted apart:
+  - **DEFINED: 12 owner commands** — `/capture`, `/inbox`, `/schedule`, `/job`,
+    `/jobs`, `/repo`, `/status`, `/watch`, `/forget`, `/task`, `/reminder`,
+    `/briefing`. `OWNER_ONLY_COMMANDS` and the registration payload agree on all
+    12, asserted by a test.
+  - **REGISTERED LIVE: the seven that existed at the time of the one recorded
+    registration.** The five added since (`/task`, `/reminder`, `/briefing`,
+    `/watch`, `/forget`) have never been written to Discord. Registering is an
+    external write, is never done at boot, and has not been done in any run
+    since. Run `pnpm register-commands --apply --profile development`
+    deliberately; the default remains a dry run.
 - Development executor authentication, polling, and liveness heartbeat
 
 The probe caught a real detail: Herdr checks a linked worktree out under its own
 directory, not inside the source repository, so the result file must be read
 from the reported checkout path.
 
-**Not probed:** `herdr agent start` and `agent prompt`, because exercising them
-launches a real Pi agent. `HerdrPiOrchestrator.verified` is therefore `false`
-and `/status` reports `experimental`.
+**Now probed:** `herdr agent start`, `agent prompt` and `agent get` have been
+exercised repeatedly against a real Pi agent, by `pnpm probe:herdr --with-agent`
+(which records `agent-start.json`, `agent-prompt.json`, `agent-get.json` and a
+result file a real agent wrote) and by `pnpm probe:live-job`. Their contracts are
+recorded and parsed by the production schemas.
+
+That is a recorded CONTRACT, not a certification of the integration: the
+end-to-end path is intermittent (see above), so `HerdrPiOrchestrator.verified`
+stays `false` and `/status` reports `experimental`.
 
 ## Mocked or unverified — stated plainly
 
 | Area | Status |
 |---|---|
-| OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. Both advertise attachments as unavailable, so the 2C path stays closed. |
+| OpenClaw conversation | **Not installed on this host** (not on PATH, not in the global npm tree, no config directory). The HTTP provider throws rather than guessing an API. `DUCKY_CONVERSATION_PROVIDER` now chooses explicitly between `mock`, `disabled` and `openclaw`; **production must choose and fails at startup otherwise**, and `mock` is refused for production outright. All three providers advertise attachments as unavailable, so the 2C path stays closed. `pnpm probe:openclaw` exists, refuses to guess, and exits 2 with the blocker. |
 | Conversation attachment delivery | **Unreachable, by design.** The pipeline is unit-tested against an injected `fetch` and a test-only provider that supplies the one thing this host lacks — a verified, attachment-capable endpoint. **No live attachment byte has been fetched on this host, and none is sent anywhere.** It becomes reachable only when 2D produces a verified provider that declares attachment support. |
 | Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1, and 2C did not add one: it forwards bytes, it does not read them. |
-| `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
+| `herdr agent start` / `agent prompt` | **Now exercised, repeatedly, against a real Pi agent** — by `pnpm probe:herdr --with-agent` (contract) and `pnpm probe:live-job` (production path). Five real defects were found and fixed as a result; see [integrations/herdr.md](integrations/herdr.md). The orchestrator nonetheless still reports `experimental`: `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and this run did not set it. |
+| Cleanup after a completed worktree job | **Keeps the workspace, by design.** `herdr worktree remove` refuses a checkout holding uncommitted work, and a finished job's checkout holds the implementation plus `.ducky/result.json`. Ducky does not force — that would delete the work — so it reports the workspace as kept. The repository reservation IS released, so nothing is blocked; the owner clears the workspace with `/job cleanup`, and the reconciler sweeps a stale one after `HERDR_WORKSPACE_TTL_MS`. |
 | Real Discord gateway | The development bot successfully connected during a local smoke test, and the bot/guild REST checks returned HTTP 200. A human DM/slash-command interaction has not yet been exercised; Message Content intent must be enabled in the portal for message bodies. Proactive job notifications use this same path, so their delivery is still not verified by an owner-initiated live DM. |
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |
 | Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |

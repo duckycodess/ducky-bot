@@ -1,4 +1,8 @@
-import { AUDIT_OWNER_REF, DuckyError } from '@ducky/contracts';
+import {
+  AUDIT_OWNER_REF, canonicalJson, DuckyError, ProposedActionSchema,
+  type ApprovalActionKind,
+} from '@ducky/contracts';
+import { redact } from '@ducky/adapters';
 import { withTransaction, type ApprovalRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { ActionPerformer } from './action-performer.js';
@@ -57,6 +61,123 @@ export class ApprovalsService {
     const job = this.store.jobs.byId(approval.jobId);
     if (!job) throw new DuckyError('not_found', 'That approval no longer exists.');
     return { approval, job };
+  }
+
+  /**
+   * Executes one previously approved action after an explicit owner request.
+   *
+   * Approval is not execution: the decision is recorded first, and this method
+   * is the only route that may hand an action to the configured performer. The
+   * immutable result snapshot is compared with the approval row before the
+   * execution slot is claimed, and the slot is durable so a retry cannot run a
+   * command twice after a successful external write followed by a crash.
+   */
+  async execute(actor: ActorContext, approvalId: string): Promise<{ state: 'succeeded'; note: string }> {
+    this.authz.requireOwner(actor);
+    if (!this.performer.enabled) {
+      throw new DuckyError(
+        'not_enabled_in_phase1',
+        'Approved action execution is disabled. The decision is recorded.',
+      );
+    }
+
+    const detail = this.detail(actor, approvalId);
+    const approval = detail.approval;
+    if (approval.state !== 'approved') {
+      throw new DuckyError(
+        'invalid_input',
+        `That action is ${approval.state}; only an approved action can be executed.`,
+      );
+    }
+    if (Date.parse(approval.expiresAt) <= this.now().getTime()) {
+      throw new DuckyError('invalid_input', 'That approval expired before execution.');
+    }
+
+    const snapshot = this.store.results.byJobId(detail.job.id)?.snapshot;
+    const proposed = snapshot?.proposedActions[approval.actionIndex];
+    const storedDetails = parseObject(approval.detailsJson);
+    const validated = ProposedActionSchema.safeParse({
+      kind: approval.actionKind,
+      description: approval.description,
+      details: storedDetails,
+    });
+    if (
+      !validated.success ||
+      !proposed ||
+      proposed.kind !== approval.actionKind ||
+      proposed.description !== approval.description ||
+      canonicalJson(proposed.details) !== canonicalJson(storedDetails)
+    ) {
+      throw new DuckyError(
+        'invalid_input',
+        'The approved proposal no longer matches the recorded job result.',
+      );
+    }
+
+    const existing = this.store.approvals.executionByApproval(approvalId);
+    if (existing) {
+      if (existing.state === 'succeeded') {
+        return { state: 'succeeded', note: 'That action was already executed.' };
+      }
+      if (existing.state === 'running') {
+        throw new DuckyError('invalid_input', 'That action is already being executed.');
+      }
+      throw new DuckyError(
+        'invalid_input',
+        'That action previously failed. Inspect the workspace and request a new proposal.',
+      );
+    }
+
+    const claimed = withTransaction(this.store.db, () =>
+      this.store.approvals.beginExecution(approvalId, detail.job.id, this.now().toISOString()),
+    );
+    if (!claimed) {
+      const raced = this.store.approvals.executionByApproval(approvalId);
+      if (raced?.state === 'succeeded') {
+        return { state: 'succeeded', note: 'That action was already executed.' };
+      }
+      throw new DuckyError('invalid_input', 'That action is already being executed or was attempted before.');
+    }
+
+    this.store.auditLog.record({
+      event: 'approval.execution_started', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
+      subjectKind: 'approval', subjectRef: approvalId, detail: approval.actionKind,
+    });
+
+    try {
+      await this.performer.perform(
+        approval.actionKind as ApprovalActionKind,
+        storedDetails,
+        {
+          job: detail.job,
+          approval,
+          workspace: this.store.herdrWorkspaces.openForJob(detail.job.id),
+        },
+      );
+      withTransaction(this.store.db, () => {
+        this.store.approvals.finishExecution(approvalId, 'succeeded', this.now().toISOString());
+      });
+      this.store.auditLog.record({
+        event: 'approval.execution_succeeded', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'approval', subjectRef: approvalId, detail: approval.actionKind,
+      });
+      return {
+        state: 'succeeded',
+        note: `Executed approved ${approval.actionKind.replace(/_/g, ' ')}.`,
+      };
+    } catch (err) {
+      const safe = redact(err instanceof Error ? err.message : 'approved action failed').slice(0, 200);
+      withTransaction(this.store.db, () => {
+        this.store.approvals.finishExecution(approvalId, 'failed', this.now().toISOString(), safe);
+      });
+      this.store.auditLog.record({
+        event: 'approval.execution_failed', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'approval', subjectRef: approvalId, outcome: 'failed',
+        detail: approval.actionKind,
+      });
+      if (err instanceof DuckyError) throw err;
+      throw new DuckyError('invalid_input', 'The approved action failed. Inspect the job and workspace.');
+    }
   }
 
   /**
@@ -174,4 +295,16 @@ export class ApprovalsService {
       throw new DuckyError('not_found', 'That approval no longer exists.');
     }
   }
+}
+
+function parseObject(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  } catch {
+    // The immutable proposal is invalid; the caller reports a safe mismatch.
+  }
+  return {};
 }

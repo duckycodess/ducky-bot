@@ -9,7 +9,10 @@ describe('the command policy', () => {
   it('classifies nothing above a local mutation in this phase', () => {
     expect(MAX_ALLOWED_COMMAND_CLASS).toBe('local_mutation');
     for (const entry of COMMAND_POLICY) {
-      expect(exceedsAllowedClass(entry.cls), `${entry.bin} ${entry.verb.join(' ')}`).toBe(false);
+      expect(
+        exceedsAllowedClass(entry.cls),
+        `${entry.bin} ${entry.verb.join(' ')}`,
+      ).toBe(entry.cls === 'external_mutation');
     }
     // The two classes that would matter are defined and refused, not absent.
     expect(exceedsAllowedClass('external_mutation')).toBe(true);
@@ -18,12 +21,15 @@ describe('the command policy', () => {
 
   it('contains no forbidden verb anywhere in its own table', () => {
     for (const entry of COMMAND_POLICY) {
-      expect(findForbiddenVerb(entry.verb), `${entry.bin} ${entry.verb.join(' ')}`).toBeUndefined();
+      expect(
+        findForbiddenVerb(entry.verb, { allowExternalMutation: true }),
+        `${entry.bin} ${entry.verb.join(' ')}`,
+      ).toBeUndefined();
     }
   });
 
   it('refuses an unclassified command rather than defaulting to allowed', () => {
-    const refusal = checkCommandAllowed('git', ['commit', '-m', 'x']);
+    const refusal = checkCommandAllowed('git', ['cherry-pick', 'main']);
     expect(refusal?.reason).toBe('unclassified');
     expect(checkCommandAllowed('curl', ['https://example.com'])?.reason).toBe('unclassified');
     // A classified binary with an unknown subcommand is still unclassified.
@@ -37,6 +43,10 @@ describe('the command policy', () => {
     }
     // Including when it is buried in an otherwise-classified argv.
     expect(checkCommandAllowed('git', ['status', '--porcelain', 'clean'])?.reason).toBe(
+      'forbidden_verb',
+    );
+    expect(checkCommandAllowed('git', ['push', 'origin', 'main'], 'external_mutation')).toBeUndefined();
+    expect(checkCommandAllowed('git', ['push', 'origin', 'main', '--force'], 'external_mutation')?.reason).toBe(
       'forbidden_verb',
     );
   });
@@ -73,7 +83,7 @@ describe('the command policy', () => {
     // Belt and braces against the two tables drifting apart.
     for (const build of Object.values(GH_OPERATIONS)) {
       const argv = build({ owner: 'acme', repo: 'demo' }, 1);
-      expect(findForbiddenVerb(argv), argv.join(' ')).toBeUndefined();
+      expect(findForbiddenVerb(argv, { allowExternalMutation: true }), argv.join(' ')).toBeUndefined();
       expect(checkCommandAllowed('gh', argv), argv.join(' ')).toBeUndefined();
     }
   });

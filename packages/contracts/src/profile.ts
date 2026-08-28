@@ -74,6 +74,7 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_DEV_SHARED_CHANNEL_IDS',
+    approvedActions: 'DUCKY_DEV_APPROVED_ACTIONS_ENABLED',
   },
   production: {
     token: 'DISCORD_PROD_TOKEN',
@@ -82,6 +83,7 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_PROD_SHARED_CHANNEL_IDS',
+    approvedActions: 'DUCKY_PROD_APPROVED_ACTIONS_ENABLED',
   },
 } as const satisfies Record<
   DuckyProfile,
@@ -92,6 +94,7 @@ export const PROFILE_ENV = {
     credentialsFile: string;
     componentKey: string;
     sharedChannels: string;
+    approvedActions: string;
   }
 >;
 

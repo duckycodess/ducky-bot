@@ -102,10 +102,12 @@ so lock the channel down first. See
   provider on this host can read those bytes, so `/schedule` refuses image and
   PDF uploads *before downloading them* rather than showing an invented
   preview. Text and CSV work end to end.
-- **Approved actions are recorded, never executed.** Commits, pushes, pull
-  requests, deployments and cloud mutations all stop at the approval gate.
-  There is no GitHub writer anywhere in the codebase, and the command policy
-  classifies every external mutation as not performed in this phase.
+- **Approved actions are opt-in and explicit.** The owner must approve an
+  individual proposal and then invoke `/job execute` for it; a durable ledger
+  prevents a retry from repeating an action. Local commit, push and PR paths
+  are implemented for a same-filesystem development topology, but the flag is
+  off by default (`DUCKY_DEV_APPROVED_ACTIONS_ENABLED=false`). Issue, deploy,
+  Azure and high-risk actions remain recorded-only.
 - **Conversation replies come from a marked mock.** OpenClaw is not installed
   here, so its API could not be verified. Every mock reply is prefixed
   `[mock]`; the real HTTP provider throws rather than guessing an API.

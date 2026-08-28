@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import type { ActionPerformer } from '../src/domain/action-performer.js';
 import { DeferredActionPerformer } from '../src/domain/action-performer.js';
 import { commitAction, implementedResult, makeHarness, OWNER, STRANGER } from './helpers.js';
+
+class RecordingPerformer implements ActionPerformer {
+  readonly enabled = true;
+  readonly calls: { kind: string; details: unknown }[] = [];
+
+  async perform(kind: Parameters<ActionPerformer['perform']>[0], details: unknown): Promise<void> {
+    this.calls.push({ kind, details });
+  }
+}
 
 const withActions = (h: ReturnType<typeof makeHarness>, n: number) => {
   const job = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
@@ -98,7 +108,31 @@ describe('per-action approvals', () => {
     h.close();
   });
 
-  it('records the approval but never performs the action in Phase 1', async () => {
+  it('executes an approved action once, with an immutable proposal and durable ledger', async () => {
+    const performer = new RecordingPerformer();
+    const h = makeHarness({ actionPerformer: performer });
+    const { job, approvals } = withActions(h, 1);
+    h.store.herdrWorkspaces.record({
+      workspaceId: 'ws-1', repoSlug: 'demo', jobId: job.id, label: 'ducky-mgd-demo',
+      mode: 'worktree', agentName: 'ducky-pi-demo', workspacePath: '/tmp/ducky-demo',
+      worktreePath: '/tmp/ducky-demo', state: 'active',
+    });
+    h.app.approvals.decide(h.owner, approvals[0]!.id, 'approved');
+
+    const first = await h.app.approvals.execute(h.owner, approvals[0]!.id);
+    expect(first.state).toBe('succeeded');
+    expect(performer.calls).toHaveLength(1);
+    expect(performer.calls[0]!.kind).toBe('git_commit');
+    expect(performer.calls[0]!.details).toEqual({ message: 'feat: 0', files: ['src/a.ts'] });
+    expect(h.store.approvals.executionByApproval(approvals[0]!.id)?.state).toBe('succeeded');
+
+    const repeated = await h.app.approvals.execute(h.owner, approvals[0]!.id);
+    expect(repeated.note).toMatch(/already executed/i);
+    expect(performer.calls).toHaveLength(1);
+    h.close();
+  });
+
+  it('records the approval but never performs the action when execution is disabled', async () => {
     const h = makeHarness();
     const { approvals } = withActions(h, 1);
     const outcome = h.app.approvals.decide(h.owner, approvals[0]!.id, 'approved');

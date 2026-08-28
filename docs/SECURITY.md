@@ -276,10 +276,14 @@ is bounded and the reconciler prunes past the window.
 ## The approval gate
 
 Every consequential action becomes one approval row, decided individually and
-exactly once. **There is no bulk-approve control anywhere.** In Phase 1 an
-approved action is recorded and deliberately not performed: the performer
-throws, and no GitHub writer exists. The read-only `gh` adapter uses a frozen
-argv table containing no write verb, asserted by a test.
+exactly once. **There is no bulk-approve control anywhere.** Approval and
+execution are separate: an owner must explicitly invoke `/job execute` after
+approving one action. The execution ledger claims that approval once and does
+not automatically retry an interrupted external command. A disabled-by-default
+local performer supports commit, push and PR in a same-filesystem development
+topology; issues, deployments, Azure mutations and high-risk commands remain
+recorded-only. The command policy classifies every argv and rejects force or
+hook-bypass flags.
 
 Read-only inspection needs no approval.
 

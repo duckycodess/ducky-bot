@@ -517,4 +517,25 @@ CREATE INDEX ix_audit_log_at ON audit_log(at);
 CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
 `,
   },
+  {
+    version: 9,
+    name: 'approved_action_execution_ledger',
+    sql: `
+-- One execution slot per approved proposal. Approval is a decision; execution
+-- is a separate, explicit owner action. A row in 'running' is deliberately
+-- never retried automatically after a crash, because an external command may
+-- have succeeded just before the process died and repeating it could publish
+-- twice.
+CREATE TABLE approval_executions (
+  approval_id TEXT PRIMARY KEY REFERENCES approvals(id),
+  job_id      TEXT NOT NULL REFERENCES jobs(id),
+  state       TEXT NOT NULL CHECK (state IN ('running','succeeded','failed')),
+  started_at  TEXT NOT NULL,
+  finished_at TEXT,
+  error       TEXT
+);
+
+CREATE INDEX ix_approval_executions_job ON approval_executions(job_id);
+`,
+  },
 ];

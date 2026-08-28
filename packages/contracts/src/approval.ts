@@ -13,6 +13,10 @@ export type ApprovalActionKind = (typeof APPROVAL_ACTION_KINDS)[number];
 export const APPROVAL_STATES = ['pending', 'approved', 'rejected', 'expired'] as const;
 export type ApprovalState = (typeof APPROVAL_STATES)[number];
 
+/** Durable execution status for an approved action. */
+export const APPROVAL_EXECUTION_STATES = ['running', 'succeeded', 'failed'] as const;
+export type ApprovalExecutionState = (typeof APPROVAL_EXECUTION_STATES)[number];
+
 const RepoRelativePath = z
   .string()
   .max(MAX_PATH_LEN)

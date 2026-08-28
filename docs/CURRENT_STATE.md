@@ -14,7 +14,7 @@ diagnostics and in `/status`.
 ## Working end to end (against mock Discord and mock Pi)
 
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
-  (submit, status, cancel, answer, cleanup), `/jobs`, `/repo status`,
+  (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
   `/status`, `/task` (add, list, done, cancel), `/reminder` (add, list,
   cancel), `/briefing`
 - Opt-in shared job visibility (milestone 2A), **off by default**. With
@@ -146,11 +146,12 @@ diagnostics and in `/status`.
     durable, so a restart resumes from it.
 - **Central command policy.** Every `gh`, `git` and `herdr` operation is
   classified `read_only` / `local_mutation` / `external_mutation` /
-  `high_risk`, with the ceiling at `local_mutation` in this phase and a test
-  asserting the whole table against it. `gh-cli` and the executor's `git`
-  helper consult it before spawning: the frozen argv table decides what can be
-  constructed, the policy decides whether it may run. An unclassified command
-  is refused rather than allowed by default. No arbitrary shell anywhere.
+  `high_risk`. Ordinary workspace inspection has a `local_mutation` ceiling;
+  the explicit, owner-approved action performer may opt into the narrow
+  external entries. Force, hook-bypass and high-risk verbs remain refused.
+  `gh-cli` and the executor's `git` helper consult it before spawning: the
+  frozen argv table decides what can be constructed, the policy decides
+  whether it may run. No arbitrary shell anywhere.
 - **Structured audit log.** Job creation, claim, every transition (written from
   the single point of state change, so coverage is structural), phase changes
   including refused ones, cancellation, failure, approval decisions, executor
@@ -160,7 +161,12 @@ diagnostics and in `/status`.
   the owner is recorded as the role `owner` rather than a Discord id. Details
   are redacted and clamped, recording never throws, and the reconciler prunes
   past the retention window.
-- Per-action approvals, decided individually, recorded and **not executed**
+- Per-action approvals, decided individually, with a separate View Details
+  control. `/job execute` is an explicit owner-only second step; a durable
+  per-approval ledger prevents replay. Same-filesystem development execution
+  supports commit, push and PR when `DUCKY_DEV_APPROVED_ACTIONS_ENABLED` is
+  deliberately enabled; the default remains disabled and issue/deploy/Azure
+  actions remain recorded-only.
 - Proactive job notifications on lifecycle transitions (running,
   needs_owner_input, needs_approval, completed, failed, cancelled), delivered
   to up to two independent targets:
@@ -179,7 +185,8 @@ diagnostics and in `/status`.
   synchronously) but is posted to the channel, where nobody saw that reply.
 - Plain-language job state labels and explicit "what happens next" copy on
   both the private and shared surfaces, derived exhaustively from the
-  persisted state. The state machine is unchanged.
+  persisted state. Work phases refine the private running label, and
+  `waiting_on_dependency` is an explicit validated state.
 - Authenticated, signed, replay-resistant, rate-limited executor API
 - Executor: outbound polling, fail-closed workspace resolution, single-writer
   lock, Herdr/Pi orchestration behind a port
@@ -235,7 +242,7 @@ and `/status` reports `experimental`.
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
 | Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
-| Approved action execution | Deliberately absent. The command policy classifies external mutations and refuses them; the performer still throws. |
+| Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
 | Dependency checking | **No real checker exists.** The port ships with `UnavailableDependencyChecker`, which only ever answers `pending`, so a dependency wait always ends at the owner's desk on this host. The resume-on-ready and fail-on-failed paths are unit-tested against a scripted fake; neither has ever run against a real external system. |
 | Azure deployment | Documented only; nothing provisioned. |
 

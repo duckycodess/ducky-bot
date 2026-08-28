@@ -6,6 +6,7 @@ export * from './security/component-signing.js';
 export * from './security/executor-auth.js';
 export * from './domain/allowlist.js';
 export * from './domain/action-performer.js';
+export * from './domain/git-action-performer.js';
 export * from './domain/approvals.service.js';
 export * from './domain/captures.service.js';
 export * from './domain/github.service.js';

@@ -1,5 +1,5 @@
 import type {
-  ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
+  ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
   CaptureState, DependencyCheckStatus, DependencyState, DependencyType,
   JobState, JobWorkPhase, RecurrenceKind, ReminderState, TaskPriority, TaskState,
 } from '@ducky/contracts';
@@ -82,6 +82,16 @@ export interface ApprovalRow {
   decidedBy: string | null;
   decidedAt: string | null;
   decisionReason: string | null;
+}
+
+/** One durable, at-most-once execution attempt for an approved action. */
+export interface ApprovalExecutionRow {
+  approvalId: string;
+  jobId: string;
+  state: ApprovalExecutionState;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
 }
 
 export interface ExecutorRow {

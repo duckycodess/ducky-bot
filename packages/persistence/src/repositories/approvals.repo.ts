@@ -1,7 +1,9 @@
-import type { ApprovalState, ProposedAction } from '@ducky/contracts';
+import type {
+  ApprovalExecutionState, ApprovalState, ProposedAction,
+} from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { nowIso } from '../db.js';
-import type { ApprovalRow } from './types.js';
+import type { ApprovalExecutionRow, ApprovalRow } from './types.js';
 
 const map = (r: Record<string, unknown>): ApprovalRow => ({
   id: String(r['id']),
@@ -15,6 +17,15 @@ const map = (r: Record<string, unknown>): ApprovalRow => ({
   decidedBy: r['decided_by'] == null ? null : String(r['decided_by']),
   decidedAt: r['decided_at'] == null ? null : String(r['decided_at']),
   decisionReason: r['decision_reason'] == null ? null : String(r['decision_reason']),
+});
+
+const mapExecution = (r: Record<string, unknown>): ApprovalExecutionRow => ({
+  approvalId: String(r['approval_id']),
+  jobId: String(r['job_id']),
+  state: String(r['state']) as ApprovalExecutionState,
+  startedAt: String(r['started_at']),
+  finishedAt: r['finished_at'] == null ? null : String(r['finished_at']),
+  error: r['error'] == null ? null : String(r['error']),
 });
 
 export class ApprovalsRepo {
@@ -87,5 +98,48 @@ export class ApprovalsRepo {
       .prepare(`SELECT * FROM approvals WHERE state = 'pending' AND expires_at < ?`)
       .all(now)
       .map((r) => map(r as Record<string, unknown>));
+  }
+
+  /** The execution ledger is separate from the approval decision itself. */
+  executionByApproval(approvalId: string): ApprovalExecutionRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM approval_executions WHERE approval_id = ?')
+      .get(approvalId);
+    return r ? mapExecution(r as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * Claims the one execution slot. A second process gets false rather than
+   * running the same approved Git action twice after a retry.
+   */
+  beginExecution(approvalId: string, jobId: string, startedAt = nowIso()): boolean {
+    try {
+      const result = this.db
+        .prepare(
+          `INSERT INTO approval_executions
+             (approval_id, job_id, state, started_at)
+           VALUES (?, ?, 'running', ?)`,
+        )
+        .run(approvalId, jobId, startedAt);
+      return Number(result.changes) === 1;
+    } catch {
+      return false;
+    }
+  }
+
+  finishExecution(
+    approvalId: string,
+    state: Exclude<ApprovalExecutionState, 'running'>,
+    finishedAt: string,
+    error: string | null = null,
+  ): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE approval_executions
+            SET state = ?, finished_at = ?, error = ?
+          WHERE approval_id = ? AND state = 'running'`,
+      )
+      .run(state, finishedAt, error, approvalId);
+    return Number(result.changes) === 1;
   }
 }

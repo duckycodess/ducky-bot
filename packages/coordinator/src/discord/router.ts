@@ -485,6 +485,11 @@ export class DuckyRouter {
           const r = d.jobs.cleanup(actor, String(e.options['id'] ?? ''), e.options['force'] === true);
           return { content: r.note, ephemeral: true };
         }
+        case 'execute': {
+          this.buckets.check('jobRead', actor.discordUserId);
+          const r = await d.approvals.execute(actor, String(e.options['id'] ?? ''));
+          return { content: r.note, ephemeral: true };
+        }
         default: {
           this.buckets.check('jobRead', actor.discordUserId);
           const detail = d.jobs.detail(actor, String(e.options['id'] ?? ''));
@@ -505,6 +510,18 @@ export class DuckyRouter {
               })),
             );
           }
+          const approved = detail.approvals.filter((a) => a.state === 'approved').slice(0, 4);
+          rows.push(
+            ...approved.map((a) => ({
+              buttons: [{
+                customId: d.signer.sign({
+                  kind: 'execute_approval', entityId: a.id, actorUserId: actor.discordUserId,
+                }),
+                label: `execute #${a.actionIndex + 1}`,
+                style: 'success' as const,
+              }],
+            })),
+          );
           if (detail.job.state === 'needs_owner_input') {
             rows.push({
               buttons: [
@@ -778,6 +795,10 @@ export class DuckyRouter {
     this.components.set('approval_details', async (actor, entityId) => {
       const detail = d.approvals.detail(actor, entityId);
       return present.approvalDetails(detail.approval, detail.job);
+    });
+    this.components.set('execute_approval', async (actor, entityId) => {
+      const outcome = await d.approvals.execute(actor, entityId);
+      return { content: outcome.note, ephemeral: true };
     });
 
     // The entity id is the short public handle, not the internal UUID: the

@@ -9,8 +9,8 @@ import {
 import { DuckyError } from '@ducky/contracts';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  loadEnv, cdnHosts, readReposFile, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets,
-  resolveSharedChannelIds,
+  loadEnv, cdnHosts, readReposFile, resolveApprovedActionsEnabled, resolveOwnerTimeZone,
+  resolvePaths, resolveProfileSecrets, resolveSharedChannelIds,
   type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
@@ -22,7 +22,8 @@ import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
 import { JobsService } from './domain/jobs.service.js';
 import { ApprovalsService } from './domain/approvals.service.js';
-import { DeferredActionPerformer } from './domain/action-performer.js';
+import { type ActionPerformer } from './domain/action-performer.js';
+import { GitActionPerformer } from './domain/git-action-performer.js';
 import { GitHubService } from './domain/github.service.js';
 import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
@@ -55,6 +56,8 @@ export interface AppOverrides {
   readonly transport?: DiscordTransport;
   readonly allowlistJson?: string;
   readonly herdrVerified?: boolean;
+  /** Test/integration override for the explicitly invoked action performer. */
+  readonly actionPerformer?: ActionPerformer;
   /**
    * Injected clock for the daily assistant. Tests drive reminder
    * materialization, due dates and briefing day boundaries through this
@@ -154,7 +157,11 @@ export function createApp(
   const captures = new CapturesService(store, authz);
   const schedules = new SchedulesService({ store, authz, pending, extractor });
   const jobs = new JobsService({ store, authz, allowlist });
-  const approvals = new ApprovalsService({ store, authz, performer: new DeferredActionPerformer() });
+  const actionPerformer = overrides.actionPerformer ?? new GitActionPerformer({
+    allowlist,
+    enabled: resolveApprovedActionsEnabled(env),
+  });
+  const approvals = new ApprovalsService({ store, authz, performer: actionPerformer });
   const github = new GitHubService(authz, allowlist, githubReader);
   const tasks = new TasksService({ store, authz, clock });
   const reminders = new RemindersService({ store, authz, clock });
@@ -219,7 +226,9 @@ export function createApp(
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',
-    actions: 'recorded, not executed (Phase 1)',
+    actions: actionPerformer.enabled
+      ? 'enabled only after owner approval and /job execute'
+      : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
   });
 

@@ -57,6 +57,13 @@ export const EnvSchema = z.object({
   DUCKY_DEV_SHARED_CHANNEL_IDS: z.string().optional(),
   DUCKY_PROD_SHARED_CHANNEL_IDS: z.string().optional(),
 
+  // Consequential action execution is separately opt-in per profile. The
+  // default is false, so an approval remains a recorded decision unless an
+  // operator deliberately enables the matching profile flag.
+  DUCKY_APPROVED_ACTIONS_ENABLED: bool(false),
+  DUCKY_DEV_APPROVED_ACTIONS_ENABLED: bool(false),
+  DUCKY_PROD_APPROVED_ACTIONS_ENABLED: bool(false),
+
   // Profile-scoped secrets. The shared names remain accepted for a
   // single-profile development box, but production requires its own.
   DUCKY_COMPONENT_SIGNING_KEY: z.string().optional(),
@@ -233,6 +240,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
  * Ids are validated as snowflakes at boot rather than trusted, so a typo
  * fails loudly instead of silently never matching.
  */
+export const resolveApprovedActionsEnabled = (env: Env): boolean =>
+  env.DUCKY_PROFILE === 'production'
+    ? env.DUCKY_PROD_APPROVED_ACTIONS_ENABLED
+    : env.DUCKY_DEV_APPROVED_ACTIONS_ENABLED || env.DUCKY_APPROVED_ACTIONS_ENABLED;
+
 export function resolveSharedChannelIds(env: Env): readonly string[] {
   const names = PROFILE_ENV[env.DUCKY_PROFILE];
   const isProd = env.DUCKY_PROFILE === 'production';

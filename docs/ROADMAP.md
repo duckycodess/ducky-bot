@@ -274,4 +274,6 @@ Unchanged from Phase 1, and none of the above reopens them: multi-user
 permissions beyond shared *visibility*; a public bot; autonomous deployment;
 automatic GitHub or Azure writes; arbitrary shell from Discord; browser
 automation; container sandboxing; concurrent implementation writers on one
-repository; performing approved actions.
+repository. Same-filesystem development commit/push/PR actions now have an
+explicit opt-in path, but executor-routed production actions, automatic PR
+follow-up, issue/deploy/Azure performers and high-risk actions remain deferred.

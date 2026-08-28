@@ -37,6 +37,7 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'approve',
   'reject',
   'approval_details',
+  'execute_approval',
   'task_done',
   'task_cancel',
   'reminder_cancel',

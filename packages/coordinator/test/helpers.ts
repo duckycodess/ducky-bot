@@ -5,6 +5,7 @@ import {
   type ConversationProvider, type DependencyChecker,
 } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
+import type { ActionPerformer } from '../src/domain/action-performer.js';
 import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { ActorContext } from '../src/security/authz.js';
@@ -81,6 +82,8 @@ export interface HarnessOptions {
   readonly conversationFetch?: typeof fetch;
   /** Answers dependency checks. Omitted means the shipped never-ready default. */
   readonly dependencyChecker?: DependencyChecker;
+  /** Replaces the approved-action performer in service-level tests. */
+  readonly actionPerformer?: ActionPerformer;
 }
 
 /**
@@ -143,6 +146,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       allowlistJson: REPOS_JSON,
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.dependencyChecker ? { dependencyChecker: opts.dependencyChecker } : {}),
+      ...(opts.actionPerformer ? { actionPerformer: opts.actionPerformer } : {}),
       ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),

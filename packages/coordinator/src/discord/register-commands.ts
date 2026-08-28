@@ -33,6 +33,9 @@ const COMMANDS = [
       { name: 'id', type: 3, required: true, description: 'Job id' },
       { name: 'force', type: 5, required: false, description: 'Force release' },
     ] },
+    { name: 'execute', type: 1, description: 'Execute one approved action', options: [
+      { name: 'id', type: 3, required: true, description: 'Approval id from job details' },
+    ] },
   ] },
   { name: 'repo', description: 'Read-only repository status (owner only)', options: [{ name: 'slug', type: 3, required: true, description: 'Repository slug' }] },
   { name: 'status', description: 'Show which providers are live (owner only)' },

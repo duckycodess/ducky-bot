@@ -73,8 +73,10 @@ export interface CommandPolicyEntry {
  */
 export const FORBIDDEN_COMMAND_VERBS = [
   // Destroys uncommitted work or rewrites history.
-  'reset', 'clean', 'prune', 'gc', 'filter-branch', 'filter-repo',
-  // Publishes, or changes something other people see.
+  'reset', 'clean', 'prune', 'gc', 'filter-branch', 'filter-repo', 'amend',
+  // Publishes, or changes something other people see. These remain forbidden
+  // to the normal local-only caller; an approved-action caller may opt into
+  // the external-mutation class, but still cannot opt into high-risk verbs.
   'push', 'publish', 'deploy', 'release',
   // Removes things.
   'rm', 'destroy', 'purge', 'drop',
@@ -82,13 +84,31 @@ export const FORBIDDEN_COMMAND_VERBS = [
   'exec', 'eval', 'sh', 'bash', 'auth', 'login', 'token', 'credential',
 ] as const;
 
+/** Verbs that remain forbidden even for an explicitly approved write. */
+const ALWAYS_FORBIDDEN_COMMAND_VERBS = [
+  'reset', 'clean', 'prune', 'gc', 'filter-branch', 'filter-repo', 'amend',
+  'rm', 'destroy', 'purge', 'drop', 'exec', 'eval', 'sh', 'bash',
+  'auth', 'login', 'token', 'credential',
+] as const;
+
 /** A `--flag` is not a verb; only bare words are checked. */
 const isVerbWord = (s: string): boolean => /^[a-z][a-z0-9-]*$/.test(s);
 
-export function findForbiddenVerb(argv: readonly string[]): string | undefined {
-  return argv.find(
-    (a) => isVerbWord(a) && (FORBIDDEN_COMMAND_VERBS as readonly string[]).includes(a),
-  );
+export function findForbiddenVerb(
+  argv: readonly string[],
+  options: { readonly allowExternalMutation?: boolean } = {},
+): string | undefined {
+  const forbidden = options.allowExternalMutation
+    ? ALWAYS_FORBIDDEN_COMMAND_VERBS
+    : FORBIDDEN_COMMAND_VERBS;
+  return argv.find((a) => isVerbWord(a) && (forbidden as readonly string[]).includes(a));
+}
+
+/** Force and hook-bypass flags are never accepted, including after approval. */
+const FORBIDDEN_COMMAND_FLAGS = ['--force', '--force-with-lease', '--no-verify', '-f'] as const;
+
+export function findForbiddenFlag(argv: readonly string[]): string | undefined {
+  return argv.find((a) => (FORBIDDEN_COMMAND_FLAGS as readonly string[]).includes(a));
 }
 
 /**
@@ -106,16 +126,26 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   { bin: 'gh', verb: ['pr', 'list'], cls: 'read_only', note: 'Open pull requests.' },
   { bin: 'gh', verb: ['pr', 'view'], cls: 'read_only', note: 'One pull request.' },
   { bin: 'gh', verb: ['pr', 'checks'], cls: 'read_only', note: 'Check results for one PR.' },
+  {
+    bin: 'gh', verb: ['pr', 'create'], cls: 'external_mutation',
+    note: 'Creates a pull request; only the approved-action path may run it.',
+  },
 
   // -- git, executor workspace resolution (packages/executor/src/workspace.ts)
   //
   // Every entry is READ-ONLY, and that is the whole point: workspace
   // resolution decides whether a job may proceed and never itself changes the
-  // repository. The verbs that would -- reset, clean, push -- are on
-  // FORBIDDEN_COMMAND_VERBS and could not be added here without tripping it.
+  // repository. Destructive verbs remain forbidden; external writes such as
+  // push are classified below but require an explicitly approved caller.
   { bin: 'git', verb: ['rev-parse'], cls: 'read_only', note: 'Resolves a ref; writes nothing.' },
   { bin: 'git', verb: ['symbolic-ref'], cls: 'read_only', note: 'Reads a symbolic ref; --quiet, no write form used.' },
   { bin: 'git', verb: ['status'], cls: 'read_only', note: 'Working tree state.' },
+  { bin: 'git', verb: ['diff'], cls: 'read_only', note: 'Changed-file or diff-summary inspection.' },
+  { bin: 'git', verb: ['branch'], cls: 'read_only', note: 'Current branch inspection.' },
+  { bin: 'git', verb: ['remote'], cls: 'read_only', note: 'Configured remote inspection.' },
+  { bin: 'git', verb: ['add'], cls: 'local_mutation', note: 'Stages only explicitly approved repository-relative files.' },
+  { bin: 'git', verb: ['commit'], cls: 'local_mutation', note: 'Creates a local commit from an approved proposal.' },
+  { bin: 'git', verb: ['push'], cls: 'external_mutation', note: 'Publishes a branch; only the approved-action path may run it.' },
   { bin: 'git', verb: ['stash', 'list'], cls: 'read_only', note: 'Lists stashes; never applies, pops or drops one.' },
   { bin: 'git', verb: ['worktree', 'list'], cls: 'read_only', note: 'Lists worktrees; never adds or removes one.' },
 
@@ -184,20 +214,26 @@ export interface CommandRefusal {
 export function checkCommandAllowed(
   bin: string,
   argv: readonly string[],
+  maxClass: CommandClass = MAX_ALLOWED_COMMAND_CLASS,
 ): CommandRefusal | undefined {
-  const forbidden = findForbiddenVerb(argv);
+  const allowExternalMutation = COMMAND_CLASS_RANK[maxClass] >= COMMAND_CLASS_RANK.external_mutation;
+  const forbidden = findForbiddenVerb(argv, { allowExternalMutation });
   if (forbidden !== undefined) {
     return { reason: 'forbidden_verb', detail: `\`${forbidden}\` is never permitted.` };
+  }
+  const flag = findForbiddenFlag(argv);
+  if (flag !== undefined) {
+    return { reason: 'forbidden_verb', detail: `\`${flag}\` is never permitted.` };
   }
   const entry = classifyCommand(bin, argv);
   if (!entry) {
     return { reason: 'unclassified', detail: `\`${bin}\` ${argv[0] ?? ''} is not a classified command.` };
   }
-  if (exceedsAllowedClass(entry.cls)) {
+  if (COMMAND_CLASS_RANK[entry.cls] > COMMAND_CLASS_RANK[maxClass]) {
     return {
       reason: 'class_not_allowed',
       cls: entry.cls,
-      detail: `\`${bin}\` ${entry.verb.join(' ')} is ${entry.cls.replace(/_/g, ' ')} and is not performed in this phase.`,
+      detail: `\`${bin}\` ${entry.verb.join(' ')} is ${entry.cls.replace(/_/g, ' ')} and is not permitted by this caller.`,
     };
   }
   return undefined;

@@ -173,7 +173,10 @@ export class ApprovalsService {
       this.store.auditLog.record({
         event: 'approval.execution_failed', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
         subjectKind: 'approval', subjectRef: approvalId, outcome: 'failed',
-        detail: approval.actionKind,
+        // The action kind AND why it failed. `safe` is already redacted and
+        // clamped; without it the trail says a push failed and not whether the
+        // remote refused, the branch was gone, or policy declined it.
+        detail: `${approval.actionKind}: ${safe}`,
       });
       if (err instanceof DuckyError) throw err;
       throw new DuckyError('invalid_input', 'The approved action failed. Inspect the job and workspace.');

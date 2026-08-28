@@ -23,6 +23,12 @@ export const OWNER_ONLY_COMMANDS = [
   'reminder',
   'briefing',
   'watch',
+  /**
+   * Deleting the owner's own data. A WRITE, and the most consequential one, so
+   * it belongs on this manifest and must never appear in
+   * `SHARED_READABLE_ROUTES`.
+   */
+  'forget',
 ] as const;
 export type OwnerOnlyCommand = (typeof OWNER_ONLY_COMMANDS)[number];
 
@@ -44,6 +50,8 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'task_cancel',
   'reminder_cancel',
   'watch_cancel',
+  /** The confirm step of `/forget job`. Signed and bound to the owner. */
+  'forget_confirm',
 ] as const;
 export type OwnerOnlyInteractionKind = (typeof OWNER_ONLY_INTERACTION_KINDS)[number];
 

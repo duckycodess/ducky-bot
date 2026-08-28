@@ -71,12 +71,17 @@ export class MockHerdr implements HerdrClient {
     return info;
   }
 
+  /**
+   * Mirrors the real adapter: resolves with the agent as it stands once the
+   * wait settles, so a test can model a turn that ended `blocked` rather than
+   * `idle`. Set `promptSettlesAs` to choose that status.
+   */
   async agentPrompt(
     target: string,
     text: string,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<AgentInfo | undefined> {
     this.record('agentPrompt', { target, textLength: text.length, timeoutMs });
     if (this.promptBlocks) {
       // Models a real `herdr agent prompt --wait`: it does not return until the
@@ -86,10 +91,17 @@ export class MockHerdr implements HerdrClient {
         signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
       });
     }
+    const agent = this.state.agents.find((a) => a.name === target || a.pane_id === target);
+    if (!agent) return undefined;
+    if (this.promptSettlesAs) agent.agent_status = this.promptSettlesAs;
+    return agent;
   }
 
   /** Set to model a long-running turn that only ends when aborted. */
   promptBlocks = false;
+
+  /** Status the agent is left in once a prompt wait settles. */
+  promptSettlesAs: AgentStatus | undefined;
 
   async workspaceList(): Promise<WorkspaceSummary[]> {
     this.record('workspaceList', null);
@@ -114,7 +126,12 @@ export class MockHerdr implements HerdrClient {
     this.state.agents = this.state.agents.filter((a) => a.workspace_id !== workspaceId);
   }
 
-  async worktreeCreate(input: { cwd: string; branch: string; base: string }): Promise<{
+  async worktreeCreate(input: {
+    cwd: string;
+    branch: string;
+    base: string;
+    label: string;
+  }): Promise<{
     workspaceId: string;
     rootPaneId: string;
     path: string;
@@ -122,7 +139,11 @@ export class MockHerdr implements HerdrClient {
     this.record('worktreeCreate', input);
     this.seq += 1;
     const workspaceId = `wW${this.seq}`;
-    this.state.workspaces.push({ workspace_id: workspaceId, label: `ducky-mgd:${input.branch}` });
+    // Uses the label it was GIVEN. It used to synthesize `ducky-mgd:<branch>`
+    // regardless, which made every test believe the workspace was provably
+    // ours -- while the live CLI, given no `--label`, named it after the branch
+    // and cleanup silently refused to close it on every real job.
+    this.state.workspaces.push({ workspace_id: workspaceId, label: input.label });
     // Mirrors the live layout: a linked worktree lives outside the source
     // repo, under a Herdr worktrees directory, already home-expanded.
     return {
@@ -132,7 +153,16 @@ export class MockHerdr implements HerdrClient {
     };
   }
 
-  async worktreeRemove(workspaceId: string): Promise<void> {
-    this.record('worktreeRemove', { workspaceId });
+  /** Set to model the live `dirty_worktree_requires_force` refusal. */
+  worktreeIsDirty = false;
+
+  async worktreeRemove(workspaceId: string, opts: { force?: boolean } = {}): Promise<void> {
+    this.record('worktreeRemove', { workspaceId, force: opts.force === true });
+    if (this.worktreeIsDirty && opts.force !== true) {
+      throw new DuckyError(
+        'herdr_worktree_dirty',
+        'The worktree still holds uncommitted changes, so it was not removed.',
+      );
+    }
   }
 }

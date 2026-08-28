@@ -293,6 +293,21 @@ export function intakeResult(deps: IntakeDeps, input: IntakeInput): IntakeVerdic
         new Date(now().getTime() + APPROVAL_TTL_MS).toISOString(),
         sanitized.proposedActions.map(() => randomUUID()),
       );
+      // The trail recorded the owner's DECISION but never that one had been
+      // asked for, so it could not answer "what was pending at the time".
+      // Records the action KINDS and the count -- never an action's details,
+      // which are the argv and the paths.
+      store.auditLog.record({
+        event: 'approval.requested',
+        actorKind: 'executor',
+        actorRef: input.job.executorId,
+        subjectKind: 'job',
+        subjectRef: input.job.publicId,
+        outcome: 'ok',
+        detail:
+          `${sanitized.proposedActions.length} action(s) proposed: ` +
+          [...new Set(sanitized.proposedActions.map((a) => a.kind))].join(', '),
+      });
     }
 
     /**

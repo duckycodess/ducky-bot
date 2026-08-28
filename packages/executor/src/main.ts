@@ -1,10 +1,27 @@
-import { HerdrCli, HerdrPiOrchestrator, MockPiOrchestrator } from '@ducky/adapters';
+import {
+  HerdrCli, HerdrPiOrchestrator, MockPiOrchestrator, createLogger,
+} from '@ducky/adapters';
 import { loadExecutorEnv } from './config.js';
 import { CoordinatorClient } from './client.js';
 import { ExecutorLoop } from './loop.js';
 
+/**
+ * A logger that exists before `loadExecutorEnv()` can throw.
+ *
+ * Same reason as the coordinator's: the startup-failure line was hand-built
+ * without a `correlationId`, and it is the line most likely to be the only one
+ * anybody sees.
+ */
+const bootLog = createLogger({
+  format: process.env['DUCKY_LOG_FORMAT'] === 'text' ? 'text' : 'json',
+  base: { component: 'executor', phase: 'boot' },
+});
+
 async function main(): Promise<void> {
   const env = loadExecutorEnv();
+
+  // Inherits the boot correlation id, so one run is one id across both phases.
+  const log = bootLog.child({ executorId: env.DUCKY_EXECUTOR_ID, phase: 'running' });
 
   const client = new CoordinatorClient({
     baseUrl: env.DUCKY_COORDINATOR_URL,
@@ -23,17 +40,18 @@ async function main(): Promise<void> {
     ? new HerdrPiOrchestrator({ herdr, verified: env.DUCKY_HERDR_VERIFIED === '1' })
     : new MockPiOrchestrator();
 
-  process.stdout.write(
-    `ducky executor ${env.DUCKY_EXECUTOR_ID} starting; orchestrator=${orchestrator.name}` +
-      `${orchestrator.verified ? ' (verified)' : ' (experimental)'}\n`,
-  );
+  log.info('executor.starting', {
+    orchestrator: orchestrator.name,
+    verified: orchestrator.verified,
+    herdrReachable: herdrUp,
+  });
 
   const loop = new ExecutorLoop({
     client,
     orchestrator,
     pollWaitMs: env.DUCKY_POLL_WAIT_MS,
     version: env.DUCKY_EXECUTOR_VERSION,
-    log: (line) => process.stdout.write(`${line}\n`),
+    log: (line) => log.info('executor.loop', { message: line }),
   });
 
   const stop = (): void => {
@@ -47,6 +65,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  process.stderr.write(`ducky executor failed: ${(err as Error).message}\n`);
+  bootLog.error('executor.start_failed', { err });
   process.exit(1);
 });

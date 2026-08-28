@@ -54,8 +54,29 @@ export function loadAuthzConfig(env: {
   return Object.freeze({ ownerId: owner, chatWhitelist: Object.freeze([...new Set(raw)]) });
 }
 
+/**
+ * Notified when a privileged surface refuses somebody.
+ *
+ * Optional and fire-and-forget: authorization must not depend on the audit log
+ * being writable, and a refusal is still a refusal if nobody wrote it down.
+ * `route` is a fixed label supplied by the caller, never user input.
+ */
+export type AuthzRefusalSink = (info: { role: 'chat' | 'none' | 'owner' }) => void;
+
 export class Authorizer {
-  constructor(private readonly config: AuthzConfig) {}
+  #onRefused: AuthzRefusalSink | undefined;
+
+  constructor(private readonly config: AuthzConfig, onRefused?: AuthzRefusalSink) {
+    this.#onRefused = onRefused;
+  }
+
+  /**
+   * Attached after construction because the store is built later in the
+   * composition root, and authorization must not wait on it.
+   */
+  onRefused(sink: AuthzRefusalSink): void {
+    this.#onRefused = sink;
+  }
 
   get ownerId(): string {
     return this.config.ownerId;
@@ -80,12 +101,34 @@ export class Authorizer {
    * at the command router, so a routing bug cannot escalate.
    */
   requireOwner(actor: ActorContext): void {
-    if (!this.isOwner(actor)) throw unauthorized();
+    if (!this.isOwner(actor)) {
+      this.#notifyRefused(actor);
+      throw unauthorized();
+    }
   }
 
   /** Conversation is the only surface a whitelist user can reach. */
   requireConversational(actor: ActorContext): void {
-    if (actor.role === 'none') throw unauthorized();
+    if (actor.role === 'none') {
+      this.#notifyRefused(actor);
+      throw unauthorized();
+    }
+  }
+
+  /**
+   * Records the ROLE that was refused, never the Discord id.
+   *
+   * There is exactly one owner, so "a chat user was refused" and "a stranger
+   * was refused" are the only two facts an auditor can act on; the id would be
+   * unnecessary personal data in a long-lived table, exactly as it is
+   * everywhere else in the audit log.
+   */
+  #notifyRefused(actor: ActorContext): void {
+    try {
+      this.#onRefused?.({ role: actor.role });
+    } catch {
+      /* authorization never depends on recording */
+    }
   }
 
   allConfiguredIds(): string[] {

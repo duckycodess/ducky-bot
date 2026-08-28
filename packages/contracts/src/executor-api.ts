@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { JobResultFileSchema } from './job-result.js';
-import { JOB_WORK_PHASES } from './job-state.js';
+import { JOB_WORK_PHASES, type JobWorkPhase } from './job-state.js';
 import { EXECUTOR_ID_RE, PUBLIC_JOB_ID_RE } from './ids.js';
 import { CLAIM_MAX_WAIT_MS, MAX_ANSWER, MAX_PROGRESS_MESSAGE, MAX_QUESTION } from './limits.js';
 
@@ -99,6 +99,21 @@ export const JobHeartbeatRequestSchema = z.strictObject({
   progress: JobProgressSchema.optional(),
 });
 export type JobHeartbeatRequest = z.infer<typeof JobHeartbeatRequestSchema>;
+
+/**
+ * What a job heartbeat answers.
+ *
+ * `workPhase` is the phase the coordinator ACCEPTED, which is not necessarily
+ * the one that was reported: the phase machine refuses a backwards or skipped
+ * edge. Echoing it back is what lets the executor log the phase that actually
+ * took effect rather than the one it hoped for -- and it is the evidence a live
+ * certification run records.
+ */
+export interface JobHeartbeatResponse {
+  readonly cancelRequested: boolean;
+  readonly leaseExpiresAt: string;
+  readonly workPhase?: JobWorkPhase | null;
+}
 
 export const JobResultRequestSchema = z.strictObject({
   leaseId: z.string().min(1).max(128),

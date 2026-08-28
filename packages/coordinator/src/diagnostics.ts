@@ -33,7 +33,17 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       ? 'enable the privileged MessageContent intent and Partials.Channel for DMs'
       : 'not applicable to the mock transport',
   );
-  add('conversation', app.conversation.verified, `${app.conversation.name}`);
+  // Not a warning when `disabled`: refusing to answer is the correct state for
+  // an instance with no verified backend, and is materially better than a
+  // canned reply the owner might believe. `mock` IS a warning, because a
+  // marked stand-in is still answering.
+  add(
+    'conversation',
+    app.conversation.verified || app.conversation.name === 'disabled',
+    app.conversation.name === 'disabled'
+      ? 'disabled — conversation refuses clearly; no backend is verified'
+      : `${app.conversation.name}${app.conversation.verified ? '' : ' (unverified)'}`,
+  );
   // Not a warning when unavailable: refusing to hand files to an unverified
   // provider is the correct state, not a degraded one.
   add('chat attachments', true, attachmentAvailability(app.conversation, app.conversationAttachments));
@@ -48,6 +58,16 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
     app.dependencies.checkerVerified
       ? `${app.dependencies.checkerName} (verified)`
       : `${app.dependencies.checkerName} — waits expire to the owner, never auto-resume`,
+  );
+  // Not a warning when disabled: keeping everything is the safe default, and an
+  // operator who has not chosen a retention policy should not be nagged into
+  // deleting the owner's records.
+  add(
+    'retention',
+    true,
+    app.retention.enabled
+      ? 'enabled — finished records are pruned on the reconcile interval'
+      : 'disabled — nothing is ever deleted automatically',
   );
   add('repositories', app.allowlist.list().length > 0, `${app.allowlist.list().length} allowlisted`);
   add('executors', true, `${app.store.executors.listExecutors().length} registered`);

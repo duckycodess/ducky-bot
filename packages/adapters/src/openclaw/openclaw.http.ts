@@ -1,4 +1,5 @@
 import { DuckyError } from '@ducky/contracts';
+import { RECORDED_CONTRACT_VERSION } from './openclaw.contract.js';
 import { assertPrivateGatewayUrl } from './private-url.js';
 import { ATTACHMENTS_UNAVAILABLE_MESSAGE } from './openclaw.mock.js';
 import {
@@ -34,6 +35,32 @@ export class HttpOpenClawProvider implements ConversationProvider {
   readonly capabilities: ConversationCapabilities = {
     attachments: NO_ATTACHMENT_CAPABILITY,
   };
+
+  /**
+   * Whether this provider could serve production traffic.
+   *
+   * A non-networked, verifiable startup contract: the provider can initialise
+   * only when a recorded contract exists for it. Today none does -- OpenClaw is
+   * not installed, `pnpm probe:openclaw` exits 2, and there are no fixtures --
+   * so this is always `false` and production refuses to start rather than
+   * discovering it on the owner's first message.
+   *
+   * It is deliberately NOT a flag an operator can set. `verified` has to mean
+   * "a contract was recorded", or it means nothing.
+   */
+  static initializable(): { ok: boolean; reason: string } {
+    if (RECORDED_CONTRACT_VERSION === null) {
+      return {
+        ok: false,
+        reason:
+          'no recorded OpenClaw contract exists on this host: its request/response shape, ' +
+          'auth model and attachment limits have never been captured. Run ' +
+          '`pnpm probe:openclaw` (it will tell you what is missing). See ' +
+          'docs/integrations/openclaw.md.',
+      };
+    }
+    return { ok: true, reason: `contract ${RECORDED_CONTRACT_VERSION}` };
+  }
 
   constructor(baseUrl: string) {
     assertPrivateGatewayUrl(baseUrl);

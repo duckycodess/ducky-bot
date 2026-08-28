@@ -113,6 +113,10 @@ describe('production uses its own default credential file', () => {
         DISCORD_PROD_APP_ID: '100000000000000021',
         DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE: file,
         DUCKY_EXECUTOR_CREDENTIALS: undefined,
+        // Production must now choose a conversational backend explicitly, so a
+        // successful production boot has to state one. `disabled` is the honest
+        // choice while no provider is verified; `mock` is refused outright.
+        DUCKY_CONVERSATION_PROVIDER: 'disabled',
       },
     });
     expect(h.app.credentials.listActive().map((c) => c.keyId)).toContain('k1');

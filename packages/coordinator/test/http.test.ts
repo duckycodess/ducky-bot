@@ -190,3 +190,47 @@ describe('executor HTTP surface', () => {
     h.close();
   });
 });
+
+/**
+ * `/readyz` used to be `SELECT 1`, which reports ready for an instance with a
+ * database it cannot migrate, no credential loaded, and no executor that has
+ * ever connected -- i.e. one where a submitted job can never run.
+ */
+describe('readiness', () => {
+  it('is ready when the database, migrations, a credential and an executor are all present', async () => {
+    const h = makeHarness();
+    const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    await app.close();
+  });
+
+  it('is NOT ready when no executor has ever been seen', async () => {
+    const h = makeHarness({ registerExecutor: false });
+    const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
+    const res = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(res.statusCode).toBe(503);
+    expect((res.json() as { notReady: string[] }).notReady).toContain('executor');
+    await app.close();
+  });
+
+  it('reports reason CODES only, never a path or an error message', async () => {
+    const h = makeHarness({ registerExecutor: false });
+    const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
+    const body = (await app.inject({ method: 'GET', url: '/readyz' })).body;
+    expect(body).not.toMatch(/\/home\//);
+    expect(body).not.toMatch(/Error|sqlite|SELECT/i);
+    expect(JSON.parse(body)).toEqual({ ok: false, notReady: expect.any(Array) });
+    await app.close();
+  });
+
+  it('healthz stays liveness-only and says nothing about readiness', async () => {
+    const h = makeHarness({ registerExecutor: false });
+    const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
+    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    await app.close();
+  });
+});

@@ -19,7 +19,22 @@
 export const AUDIT_ACTOR_KINDS = ['owner', 'executor', 'system', 'reconciler'] as const;
 export type AuditActorKind = (typeof AUDIT_ACTOR_KINDS)[number];
 
-export const AUDIT_SUBJECT_KINDS = ['job', 'approval', 'executor', 'dependency'] as const;
+export const AUDIT_SUBJECT_KINDS = [
+  'job',
+  'approval',
+  'executor',
+  'dependency',
+  /** A credential key id. Not secret, and genuinely identifying. */
+  'credential',
+  /** A retention or deletion pass, referenced by its run id. */
+  'retention',
+  /** An HTTP route or a Discord command, for a refusal or a rate limit. */
+  'route',
+  /** A configuration key by NAME. Never its value. */
+  'config',
+  /** A provider, by its own reported name. */
+  'provider',
+] as const;
 export type AuditSubjectKind = (typeof AUDIT_SUBJECT_KINDS)[number];
 
 export const AUDIT_OUTCOMES = ['ok', 'refused', 'failed'] as const;
@@ -49,6 +64,63 @@ export const AUDIT_EVENTS = [
   'dependency.recorded',
   'dependency.checked',
   'dependency.resolved',
+
+  // ---- security events -----------------------------------------------------
+  //
+  // Added because the audit log recorded the lifecycle in detail and recorded
+  // nothing at all about who was turned away. All four below are influenced by
+  // whoever is sending traffic, so each records a CODE and a non-secret
+  // reference, never the material that failed: an audit row that quoted a bad
+  // bearer token would be the leak it exists to detect.
+  //
+  // Volume is bounded the same way every other row is -- clamped detail, and
+  // the reconciler prunes past `AUDIT_RETENTION_MS`.
+  /** Executor authentication failed. Never says WHY, matching the 401. */
+  'auth.failed',
+  /** A single-use nonce was presented twice. */
+  'auth.replay_detected',
+  /** A non-owner reached a privileged surface and was refused. */
+  'authz.refused',
+  /** A bucket or route budget was exhausted. */
+  'rate_limit.exceeded',
+  /** The runtime credential store reloaded from its file. */
+  'credential.reloaded',
+
+  // ---- retention and deletion ---------------------------------------------
+  //
+  // These two are the audit trail for the only paths in this codebase that
+  // remove the owner's data, so they are the rows that matter most. Both record
+  // COUNTS, never content: the point of a deletion record is to say that data
+  // went, not to keep a copy of it.
+  /** A scheduled or manual retention pass finished. */
+  'retention.pruned',
+  /** The owner deleted one specific entity. */
+  'data.deleted',
+
+  // ---- approvals and actions ----------------------------------------------
+  //
+  // `approval.decided` recorded the owner's answer but nothing recorded that an
+  // approval had been ASKED for, or that one lapsed unanswered. An audit trail
+  // that shows decisions and not requests cannot answer "what was pending on
+  // the day of the incident".
+  /** A result proposed consequential actions, so approvals were created. */
+  'approval.requested',
+  /** A pending approval lapsed unanswered and the job was settled. */
+  'approval.expired',
+
+  // ---- integrations and configuration -------------------------------------
+  /**
+   * A provider refused or failed at the boundary -- a conversation backend, a
+   * dependency checker, an extraction provider. Recorded because "the owner got
+   * no answer" is otherwise invisible in the trail.
+   */
+  'provider.failed',
+  /**
+   * Configuration was rejected. Only reachable where persistence is possible:
+   * a startup config error happens before the database exists, so those are
+   * logged, not audited. See docs/SECURITY.md.
+   */
+  'config.rejected',
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

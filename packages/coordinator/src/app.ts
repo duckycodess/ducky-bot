@@ -1,17 +1,20 @@
 import {
   DeterministicScheduleExtractor, FileCredentialStore, GhCliReader, HerdrCli,
-  MemoryCredentialStore, MockConversationProvider, HttpOpenClawProvider,
+  DisabledConversationProvider, MemoryCredentialStore, MockConversationProvider, HttpOpenClawProvider,
   assertPrivateGatewayUrl,
   UnavailableDependencyChecker,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
   type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
-import { DuckyError } from '@ducky/contracts';
+import {
+  AUDIT_OWNER_REF, DuckyError,
+  type ConversationProviderMode, type DuckyProfile,
+} from '@ducky/contracts';
+import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
+import { ForgetService } from './domain/forget.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  loadEnv, cdnHosts, readReposFile, resolveApprovedActionsEnabled, resolveOwnerTimeZone,
-  resolvePaths, resolveProfileSecrets, resolveSharedChannelIds,
-  type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -43,7 +46,7 @@ import { fetchTextAttachment } from './discord/attachments.js';
 import {
   attachmentAvailability, type ConversationAttachmentConfig,
 } from './discord/conversation-attachments.js';
-import { HourlyBudget } from './discord/command-buckets.js';
+import { CommandBuckets, HourlyBudget } from './discord/command-buckets.js';
 import type { DiscordSink, DiscordTransport } from './discord/transport.js';
 import { toDiscordPayload } from './discord/payload.js';
 import type { ProviderStatus } from './discord/presenters.js';
@@ -102,6 +105,8 @@ export interface App {
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
   readonly dependencies: DependencyResolver;
+  readonly retention: RetentionService;
+  readonly forget: ForgetService;
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
@@ -128,6 +133,13 @@ export function createApp(
   // the other profile's variables.
   const discordProfile = resolveDiscordProfile(env.DUCKY_PROFILE, envSource);
 
+  // Resolved HERE, before any filesystem or database work, because it is a pure
+  // configuration decision and a misconfigured instance should fail on the
+  // cheapest check rather than after a confusing unrelated error. Production
+  // refuses an unset value and refuses `mock` outright.
+  const conversationMode = resolveConversationProvider(env);
+  assertModeUsable(conversationMode, env.DUCKY_PROFILE);
+
   // Secrets for THIS profile only. Production never falls back to a shared or
   // development value.
   const secrets = resolveProfileSecrets(env);
@@ -147,7 +159,55 @@ export function createApp(
   store.audit.revokeMissing(authz.allConfiguredIds());
 
   const credentials = overrides.credentials ?? credentialStoreFor(env, paths, secrets);
-  const conversation = overrides.conversation ?? conversationFromEnv(env);
+  const conversation = overrides.conversation ?? conversationFromEnv(env, conversationMode);
+
+  // Retention deletes the owner's own records, so it is OFF unless configured.
+  // `/forget` is always wired -- the owner acting deliberately on one named
+  // entity is a different thing from a scheduled sweep.
+  // Now that the store exists, a refusal can be recorded. Attached rather than
+  // constructed with, because authorization is built before the database.
+  authz.onRefused(({ role }) => {
+    try {
+      store.auditLog.record({
+        event: 'authz.refused',
+        actorKind: role === 'owner' ? 'owner' : 'system',
+        actorRef: role === 'owner' ? AUDIT_OWNER_REF : role,
+        subjectKind: 'route',
+        subjectRef: 'privileged',
+        outcome: 'refused',
+        detail: `role ${role} refused on a privileged surface`,
+      });
+    } catch {
+      /* a record is never worth failing a refusal */
+    }
+  });
+
+  // Created here rather than inside the router so the audit sink can be
+  // attached to the SAME instance the router uses.
+  const buckets = new CommandBuckets();
+  buckets.onExhausted(({ bucket }) => {
+    try {
+      store.auditLog.record({
+        event: 'rate_limit.exceeded',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'route',
+        subjectRef: bucket,
+        outcome: 'refused',
+      });
+    } catch {
+      /* a record is never worth failing the limit */
+    }
+  });
+
+  const retention = new RetentionService({
+    store,
+    policy: retentionPolicyFrom(env),
+    // `schedules.starts_at` is wall-clock text in this zone (ADR 0014), so
+    // retention needs it to decide whether an event is genuinely past.
+    timeZone: resolveOwnerTimeZone(env),
+  });
+  const forget = new ForgetService({ store, authz });
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
@@ -251,6 +311,23 @@ export function createApp(
     reminders,
     briefing,
     conversation,
+    forget,
+    buckets,
+    onProviderFailure: ({ provider, code }) => {
+      try {
+        store.auditLog.record({
+          event: 'provider.failed',
+          actorKind: 'system',
+          actorRef: 'conversation',
+          subjectKind: 'provider',
+          subjectRef: provider,
+          outcome: 'failed',
+          detail: `reply refused or failed: ${code}`,
+        });
+      } catch {
+        /* a record is never worth failing the reply path */
+      }
+    },
     status,
     sharedPolicy,
     sharedJobs,
@@ -273,6 +350,7 @@ export function createApp(
     approvals, github, githubWatches, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments, dependencies,
+    retention, forget,
     close: () => store.db.close(),
   };
 }
@@ -363,11 +441,64 @@ export function channelAwareSink(client: unknown): DiscordSink {
   };
 }
 
-function conversationFromEnv(env: Env): ConversationProvider {
-  if (!env.OPENCLAW_BASE_URL) return new MockConversationProvider();
-  // Fails loudly at startup rather than quietly exposing the gateway.
+/**
+ * Chooses the conversational backend from an EXPLICIT mode.
+ *
+ * This used to be `if (!OPENCLAW_BASE_URL) return mock`, with no profile check
+ * at all -- so a production instance with the variable unset (the default; it
+ * is not even in `.env.example`) silently answered the owner from a canned
+ * mock. `resolveConversationMode` now refuses that at startup.
+ *
+ * Every branch fails at STARTUP rather than at first use, so a misconfigured
+ * instance never reaches a person.
+ */
+function conversationFromEnv(env: Env, mode: ConversationProviderMode): ConversationProvider {
+  if (mode === 'disabled') return new DisabledConversationProvider();
+  if (mode === 'mock') return new MockConversationProvider();
+
+  // openclaw: a URL is mandatory, and it must be private. Both are checked here
+  // so the failure is at boot, not on the owner's first message.
+  if (!env.OPENCLAW_BASE_URL) {
+    throw new DuckyError(
+      'invalid_input',
+      'DUCKY_CONVERSATION_PROVIDER=openclaw requires OPENCLAW_BASE_URL (loopback or tailnet).',
+    );
+  }
   assertPrivateGatewayUrl(env.OPENCLAW_BASE_URL);
+
   return new HttpOpenClawProvider(env.OPENCLAW_BASE_URL);
+}
+
+/**
+ * Whether the SELECTED mode can work on this profile at all.
+ *
+ * Runs with the other pure configuration checks, before any filesystem or
+ * database work, because that is the cheapest place for a misconfigured
+ * instance to fail -- and because a confusing unrelated error (a missing
+ * credential file, say) would otherwise mask the real problem.
+ *
+ * Production selecting `openclaw` while no contract has been recorded used to
+ * boot happily and then throw on the owner's first message: exactly the
+ * "discover it in production" outcome the provider modes exist to prevent. A
+ * private URL proves the address is not public; it proves nothing about whether
+ * anything there speaks a contract we have recorded.
+ *
+ * Non-networked on purpose. Reachability at boot would not prove the API
+ * either, and a gateway that is merely down should not stop a correctly
+ * configured instance from starting.
+ */
+function assertModeUsable(mode: ConversationProviderMode, profile: DuckyProfile): void {
+  if (mode !== 'openclaw' || profile !== 'production') return;
+
+  const init = HttpOpenClawProvider.initializable();
+  if (!init.ok) {
+    throw new DuckyError(
+      'integration_not_verified',
+      'DUCKY_CONVERSATION_PROVIDER=openclaw cannot be used on the production profile: ' +
+        `${init.reason} Until then use DUCKY_CONVERSATION_PROVIDER=disabled, which ` +
+        'refuses conversation clearly instead of faking it.',
+    );
+  }
 }
 
 export { HerdrCli };

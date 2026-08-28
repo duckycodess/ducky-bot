@@ -1,5 +1,6 @@
 import { DUCKY_PROFILES, OWNER_ONLY_COMMANDS, PROFILE_ENV } from '@ducky/contracts';
 import { commandScopeFor, resolveDiscordProfile } from './profile-config.js';
+import { redact } from '@ducky/adapters';
 
 /**
  * Prints the slash-command definitions.
@@ -52,6 +53,18 @@ const COMMANDS = [
     { name: 'remove', type: 1, description: 'Cancel a repository watch', options: [
       { name: 'id', type: 3, required: true, description: 'Watch id' },
     ] },
+  ] },
+  /**
+   * Deleting the owner's own data. Deliberately narrow: `target` has exactly two
+   * choices and `job` needs an explicit id, so there is no shape of this command
+   * that means "delete everything".
+   */
+  { name: 'forget', description: 'Delete data Ducky holds about one job (owner only)', options: [
+    { name: 'target', type: 3, required: true, description: 'job | conversation', choices: [
+      { name: 'job', value: 'job' },
+      { name: 'conversation', value: 'conversation' },
+    ] },
+    { name: 'id', type: 3, required: false, description: 'Job id, required when target is job' },
   ] },
   { name: 'task', description: 'Your tasks (owner only)', options: [
     { name: 'add', type: 1, description: 'Add a task', options: [
@@ -137,7 +150,7 @@ async function apply(profileArg: string | undefined): Promise<void> {
   try {
     config = resolveDiscordProfile(profileArg, process.env);
   } catch (err) {
-    process.stderr.write(`${(err as Error).message}\n`);
+    process.stderr.write(`${redact((err as Error).message)}\n`);
     process.exit(1);
   }
 

@@ -5,6 +5,10 @@ import { expandHerdrPath } from '../src/herdr/paths.js';
 import { WorktreeCreateResultSchema, EnvelopeSchema } from '../src/herdr/herdr.types.js';
 import { MockHerdr } from '../src/herdr/herdr.mock.js';
 import { HerdrPiOrchestrator, toSlugKey } from '../src/pi/pi-herdr.js';
+import { MemoryBriefWriter } from '../src/pi/brief-file.js';
+
+/** The brief travels as a file; these suites use synthetic workspace paths. */
+const briefs = (): MemoryBriefWriter => new MemoryBriefWriter();
 import { exampleImplementedResult } from '../src/pi/pi.mock.js';
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
 
@@ -69,6 +73,7 @@ describe('a real worktree path survives the registration boundary', () => {
     const herdr = new MockHerdr();
     const seen: { workspacePath: string; worktreePath: string | null }[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+      briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => exampleImplementedResult() },
       sleep: async () => {},
@@ -93,6 +98,7 @@ describe('a real worktree path survives the registration boundary', () => {
     const herdr = new MockHerdr();
     const states: string[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+      briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => exampleImplementedResult() },
       sleep: async () => {},

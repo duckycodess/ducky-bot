@@ -7,7 +7,7 @@ import {
   agentNameFor, buildOrchestrationBrief, redact, toSlugKey, workspaceLabelFor,
   type OrchestrationOutcome, type OrchestrationSpec, type PiOrchestrator,
 } from '@ducky/adapters';
-import { RESULT_RELATIVE_PATH } from '@ducky/adapters';
+import { PHASE_RELATIVE_PATH, RESULT_RELATIVE_PATH } from '@ducky/adapters';
 import type { CoordinatorClient } from './client.js';
 import { resolveWorkspace } from './workspace.js';
 import { acquireWriterLock } from './single-writer.js';
@@ -63,6 +63,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     ownerInputs: claim.ownerInputs,
     mode: resolved.mode,
     resultRelativePath: RESULT_RELATIVE_PATH,
+    phaseRelativePath: PHASE_RELATIVE_PATH,
   });
 
   // The prompt itself is never logged; only its digest.
@@ -115,11 +116,16 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     promptTimeoutMs: JOB_MAX_WALL_CLOCK_MS,
     recoveryWaitMs: RECOVERY_WAIT_MS,
     signal: supervisor.signal,
+    onPhase: (phase) => supervisor.reportPhase(phase),
     onWorkspaceCreated: async (info) => {
       // Remembered so the follow-up state advance re-sends the SAME path. For
       // a worktree that is Herdr's checkout directory, not the repo root, and
       // overwriting it would corrupt the record cleanup later relies on.
       registered = info;
+      // Pi writes its phase inside the workspace, so the supervisor can only
+      // start looking once that path exists. For a worktree this is Herdr's
+      // checkout directory -- the same place the result file lives.
+      supervisor.watchWorkspace(info.workspacePath);
       // Durable ownership before the agent exists. If this fails the
       // orchestrator aborts rather than starting an unrecorded agent.
       await client.registerWorkspace(claim.jobId, {
@@ -159,6 +165,10 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         });
     },
   };
+
+  // A resumed job already owns a workspace, so its phase file may exist from
+  // the moment the turn starts -- `onWorkspaceCreated` will not fire again.
+  if (spec.recorded) supervisor.watchWorkspace(spec.recorded.workspacePath);
 
   const lock = acquireWriterLock(claim.payload.repoSlug);
   let outcome: OrchestrationOutcome | undefined;
@@ -224,12 +234,23 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     return;
   }
 
-  // Past the cancellation branch the turn has genuinely ended.
-  lock.release();
+  // Past the cancellation branch the turn has genuinely ended -- but "the turn
+  // ended" is not the same as "nothing of ours is running". An ORPHAN outcome
+  // means the orchestrator observed an agent that may still be writing, so the
+  // host-side writer lock is deliberately KEPT, exactly as the cancellation
+  // branch above keeps it. Releasing it here (which is what used to happen,
+  // because the release was unconditional) would let a retry on this host start
+  // a second writer beside a live Pi agent -- the one thing the single-writer
+  // guarantee exists to prevent.
+  const keepsWriterLock = outcome?.kind === 'orphan';
+  if (!keepsWriterLock) lock.release();
 
   if (failure !== undefined) {
     const err = failure;
     const detail = isDuckyError(err) ? err.ownerMessage : 'The orchestrator failed.';
+    // A stalled prompt is NOT an outage: the orchestrator has already proved,
+    // via `agentGet`, that no agent of ours is running and no result was
+    // written. It is reported as an absent result so the reason stays honest.
     const reason: ExecutorFailureReason =
       isDuckyError(err) && err.code === 'herdr_unavailable' ? 'herdr_unavailable' : 'no_result';
     await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
@@ -267,17 +288,28 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       if (accepted?.state === 'completed') {
         // cleanup() proves ownership against `recorded`, so hand it exactly
         // the workspace this run produced.
-        const cleaned = await orchestrator.cleanup(
-          {
-            ...spec,
-            recorded: {
-              workspaceId: outcome.workspaceId,
-              agentName: outcome.agentName,
-              workspacePath: outcome.workspacePath,
+        // The result is already accepted at this point, so a cleanup problem
+        // must never escape and be reported as a job failure: the work
+        // succeeded, only the tidying did not. A kept workspace is recoverable
+        // (the reconciler sweeps it, and the owner can clear the job); a
+        // successful job re-reported as failed is not.
+        let cleaned: { closed: boolean; detail: string };
+        try {
+          cleaned = await orchestrator.cleanup(
+            {
+              ...spec,
+              recorded: {
+                workspaceId: outcome.workspaceId,
+                agentName: outcome.agentName,
+                workspacePath: outcome.workspacePath,
+              },
             },
-          },
-          outcome.workspaceId,
-        );
+            outcome.workspaceId,
+          );
+        } catch (err) {
+          const detail = isDuckyError(err) ? err.ownerMessage : 'Cleanup failed.';
+          cleaned = { closed: false, detail: `not cleaned up: ${redact(detail).slice(0, 200)}` };
+        }
         log(`job ${claim.publicId} cleanup: ${cleaned.detail}`);
         if (cleaned.closed) {
           // Recorded only after the exact recorded workspace was proved closed,
@@ -299,7 +331,12 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
 
     case 'orphan':
       // A possibly-live writer stays untouched and keeps blocking the repo
-      // until the owner clears it.
+      // until the owner clears it. The writer lock was NOT released above, so
+      // this host cannot start a second writer either.
+      log(
+        `job ${claim.publicId}: ${outcome.reason}; writer lock for ` +
+          `\`${claim.payload.repoSlug}\` retained for the owner`,
+      );
       await client.reportFailure(claim.jobId, claim.leaseId, outcome.reason, {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,

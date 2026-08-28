@@ -1,7 +1,7 @@
 import { readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SHARED_READABLE_ROUTES } from '@ducky/contracts';
 import {
   HttpOpenClawProvider, MockConversationProvider, NO_ATTACHMENT_CAPABILITY, attachmentsUsable,
@@ -454,8 +454,9 @@ describe('lifetime and cleanup', () => {
 
     const removed = sweepStaleTempDirs();
     expect(removed).toContain(stale);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(existsSync(stale)).toBe(false);
+    // The sweep deletes fire-and-forget, so the directory disappears shortly
+    // AFTER the call returns. A fixed sleep makes this flaky on a loaded host.
+    await vi.waitFor(() => expect(existsSync(stale)).toBe(false), { timeout: 5_000 });
   });
 });
 

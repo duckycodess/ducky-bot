@@ -1,4 +1,4 @@
-import type { JobResultFile } from '@ducky/contracts';
+import type { JobResultFile, JobWorkPhase } from '@ducky/contracts';
 
 export interface OrchestrationSpec {
   readonly jobId: string;
@@ -39,6 +39,16 @@ export interface OrchestrationSpec {
    * got as far as running from one that never did.
    */
   readonly onAgentStarted?: (info: { workspaceId: string; agentName: string }) => Promise<void>;
+  /**
+   * Reports an engineering phase the orchestrator can actually OBSERVE.
+   *
+   * Only `planning` is emitted from here: handing the brief over is a fact.
+   * `implementing`, `reviewing`, `fixing` and `verifying` are Pi's own
+   * assessment of its work, and they arrive through the phase file it writes --
+   * inventing them from a lifecycle status would be a guess presented as an
+   * observation. Fire-and-forget: bookkeeping must never delay a turn.
+   */
+  readonly onPhase?: (phase: JobWorkPhase) => void;
 }
 
 /**

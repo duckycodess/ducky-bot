@@ -7,10 +7,11 @@ import {
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
   JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
   WorkspaceCloseRequestSchema, WorkspaceRegistrationRequestSchema,
-  EXECUTOR_HEADERS, isDuckyError,
+  EXECUTOR_HEADERS, EXECUTOR_ID_RE, isDuckyError,
 } from '@ducky/contracts';
 import type { ExecutorCredentialStore } from '@ducky/adapters';
-import type { Store } from '@ducky/persistence';
+import { isUpToDate, type Store } from '@ducky/persistence';
+import type { AuditRecordInput } from '@ducky/persistence';
 import { verifyExecutorRequest } from '../security/executor-auth.js';
 import type { JobsService } from '../domain/jobs.service.js';
 
@@ -18,6 +19,27 @@ declare module 'fastify' {
   interface FastifyRequest {
     rawBodyBuffer?: Buffer;
     executorId?: string;
+  }
+}
+
+/** Same header semantics as the verifier, without importing its internals. */
+function header(h: Record<string, string | string[] | undefined>, name: string): string {
+  const v = h[name];
+  if (Array.isArray(v)) return v[0] ?? '';
+  return typeof v === 'string' ? v : '';
+}
+
+/**
+ * Recording must never break a response.
+ *
+ * The audit log is a record and never an authority, so a failure to write one
+ * is strictly less bad than turning a 401 into a 500.
+ */
+function recordAudit(deps: { store: Store }, input: AuditRecordInput): void {
+  try {
+    deps.store.auditLog.record(input);
+  } catch {
+    /* a record is not worth a failed request */
   }
 }
 
@@ -72,10 +94,36 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     },
   );
 
+  /**
+   * Records an exhausted budget on THIS surface.
+   *
+   * The Discord buckets were audited and the HTTP ones were not -- which left
+   * the surface an unauthenticated caller can actually reach unrecorded. The
+   * route is recorded, and the claimed executor id only when it is well-formed;
+   * an unauthenticated caller controls that header.
+   */
+  const auditRateLimit = (req: FastifyRequest): void => {
+    const claimed = String(req.headers[EXECUTOR_HEADERS.executorId] ?? '');
+    recordAudit(deps, {
+      event: 'rate_limit.exceeded',
+      actorKind: 'executor',
+      actorRef: EXECUTOR_ID_RE.test(claimed) ? claimed : null,
+      subjectKind: 'route',
+      subjectRef: req.url.split('?')[0]!,
+      outcome: 'refused',
+    });
+  };
+
   await app.register(rateLimit, {
     global: false,
     keyGenerator: (req: FastifyRequest) =>
       req.executorId ?? String(req.headers[EXECUTOR_HEADERS.executorId] ?? req.ip),
+    // The plugin answers BEFORE the handler runs, so its 429 never reaches
+    // `sendDomainError`. `onExceeded` is an OBSERVATION hook, so the response
+    // shape and status stay exactly as they were -- an `errorResponseBuilder`
+    // here would own the response too, and returning a body without a
+    // `statusCode` silently turned the 429 into a 500.
+    onExceeded: (req: FastifyRequest) => auditRateLimit(req),
   });
 
   const claims = new ClaimRegistry();
@@ -98,9 +146,26 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         executorId = verified.executorId;
         req.executorId = executorId;
       } catch (err) {
-        if (isDuckyError(err) && err.code === 'replay_detected') {
-          return reply.code(409).send({ error: 'replay_detected' });
-        }
+        // Recorded HERE because this is the one place every authenticated route
+        // funnels through. The row carries the ROUTE and, for a replay, the
+        // claimed executor id -- never the bearer token, the signature, or a
+        // reason. The 401 says nothing about why, and neither does the audit
+        // row: an audit trail that distinguished "unknown executor" from "bad
+        // signature" would be an oracle.
+        const claimedExecutor = header(
+          req.headers as Record<string, string | string[] | undefined>,
+          EXECUTOR_HEADERS.executorId,
+        );
+        const replay = isDuckyError(err) && err.code === 'replay_detected';
+        recordAudit(deps, {
+          event: replay ? 'auth.replay_detected' : 'auth.failed',
+          actorKind: 'executor',
+          actorRef: EXECUTOR_ID_RE.test(claimedExecutor) ? claimedExecutor : null,
+          subjectKind: 'route',
+          subjectRef: req.url.split('?')[0]!,
+          outcome: 'refused',
+        });
+        if (replay) return reply.code(409).send({ error: 'replay_detected' });
         return reply.code(401).send(generic401);
       }
       try {
@@ -109,7 +174,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         if (out === null || out === undefined) return reply.code(204).send();
         return reply.send(out);
       } catch (err) {
-        return sendDomainError(reply, err);
+        return sendDomainError(reply, err, () => auditRateLimit(req));
       }
     };
 
@@ -257,22 +322,74 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     }),
   );
 
+  /** Liveness only: the process is up. Deliberately says nothing else. */
   app.get('/healthz', async () => ({ ok: true }));
+
+  /**
+   * Readiness: can this instance actually do its job?
+   *
+   * `SELECT 1` alone -- which is all this used to be -- reports ready for an
+   * instance with a database it cannot migrate, no credential loaded, and no
+   * executor that has ever connected. Each check below is something that, if
+   * false, means a submitted job cannot run.
+   *
+   * The response carries reason CODES and counts, never a path, a secret, or an
+   * error message: an unauthenticated endpoint is not a diagnostics channel.
+   */
   app.get('/readyz', async (_req, reply) => {
+    const checks: Record<string, boolean> = {
+      database: false,
+      migrations: false,
+      credentials: false,
+      executor: false,
+    };
+
     try {
       deps.store.db.prepare('SELECT 1').get();
-      return { ok: true };
+      checks['database'] = true;
+      checks['migrations'] = isUpToDate(deps.store.db);
     } catch {
-      return reply.code(503).send({ ok: false });
+      /* leaves database/migrations false */
     }
+
+    try {
+      checks['credentials'] = deps.credentials.listActive().length > 0;
+    } catch {
+      /* leaves credentials false */
+    }
+
+    try {
+      const cutoff = Date.now() - EXECUTOR_OFFLINE_AFTER_MS;
+      checks['executor'] = deps.store.executors
+        .listExecutors()
+        .some((e) => e.lastSeenAt !== null && Date.parse(e.lastSeenAt) >= cutoff);
+    } catch {
+      /* leaves executor false */
+    }
+
+    const notReady = Object.entries(checks)
+      .filter(([, ok]) => !ok)
+      .map(([name]) => name);
+
+    if (notReady.length > 0) return reply.code(503).send({ ok: false, notReady });
+    return { ok: true };
   });
 
   return app;
 }
 
-function sendDomainError(reply: import('fastify').FastifyReply, err: unknown) {
+function sendDomainError(
+  reply: import('fastify').FastifyReply,
+  err: unknown,
+  onRateLimited?: () => void,
+) {
   const status = (err as { statusCode?: number }).statusCode;
-  if (status === 429) return reply.code(429).send({ error: 'rate_limited' });
+  if (status === 429) {
+    // The Discord buckets were audited and the HTTP ones were not, which left
+    // the surface an unauthenticated caller can actually reach unrecorded.
+    onRateLimited?.();
+    return reply.code(429).send({ error: 'rate_limited' });
+  }
   if (status === 413) return reply.code(413).send({ error: 'result_rejected' });
   if (isDuckyError(err)) {
     switch (err.code) {
@@ -285,6 +402,7 @@ function sendDomainError(reply: import('fastify').FastifyReply, err: unknown) {
       case 'not_found':
         return reply.code(404).send({ error: 'not_found' });
       case 'rate_limited':
+        onRateLimited?.();
         return reply.code(429).send({ error: 'rate_limited' });
       default:
         return reply.code(400).send({ error: err.code });

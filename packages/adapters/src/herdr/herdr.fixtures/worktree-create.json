@@ -3,19 +3,19 @@
   "result": {
     "root_pane": {
       "agent_status": "unknown",
-      "cwd": "~/.herdr/worktrees/ducky-probe-RbHol4/ducky-job-probe",
+      "cwd": "~/.herdr/worktrees/ducky-probe-yczvst/ducky-job-probe",
       "focused": false,
-      "foreground_cwd": "~/.herdr",
-      "pane_id": "wK:p1",
+      "foreground_cwd": "~/.herdr/worktrees/ducky-probe-yczvst/ducky-job-probe",
+      "pane_id": "w1F:p1",
       "revision": 0,
       "scroll": {
         "max_offset_from_bottom": 0,
         "offset_from_bottom": 0,
         "viewport_rows": 50
       },
-      "tab_id": "wK:t1",
-      "terminal_id": "term_65a08f4da89b0b",
-      "workspace_id": "wK"
+      "tab_id": "w1F:t1",
+      "terminal_id": "term_65a194995bb862e",
+      "workspace_id": "w1F"
     },
     "tab": {
       "agent_status": "unknown",
@@ -23,25 +23,25 @@
       "label": "1",
       "number": 1,
       "pane_count": 1,
-      "tab_id": "wK:t1",
-      "workspace_id": "wK"
+      "tab_id": "w1F:t1",
+      "workspace_id": "w1F"
     },
     "type": "worktree_created",
     "workspace": {
-      "active_tab_id": "wK:t1",
+      "active_tab_id": "w1F:t1",
       "agent_status": "unknown",
       "focused": false,
       "label": "ducky-job-probe",
       "number": 7,
       "pane_count": 1,
       "tab_count": 1,
-      "workspace_id": "wK",
+      "workspace_id": "w1F",
       "worktree": {
-        "checkout_path": "~/.herdr/worktrees/ducky-probe-RbHol4/ducky-job-probe",
+        "checkout_path": "~/.herdr/worktrees/ducky-probe-yczvst/ducky-job-probe",
         "is_linked_worktree": true,
-        "repo_key": "/tmp/ducky-probe-RbHol4/.git",
-        "repo_name": "ducky-probe-RbHol4",
-        "repo_root": "/tmp/ducky-probe-RbHol4"
+        "repo_key": "/tmp/ducky-probe-yczvst/.git",
+        "repo_name": "ducky-probe-yczvst",
+        "repo_root": "/tmp/ducky-probe-yczvst"
       }
     },
     "worktree": {
@@ -50,9 +50,9 @@
       "is_detached": false,
       "is_linked_worktree": true,
       "is_prunable": false,
-      "label": "ducky-probe-RbHol4",
-      "open_workspace_id": "wK",
-      "path": "~/.herdr/worktrees/ducky-probe-RbHol4/ducky-job-probe"
+      "label": "ducky-probe-yczvst",
+      "open_workspace_id": "w1F",
+      "path": "~/.herdr/worktrees/ducky-probe-yczvst/ducky-job-probe"
     }
   }
 }

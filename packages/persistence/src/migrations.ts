@@ -588,4 +588,169 @@ CREATE INDEX ix_github_watch_events_pending
   WHERE delivered_at IS NULL AND abandoned_at IS NULL;
 `,
   },
+  {
+    version: 11,
+    name: 'query_indexes',
+    sql: `
+-- Indexes for three queries confirmed by EXPLAIN QUERY PLAN to be full table
+-- scans on the live development database:
+--
+--   SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id        -> SCAN
+--   SELECT * FROM jobs WHERE discord_user_id = ? ORDER BY created_at  -> SCAN + temp b-tree
+--   SELECT * FROM jobs WHERE origin_shared_channel_id = ? ...         -> SCAN + temp b-tree
+--
+-- job_transitions had NO index at all, and it is both the owner's job history
+-- and the source the notification sweep reads on every reconcile tick, so it
+-- grows for the life of the instance.
+CREATE INDEX IF NOT EXISTS ix_job_transitions_job ON job_transitions(job_id, id);
+CREATE INDEX IF NOT EXISTS ix_jobs_owner_created ON jobs(discord_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_jobs_origin_channel
+  ON jobs(origin_shared_channel_id, created_at DESC)
+  WHERE origin_shared_channel_id IS NOT NULL;
+
+-- Reservations are keyed by repo_slug, but the reverse lookup ("which repo does
+-- this job hold?") runs on every cancellation and every reconcile pass.
+CREATE INDEX IF NOT EXISTS ix_repo_reservations_job ON repo_reservations(job_id);
+
+-- The only table with no expiry and no index on its age column.
+CREATE INDEX IF NOT EXISTS ix_idempotency_created ON idempotency_keys(created_at);
+`,
+  },
+  {
+    version: 12,
+    name: 'retention',
+    sql: `
+-- Retention's own run log. Counts only: a deletion record exists to say that
+-- data went, not to keep a copy of it.
+CREATE TABLE retention_runs (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at   TEXT NOT NULL,
+  finished_at  TEXT,
+  trigger      TEXT NOT NULL CHECK (trigger IN ('scheduled','manual')),
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','partial','failed')),
+  counts_json  TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX ix_retention_runs_started ON retention_runs(started_at);
+
+-- Age indexes for the columns each policy selects on. Without these every
+-- pass is a full scan of the table it is trying to bound.
+--
+-- Each is PARTIAL where the policy is: retention only ever looks at finished
+-- things, so an index over live rows would be dead weight and would let a
+-- careless query match one.
+CREATE INDEX ix_jobs_terminal_finished ON jobs(finished_at)
+  WHERE state IN ('completed','failed','cancelled') AND finished_at IS NOT NULL;
+CREATE INDEX ix_captures_closed ON captures(updated_at)
+  WHERE status IN ('done','archived');
+CREATE INDEX ix_tasks_closed_at ON tasks(closed_at)
+  WHERE closed_at IS NOT NULL;
+CREATE INDEX ix_reminders_closed_at ON reminders(closed_at)
+  WHERE closed_at IS NOT NULL;
+CREATE INDEX ix_schedules_confirmed ON schedules(starts_at)
+  WHERE confirmed_at IS NOT NULL;
+CREATE INDEX ix_github_watch_events_settled ON github_watch_events(created_at)
+  WHERE delivered_at IS NOT NULL OR abandoned_at IS NOT NULL;
+CREATE INDEX ix_github_watches_cancelled ON github_watches(cancelled_at)
+  WHERE cancelled_at IS NOT NULL;
+CREATE INDEX ix_herdr_ws_closed_at ON herdr_workspaces(closed_at)
+  WHERE closed_at IS NOT NULL;
+CREATE INDEX ix_reminder_occurrences_settled ON reminder_occurrences(created_at)
+  WHERE delivered_at IS NOT NULL OR abandoned_at IS NOT NULL;
+`,
+  },
+  {
+    version: 13,
+    name: 'audit_subject_kinds',
+    sql: `
+-- Widens \`audit_log.subject_kind\` for the security and retention events.
+--
+-- This migration exists because of a silent failure, and the failure mode is
+-- worth recording. \`AuditLogRepo.record\` deliberately NEVER THROWS -- a job
+-- rolled back because bookkeeping failed would be worse than one that ran and
+-- was not written down. The consequence is that a value the TypeScript enum
+-- allows and this CHECK constraint does not is dropped without a sound: the
+-- audit log simply loses the row. Three new subject kinds hit exactly that.
+--
+-- SQLite cannot alter a CHECK, so the table is rebuilt. Rows are copied
+-- verbatim; nothing is reinterpreted.
+CREATE TABLE audit_log_v2 (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  actor_kind   TEXT NOT NULL CHECK (actor_kind IN ('owner','executor','system','reconciler')),
+  actor_ref    TEXT,
+  subject_kind TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                 ('job','approval','executor','dependency','credential','retention','route')),
+  subject_ref  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','failed')),
+  detail       TEXT
+);
+
+INSERT INTO audit_log_v2 (id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+  SELECT id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail
+    FROM audit_log;
+
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v2 RENAME TO audit_log;
+
+CREATE INDEX ix_audit_log_at ON audit_log(at);
+CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
+`,
+  },
+  {
+    version: 14,
+    name: 'schedule_retention_index',
+    sql: `
+-- Indexes the column retention actually selects schedules on.
+--
+-- Migration 12 indexed \`starts_at\`, which was the wrong column for the wrong
+-- query: \`starts_at\` is bare WALL-CLOCK text in the owner's zone (ADR 0014),
+-- so comparing it to a UTC cutoff in SQL is not a valid comparison at all. The
+-- selection now filters on \`confirmed_at\`, which is a stored UTC instant, and
+-- the owner-zone test on \`starts_at\` happens in TypeScript where the zone is
+-- known.
+--
+-- The old index is dropped rather than left behind: it supports no query, and a
+-- stale index on a text column that looks like a timestamp is an invitation to
+-- write exactly the comparison that was just removed.
+DROP INDEX IF EXISTS ix_schedules_confirmed;
+CREATE INDEX IF NOT EXISTS ix_schedules_confirmed_at ON schedules(confirmed_at)
+  WHERE confirmed_at IS NOT NULL;
+`,
+  },
+  {
+    version: 15,
+    name: 'audit_subject_kinds_v3',
+    sql: `
+-- Two more subject kinds, for the approval/provider/configuration events.
+--
+-- Same reason as migration 13, and the same hazard: \`AuditLogRepo.record\` never
+-- throws, so a subject kind the enum allows and this constraint does not is
+-- dropped silently. \`schema.test.ts\` asserts the enums and this constraint agree,
+-- which is what makes adding one here non-optional rather than easy to forget.
+CREATE TABLE audit_log_v3 (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  actor_kind   TEXT NOT NULL CHECK (actor_kind IN ('owner','executor','system','reconciler')),
+  actor_ref    TEXT,
+  subject_kind TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                 ('job','approval','executor','dependency','credential','retention','route',
+                  'config','provider')),
+  subject_ref  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','failed')),
+  detail       TEXT
+);
+
+INSERT INTO audit_log_v3 (id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+  SELECT id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail
+    FROM audit_log;
+
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v3 RENAME TO audit_log;
+
+CREATE INDEX ix_audit_log_at ON audit_log(at);
+CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
+`,
+  },
 ];

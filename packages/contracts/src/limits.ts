@@ -135,6 +135,36 @@ export const HERDR_TIMEOUT_MS = 30_000;
 export const GIT_TIMEOUT_MS = 20_000;
 
 // ---- herdr ------------------------------------------------------------------
+/**
+ * Extra subprocess budget on top of the timeout handed to `herdr` itself.
+ *
+ * `herdr agent prompt --wait --timeout <t>` is expected to run for up to `t`.
+ * The process that hosts it must therefore outlive `t`, or `execFile` SIGTERMs
+ * a healthy wait and the caller sees an outage while a real Pi agent is still
+ * writing. The grace covers herdr's own teardown and JSON flush; it is not a
+ * second timeout, and it must never be the smaller of the two.
+ */
+export const HERDR_PROMPT_GRACE_MS = 30_000;
+/**
+ * Interactive-readiness budget for `herdr agent start`.
+ *
+ * Herdr's own default is 30 s and its documented ceiling is 300 s. A cold Pi
+ * start on this host can exceed 30 s, so the value is sent explicitly rather
+ * than inherited, and the subprocess budget is derived from it the same way
+ * the prompt's is.
+ */
+export const HERDR_START_TIMEOUT_MS = 120_000;
+/**
+ * How long a phase report may wait to be coalesced into one heartbeat.
+ *
+ * A phase that only rode the regular `LEASE_HEARTBEAT_MS` beat could take 30
+ * seconds to become visible, which makes the whole engineering-loop display
+ * useless on short turns. Small enough to look immediate, large enough that a
+ * burst of reports costs one request rather than four.
+ */
+export const PHASE_REPORT_DEBOUNCE_MS = 2_000;
+/** Longest phase-file value we will read; anything larger is not a phase word. */
+export const PHASE_FILE_MAX_BYTES = 64;
 export const HERDR_WORKSPACE_TTL_MS = 24 * 60 * 60_000;
 export const DUCKY_AGENT_PREFIX = 'ducky-pi-';
 export const DUCKY_WORKSPACE_LABEL_PREFIX = 'ducky-mgd:';

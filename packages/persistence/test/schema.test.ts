@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openDatabase, withTransaction } from '../src/db.js';
 import { appliedVersions, isUpToDate, pendingMigrations, runMigrations } from '../src/migrate.js';
+import { AUDIT_ACTOR_KINDS, AUDIT_EVENTS, AUDIT_SUBJECT_KINDS } from '@ducky/contracts';
 import { MIGRATIONS } from '../src/migrations.js';
 import { createStore } from '../src/index.js';
 
@@ -126,5 +127,135 @@ describe('invariants enforced by the schema', () => {
     const store = createStore(db);
     expect(store.executors.consumeNonce('n1', 'e', '2099-01-01T00:00:00.000Z')).toBe(true);
     expect(store.executors.consumeNonce('n1', 'e', '2099-01-01T00:00:00.000Z')).toBe(false);
+  });
+});
+
+/**
+ * Migration 11 exists because `EXPLAIN QUERY PLAN` on the live development
+ * database reported three full table scans, and `job_transitions` -- the
+ * owner's job history AND the source the notification sweep reads every
+ * reconcile tick -- had no index at all.
+ */
+describe('migration 11: query indexes', () => {
+  const plan = (db: ReturnType<typeof openDatabase>, sql: string): string =>
+    (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[])
+      .map((r) => r.detail)
+      .join(' | ');
+
+  it('turns the three confirmed table scans into index searches', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+
+    const transitions = plan(db, "SELECT * FROM job_transitions WHERE job_id = 'x' ORDER BY id");
+    expect(transitions).toMatch(/USING (COVERING )?INDEX ix_job_transitions_job/);
+    expect(transitions).not.toMatch(/SCAN job_transitions/);
+
+    const owner = plan(
+      db,
+      "SELECT * FROM jobs WHERE discord_user_id = 'x' ORDER BY created_at DESC LIMIT 10",
+    );
+    expect(owner).toMatch(/USING (COVERING )?INDEX ix_jobs_owner_created/);
+    expect(owner).not.toMatch(/TEMP B-TREE/);
+
+    const channel = plan(
+      db,
+      "SELECT * FROM jobs WHERE origin_shared_channel_id = 'x' ORDER BY created_at DESC LIMIT 10",
+    );
+    expect(channel).toMatch(/USING (COVERING )?INDEX ix_jobs_origin_channel/);
+
+    db.close();
+  });
+
+  it('indexes the reservation reverse lookup', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    expect(plan(db, "SELECT * FROM repo_reservations WHERE job_id = 'x'")).toMatch(
+      /USING (COVERING )?INDEX ix_repo_reservations_job/,
+    );
+    db.close();
+  });
+
+  it('is index-only: migration 11 creates no table, column or constraint', () => {
+    // Asserted against the migration's own SQL rather than the final schema,
+    // because later migrations legitimately add tables.
+    const eleven = MIGRATIONS.find((m) => m.version === 11);
+    expect(eleven?.name).toBe('query_indexes');
+    const sql = (eleven?.sql ?? '').toUpperCase();
+    for (const forbidden of ['CREATE TABLE', 'ALTER TABLE', 'DROP ', 'REFERENCES', 'CREATE TRIGGER']) {
+      expect(sql, forbidden).not.toContain(forbidden);
+    }
+    expect(sql).toContain('CREATE INDEX');
+  });
+});
+
+/**
+ * `AuditLogRepo.record` never throws, on purpose: bookkeeping must not roll
+ * back the work it describes. The cost is that a value the TypeScript enum
+ * allows and the CHECK constraint does not is dropped SILENTLY -- the audit log
+ * just loses the row.
+ *
+ * That happened: three new subject kinds were added to the enum and the
+ * constraint still listed four. So the enums and the schema are now checked
+ * against each other directly.
+ */
+describe('the audit log can persist everything its vocabulary allows', () => {
+  it('accepts every declared subject kind', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const store = createStore(db);
+
+    for (const kind of AUDIT_SUBJECT_KINDS) {
+      store.auditLog.record({
+        event: 'job.created',
+        actorKind: 'system',
+        subjectKind: kind,
+        subjectRef: 'x',
+        outcome: 'ok',
+      });
+    }
+    const rows = store.auditLog.recent(100);
+    expect(rows).toHaveLength(AUDIT_SUBJECT_KINDS.length);
+    expect(new Set(rows.map((r) => r.subjectKind))).toEqual(new Set(AUDIT_SUBJECT_KINDS));
+    db.close();
+  });
+
+  it('accepts every declared event and actor kind', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const store = createStore(db);
+
+    for (const event of AUDIT_EVENTS) {
+      for (const actorKind of AUDIT_ACTOR_KINDS) {
+        store.auditLog.record({ event, actorKind, outcome: 'ok' });
+      }
+    }
+    expect(store.auditLog.recent(10_000)).toHaveLength(
+      AUDIT_EVENTS.length * AUDIT_ACTOR_KINDS.length,
+    );
+    db.close();
+  });
+
+  it('keeps existing rows across the rebuild in migration 13', () => {
+    // The rebuild copies rows verbatim; a lost audit row is a lost audit row.
+    const db = openDatabase({ location: ':memory:' });
+    const upto12 = MIGRATIONS.filter((m) => m.version <= 12);
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+    for (const m of upto12) {
+      db.exec(m.sql);
+      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?,?,?)')
+        .run(m.version, m.name, new Date().toISOString());
+    }
+    db.prepare(
+      `INSERT INTO audit_log (at, event, actor_kind, subject_kind, subject_ref, outcome, detail)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).run(new Date().toISOString(), 'job.created', 'system', 'job', 'p1', 'ok', 'historic');
+
+    runMigrations(db);
+
+    const rows = createStore(db).auditLog.recent(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.detail).toBe('historic');
+    db.close();
   });
 });

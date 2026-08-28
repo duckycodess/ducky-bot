@@ -15,6 +15,7 @@ import type { JobsService } from '../domain/jobs.service.js';
 import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
 import type { GitHubWatchService } from '../domain/github-watches.service.js';
+import type { ForgetService } from '../domain/forget.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
@@ -48,6 +49,16 @@ export interface RouterDeps {
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly conversation: ConversationProvider;
+  /**
+   * The owner's deletion controls. OMITTING IT DISABLES `/forget` entirely,
+   * which is the safe direction for a command that removes data.
+   */
+  readonly forget?: ForgetService;
+  /**
+   * Notified when a provider refuses or fails at the boundary. Fire-and-forget:
+   * the owner's reply must not depend on the audit log being writable.
+   */
+  readonly onProviderFailure?: (info: { provider: string; code: string }) => void;
   readonly status: () => present.ProviderStatus;
   readonly buckets?: CommandBuckets;
   /**
@@ -353,7 +364,19 @@ export class DuckyRouter {
     threadKey: string;
     attachment?: ConversationAttachment;
   }): Promise<OutboundMessage> {
-    const reply = await this.deps.conversation.reply(input);
+    let reply;
+    try {
+      reply = await this.deps.conversation.reply(input);
+    } catch (err) {
+      // "The owner asked and got no answer" was invisible in the trail. Records
+      // the PROVIDER and the error code, never the message the owner sent and
+      // never the provider's raw error text.
+      this.deps.onProviderFailure?.({
+        provider: this.deps.conversation.name,
+        code: isDuckyError(err) ? err.code : 'unknown',
+      });
+      throw err;
+    }
     // A stand-in reply is always visibly marked so it cannot be mistaken for a
     // real assistant answer.
     return { content: reply.mock ? `[mock] ${reply.text}` : reply.text, ephemeral: false };
@@ -363,6 +386,55 @@ export class DuckyRouter {
 
   private registerCommands(): void {
     const d = this.deps;
+
+    /**
+     * `/forget job <id>` and `/forget conversation`.
+     *
+     * Two-step on purpose: the command SHOWS what will go and returns a signed
+     * confirm control; only pressing it deletes. There is deliberately no
+     * `/forget all`, no filter and no wildcard -- `FORGET_TARGETS` cannot
+     * express one, so this route has nothing broader to offer.
+     */
+    this.commands.set('forget', async (actor, e) => {
+      this.buckets.check('interaction', actor.discordUserId);
+      const forget = d.forget;
+      if (!forget) {
+        return { content: 'Deletion is not configured on this instance.', ephemeral: true };
+      }
+
+      const target = String(e.options['target'] ?? 'job');
+      if (target === 'conversation') {
+        return { content: forget.forgetConversation(actor).message, ephemeral: true };
+      }
+
+      const publicId = String(e.options['id'] ?? '').trim();
+      if (publicId === '') {
+        return { content: 'Which job? Give the id from `/jobs`.', ephemeral: true };
+      }
+
+      // Dry run first: prove it CAN be deleted, and show the owner what for,
+      // before offering a control that actually removes it.
+      const preview = d.jobs.detail(actor, publicId);
+      return {
+        content:
+          `Delete job \`${preview.job.publicId}\` (${preview.job.repoSlug}, ` +
+          `${preview.job.state.replace(/_/g, ' ')}) and everything recorded about it — ` +
+          'its transitions, events, your answers, the result snapshot, approvals and ' +
+          'workspace record?\n\n**This cannot be undone.** Nothing else is touched.',
+        ephemeral: true,
+        rows: [{
+          buttons: [{
+            customId: d.signer.sign({
+              kind: 'forget_confirm',
+              entityId: preview.job.publicId,
+              actorUserId: actor.discordUserId,
+            }),
+            label: `delete ${preview.job.publicId}`,
+            style: 'danger' as const,
+          }],
+        }],
+      };
+    });
 
     this.commands.set('capture', async (actor, e) => {
       this.buckets.check('capture', actor.discordUserId);
@@ -871,6 +943,15 @@ export class DuckyRouter {
     this.components.set('watch_cancel', async (actor, entityId) =>
       assistant.watchCancelled(d.githubWatches.cancel(actor, entityId)),
     );
+    // The signature is already verified and bound to the owner before this
+    // runs; the service re-checks ownership anyway.
+    this.components.set('forget_confirm', async (actor, entityId) => {
+      if (!d.forget) {
+        return { content: 'Deletion is not configured on this instance.', ephemeral: true };
+      }
+      const result = d.forget.forgetJob(actor, entityId);
+      return { content: result.message, ephemeral: true };
+    });
   }
 }
 

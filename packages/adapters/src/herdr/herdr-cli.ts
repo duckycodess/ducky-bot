@@ -1,18 +1,28 @@
 import { homedir } from 'node:os';
-import { DuckyError, HERDR_TIMEOUT_MS } from '@ducky/contracts';
+import {
+  DuckyError, HERDR_PROMPT_GRACE_MS, HERDR_START_TIMEOUT_MS, HERDR_TIMEOUT_MS,
+} from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
 import { expandHerdrPath } from './paths.js';
 import type { HerdrClient } from './herdr.port.js';
 import {
-  AgentInfoSchema, AgentListResultSchema, EnvelopeSchema, PaneSplitResultSchema,
-  WorkspaceCreateResultSchema, WorkspaceListResultSchema, WorktreeCreateResultSchema,
+  AgentInfoSchema, AgentListResultSchema, AgentPromptResultSchema, AgentStartResultSchema,
+  EnvelopeSchema, HERDR_DIRTY_WORKTREE_CODES, HERDR_NOT_FOUND_CODES, HERDR_NOT_READY_CODES,
+  HERDR_STALLED_CODES, HerdrErrorEnvelopeSchema,
+  PaneSplitResultSchema, WorkspaceCreateResultSchema, WorkspaceListResultSchema,
+  WorktreeCreateResultSchema,
   type AgentInfo, type WorkspaceSummary,
 } from './herdr.types.js';
 
 export interface HerdrCliOptions {
   readonly bin?: string;
+  /** Subprocess budget for ordinary, non-blocking commands. */
   readonly timeoutMs?: number;
+  /** Added to a blocking wait's own timeout to get the subprocess budget. */
+  readonly promptGraceMs?: number;
+  /** Interactive-readiness budget sent to `agent start --timeout`. */
+  readonly startTimeoutMs?: number;
   /** Overridable so the expansion can be tested without touching the real home. */
   readonly homeDir?: string;
   /** Records every argv for the probe script and for tests. */
@@ -20,11 +30,10 @@ export interface HerdrCliOptions {
 }
 
 /**
- * Thin wrapper over the installed `herdr` binary. Never uses `--current`: the
- * executor runs under systemd with no caller pane, and herdr reaches its server
- * over a socket regardless.
+ * Fallback wording match, used ONLY when no machine code could be parsed --
+ * a syntax error (exit 2) or a non-JSON failure. The `code` field is the
+ * primary signal; see `classify`.
  */
-/** Herdr's wording for "that target does not exist", as opposed to an outage. */
 const NOT_FOUND = /\b(not[ _-]?found|no such|unknown (agent|pane|workspace)|does not exist)\b/i;
 
 class HerdrNotFoundError extends DuckyError {
@@ -35,21 +44,83 @@ class HerdrNotFoundError extends DuckyError {
 
 const isNotFound = (err: unknown): boolean => err instanceof HerdrNotFoundError;
 
+/** Herdr's machine code for a failure, when it emitted a parseable envelope. */
+function herdrErrorCode(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const env = HerdrErrorEnvelopeSchema.safeParse(parsed);
+  return env.success ? env.data.error.code : undefined;
+}
+
+/**
+ * Turns a failed herdr invocation into the right DuckyError.
+ *
+ * Three outcomes with genuinely different consequences, so they are three
+ * different codes rather than one:
+ *
+ * - `not_found` -- the target is absent. The caller may safely create.
+ * - `herdr_prompt_stalled` -- the server and the agent are both fine, the wait
+ *   simply did not settle. Treating it as an outage would release a repository
+ *   whose pane may still hold a live writer.
+ * - `herdr_unavailable` -- everything else, which is the only one that means
+ *   "Herdr itself cannot be reached".
+ */
 function herdrError(raw: unknown, argv: readonly string[]): DuckyError {
+  const code = herdrErrorCode(raw);
   const text = redact(typeof raw === 'string' ? raw : JSON.stringify(raw ?? '')).slice(0, 200);
+
+  if (code !== undefined) {
+    if (HERDR_NOT_FOUND_CODES.includes(code)) return new HerdrNotFoundError(text);
+    if (HERDR_STALLED_CODES.includes(code)) {
+      return new DuckyError(
+        'herdr_prompt_stalled',
+        `Herdr saw no activity from the agent after the prompt was submitted (${code}).`,
+      );
+    }
+    if (HERDR_NOT_READY_CODES.includes(code)) {
+      return new DuckyError(
+        'herdr_agent_not_ready',
+        'The agent is not accepting input yet.',
+      );
+    }
+    if (HERDR_DIRTY_WORKTREE_CODES.includes(code)) {
+      return new DuckyError(
+        'herdr_worktree_dirty',
+        'The worktree still holds uncommitted changes, so it was not removed.',
+      );
+    }
+    return new DuckyError('herdr_unavailable', `Herdr command failed (${argv[0]}): ${code}`);
+  }
+
+  // No parseable envelope: a syntax error, a dead socket, or a truncated
+  // stream. Fall back to the wording, then to an outage.
   if (NOT_FOUND.test(text)) return new HerdrNotFoundError(text);
   return new DuckyError('herdr_unavailable', `Herdr command failed (${argv[0]}): ${text}`);
 }
 
+/**
+ * Thin wrapper over the installed `herdr` binary. Never uses `--current`: the
+ * executor runs under systemd with no caller pane, and herdr reaches its server
+ * over a socket regardless.
+ */
 export class HerdrCli implements HerdrClient {
   private readonly bin: string;
   private readonly timeoutMs: number;
+  private readonly promptGraceMs: number;
+  private readonly startTimeoutMs: number;
   private readonly homeDir: string;
   private readonly onInvoke: ((argv: readonly string[]) => void) | undefined;
 
   constructor(opts: HerdrCliOptions = {}) {
     this.bin = opts.bin ?? 'herdr';
     this.timeoutMs = opts.timeoutMs ?? HERDR_TIMEOUT_MS;
+    this.promptGraceMs = opts.promptGraceMs ?? HERDR_PROMPT_GRACE_MS;
+    this.startTimeoutMs = opts.startTimeoutMs ?? HERDR_START_TIMEOUT_MS;
     this.homeDir = opts.homeDir ?? homedir();
     this.onInvoke = opts.onInvoke;
   }
@@ -66,10 +137,22 @@ export class HerdrCli implements HerdrClient {
     }
   }
 
-  private async call(argv: readonly string[], signal?: AbortSignal): Promise<unknown> {
+  /**
+   * @param subprocessTimeoutMs Budget for the CHILD PROCESS, which is not the
+   * same thing as the `--timeout` handed to herdr inside `argv`. A blocking
+   * `agent prompt --wait --timeout 2h` must be hosted by a process allowed to
+   * live longer than two hours: using the default 30 s here SIGTERMs a healthy
+   * wait, the caller reads an outage, and the repository is released while a
+   * real Pi agent is still writing to it.
+   */
+  private async call(
+    argv: readonly string[],
+    signal?: AbortSignal,
+    subprocessTimeoutMs?: number,
+  ): Promise<unknown> {
     this.onInvoke?.(argv);
     const res = await runArgv(this.bin, argv, {
-      timeoutMs: this.timeoutMs,
+      timeoutMs: subprocessTimeoutMs ?? this.timeoutMs,
       ...(signal ? { signal } : {}),
     });
     if (res.code !== 0) {
@@ -126,16 +209,32 @@ export class HerdrCli implements HerdrClient {
     return parsed.data;
   }
 
+  /**
+   * Starts a supported agent in an EXISTING pane that is already at its
+   * interactive shell prompt. Herdr never creates layout here.
+   *
+   * The readiness `--timeout` is sent explicitly rather than inherited: herdr's
+   * own default is 30 s, and a cold Pi start on a loaded host can exceed that.
+   * The subprocess budget is derived from it so the child always outlives the
+   * wait it was asked to perform.
+   */
   async agentStart(
     name: string,
     kind: string,
     paneId: string,
     agentArgs: readonly string[],
   ): Promise<AgentInfo> {
-    const argv = ['agent', 'start', name, '--kind', kind, '--pane', paneId];
+    const argv = [
+      'agent', 'start', name,
+      '--kind', kind,
+      '--pane', paneId,
+      '--timeout', String(this.startTimeoutMs),
+    ];
     if (agentArgs.length > 0) argv.push('--', ...agentArgs);
-    const raw = await this.call(argv);
+    const raw = await this.call(argv, undefined, this.startTimeoutMs + this.promptGraceMs);
     const obj = raw as Record<string, unknown>;
+    const parsed = AgentStartResultSchema.safeParse(obj);
+    if (parsed.success) return parsed.data.agent;
     return AgentInfoSchema.parse(obj['agent'] ?? obj);
   }
 
@@ -143,17 +242,27 @@ export class HerdrCli implements HerdrClient {
    * `--wait` blocks until the turn settles. The signal is passed down so a
    * cancellation stops us waiting immediately instead of holding on for the
    * whole timeout; the agent itself is deliberately left alone.
+   *
+   * Returns the SETTLED agent herdr reports, which is how the caller tells a
+   * finished turn from one that stopped at an approval prompt. `undefined`
+   * only when herdr answered without an agent record -- the caller then has to
+   * observe the agent itself rather than assume anything.
    */
   async agentPrompt(
     target: string,
     text: string,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.call(
+  ): Promise<AgentInfo | undefined> {
+    const raw = await this.call(
       ['agent', 'prompt', target, text, '--wait', '--timeout', String(timeoutMs)],
       signal,
+      // The child must outlive the wait it is hosting, or a healthy long turn
+      // is killed and misread as an outage.
+      timeoutMs + this.promptGraceMs,
     );
+    const parsed = AgentPromptResultSchema.safeParse(raw);
+    return parsed.success ? parsed.data.agent : undefined;
   }
 
   async workspaceList(): Promise<WorkspaceSummary[]> {
@@ -195,7 +304,12 @@ export class HerdrCli implements HerdrClient {
    * read from the response -- falling back to the repository root would make
    * the job read its result from the wrong tree.
    */
-  async worktreeCreate(input: { cwd: string; branch: string; base: string }): Promise<{
+  async worktreeCreate(input: {
+    cwd: string;
+    branch: string;
+    base: string;
+    label: string;
+  }): Promise<{
     workspaceId: string;
     rootPaneId: string;
     path: string;
@@ -206,6 +320,12 @@ export class HerdrCli implements HerdrClient {
         '--cwd', input.cwd,
         '--branch', input.branch,
         '--base', input.base,
+        // WITHOUT this, Herdr labels the workspace after the branch
+        // (`ducky-job-<id>`), which does NOT start with the Ducky-managed
+        // prefix -- so `cleanup()`'s ownership proof could never pass and every
+        // worktree job leaked its workspace and its checkout. Found by the
+        // production-path probe, not by any unit test.
+        '--label', input.label,
         '--no-focus',
       ]),
     );
@@ -224,7 +344,19 @@ export class HerdrCli implements HerdrClient {
     return { workspaceId, rootPaneId, path: expandHerdrPath(reported, this.homeDir) };
   }
 
-  async worktreeRemove(workspaceId: string): Promise<void> {
-    await this.call(['worktree', 'remove', '--workspace', workspaceId]);
+  /**
+   * Removes a linked worktree checkout.
+   *
+   * `force` is a parameter rather than a default because the two callers want
+   * opposite things. A finished job's checkout always contains at least an
+   * untracked `.ducky/result.json`, and usually the implementation itself,
+   * which nothing has committed -- the brief forbids committing. Forcing there
+   * would delete the owner's work, so production never does. A disposable
+   * probe repository under a temp directory has nothing to lose and may.
+   */
+  async worktreeRemove(workspaceId: string, opts: { force?: boolean } = {}): Promise<void> {
+    const argv = ['worktree', 'remove', '--workspace', workspaceId];
+    if (opts.force === true) argv.push('--force');
+    await this.call(argv);
   }
 }

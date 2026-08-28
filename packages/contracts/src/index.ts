@@ -10,6 +10,8 @@ export * from './discord.js';
 export * from './owner-only-surface.js';
 export * from './github.js';
 export * from './profile.js';
+export * from './conversation.js';
+export * from './retention.js';
 export * from './job-visibility.js';
 export * from './time.js';
 export * from './assistant.js';

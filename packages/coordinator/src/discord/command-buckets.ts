@@ -8,6 +8,12 @@ interface Window {
 }
 
 /**
+ * Notified when a bucket is exhausted. Fire-and-forget: a rate limit still
+ * applies whether or not anybody wrote it down.
+ */
+export type BucketExhaustedSink = (info: { bucket: BucketName }) => void;
+
+/**
  * Per-user token buckets for the Discord surfaces.
  *
  * These surfaces are owner-only, so this is accident containment and
@@ -16,8 +22,19 @@ interface Window {
  */
 export class CommandBuckets {
   readonly #windows = new Map<string, Window>();
+  #onExhausted: BucketExhaustedSink | undefined;
 
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  constructor(
+    private readonly now: () => number = () => Date.now(),
+    onExhausted?: BucketExhaustedSink,
+  ) {
+    this.#onExhausted = onExhausted;
+  }
+
+  /** Attached after construction, since the store is built later. */
+  onExhausted(sink: BucketExhaustedSink): void {
+    this.#onExhausted = sink;
+  }
 
   check(bucket: BucketName, userId: string): void {
     const spec = COMMAND_BUCKETS[bucket];
@@ -30,6 +47,13 @@ export class CommandBuckets {
     }
     if (w.count >= spec.max) {
       const seconds = Math.ceil((w.resetAt - t) / 1000);
+      // The BUCKET is recorded, never the user id: these surfaces are
+      // owner-only, so the id adds nothing an auditor could use.
+      try {
+        this.#onExhausted?.({ bucket });
+      } catch {
+        /* a record is never worth failing the limit */
+      }
       throw new DuckyError(
         'rate_limited',
         `Too many requests — try again in ${seconds}s.`,

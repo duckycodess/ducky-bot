@@ -17,6 +17,7 @@ export * from './repositories/tasks.repo.js';
 export * from './repositories/reminders.repo.js';
 export * from './repositories/dependencies.repo.js';
 export * from './repositories/audit-log.repo.js';
+export * from './repositories/retention.repo.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
@@ -33,6 +34,7 @@ import { NotificationsRepo } from './repositories/notifications.repo.js';
 import { TasksRepo } from './repositories/tasks.repo.js';
 import { RemindersRepo } from './repositories/reminders.repo.js';
 import { DependenciesRepo } from './repositories/dependencies.repo.js';
+import { RetentionRepo } from './repositories/retention.repo.js';
 import { AuditLogRepo } from './repositories/audit-log.repo.js';
 
 export interface Store {
@@ -57,6 +59,7 @@ export interface Store {
    * ever consulted for a decision.
    */
   readonly auditLog: AuditLogRepo;
+  readonly retention: RetentionRepo;
 }
 
 export function createStore(db: Db): Store {
@@ -77,5 +80,6 @@ export function createStore(db: Db): Store {
     reminders: new RemindersRepo(db),
     dependencies: new DependenciesRepo(db),
     auditLog: new AuditLogRepo(db),
+    retention: new RetentionRepo(db),
   };
 }

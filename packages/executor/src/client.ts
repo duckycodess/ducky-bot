@@ -2,7 +2,8 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import {
   DuckyError, EXECUTOR_HEADERS, canonicalRequest,
   type CancelAckRequest, type ClaimResponse, type ExecutorFailureReason,
-  type HeartbeatRequest, type JobHeartbeatRequest, type JobResultFile,
+  type HeartbeatRequest, type JobHeartbeatRequest, type JobHeartbeatResponse,
+  type JobResultFile,
 } from '@ducky/contracts';
 import { ClaimResponseSchema } from '@ducky/contracts';
 
@@ -97,13 +98,24 @@ export class CoordinatorClient {
     return ClaimResponseSchema.parse(body);
   }
 
-  async jobHeartbeat(
-    jobId: string,
-    body: JobHeartbeatRequest,
-  ): Promise<{ cancelRequested: boolean; leaseExpiresAt: string }> {
-    return (await this.expectJson(
-      await this.post(`/api/v1/executor/jobs/${jobId}/heartbeat`, body),
-    )) as { cancelRequested: boolean; leaseExpiresAt: string };
+  /**
+   * Renews the lease and optionally reports progress.
+   *
+   * The response carries the phase the coordinator ACCEPTED, which the caller
+   * needs because the phase machine may refuse a reported edge. A refusal
+   * arrives as HTTP 400 `invalid_transition`; it is surfaced with that exact
+   * code so the supervisor can stop resending a doomed report instead of
+   * failing every future lease renewal with it.
+   */
+  async jobHeartbeat(jobId: string, body: JobHeartbeatRequest): Promise<JobHeartbeatResponse> {
+    const res = await this.post(`/api/v1/executor/jobs/${jobId}/heartbeat`, body);
+    if (res.status === 400) {
+      const code = await errorCode(res);
+      if (code === 'invalid_transition') {
+        throw new DuckyError('invalid_transition', 'The coordinator refused that work phase.');
+      }
+    }
+    return (await this.expectJson(res)) as JobHeartbeatResponse;
   }
 
   async submitResult(jobId: string, leaseId: string, result: JobResultFile): Promise<unknown> {
@@ -150,5 +162,20 @@ export class CoordinatorClient {
     return this.expectJson(
       await this.post(`/api/v1/executor/jobs/${jobId}/failure`, { leaseId, reason, ...extra }),
     );
+  }
+}
+
+/**
+ * The coordinator's machine-readable error code, when it sent one.
+ *
+ * Read defensively: the body is consumed only on an error path, and a
+ * malformed one must not mask the status that was already observed.
+ */
+async function errorCode(res: Response): Promise<string | undefined> {
+  try {
+    const body = (await res.clone().json()) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : undefined;
+  } catch {
+    return undefined;
   }
 }

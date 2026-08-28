@@ -3,19 +3,19 @@
   "result": {
     "root_pane": {
       "agent_status": "unknown",
-      "cwd": "/tmp/ducky-probe-RbHol4",
+      "cwd": "/tmp/ducky-probe-yczvst",
       "focused": false,
-      "foreground_cwd": "/tmp/ducky-probe-RbHol4",
-      "pane_id": "wJ:p1",
+      "foreground_cwd": "/tmp/ducky-probe-yczvst",
+      "pane_id": "w1E:p1",
       "revision": 0,
       "scroll": {
         "max_offset_from_bottom": 0,
         "offset_from_bottom": 0,
         "viewport_rows": 50
       },
-      "tab_id": "wJ:t1",
-      "terminal_id": "term_65a08f4d964a69",
-      "workspace_id": "wJ"
+      "tab_id": "w1E:t1",
+      "terminal_id": "term_65a19499543282c",
+      "workspace_id": "w1E"
     },
     "tab": {
       "agent_status": "unknown",
@@ -23,19 +23,19 @@
       "label": "1",
       "number": 1,
       "pane_count": 1,
-      "tab_id": "wJ:t1",
-      "workspace_id": "wJ"
+      "tab_id": "w1E:t1",
+      "workspace_id": "w1E"
     },
     "type": "workspace_created",
     "workspace": {
-      "active_tab_id": "wJ:t1",
+      "active_tab_id": "w1E:t1",
       "agent_status": "unknown",
       "focused": false,
       "label": "ducky-mgd:probe",
       "number": 6,
       "pane_count": 1,
       "tab_count": 1,
-      "workspace_id": "wJ"
+      "workspace_id": "w1E"
     }
   }
 }

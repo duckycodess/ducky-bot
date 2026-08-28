@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "verdict": "failed",
+  "summary": "contract probe: no work was performed",
+  "changedFiles": [],
+  "review": {
+    "performed": false,
+    "independent": false,
+    "verdict": "skipped",
+    "notes": "probe"
+  },
+  "verification": {
+    "commands": [],
+    "passed": false
+  },
+  "proposedActions": []
+}

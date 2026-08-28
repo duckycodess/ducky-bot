@@ -21,7 +21,9 @@
     "executor:revoke-credential": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development packages/coordinator/src/cli/credentials.ts revoke-credential",
     "executor:revoke-executor": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development packages/coordinator/src/cli/credentials.ts revoke-executor",
     "register-commands": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.production packages/coordinator/src/discord/register-commands.ts",
-    "dev:coordinator:prod": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.production packages/coordinator/src/main.ts"
+    "dev:coordinator:prod": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.production packages/coordinator/src/main.ts",
+    "probe:live-job": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-live-job.ts",
+    "probe:openclaw": "node scripts/probe-openclaw.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

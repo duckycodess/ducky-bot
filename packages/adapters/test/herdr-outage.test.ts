@@ -6,6 +6,10 @@ import { isDuckyError } from '@ducky/contracts';
 import { HerdrCli } from '../src/herdr/herdr-cli.js';
 import { MockHerdr } from '../src/herdr/herdr.mock.js';
 import { HerdrPiOrchestrator, agentNameFor, toSlugKey } from '../src/pi/pi-herdr.js';
+import { MemoryBriefWriter } from '../src/pi/brief-file.js';
+
+/** The brief travels as a file; these suites use synthetic workspace paths. */
+const briefs = (): MemoryBriefWriter => new MemoryBriefWriter();
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
 
 /** A stand-in `herdr` binary with scripted output, so no real Herdr is touched. */
@@ -74,7 +78,7 @@ describe('a Herdr outage is not an absent agent', () => {
 describe('an outage never triggers creation or destruction', () => {
   it('reports unavailable instead of creating a second workspace', async () => {
     const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const outcome = await orchestrator.runJob(spec());
 
@@ -107,7 +111,7 @@ describe('an outage never triggers creation or destruction', () => {
       return original(target);
     };
 
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
     const out = await orchestrator.cleanup(spec({ recorded }), 'wX');
 
     expect(calls).toBe(1);
@@ -119,7 +123,7 @@ describe('an outage never triggers creation or destruction', () => {
 
   it('never claims a termination it could not observe', async () => {
     const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {} });
+    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
     const out = await orchestrator.cancel(
       spec({ recorded: { workspaceId: 'wX', agentName: 'ducky-pi-demo', workspacePath: '/repos/demo' } }),
     );

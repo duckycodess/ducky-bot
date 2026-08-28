@@ -5,8 +5,8 @@ import {
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
   CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
-  blankToUndefined, resolveDuckyProfile,
-  type DuckyProfile,
+  blankToUndefined, resolveConversationMode, resolveDuckyProfile,
+  type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
 const bool = (dflt: boolean) =>
@@ -76,7 +76,17 @@ export const EnvSchema = z.object({
 
   DUCKY_REPOS_FILE: z.string().optional(),
 
+  /**
+   * Which conversational backend answers. Explicit, never inferred.
+   *
+   * Development may omit it and get the marked mock. PRODUCTION MUST CHOOSE:
+   * see `resolveConversationMode`, which refuses an unset value and refuses
+   * `mock` outright for production, because a canned reply must never be
+   * mistaken for a real one.
+   */
+  DUCKY_CONVERSATION_PROVIDER: z.string().optional(),
   OPENCLAW_BASE_URL: z.string().optional(),
+  OPENCLAW_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 
   /**
    * Operator opt-in for conversation attachments. Default OFF.
@@ -99,6 +109,24 @@ export const EnvSchema = z.object({
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),
 
   DUCKY_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+
+  /** `json` (default) or `text` for a readable local run. */
+  DUCKY_LOG_FORMAT: z.enum(['json', 'text']).default('json'),
+
+  /**
+   * Retention. OFF by default, because this deletes the owner's own records.
+   *
+   * With `ENABLED` false no window below is consulted and nothing is ever
+   * removed, so an operator has to choose retention rather than inherit it.
+   * Every window is a floor of one day: a zero would mean "delete as soon as it
+   * finishes", which is not a retention policy.
+   */
+  DUCKY_RETENTION_ENABLED: bool(false),
+  DUCKY_RETENTION_TERMINAL_JOBS_DAYS: z.coerce.number().int().min(1).default(180),
+  DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: z.coerce.number().int().min(1).default(365),
+  DUCKY_RETENTION_WATCH_EVENTS_DAYS: z.coerce.number().int().min(1).default(90),
+  DUCKY_RETENTION_IDEMPOTENCY_DAYS: z.coerce.number().int().min(1).default(7),
+  DUCKY_RETENTION_BATCH: z.coerce.number().int().min(1).max(10_000).default(200),
 
   /**
    * The owner's own timezone, as an IANA name (`Asia/Manila`, `UTC`).
@@ -272,6 +300,15 @@ export function resolveSharedChannelIds(env: Env): readonly string[] {
  */
 export const resolveOwnerTimeZone = (env: Env): string =>
   assertValidTimeZone(env.DUCKY_OWNER_TIMEZONE.trim());
+
+/**
+ * The conversational backend for THIS profile, decided at startup.
+ *
+ * Not profile-scoped in name -- there is one variable -- but the RULES are
+ * profile-dependent, and production fails closed rather than defaulting.
+ */
+export const resolveConversationProvider = (env: Env): ConversationProviderMode =>
+  resolveConversationMode(env.DUCKY_CONVERSATION_PROVIDER, env.DUCKY_PROFILE);
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

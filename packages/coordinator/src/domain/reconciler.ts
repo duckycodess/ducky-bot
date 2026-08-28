@@ -154,6 +154,11 @@ export class Reconciler {
         continue;
       }
 
+      // Recorded after the transaction commits, so bookkeeping can never roll
+      // back the expiry -- and counted here because the branch below runs
+      // inside the transaction.
+      let approvalsExpiredHere = 0;
+
       withTransaction(this.store.db, () => {
         if (job.state === 'waiting_on_dependency') {
           // The reservation outlives the longest permitted dependency wait, so
@@ -180,7 +185,10 @@ export class Reconciler {
             'No answer arrived in time. The job stopped safely and its workspace was retained.',
           );
         } else if (job.state === 'needs_approval') {
-          this.store.approvals.expireAllPending(job.id, 'reservation_expired');
+          approvalsExpiredHere = this.store.approvals.expireAllPending(
+            job.id,
+            'reservation_expired',
+          );
           this.store.jobs.transition(
             job.id,
             'completed',
@@ -205,6 +213,25 @@ export class Reconciler {
         }
         this.store.jobs.releaseReservation(reservation.repoSlug);
       });
+
+      // The SAME event `expireApprovals()` records. An approval that lapsed on
+      // this path was invisible in the trail purely because the reservation
+      // timer got there first, which is not a distinction an auditor cares
+      // about -- and the detail names the cause so the two are still
+      // distinguishable.
+      if (approvalsExpiredHere > 0) {
+        this.store.auditLog.record({
+          event: 'approval.expired',
+          actorKind: 'reconciler',
+          actorRef: 'reconciler',
+          subjectKind: 'job',
+          subjectRef: job.publicId,
+          outcome: 'ok',
+          detail:
+            `${approvalsExpiredHere} pending approval(s) lapsed unanswered ` +
+            '(repository reservation expired first)',
+        });
+      }
       n += 1;
     }
     return n;
@@ -226,11 +253,26 @@ export class Reconciler {
     for (const jobId of jobIds) {
       const job = this.store.jobs.byId(jobId);
       if (!job || job.state !== 'needs_approval') continue;
-      n += withTransaction(this.store.db, () => {
-        const expired = this.store.approvals.expireAllPending(jobId, 'approval_ttl_expired');
+      const expired = withTransaction(this.store.db, () => {
+        const count = this.store.approvals.expireAllPending(jobId, 'approval_ttl_expired');
         this.approvals.settleJobWithin(jobId);
-        return expired;
+        return count;
       });
+      n += expired;
+      if (expired > 0) {
+        // An approval that lapsed unanswered is a decision by default, and the
+        // trail had no record of it at all. Written OUTSIDE the transaction so
+        // a bookkeeping failure cannot roll back the expiry itself.
+        this.store.auditLog.record({
+          event: 'approval.expired',
+          actorKind: 'reconciler',
+          actorRef: 'reconciler',
+          subjectKind: 'job',
+          subjectRef: job.publicId,
+          outcome: 'ok',
+          detail: `${expired} pending approval(s) lapsed unanswered`,
+        });
+      }
     }
     return n;
   }

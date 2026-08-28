@@ -409,13 +409,18 @@ describe('job_notifications baseline backfill on migration', () => {
       name       TEXT NOT NULL,
       applied_at TEXT NOT NULL
     )`);
-    // Apply every migration BEFORE the notification ledger existed,
-    // simulating an existing deployment upgrading into this feature. Both
-    // ledger migrations are withheld: migration 6 rewrites migration 5's
-    // table, so applying one without the other is not a state that ever
-    // existed.
-    const LEDGER_MIGRATIONS = ['job_notifications', 'shared_job_visibility'];
-    const preExisting = MIGRATIONS.filter((m) => !LEDGER_MIGRATIONS.includes(m.name));
+    // Apply every migration BEFORE the notification ledger existed, simulating
+    // an existing deployment upgrading into this feature.
+    //
+    // Selected by VERSION, not by excluding two names. The name-exclusion form
+    // also dragged in every migration that came AFTER the ledger, which is not
+    // a state that ever existed and only happened to work while nothing later
+    // referenced a ledger-era column -- migration 11 indexes migration 6's
+    // `origin_shared_channel_id`, and the old form broke on it.
+    const firstLedgerVersion = Math.min(
+      ...MIGRATIONS.filter((m) => m.name === 'job_notifications').map((m) => m.version),
+    );
+    const preExisting = MIGRATIONS.filter((m) => m.version < firstLedgerVersion);
     for (const m of preExisting) {
       db.exec(m.sql);
       db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(

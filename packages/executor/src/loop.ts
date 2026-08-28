@@ -1,3 +1,4 @@
+import { redact } from '@ducky/adapters';
 import { isDuckyError } from '@ducky/contracts';
 import type { PiOrchestrator } from '@ducky/adapters';
 import type { CoordinatorClient } from './client.js';
@@ -126,7 +127,10 @@ export class ExecutorLoop {
         backoff = 1000;
         if (outcome === 'idle') await sleep(250);
       } catch (err) {
-        const message = isDuckyError(err) ? err.ownerMessage : (err as Error).message;
+        // `ownerMessage` is already safe by construction; an arbitrary error
+        // message is not, and this is the one place a non-Ducky error reaches a
+        // log line.
+        const message = isDuckyError(err) ? err.ownerMessage : redact((err as Error).message);
         log(`executor loop error: ${message}`);
         const jitter = Math.floor(backoff * 0.25 * Math.random());
         await sleep(backoff + jitter);

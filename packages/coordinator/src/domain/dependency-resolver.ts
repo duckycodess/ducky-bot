@@ -163,6 +163,9 @@ export class DependencyResolver {
       return await withTimeout(this.checker.check(input), this.checkTimeoutMs);
     } catch (err) {
       return {
+        // Safe: `apply()` runs every outcome detail through `redact()` and
+        // clamps it before it is persisted or shown, so a checker's error text
+        // cannot reach the database or the owner unredacted.
         status: 'pending',
         detail: `The dependency check did not complete: ${(err as Error).message}`,
       };

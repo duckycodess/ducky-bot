@@ -1,0 +1,30 @@
+{
+  "id": "cli:agent:start",
+  "result": {
+    "agent": {
+      "agent": "pi",
+      "agent_status": "idle",
+      "cwd": "~/.herdr/worktrees/ducky-probe-3oLpLV/ducky-job-probe",
+      "focused": false,
+      "foreground_cwd": "~/.herdr/worktrees/ducky-probe-3oLpLV/ducky-job-probe",
+      "interactive_ready": true,
+      "name": "ducky-pi-probe",
+      "pane_id": "wQ:p1",
+      "revision": 2,
+      "state_change_seq": 41,
+      "tab_id": "wQ:t1",
+      "terminal_id": "term_65a158b61efd113",
+      "terminal_title": "[REDACTED:title]",
+      "terminal_title_stripped": "[REDACTED:title]",
+      "workspace_id": "wQ"
+    },
+    "argv": [
+      "pi",
+      "--session-id",
+      "ducky-probe",
+      "--thinking",
+      "minimal"
+    ],
+    "type": "agent_started"
+  }
+}

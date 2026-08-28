@@ -18,6 +18,33 @@ export type DuckyErrorCode =
   | 'not_found'
   | 'rate_limited'
   | 'herdr_unavailable'
+  /**
+   * `herdr agent prompt --wait` observed no lifecycle change within its own
+   * stall window. The agent and the Herdr server are both fine, so this is
+   * deliberately NOT an outage: treating it as one would release a repository
+   * whose pane may still hold a live writer.
+   */
+  | 'herdr_prompt_stalled'
+  /**
+   * A worktree checkout still holds modified or untracked files, so Herdr
+   * refuses to remove it without `--force`.
+   *
+   * Ducky deliberately does NOT force. A completed job's implementation lives
+   * in that checkout and nothing has committed it -- the brief forbids
+   * committing -- so forcing the removal would delete the very work the job
+   * was asked to do.
+   */
+  | 'herdr_worktree_dirty'
+  /**
+   * `agent start` returned, but the agent could not accept input yet.
+   *
+   * Herdr documents `agent start` as returning once the agent "is ready for
+   * input", and it usually is -- but observed live on this host, a resumed Pi
+   * session printed enough banner output that detection succeeded seconds
+   * before the input surface was usable, and the prompt three seconds later
+   * was refused with `agent_not_ready`. Transient, and retryable.
+   */
+  | 'herdr_agent_not_ready'
   | 'foreign_agent_conflict'
   | 'orphan_agent'
   | 'not_enabled_in_phase1'

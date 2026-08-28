@@ -19,6 +19,7 @@ reverse. Trivial implementation choices do not get one.
 | [0012](0012-opt-in-shared-job-visibility.md) | Opt-in shared job visibility through a projection |
 | [0013](0013-bounded-reminder-recurrence-and-catch-up.md) | Bounded reminder recurrence, and a collapsing catch-up after an outage |
 | [0014](0014-single-owner-timezone-as-a-projection.md) | One configured owner timezone, applied as a projection |
+| [0015](0015-provider-agnostic-conversation-attachments.md) | Provider-agnostic conversation attachments, refused before download |
 
 ## Format
 

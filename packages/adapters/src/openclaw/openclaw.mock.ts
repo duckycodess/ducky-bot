@@ -1,4 +1,18 @@
-import type { ConversationInput, ConversationProvider, ConversationReply } from './openclaw.port.js';
+import { DuckyError } from '@ducky/contracts';
+import {
+  NO_ATTACHMENT_CAPABILITY,
+  type ConversationCapabilities, type ConversationInput, type ConversationProvider,
+  type ConversationReply,
+} from './openclaw.port.js';
+
+/**
+ * Refused by BOTH stand-ins, and worth writing once. It is a capability
+ * statement, not a policy one: nothing on this host can read those bytes, so
+ * saying anything softer would be a promise we cannot keep.
+ */
+export const ATTACHMENTS_UNAVAILABLE_MESSAGE =
+  'No conversational backend that can read files is configured, so attachments are not accepted. ' +
+  'The bytes were not downloaded.';
 
 /**
  * Stand-in for the OpenClaw gateway, which is not installed on this host and
@@ -9,7 +23,20 @@ export class MockConversationProvider implements ConversationProvider {
   readonly name = 'mock';
   readonly verified = false;
 
+  /**
+   * Honest about attachments in both directions: it advertises none, and it
+   * still throws if one somehow arrives. The router already refuses before
+   * downloading, so reaching this line means a wiring bug -- which should
+   * fail loudly rather than silently drop the owner's file on the floor.
+   */
+  readonly capabilities: ConversationCapabilities = {
+    attachments: NO_ATTACHMENT_CAPABILITY,
+  };
+
   async reply(input: ConversationInput): Promise<ConversationReply> {
+    if (input.attachment) {
+      throw new DuckyError('attachment_rejected', ATTACHMENTS_UNAVAILABLE_MESSAGE);
+    }
     const trimmed = input.text.trim();
     const body =
       trimmed.length === 0

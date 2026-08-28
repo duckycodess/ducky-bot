@@ -20,6 +20,9 @@ outside the scope of this run.
   gateway URL at construction and then **throws** from `reply()`. Guessing at
   routes and a response shape would have produced code that looks finished and
   fails in production; failing loudly is the honest option.
+- Both providers declare `capabilities.attachments` as
+  `NO_ATTACHMENT_CAPABILITY`, and both throw a distinct
+  capability refusal if an attachment somehow reaches them.
 
 The private-URL guard is already enforced: loopback, `100.64.0.0/10` and
 `.ts.net` are accepted, everything else is refused at construction and again at
@@ -39,6 +42,24 @@ startup.
    does.
 6. Set `OPENCLAW_BASE_URL` to a loopback or tailnet address. A public URL is
    refused.
+7. **Only then** consider attachments. Flipping `verified` to `true` also opens
+   the 2C attachment gate, so verification must cover the attachment contract
+   and not only the text one: which MIME types the gateway really accepts, its
+   own size ceiling, and how bytes are transferred. Fill those into
+   `capabilities.attachments` from what was probed, not from what is
+   convenient — the coordinator takes the smaller cap and the intersection of
+   the type lists, so an over-claim here is the one that matters.
+
+## Consequence for conversation attachments (2C)
+
+The 2C pipeline is built and closed. An attachment on a conversation message is
+refused **before download** because `attachmentsUsable` requires the provider to
+be both `verified` and attachment-capable, and neither shipped provider is
+either. `/status` reports `unavailable (mock is unverified)`.
+
+No attachment byte has ever been fetched on this host, and none is sent
+anywhere. See
+[decisions/0015](../decisions/0015-provider-agnostic-conversation-attachments.md).
 
 ## Consequence for schedules
 

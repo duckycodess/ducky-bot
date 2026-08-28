@@ -190,17 +190,40 @@ string, header set or body.
 
 ## Untrusted input
 
-- **Attachments.** Only `/schedule`, owner only, one file. The metadata check
-  runs *before any network request*: https only, an exact CDN host match (never
-  a suffix match), a size cap, and a content-type allowlist. Redirects are
-  refused outright, nothing is ever decompressed, and a counting stream aborts
-  mid-download if the reported size was a lie. A NUL byte in the head rejects
+- **Attachments.** Two surfaces, `/schedule` and conversation, both **owner
+  only** and both **one file at a time**. They share one metadata policy
+  (`assertAttachmentMeta`) rather than each carrying a copy, so a surface
+  cannot ship weaker checks than the other. The check runs *before any network
+  request*: https only, an exact CDN host match (never a suffix match), a size
+  cap, and a content-type allowlist. Redirects are refused outright, nothing is
+  ever decompressed, and a counting stream aborts mid-download if the reported
+  size was a lie. On the schedule surface a NUL byte in the head rejects
   anything that claimed to be text. Bytes are written to a 0600 file in a 0700
   directory that is removed on success and on failure alike, and a startup
-  sweeper clears anything a crash left behind. Raw bytes never reach the
-  database, Discord, or a log.
-- **Image and PDF uploads are refused** while no verified provider can read
-  them, rather than producing an invented preview.
+  sweeper clears anything a crash left behind, for every surface's prefix. Raw
+  bytes never reach the database, Discord, or a log.
+- **Conversation attachments are owner-only even though plain chat is not.**
+  The chat whitelist may talk; it may not send files. A file is personal data
+  leaving the host to an external provider, and fetching one is an action taken
+  on somebody else's say-so — it makes the coordinator issue an HTTPS request
+  to a URL they chose and spends the owner's bandwidth and provider budget. The
+  whitelist gets the same refusal it gets on every other privileged surface.
+  See [decisions/0015](decisions/0015-provider-agnostic-conversation-attachments.md).
+- **A capability refusal happens before any download.** Conversation bytes are
+  fetched only when the operator has opted in, the provider reports itself
+  `verified`, and it declares attachment support. `verified` is not negotiable:
+  an unexercised API is not sent the owner's personal files on the strength of
+  a flag it wrote itself. No provider on this host qualifies, so the path is
+  closed and nothing is fetched.
+- **The attachment handle has an explicit lifetime the coordinator owns.** The
+  provider is handed a type with no `dispose`, so it cannot keep the bytes
+  alive; the router disposes in a `finally` and the handle is poisoned, so a
+  retained reference reads an error rather than the file.
+- **Image and PDF uploads are refused for schedule extraction** while no
+  verified provider can read them, rather than producing an invented preview.
+  Conversation accepting an image type is *not* a claim that anything can read
+  it: the bytes are forwarded to a provider that declared it accepts that type,
+  and no vision or extraction capability is claimed anywhere.
 - **Subprocesses.** `runArgv` uses `execFile` with an argv array, a mandatory
   timeout and a capped buffer. There is no shell mode; a shell string or a
   non-array throws. A global concurrency pool bounds host load.
@@ -228,8 +251,9 @@ Read-only inspection needs no approval.
 ## Rate limiting
 
 Per-executor budgets on every API route, one in-flight long poll per executor,
-a server-side wait cap, per-user Discord command buckets, an hourly attachment
-budget, a subprocess concurrency cap and a job wall-clock bound.
+a server-side wait cap, per-user Discord command buckets, a separate hourly
+attachment budget per surface (schedule and conversation), a subprocess
+concurrency cap and a job wall-clock bound.
 
 Because the Discord surfaces are already owner-only, these are **accident
 containment and self-protection, not an authorization control**. They are

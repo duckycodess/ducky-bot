@@ -1,7 +1,7 @@
 # Current state
 
-What is actually true today. Phase 1 plus milestones 2A and 2B, no deployment
-performed.
+What is actually true today. Phase 1 plus milestones 2A, 2B and 2C, no
+deployment performed.
 
 ## Two Discord identities
 
@@ -70,6 +70,39 @@ diagnostics and in `/status`.
     reminder is late by at most one `DUCKY_RECONCILE_INTERVAL_MS`.
 - Text and CSV schedule extraction → preview → correction modal → explicit
   confirm
+- **Conversation attachments (milestone 2C): the PIPELINE only, and closed on
+  this host.** See
+  [decisions/0015](decisions/0015-provider-agnostic-conversation-attachments.md)
+  - One image or file may be attached to an ordinary conversation message.
+    Several in one message are refused concisely, before anything is inspected
+    further.
+  - **Nothing is downloaded unless all three hold:** the operator has opted in
+    (`CONVERSATION_ATTACHMENTS_ENABLED`, default off), the provider reports
+    itself `verified`, and it declares attachment support. Both shipped
+    providers advertise none and throw if one reaches them anyway, so on this
+    host the refusal is on metadata alone and **no attachment byte is ever
+    fetched**.
+  - The port carries **metadata plus a bounded read** — never a path, never
+    base64 — with an explicit lifetime the coordinator owns. The provider is
+    handed a narrower type with no `dispose`, and the handle is poisoned after
+    the reply, so a retained reference reads an error rather than the owner's
+    file.
+  - **Owner-only.** Plain conversation keeps its Phase 1 whitelist behaviour;
+    an attachment does not, because it is personal data leaving the host and
+    fetching one is an action taken on somebody else's say-so. Conversation is
+    not a shared route, and a message event carries no channel context.
+  - Accepted types: `image/png`, `image/jpeg`, `image/webp`, `text/plain`,
+    `text/csv`, `text/markdown`, `application/json`. **PDF is deliberately
+    excluded.** Accepting a type is not a claim that anything can read it — no
+    vision or extraction capability is claimed anywhere.
+  - Controls: exact HTTPS host from the existing `DISCORD_CDN_HOSTS`; declared
+    type and size checked before any network request; the smaller of the
+    configured cap and the provider's own; no redirects; no compressed
+    transfer; the received stream capped again because a declared size is a
+    claim; a `0700` directory and a `0600` file removed on success, failure
+    and provider error alike; the startup sweep extended to the new prefix;
+    per-owner hourly budget. No byte reaches SQLite, a log line, or a Discord
+    reply.
 - Job lifecycle: queue, claim, lease, heartbeat, result intake, cancellation
   (supervised mid-turn, acknowledged only once a stop is observed), owner-input
   rounds, per-repo reservations, durable workspace registration, crash
@@ -139,8 +172,9 @@ and `/status` reports `experimental`.
 
 | Area | Status |
 |---|---|
-| OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. |
-| Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1. |
+| OpenClaw conversation | **Not installed on this host.** The HTTP provider throws rather than guessing an API; the mock provider answers and every reply is prefixed `[mock]`. Both advertise attachments as unavailable, so the 2C path stays closed. |
+| Conversation attachment delivery | **Unreachable, by design.** The pipeline is unit-tested against an injected `fetch` and a test-only provider that supplies the one thing this host lacks — a verified, attachment-capable endpoint. **No live attachment byte has been fetched on this host, and none is sent anywhere.** It becomes reachable only when 2D produces a verified provider that declares attachment support. |
+| Image / PDF schedule extraction | **Unsupported.** Those uploads are refused before download. No decoder ships in Phase 1, and 2C did not add one: it forwards bytes, it does not read them. |
 | `herdr agent start` / `agent prompt` | **Not exercised.** Doing so starts a real Pi agent. The orchestrator is therefore `experimental`, not `verified`. |
 | Real Discord gateway | The development bot successfully connected during a local smoke test, and the bot/guild REST checks returned HTTP 200. A human DM/slash-command interaction has not yet been exercised; Message Content intent must be enabled in the portal for message bodies. Proactive job notifications use this same path, so their delivery is still not verified by an owner-initiated live DM. |
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |

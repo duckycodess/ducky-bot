@@ -1,4 +1,5 @@
 import { isUpToDate } from '@ducky/persistence';
+import { attachmentAvailability } from './discord/conversation-attachments.js';
 import type { App } from './app.js';
 
 export interface Diagnostic {
@@ -33,6 +34,9 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       : 'not applicable to the mock transport',
   );
   add('conversation', app.conversation.verified, `${app.conversation.name}`);
+  // Not a warning when unavailable: refusing to hand files to an unverified
+  // provider is the correct state, not a degraded one.
+  add('chat attachments', true, attachmentAvailability(app.conversation, app.conversationAttachments));
   // Already validated in createApp; reported so the owner can see WHICH zone
   // every due date, reminder and briefing day boundary is computed in.
   add('owner timezone', true, app.clock.timeZone);

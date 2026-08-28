@@ -3,7 +3,7 @@ import { z } from 'zod';
 import {
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
-  DEFAULT_OWNER_TIMEZONE,
+  CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   blankToUndefined, resolveDuckyProfile,
   type DuckyProfile,
@@ -70,6 +70,23 @@ export const EnvSchema = z.object({
   DUCKY_REPOS_FILE: z.string().optional(),
 
   OPENCLAW_BASE_URL: z.string().optional(),
+
+  /**
+   * Operator opt-in for conversation attachments. Default OFF.
+   *
+   * This is the answer to "does the owner confirm per upload, per provider, or
+   * once in configuration?" -- once, in configuration, and it is one of three
+   * conditions rather than the only one: the provider must also report itself
+   * verified AND attachment-capable before a single byte is fetched. Enabling
+   * this alone changes nothing while every provider on this host is
+   * unverified.
+   */
+  CONVERSATION_ATTACHMENTS_ENABLED: bool(false),
+  CONVERSATION_MAX_ATTACHMENT_BYTES: z.coerce
+    .number().int().positive().default(CONVERSATION_MAX_ATTACHMENT_BYTES),
+  CONVERSATION_ATTACHMENTS_PER_HOUR: z.coerce
+    .number().int().positive().default(CONVERSATION_ATTACHMENTS_PER_HOUR),
+
   SCHEDULE_BINARY_EXTRACTION_ENABLED: bool(false),
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),

@@ -46,6 +46,15 @@ gateway guard accepts loopback and tailnet and rejects everything else; the
 `gh` table is frozen and contains no write verb; the schedule extractor never
 guesses; attachment policy rejects binaries, bad hosts and oversize files.
 
+**adapters / attachment policy** — the shared metadata policy normalizes a
+parameterized, upper-cased content type before comparing it; accepts only an
+exact type; rejects a negative, NaN, infinite or oversize declared size;
+requires HTTPS and an EXACT host, so `cdn.discordapp.com.evil.tld`, a path that
+merely contains an allowed host, and `notcdn.discordapp.com` are all refused;
+checks type before size before host, so the cheapest decisive check runs first;
+and the schedule surface still layers its own capability-honest image/PDF
+wording on top of the same shared rules.
+
 **adapters / herdr contract** — the production schemas parse **recorded live
 responses** from `pnpm probe:herdr`. Until fixtures exist the cases skip and the
 orchestrator stays experimental: passing mocks is not evidence.
@@ -100,6 +109,26 @@ says so rather than padding; the same stored rows produce a byte-identical
 briefing twice; every briefing carries its provenance, contains no `[mock]`
 text, and the service holds nothing that could generate a sentence; and every
 task handle in the output belongs to a task that exists.
+
+**coordinator / conversation attachments** — both shipped providers advertise
+attachments unavailable AND throw if one reaches them; the gate requires
+verified AND capable AND opted-in, and a provider that claims capability while
+unverified is still refused; every refusal path is asserted to make **zero
+fetch calls** and leave no temp directory — unsupported provider, operator
+switch off, unverified provider, several attachments, a foreign host, plain
+HTTP, a host that merely ends with an allowed one, an unsupported or absent
+type, and an oversize claim; attachments are refused for a chat-whitelist user
+and a stranger while plain conversation still works for the whitelist; the
+effective limits are the smaller cap and the intersection of the type lists;
+the request sets `redirect: 'error'` and `accept-encoding: identity`; a lying
+declared size is caught by the stream counter; the provider receives exactly
+the declared metadata and the exact bytes, and a bounded `read(n)` returns a
+prefix; the temp directory is `0700` and the file `0600` *while the provider
+holds it* and both are gone afterwards, including when the provider throws; a
+handle the provider retained reads an error after the reply while its metadata
+stays inert; the startup sweep removes a stale conversation directory; and no
+byte, base64 blob, temp path or `attachments` table appears in the reply or the
+database.
 
 **coordinator / shared visibility** — a shared-channel member (and a stranger,
 and a chat-whitelist user) sees the projection and never the task, context,

@@ -49,6 +49,12 @@ Fill in the env file:
   and what `tomorrow 09:00` means. Instants are still stored as UTC, so
   changing it re-renders existing rows rather than rewriting them, and there is
   nothing to migrate. A name the runtime does not recognise fails at startup.
+- `CONVERSATION_ATTACHMENTS_ENABLED` — optional, default off. Setting it alone
+  changes nothing: a file is downloaded only when the conversation provider is
+  also `verified` *and* declares attachment support, and no provider on this
+  host is either. Attachments are owner-only even though plain chat is not.
+  `CONVERSATION_MAX_ATTACHMENT_BYTES` and `CONVERSATION_ATTACHMENTS_PER_HOUR`
+  bound it; downloads reuse `DISCORD_CDN_HOSTS`.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
 

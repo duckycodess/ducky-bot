@@ -1,11 +1,12 @@
 import {
-  CONVERSATIONAL_ROUTE, DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
+  CONVERSATIONAL_ROUTE, CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE,
+  DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
   isBriefingKind, isDuckyError, isSharedReadableRoute, isTaskListFilter,
   type CaptureState, type OwnerOnlyCommand, type OwnerOnlyInteractionKind,
   type ReminderListFilter, type TaskListFilter,
 } from '@ducky/contracts';
-import type { ConversationProvider } from '@ducky/adapters';
+import type { ConversationAttachment, ConversationProvider } from '@ducky/adapters';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { ComponentSigner } from '../security/component-signing.js';
 import type { CapturesService } from '../domain/captures.service.js';
@@ -19,7 +20,11 @@ import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
-import type { Incoming } from './transport.js';
+import type { Incoming, IncomingAttachment } from './transport.js';
+import {
+  TOO_MANY_ATTACHMENTS_MESSAGE, attachmentAvailability, conversationAttachmentsUsable,
+  downloadConversationAttachment, type ConversationAttachmentConfig,
+} from './conversation-attachments.js';
 import { CommandBuckets } from './command-buckets.js';
 import * as present from './presenters.js';
 import * as shared from './shared-presenters.js';
@@ -52,7 +57,19 @@ export interface RouterDeps {
   readonly sharedPolicy?: SharedChannelPolicy;
   readonly sharedJobs?: SharedJobsService;
   /** Supplied by the transport so /schedule can accept a text attachment. */
-  readonly readAttachment?: (a: NonNullable<Extract<Incoming, { kind: 'command' }>['attachment']>) => Promise<string>;
+  readonly readAttachment?: (a: IncomingAttachment) => Promise<string>;
+  /**
+   * Conversation-attachment configuration. OMITTING IT DISABLES THE PATH
+   * ENTIRELY: an unwired router refuses every attachment and downloads
+   * nothing, which is the same fail-closed posture the shared-visibility
+   * wiring takes.
+   */
+  readonly conversationAttachments?: ConversationAttachmentConfig;
+  /**
+   * Charged once per accepted attachment, before the download. Injected so
+   * the budget is shared with the schedule surface rather than duplicated.
+   */
+  readonly chargeConversationAttachment?: (userId: string) => void;
 }
 
 type CommandHandler = (actor: ActorContext, e: Extract<Incoming, { kind: 'command' }>) => Promise<OutboundMessage>;
@@ -148,7 +165,7 @@ export class DuckyRouter {
         case 'component':
           return await this.handleComponent(actor, event.customId, event.values);
         case 'message':
-          return await this.handleMessage(actor, event.text, event.threadKey);
+          return await this.handleMessage(actor, event);
       }
     } catch (err) {
       return errorReply(err);
@@ -237,18 +254,104 @@ export class DuckyRouter {
     return handler(actor, verified.entityId, values);
   }
 
-  /** The single non-privileged route: conversation, with no tool access. */
+  /**
+   * The single non-privileged route: conversation, with no tool access.
+   *
+   * Plain text keeps its Phase 1 authorization exactly: the chat whitelist may
+   * talk. An ATTACHMENT is different and is owner-only -- see
+   * `handleConversationAttachment` for why.
+   */
   private async handleMessage(
     actor: ActorContext,
-    text: string,
-    threadKey: string,
+    event: Extract<Incoming, { kind: 'message' }>,
   ): Promise<OutboundMessage> {
     this.deps.authz.requireConversational(actor);
-    const reply = await this.deps.conversation.reply({
-      userId: actor.discordUserId,
-      text,
-      threadKey,
-    });
+    const attachments = event.attachments ?? [];
+
+    if (attachments.length === 0) {
+      return this.converse({ userId: actor.discordUserId, text: event.text, threadKey: event.threadKey });
+    }
+    return this.handleConversationAttachment(actor, event, attachments);
+  }
+
+  /**
+   * Conversation with one attachment.
+   *
+   * The order of these checks IS the security property, so it is written out
+   * rather than left to reading order:
+   *
+   * 1. **Owner-only.** Plain chat stays on the whitelist, but an attachment is
+   *    personal data being handed to an external provider, and fetching one
+   *    spends the owner's bandwidth and provider budget on a URL somebody else
+   *    chose. A whitelist user gets the same refusal they get anywhere else.
+   * 2. **One at a time**, refused before anything is inspected further.
+   * 3. **Capability**, which is the refusal that matters: if the provider is
+   *    not verified AND attachment-capable AND the operator has opted in,
+   *    the answer is honest and NO BYTES ARE FETCHED. This is checked before
+   *    the rate-limit charge and before any URL is touched.
+   * 4. **Metadata policy** -- type, size, HTTPS, exact CDN host -- still
+   *    entirely offline.
+   * 5. Only then a download, into a private temp file.
+   *
+   * The handle is disposed in a `finally`, so a provider that throws, hangs
+   * past its own timeout, or simply returns leaves nothing on disk.
+   */
+  private async handleConversationAttachment(
+    actor: ActorContext,
+    event: Extract<Incoming, { kind: 'message' }>,
+    attachments: readonly IncomingAttachment[],
+  ): Promise<OutboundMessage> {
+    this.deps.authz.requireOwner(actor);
+
+    if (attachments.length > CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE) {
+      return { content: TOO_MANY_ATTACHMENTS_MESSAGE, ephemeral: false };
+    }
+
+    const config = this.deps.conversationAttachments;
+    const provider = this.deps.conversation;
+    // An unwired router has no config at all, which refuses exactly as a
+    // configured-but-unusable one does. Failing closed here loses a feature;
+    // failing open would send the owner's files to an unverified endpoint.
+    if (!config || !conversationAttachmentsUsable(provider, config)) {
+      return {
+        content:
+          'I cannot accept files yet — ' +
+          `attachments are ${config ? attachmentAvailability(provider, config) : 'not configured'}. ` +
+          'Nothing was downloaded.',
+        ephemeral: false,
+      };
+    }
+
+    const meta = attachments[0]!;
+    // Charged before the metadata check, so a stream of rejected files still
+    // costs budget. Only the owner reaches this line, so it is accident
+    // containment rather than an authorization control -- the same reasoning
+    // the command buckets carry.
+    this.deps.chargeConversationAttachment?.(actor.discordUserId);
+
+    const handle = await downloadConversationAttachment(meta, provider, config);
+    try {
+      return await this.converse({
+        userId: actor.discordUserId,
+        text: event.text,
+        threadKey: event.threadKey,
+        // The provider receives the NARROW type, which has no `dispose`: it is
+        // structurally unable to keep the bytes alive past this call.
+        attachment: handle,
+      });
+    } finally {
+      // Success, provider error, or a throw from anywhere in between.
+      await handle.dispose();
+    }
+  }
+
+  private async converse(input: {
+    userId: string;
+    text: string;
+    threadKey: string;
+    attachment?: ConversationAttachment;
+  }): Promise<OutboundMessage> {
+    const reply = await this.deps.conversation.reply(input);
     // A stand-in reply is always visibly marked so it cannot be mistaken for a
     // real assistant answer.
     return { content: reply.mock ? `[mock] ${reply.text}` : reply.text, ephemeral: false };

@@ -81,6 +81,18 @@ so lock the channel down first. See
 - **Conversation replies come from a marked mock.** OpenClaw is not installed
   here, so its API could not be verified. Every mock reply is prefixed
   `[mock]`; the real HTTP provider throws rather than guessing an API.
+- **Conversation attachments are built but closed.** You can attach one image
+  or file to a chat message, and the whole pipeline — capability handshake,
+  metadata policy, bounded download, private temp file, explicit disposal — is
+  in place and tested. It is **unreachable on this host**, deliberately: bytes
+  are fetched only when the operator has opted in *and* the provider is
+  `verified` *and* it declares attachment support, and no provider here is
+  either of the last two. So an upload is refused **before download** and
+  **no attachment byte has ever been fetched or sent anywhere**. Accepting a
+  type is not a claim that anything can read it — no vision or extraction
+  capability is claimed. Attachments are owner-only even though plain chat is
+  not. See
+  [`docs/decisions/0015`](docs/decisions/0015-provider-agnostic-conversation-attachments.md).
 - **The Herdr/Pi orchestrator is partly verified.** Workspace, pane and
   worktree creation are checked against recorded live responses
   (`pnpm probe:herdr`); starting and prompting a Pi agent was not exercised, so

@@ -8,6 +8,7 @@ export * from './credentials/memory-credential-store.js';
 export * from './github/github.port.js';
 export * from './github/gh-cli.js';
 export * from './github/github.mock.js';
+export * from './attachments/policy.js';
 export * from './openclaw/private-url.js';
 export * from './openclaw/openclaw.port.js';
 export * from './openclaw/openclaw.mock.js';

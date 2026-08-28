@@ -110,6 +110,8 @@ export interface ProviderStatus {
   readonly profile: string;
   readonly discord: string;
   readonly conversation: string;
+  /** Whether the conversation provider may be handed files, and why not. */
+  readonly conversationAttachments: string;
   readonly orchestrator: string;
   readonly scheduleExtraction: string;
   readonly actions: string;
@@ -129,6 +131,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Profile', value: p.profile, inline: true },
           { name: 'Discord', value: p.discord, inline: true },
           { name: 'Conversation', value: p.conversation, inline: true },
+          { name: 'Chat attachments', value: p.conversationAttachments, inline: true },
           { name: 'Orchestrator', value: p.orchestrator, inline: true },
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },
           { name: 'Approved actions', value: p.actions, inline: true },

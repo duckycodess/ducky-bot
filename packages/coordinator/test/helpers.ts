@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
-import { MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex } from '@ducky/adapters';
+import {
+  MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
+  type ConversationProvider,
+} from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
 import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
 import { MockDiscordTransport } from '../src/discord/mock.transport.js';
@@ -72,6 +75,10 @@ export interface HarnessOptions {
    * time without waiting for it.
    */
   readonly clock?: TestClock;
+  /** Replaces the conversation provider; used by the attachment tests. */
+  readonly conversation?: ConversationProvider;
+  /** Injected download `fetch` for conversation attachments. */
+  readonly conversationFetch?: typeof fetch;
 }
 
 /**
@@ -133,7 +140,8 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       ...(realTransport ? {} : { transport }),
       allowlistJson: REPOS_JSON,
       ...(opts.clock ? { clock: opts.clock } : {}),
-      conversation: new MockConversationProvider(),
+      ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
+      conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
     },
   );

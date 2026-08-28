@@ -36,6 +36,9 @@ import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
 import { DiscordJsTransport } from './discord/discordjs.transport.js';
 import { fetchTextAttachment } from './discord/attachments.js';
+import {
+  attachmentAvailability, type ConversationAttachmentConfig,
+} from './discord/conversation-attachments.js';
 import { HourlyBudget } from './discord/command-buckets.js';
 import type { DiscordSink, DiscordTransport } from './discord/transport.js';
 import { toDiscordPayload } from './discord/payload.js';
@@ -56,6 +59,12 @@ export interface AppOverrides {
    * instead of waiting for real time to pass.
    */
   readonly clock?: OwnerClock;
+  /**
+   * Injected `fetch` for the conversation-attachment download. Tests use it to
+   * exercise the byte path without a network; nothing in production supplies
+   * it, so the global `fetch` is what actually runs.
+   */
+  readonly conversationFetch?: typeof fetch;
 }
 
 export interface App {
@@ -78,6 +87,8 @@ export interface App {
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
+  /** Reported by /status and asserted by tests; off by default. */
+  readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
@@ -155,7 +166,22 @@ export function createApp(
     store, transport, ownerId: authz.ownerId, clock,
   });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
+  const conversationAttachmentBudget = new HourlyBudget(env.CONVERSATION_ATTACHMENTS_PER_HOUR);
   const hosts = cdnHosts(env);
+
+  /**
+   * Conversation attachments are off unless the operator says otherwise, and
+   * even then the router still requires the provider to be verified AND
+   * attachment-capable. Every host in the allowlist is the SAME
+   * `DISCORD_CDN_HOSTS` the schedule surface uses -- one list, one place to
+   * get wrong.
+   */
+  const conversationAttachments: ConversationAttachmentConfig = {
+    enabled: env.CONVERSATION_ATTACHMENTS_ENABLED,
+    allowedHosts: hosts,
+    maxBytes: env.CONVERSATION_MAX_ATTACHMENT_BYTES,
+    ...(overrides.conversationFetch ? { fetchImpl: overrides.conversationFetch } : {}),
+  };
 
   const scope = discordProfile.token ? commandScopeFor(discordProfile) : undefined;
   const status = (): ProviderStatus => ({
@@ -165,6 +191,7 @@ export function createApp(
         ? `real (${discordProfile.profile} bot, ${scope?.kind === 'guild' ? 'guild' : 'global'} commands)`
         : `mock (no ${discordProfile.profile} token)`,
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
+    conversationAttachments: attachmentAvailability(conversation, conversationAttachments),
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
@@ -202,13 +229,15 @@ export function createApp(
       });
       return text;
     },
+    conversationAttachments,
+    chargeConversationAttachment: (userId) => conversationAttachmentBudget.check(userId),
   });
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
     approvals, github, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
     credentials, conversation, status,
-    clock, tasks, reminders, briefing, reminderNotifier,
+    clock, tasks, reminders, briefing, reminderNotifier, conversationAttachments,
     close: () => store.db.close(),
   };
 }

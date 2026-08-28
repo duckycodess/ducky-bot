@@ -105,47 +105,71 @@ Still open, and deliberately deferred:
 
 ---
 
-## 2C — Provider-agnostic multimodal chat attachments
+## 2C — Provider-agnostic conversation attachments ✅ delivered (pipeline only)
 
-Ducky should accept an image or a file in conversation. Phase 1 refuses both,
-honestly: `SCHEDULE_BINARY_EXTRACTION_ENABLED` defaults off and no provider on
-this host can read those bytes
-([ADR 0011](decisions/0011-capability-honest-schedule-extraction.md)).
+Ducky can now accept one image or file on an ordinary conversation message.
+The **pipeline** is built, provider-agnostic, and it keeps Phase 1's honesty:
+with no verified, attachment-capable provider configured — which is the state
+on this host — an upload is refused **before download**, and no byte is ever
+fetched. See
+[ADR 0015](decisions/0015-provider-agnostic-conversation-attachments.md).
 
-This milestone builds the **pipeline**, provider-agnostic, and keeps that
-honesty: with no capable provider configured, an upload is still refused
-before download.
+Delivered:
 
-Non-negotiable controls, most of which the existing
-`fetchTextAttachment` path already enforces for text and which extend
-unchanged:
+- **A capability handshake on the port.** `ConversationProvider.capabilities`
+  is required, so a new provider must state its position rather than default
+  into one. Bytes are fetched only when the operator has opted in AND the
+  provider is `verified` AND it declares attachment support. Both shipped
+  providers advertise none and throw if one reaches them anyway.
+- **A provider-agnostic handle** — metadata plus a bounded `read`, never a
+  path and never base64, with an **explicit lifetime the caller owns**. The
+  provider gets a narrower type with no `dispose`, so it is structurally
+  unable to keep the bytes alive; the router disposes in a `finally` and the
+  handle is poisoned, so a retained reference reads an error rather than a
+  file.
+- **One attachment per message**, refused concisely if there are more, before
+  anything is inspected further.
+- **Owner-only attachments.** Plain chat keeps its whitelist behaviour; a file
+  is personal data leaving the host on somebody's say-so, so it is owner-only.
+- **A shared, strict metadata policy** used by both the schedule and the
+  conversation surface, so a second surface cannot ship weaker checks than the
+  first.
+- Type allowlist checked before any network request; exact HTTPS CDN host from
+  the existing `DISCORD_CDN_HOSTS`; a conservative configured size cap and the
+  provider's own, whichever is smaller; no redirects and no compressed
+  transfer; the received stream capped again because a declared size is a
+  claim; a `0700` directory and a `0600` file removed on success, failure and
+  provider error alike; the startup sweep extended to the new prefix; and no
+  byte in SQLite, in a log, or in a Discord reply.
 
-- **CDN allowlist** — download only from `DISCORD_CDN_HOSTS`. An attachment
-  url is attacker-influenced input.
-- **Declared type allowlist**, checked against the metadata *before* any
-  network request. DCStro allowed exactly `image/png`, `image/jpeg`,
-  `image/webp`; that narrowness is a feature.
-- **Size ceiling**, enforced on the declared size and again on the received
-  stream, since a declared size is a claim.
-- **Temp cleanup** — a private-mode file with an explicit lifetime, deleted on
-  every path including failure, plus the existing startup sweep for a
-  previous run's leftovers. DCStro wrote `0o600` and dropped the bytes
-  immediately; keep both.
-- **Rate limiting** per owner, as attachments already are.
-- **No bytes in SQLite and none in a log.** Unchanged from Phase 1.
+Decisions resolved:
 
-Open decisions:
+- **Where content is sent** → answered once, in configuration
+  (`CONVERSATION_ATTACHMENTS_ENABLED`, default off), and it is only one of
+  three conditions. Per-upload confirmation was rejected: it trains the owner
+  to click through, and it does not constrain *which* provider receives the
+  bytes.
+- **Transfer shape** → neither. The port carries metadata and a bounded read;
+  an adapter that wants a file writes one, an adapter that wants base64
+  encodes one.
+- **Non-image files** → a narrow set that genuinely survives the generic byte
+  path (`text/plain`, `text/csv`, `text/markdown`, `application/json`)
+  alongside PNG/JPEG/WebP. **PDF is deliberately excluded** — a different
+  parsing surface, and accepting it would imply a document capability nothing
+  here has.
 
-- 🔶 **Where content is sent.** Passing an image to a provider sends personal
-  data off the host. Which providers are acceptable, and does the owner
-  confirm per upload, per provider, or once in configuration?
-- 🔶 **Transfer shape.** Inline base64 or a temp file path? DCStro used a path
-  because its CLI read from disk. A provider-agnostic port must not assume
-  either, and the answer shapes the port.
-- 🔶 **Non-image files.** PDFs and text are a different parsing surface from
-  images. Same milestone or a later one?
-- 🔶 **Retention of derived text.** Extracted text is durable where the image
-  was not. Stored, or used once and dropped?
+Still open:
+
+- 🔶 **Retention of derived text.** Moved to 2E with the rest of the retention
+  questions. Nothing is derived yet, because nothing on this host can read the
+  bytes.
+- 🔶 **PDF and other document types**, which depend on a provider that can
+  honestly claim to parse them.
+
+**Not delivered, and stated plainly:** no vision or extraction capability. The
+bytes are forwarded to a provider that declared it accepts that exact type;
+what it does with them is its own contract, and 2D has to verify it. No live
+attachment byte has been fetched on this host.
 
 ---
 
@@ -165,8 +189,11 @@ Scope: install or reach an instance; record request/response fixtures the way
 the Herdr probe does; pin the schemas; only then let the provider report
 `verified: true`.
 
-2B's natural-language capture and 2C's multimodal chat both depend on this.
-Neither should ship against a mock.
+2B's natural-language capture and 2C's attachment *delivery* both depend on
+this. 2C's pipeline ships without it precisely because it refuses rather than
+guesses: until a provider is verified AND declares attachment support, the
+capability gate keeps the path closed. Verifying that provider must therefore
+include verifying its attachment contract, not only its text one.
 
 Open decisions:
 

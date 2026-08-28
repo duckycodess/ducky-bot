@@ -162,3 +162,16 @@ export const REMINDER_MAX_DELIVERY_ATTEMPTS = 8;
  * rather than quietly dropping them.
  */
 export const BRIEFING_SECTION_MAX = 10;
+
+// ---- conversation attachments (2C) -----------------------------------------
+/**
+ * Bytes are only ever fetched for a provider that is BOTH verified and
+ * attachment-capable, and only when the operator has opted in. These are the
+ * ceilings that apply once all of that is true; the effective cap is the
+ * smaller of this and whatever the provider itself declares.
+ */
+export const CONVERSATION_MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+export const CONVERSATION_ATTACHMENT_TIMEOUT_MS = 20_000;
+export const CONVERSATION_ATTACHMENTS_PER_HOUR = 20;
+/** One at a time. Several files in one message is refused, never partly read. */
+export const CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE = 1;

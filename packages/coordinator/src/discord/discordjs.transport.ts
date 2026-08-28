@@ -46,6 +46,14 @@ export class DiscordJsTransport implements DiscordTransport {
         userId: message.author.id,
         text: message.content,
         threadKey: message.channelId,
+        // Metadata only. Nothing is fetched here; the router decides whether
+        // anything may be, and refuses before any download when it may not.
+        attachments: [...message.attachments.values()].map((a) => ({
+          filename: a.name,
+          contentType: a.contentType ?? null,
+          size: a.size,
+          url: a.url,
+        })),
       }).then(async (reply) => {
         if (reply) await message.reply(toDiscordPayload({ ...reply, ephemeral: false }));
       });

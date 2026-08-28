@@ -17,6 +17,18 @@ export interface IncomingContext {
   readonly guildId: string | undefined;
 }
 
+/**
+ * Attachment METADATA only. Discord-supplied, entirely untrusted, and never
+ * accompanied by bytes: whether anything is downloaded is decided later, by
+ * policy, and for conversation only after a capability check.
+ */
+export interface IncomingAttachment {
+  readonly filename: string;
+  readonly contentType: string | null;
+  readonly size: number;
+  readonly url: string;
+}
+
 export interface IncomingCommand {
   readonly kind: 'command';
   readonly name: string;
@@ -24,12 +36,7 @@ export interface IncomingCommand {
   readonly userId: string;
   readonly context?: IncomingContext;
   readonly options: Record<string, string | number | boolean | undefined>;
-  readonly attachment?: {
-    readonly filename: string;
-    readonly contentType: string | null;
-    readonly size: number;
-    readonly url: string;
-  };
+  readonly attachment?: IncomingAttachment;
 }
 
 export interface IncomingComponent {
@@ -44,6 +51,12 @@ export interface IncomingMessage {
   readonly userId: string;
   readonly text: string;
   readonly threadKey: string;
+  /**
+   * Every attachment on the message, as metadata. All of them, not the first:
+   * the router must be able to SEE that there were several and refuse, rather
+   * than silently pick one. Absent and empty mean the same thing.
+   */
+  readonly attachments?: readonly IncomingAttachment[];
 }
 
 export type Incoming = IncomingCommand | IncomingComponent | IncomingMessage;

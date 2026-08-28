@@ -128,7 +128,8 @@ Delivered:
   bounded backoff, and hand the job to the owner when the budget is spent.
   Nothing polls forever.
 - **A central command policy** classifying every subprocess surface, applied at
-  the `gh` and `git` call sites.
+  the `gh` and `git` call sites — and, since the final milestone, at the herdr
+  ones too, which had been constructing argv the policy never saw.
 - **A structured audit log**, bounded and pruned, that is a record and never an
   authority.
 
@@ -312,10 +313,12 @@ Delivered:
 - **Centralised redacted logging** (`obs/logger.ts`). Eleven sites had been
   interpolating raw error messages into stderr while `redact()` sat unused two
   imports away.
-- **Migrations 11–13.** 11 indexes three queries `EXPLAIN QUERY PLAN` showed as
+- **Migrations 11–15.** 11 indexes three queries `EXPLAIN QUERY PLAN` showed as
   full table scans (including `job_transitions`, which had no index at all);
   12 adds `retention_runs` and the partial age indexes each policy selects on;
-  13 widens `audit_log.subject_kind`, which had been silently dropping rows.
+  13 widens `audit_log.subject_kind`, which had been silently dropping rows;
+  14 adds the schedule retention index; 15 widens the subject kinds again for
+  the approval, provider and configuration events.
 - **A meaningful `/readyz`** — migrations, a loaded credential and a
   recently-seen executor, not `SELECT 1`.
 - **Bounded retention**, off by default, table-by-table, batched, idempotent,
@@ -352,26 +355,6 @@ Still open:
   will not delete them: that needs a Manage Messages write the bot deliberately
   does not hold. Unchanged, and now recorded as a residual rather than an open
   implementation question.
-
-Currently implicit and due to be written down. 2A already created one new
-retention surface — a shared channel keeps its history, where an ephemeral
-reply kept none.
-
-Open decisions, all 🔶:
-
-- **Shared channel history.** Projection messages persist in Discord. Deleted
-  after a period, on job completion, or left as the record?
-- **Job data retention.** Jobs, transitions, events, results and owner inputs
-  grow without bound. What is pruned, when, and does pruning cascade to the
-  notification ledger?
-- **Assistant data retention.** Completed tasks, fired reminders, past
-  schedule entries, captures.
-- **Conversation retention.** Whether transcripts are stored at all (2D).
-- **Attachment retention.** Bytes, and any text derived from them (2C).
-- **The owner's own deletion controls.** Deleting a capture exists; there is no
-  "delete everything about job X" or "forget this conversation".
-- **What survives a profile switch.** Development and production share no
-  database today; a retention policy must not quietly assume otherwise.
 
 ---
 

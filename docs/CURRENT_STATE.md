@@ -305,8 +305,9 @@ before the database exists. Both distinctions are documented in
 
 `AuditLogRepo.record` never throws by design, which means an enum value the
 table's CHECK constraint does not allow is dropped **silently**. That happened;
-migration 13 widens the constraint and a test now asserts every declared event,
-actor kind and subject kind is actually persistable.
+migration 13 widens the constraint, migration 15 widens it again for the
+approval, provider and configuration subject kinds, and a test now asserts every
+declared event, actor kind and subject kind is actually persistable.
 
 ## Certified on the production code path
 

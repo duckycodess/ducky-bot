@@ -175,9 +175,20 @@ diagnostics and in `/status`.
   `high_risk`. Ordinary workspace inspection has a `local_mutation` ceiling;
   the explicit, owner-approved action performer may opt into the narrow
   external entries. Force, hook-bypass and high-risk verbs remain refused.
-  `gh-cli` and the executor's `git` helper consult it before spawning: the
-  frozen argv table decides what can be constructed, the policy decides
-  whether it may run. No arbitrary shell anywhere.
+  `gh-cli`, the executor's `git` helper and **now `HerdrCli`** consult it before
+  spawning: the frozen argv table decides what can be constructed, the policy
+  decides whether it may run. No arbitrary shell anywhere.
+
+  Until this milestone that sentence was two binaries out of three. Every herdr
+  invocation went straight to a subprocess, and `agent get`, `workspace close`
+  and `worktree remove` were not classified at all — so the claim above was
+  false for the surface that starts agents. Both spawn points in `HerdrCli` now
+  assert, `agent get` / `agent read` / `agent wait` are classified `read_only`,
+  `workspace close` / `worktree remove` are `local_mutation`, and a test drives
+  every method the orchestrator uses and asserts each argv it builds is
+  classified. One consequence is deliberate: `--force` is a forbidden flag, so
+  a forced worktree removal is refused **before** a subprocess exists rather
+  than deleting a checkout that still holds uncommitted work.
 - **Structured audit log.** Job creation, claim, every transition (written from
   the single point of state change, so coverage is structural), phase changes
   including refused ones, cancellation, failure, approval decisions, executor

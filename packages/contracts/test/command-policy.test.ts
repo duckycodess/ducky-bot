@@ -68,7 +68,12 @@ describe('the command policy', () => {
       ['git', ['worktree', 'list', '--porcelain']],
       ['git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']],
       ['herdr', ['agent', 'list']],
+      ['herdr', ['agent', 'get', 'ducky-pi-demo']],
+      ['herdr', ['agent', 'read', 'ducky-pi-demo', '--source', 'detection']],
+      ['herdr', ['agent', 'wait', 'ducky-pi-demo', '--until', 'idle', '--timeout', '5000']],
       ['herdr', ['workspace', 'create']],
+      ['herdr', ['workspace', 'close', 'ws-1']],
+      ['herdr', ['worktree', 'remove', '--workspace', 'ws-1']],
     ];
     for (const [bin, argv] of allowed) {
       expect(checkCommandAllowed(bin, argv), `${bin} ${argv.join(' ')}`).toBeUndefined();
@@ -88,6 +93,15 @@ describe('the command policy', () => {
       expect(findForbiddenVerb(argv, { allowExternalMutation: true }), argv.join(' ')).toBeUndefined();
       expect(checkCommandAllowed('gh', argv), argv.join(' ')).toBeUndefined();
     }
+  });
+
+  it('refuses a forced worktree removal even though the verb itself is allowed', () => {
+    // The whole reason cleanup keeps a dirty checkout: forcing would delete
+    // work nothing has committed. The flag is refused, not the operation.
+    expect(checkCommandAllowed('herdr', ['worktree', 'remove', '--workspace', 'ws-1'])).toBeUndefined();
+    expect(
+      checkCommandAllowed('herdr', ['worktree', 'remove', '--workspace', 'ws-1', '--force'])?.reason,
+    ).toBe('forbidden_verb');
   });
 
   it('keeps the forbidden list covering the verbs that actually matter', () => {

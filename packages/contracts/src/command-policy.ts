@@ -153,6 +153,15 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
 
   // -- herdr, orchestration (packages/adapters/src/herdr/herdr-cli.ts) -------
   { bin: 'herdr', verb: ['agent', 'list'], cls: 'read_only', note: 'Agent inventory.' },
+  { bin: 'herdr', verb: ['agent', 'get'], cls: 'read_only', note: 'One agent record; changes nothing.' },
+  {
+    bin: 'herdr', verb: ['agent', 'read'], cls: 'read_only',
+    note: 'Reads an agent pane snapshot. The readiness observation; never sends input.',
+  },
+  {
+    bin: 'herdr', verb: ['agent', 'wait'], cls: 'read_only',
+    note: 'Blocks until an agent reports one of the requested states. Observation only.',
+  },
   { bin: 'herdr', verb: ['workspace', 'list'], cls: 'read_only', note: 'Workspace inventory.' },
   {
     bin: 'herdr', verb: ['workspace', 'create'], cls: 'local_mutation',
@@ -177,6 +186,16 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   {
     bin: 'herdr', verb: ['agent', 'prompt'], cls: 'local_mutation',
     note: 'Sends a prompt to a Ducky-owned agent. Unverified on this host.',
+  },
+  {
+    bin: 'herdr', verb: ['workspace', 'close'], cls: 'local_mutation',
+    note: 'Closes a workspace whose id is recorded in herdr_workspaces and holds no reservation.',
+  },
+  {
+    bin: 'herdr', verb: ['worktree', 'remove'], cls: 'local_mutation',
+    note:
+      'Removes a Ducky-created linked worktree. NEVER forced: `--force` is a forbidden flag, so ' +
+      'a dirty checkout holding uncommitted work is refused here rather than deleted.',
   },
 ]);
 

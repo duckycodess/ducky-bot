@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import {
   DuckyError, HERDR_PROMPT_GRACE_MS, HERDR_START_TIMEOUT_MS, HERDR_TIMEOUT_MS,
+  checkCommandAllowed,
 } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
@@ -125,8 +126,34 @@ export class HerdrCli implements HerdrClient {
     this.onInvoke = opts.onInvoke;
   }
 
+  /**
+   * The second gate, and the one this adapter was missing.
+   *
+   * The frozen argv construction in the methods below decides what CAN be
+   * built; the central policy decides whether what was built may RUN. `gh` and
+   * the executor's `git` helper have consulted it since it existed, but every
+   * herdr invocation went straight to a subprocess -- so the documented claim
+   * that "every gh, git and herdr operation is classified" was only true of two
+   * of the three, and `agent get`, `workspace close` and `worktree remove` were
+   * not classified at all.
+   *
+   * A consequence worth stating: `--force` is a forbidden flag, so
+   * `worktreeRemove(..., { force: true })` is refused HERE, before a
+   * subprocess, rather than deleting a checkout that still holds uncommitted
+   * work. Nothing in the running system passes it.
+   *
+   * Free text (an `agent prompt` body) is one argv element, so it cannot be
+   * read as a verb; a single-word prompt that happened to equal a forbidden
+   * verb would be refused, which is the safe direction.
+   */
+  private assertAllowed(argv: readonly string[]): void {
+    const refusal = checkCommandAllowed('herdr', argv);
+    if (refusal) throw new DuckyError('not_enabled_in_phase1', refusal.detail);
+  }
+
   /** Runs a command that reports success only through its exit code. */
   private async callVoid(argv: readonly string[]): Promise<void> {
+    this.assertAllowed(argv);
     this.onInvoke?.(argv);
     const res = await runArgv(this.bin, argv, { timeoutMs: this.timeoutMs });
     if (res.code !== 0) {
@@ -150,6 +177,7 @@ export class HerdrCli implements HerdrClient {
     signal?: AbortSignal,
     subprocessTimeoutMs?: number,
   ): Promise<unknown> {
+    this.assertAllowed(argv);
     this.onInvoke?.(argv);
     const res = await runArgv(this.bin, argv, {
       timeoutMs: subprocessTimeoutMs ?? this.timeoutMs,
@@ -347,12 +375,17 @@ export class HerdrCli implements HerdrClient {
   /**
    * Removes a linked worktree checkout.
    *
-   * `force` is a parameter rather than a default because the two callers want
-   * opposite things. A finished job's checkout always contains at least an
-   * untracked `.ducky/result.json`, and usually the implementation itself,
-   * which nothing has committed -- the brief forbids committing. Forcing there
-   * would delete the owner's work, so production never does. A disposable
-   * probe repository under a temp directory has nothing to lose and may.
+   * `force` stays on the signature because the mock uses it to model Herdr's
+   * real `dirty_worktree_requires_force` refusal, and because a test asserts
+   * that job cleanup never passes it. It is NOT a usable option through this
+   * adapter: `--force` is a forbidden flag in the central command policy, so
+   * `assertAllowed` refuses the argv before a subprocess exists.
+   *
+   * That is the intended outcome. A finished job's checkout always contains at
+   * least an untracked `.ducky/result.json`, and usually the implementation
+   * itself, which nothing has committed -- the brief forbids committing.
+   * Forcing there would delete the owner's work. The probe scripts, which
+   * operate on a disposable temp repository, build their own argv and say so.
    */
   async worktreeRemove(workspaceId: string, opts: { force?: boolean } = {}): Promise<void> {
     const argv = ['worktree', 'remove', '--workspace', workspaceId];

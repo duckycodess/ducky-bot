@@ -371,8 +371,23 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       .filter(([, ok]) => !ok)
       .map(([name]) => name);
 
-    if (notReady.length > 0) return reply.code(503).send({ ok: false, notReady });
-    return { ok: true };
+    // Reported, never a readiness CONDITION. Retention is off by default and a
+    // backup is an operator's own routine, so an instance without either is
+    // perfectly able to do its job -- but "when did retention last run" is the
+    // question an operator asks at exactly the moment the answer is hard to get.
+    // Ages in whole hours: a count is not a path, a secret, or an error message.
+    const info: Record<string, number | null> = { retentionRanHoursAgo: null };
+    try {
+      const last = deps.store.retention.lastRun();
+      info['retentionRanHoursAgo'] = last
+        ? Math.floor((Date.now() - Date.parse(last.startedAt)) / 3_600_000)
+        : null;
+    } catch {
+      /* an unreadable run log is not a readiness failure */
+    }
+
+    if (notReady.length > 0) return reply.code(503).send({ ok: false, notReady, info });
+    return { ok: true, info };
   });
 
   return app;

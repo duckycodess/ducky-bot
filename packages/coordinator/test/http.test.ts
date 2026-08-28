@@ -202,7 +202,9 @@ describe('readiness', () => {
     const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
     const res = await app.inject({ method: 'GET', url: '/readyz' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
+    // `info` is operator context, never a readiness condition: retention is off
+    // by default, so an instance that has never run it is perfectly ready.
+    expect(res.json()).toEqual({ ok: true, info: { retentionRanHoursAgo: null } });
     await app.close();
   });
 
@@ -221,8 +223,28 @@ describe('readiness', () => {
     const body = (await app.inject({ method: 'GET', url: '/readyz' })).body;
     expect(body).not.toMatch(/\/home\//);
     expect(body).not.toMatch(/Error|sqlite|SELECT/i);
-    expect(JSON.parse(body)).toEqual({ ok: false, notReady: expect.any(Array) });
+    expect(JSON.parse(body)).toEqual({
+      ok: false,
+      notReady: expect.any(Array),
+      // Counts and nulls only. An unauthenticated endpoint is not a diagnostics
+      // channel, so `info` carries no path, no id and no message.
+      info: { retentionRanHoursAgo: null },
+    });
     await app.close();
+  });
+
+  it('reports how long ago retention ran, in whole hours and nothing else', async () => {
+    const h = makeHarness({ env: { DUCKY_RETENTION_ENABLED: 'true' } });
+    await h.app.retention.run('manual');
+    const app = await buildServer({ store: h.store, jobs: h.app.jobs, credentials: h.app.credentials });
+
+    const body = (await app.inject({ method: 'GET', url: '/readyz' })).json() as {
+      info: { retentionRanHoursAgo: number | null };
+    };
+
+    expect(body.info.retentionRanHoursAgo).toBe(0);
+    await app.close();
+    h.close();
   });
 
   it('healthz stays liveness-only and says nothing about readiness', async () => {

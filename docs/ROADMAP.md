@@ -225,11 +225,22 @@ read-only `gh` adapter, stores only a normalized snapshot and hash, and emits
 one owner-DM summary when the snapshot changes. Delivery has its own durable
 retry/abandon ledger and never reaches a shared channel.
 
-This first slice deliberately covers open PR state/title/branch and a bounded
-sample of PR check status. It does not yet observe recent commits, review
-comments/requested changes, workflow history or issue updates; those require
-additional verified `gh` response schemas. A live watch has not been exercised
-on this host.
+The first slice covered open PR state/title/branch and a bounded sample of check
+status. **The final milestone widened it** to merges, approvals, requested
+changes, review comments, commits under review, workflow failures and recovery,
+and issue activity — each through the same frozen read-only argv table, with
+every `--json` selector recorded from `gh` itself by `pnpm probe:gh` rather than
+guessed.
+
+A requested change now produces an owner-DM proposal naming the exact
+`/job submit` command, tied to the repository, PR number, head commit and review
+timestamp, and deduplicated by the database. **Nothing is submitted**, and no new
+manifest entry was added to make it one-press: `AGENTS.md` forbids widening the
+owner-only surface.
+
+Still not observable: recent commits on the default branch, which need `gh api`
+— a forbidden verb. A live watch still has not been exercised on this host,
+because no GitHub repository is configured in the allowlist.
 
 ---
 

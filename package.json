@@ -23,7 +23,8 @@
     "register-commands": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.production packages/coordinator/src/discord/register-commands.ts",
     "dev:coordinator:prod": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.production packages/coordinator/src/main.ts",
     "probe:live-job": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-live-job.ts",
-    "probe:openclaw": "node scripts/probe-openclaw.mjs"
+    "probe:openclaw": "node scripts/probe-openclaw.mjs",
+    "probe:gh": "node scripts/probe-gh.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

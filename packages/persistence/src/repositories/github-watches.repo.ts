@@ -124,7 +124,14 @@ export class GitHubWatchesRepo {
     nextCheckAt: string;
     atIso: string;
     changed: boolean;
-    event?: { id: string; fingerprint: string; summary: string };
+    /**
+     * Zero or more events to enqueue in the SAME transaction as the cursor move.
+     *
+     * Plural since the final milestone: one observation can produce both a
+     * snapshot summary and a follow-up proposal, and enqueuing them separately
+     * would let a crash keep the cursor while losing the proposal.
+     */
+    events?: readonly { id: string; fingerprint: string; summary: string }[];
   }): boolean {
     const updated = this.db
       .prepare(
@@ -139,14 +146,17 @@ export class GitHubWatchesRepo {
       );
     if (Number(updated.changes) !== 1) return false;
 
-    if (input.changed && input.event) {
+    for (const event of input.events ?? []) {
       this.db
         .prepare(
-          `INSERT INTO github_watch_events
+          // OR IGNORE, because `(watch_id, fingerprint)` is unique and that
+          // uniqueness IS the deduplication: the same requested-change review
+          // observed on two passes must produce one proposal, not an error.
+          `INSERT OR IGNORE INTO github_watch_events
              (id, watch_id, fingerprint, summary, created_at)
            VALUES (?, ?, ?, ?, ?)`,
         )
-        .run(input.event.id, input.id, input.event.fingerprint, input.event.summary, input.atIso);
+        .run(event.id, input.id, event.fingerprint, event.summary, input.atIso);
     }
     return true;
   }

@@ -21,6 +21,12 @@ export const PrListSchema = z.array(
     isDraft: z.boolean().optional(),
     headRefName: z.string().optional(),
     updatedAt: z.string().optional(),
+    // Added by the final milestone so a watch can see a MERGE and a review
+    // verdict, not only that a title changed. Optional for the same reason the
+    // review schema is: the names are recorded, the values are not.
+    headRefOid: z.string().optional(),
+    mergedAt: z.string().nullable().optional(),
+    reviewDecision: z.string().nullable().optional(),
   }),
 );
 export type PrList = z.infer<typeof PrListSchema>;
@@ -33,6 +39,70 @@ export const PrViewSchema = z.object({
   reviewDecision: z.string().nullable().optional(),
 });
 export type PrView = z.infer<typeof PrViewSchema>;
+
+/**
+ * The review surface of one pull request.
+ *
+ * Every field is OPTIONAL and every unknown key is ignored, deliberately. The
+ * field NAMES are recorded (`pnpm probe:gh` reads them from `gh` itself, with no
+ * repository named and no network request), but the response VALUES are not: no
+ * GitHub repository is configured in this host's allowlist, so a strict schema
+ * here would be asserting a shape nobody has seen. A tolerant schema degrades to
+ * "less detail in the summary"; a strict one would turn an unremarkable API
+ * difference into a failed observation.
+ */
+const ReviewSchema = z.object({
+  id: z.string().optional(),
+  author: z.object({ login: z.string().optional() }).nullable().optional(),
+  state: z.string().optional(),
+  submittedAt: z.string().nullable().optional(),
+  body: z.string().optional(),
+});
+
+export const PrReviewsSchema = z.object({
+  number: z.number(),
+  title: z.string().optional(),
+  state: z.string().optional(),
+  headRefOid: z.string().optional(),
+  reviewDecision: z.string().nullable().optional(),
+  mergedAt: z.string().nullable().optional(),
+  reviews: z.array(ReviewSchema).optional(),
+  latestReviews: z.array(ReviewSchema).optional(),
+  reviewRequests: z.array(z.object({ login: z.string().optional() }).loose()).optional(),
+  comments: z.array(z.object({ author: z.object({ login: z.string().optional() }).nullable().optional() }).loose()).optional(),
+  commits: z.array(z.object({ oid: z.string().optional(), messageHeadline: z.string().optional() }).loose()).optional(),
+});
+export type PrReviews = z.infer<typeof PrReviewsSchema>;
+
+/** Workflow runs, for failures and for recovery. Bounded by `--limit`. */
+export const WorkflowRunsSchema = z.array(
+  z.object({
+    databaseId: z.number().optional(),
+    number: z.number().optional(),
+    workflowName: z.string().optional(),
+    displayTitle: z.string().optional(),
+    headBranch: z.string().optional(),
+    headSha: z.string().optional(),
+    event: z.string().optional(),
+    status: z.string().optional(),
+    conclusion: z.string().nullable().optional(),
+    createdAt: z.string().optional(),
+    updatedAt: z.string().optional(),
+  }),
+);
+export type WorkflowRuns = z.infer<typeof WorkflowRunsSchema>;
+
+export const IssueListSchema = z.array(
+  z.object({
+    number: z.number(),
+    title: z.string(),
+    state: z.string().optional(),
+    stateReason: z.string().nullable().optional(),
+    updatedAt: z.string().optional(),
+    labels: z.array(z.object({ name: z.string().optional() }).loose()).optional(),
+  }),
+);
+export type IssueList = z.infer<typeof IssueListSchema>;
 
 export const PrChecksSchema = z.array(
   z.object({ name: z.string(), state: z.string().optional(), bucket: z.string().optional() }),

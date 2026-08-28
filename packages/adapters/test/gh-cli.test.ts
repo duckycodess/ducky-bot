@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { FORBIDDEN_GH_VERBS, GH_OPERATIONS, GhCliReader } from '../src/github/gh-cli.js';
 
 describe('gh adapter', () => {
-  it('exposes exactly the four read-only operations', () => {
-    expect(Object.keys(GH_OPERATIONS).sort()).toEqual(['prChecks', 'prList', 'prView', 'repoView']);
+  it('exposes exactly the read-only operations the watch feature needs', () => {
+    // Every one of these is a READ, and every `--json` selector inside them was
+    // recorded from `gh` itself by `pnpm probe:gh` rather than guessed.
+    expect(Object.keys(GH_OPERATIONS).sort()).toEqual([
+      'issueList', 'prChecks', 'prList', 'prListAll', 'prReviews', 'prView', 'repoView', 'runList',
+    ]);
   });
 
   it('is frozen so no operation can be added at runtime', () => {

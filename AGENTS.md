@@ -12,6 +12,7 @@ pnpm probe:herdr      # record live Herdr responses (creates and cleans up a tem
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
 pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
+pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
 ```
 
 The two agent probes start a **real Pi agent**. `probe:live-job` refuses to run

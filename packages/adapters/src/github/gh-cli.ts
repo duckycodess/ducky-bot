@@ -1,14 +1,21 @@
 import {
   DuckyError, GH_OWNER_RE, GH_REPO_RE, GH_TIMEOUT_MS,
-  PrChecksSchema, PrListSchema, PrViewSchema, RepoViewSchema,
+  IssueListSchema, PrChecksSchema, PrListSchema, PrReviewsSchema, PrViewSchema, RepoViewSchema,
+  WorkflowRunsSchema,
   checkCommandAllowed,
 } from '@ducky/contracts';
-import type { PrChecks, PrList, PrView, RepoView } from '@ducky/contracts';
+import type {
+  IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, WorkflowRuns,
+} from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
 import type { GitHubReader, RepoRef } from './github.port.js';
 
-export type GhOperation = 'repoView' | 'prList' | 'prView' | 'prChecks';
+export type GhOperation =
+  | 'repoView' | 'prList' | 'prView' | 'prChecks'
+  // Added by the final milestone. Every one is a READ, and every field selector
+  // in it was recorded from `gh` itself by `pnpm probe:gh` rather than guessed.
+  | 'prListAll' | 'prReviews' | 'runList' | 'issueList';
 
 /**
  * The complete set of gh invocations this system can make. Callers pass an
@@ -33,6 +40,39 @@ export const GH_OPERATIONS: Readonly<
   prChecks: (ref, n) => [
     'pr', 'checks', String(n), '-R', `${ref.owner}/${ref.repo}`,
     '--json', 'name,state,bucket',
+  ],
+
+  /**
+   * Open AND recently closed pull requests, so a watch can see a MERGE.
+   *
+   * `--state all` with a small limit rather than a second call: a merge is the
+   * disappearance of an open PR, which the open-only list could only ever report
+   * as "it is gone".
+   */
+  prListAll: (ref) => [
+    'pr', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'all', '--limit', '20',
+    '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,reviewDecision',
+  ],
+
+  /**
+   * The review surface of one pull request: approvals, requested changes, review
+   * comments, and the commits under review.
+   */
+  prReviews: (ref, n) => [
+    'pr', 'view', String(n), '-R', `${ref.owner}/${ref.repo}`,
+    '--json', 'number,title,state,headRefOid,reviewDecision,mergedAt,reviews,latestReviews,reviewRequests,comments,commits',
+  ],
+
+  /** Workflow runs: failures, and the recovery that follows one. */
+  runList: (ref) => [
+    'run', 'list', '-R', `${ref.owner}/${ref.repo}`, '--limit', '10',
+    '--json', 'databaseId,number,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,createdAt,updatedAt',
+  ],
+
+  /** Issue updates, bounded and open-only: a closed backlog is not news. */
+  issueList: (ref) => [
+    'issue', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'open', '--limit', '20',
+    '--json', 'number,title,state,stateReason,updatedAt,labels',
   ],
 });
 
@@ -98,5 +138,21 @@ export class GhCliReader implements GitHubReader {
 
   async prChecks(ref: RepoRef, number: number): Promise<PrChecks> {
     return PrChecksSchema.parse(await this.run('prChecks', ref, number));
+  }
+
+  async prListAll(ref: RepoRef): Promise<PrList> {
+    return PrListSchema.parse(await this.run('prListAll', ref));
+  }
+
+  async prReviews(ref: RepoRef, number: number): Promise<PrReviews> {
+    return PrReviewsSchema.parse(await this.run('prReviews', ref, number));
+  }
+
+  async runList(ref: RepoRef): Promise<WorkflowRuns> {
+    return WorkflowRunsSchema.parse(await this.run('runList', ref));
+  }
+
+  async issueList(ref: RepoRef): Promise<IssueList> {
+    return IssueListSchema.parse(await this.run('issueList', ref));
   }
 }

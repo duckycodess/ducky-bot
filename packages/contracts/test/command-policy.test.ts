@@ -33,7 +33,14 @@ describe('the command policy', () => {
     expect(refusal?.reason).toBe('unclassified');
     expect(checkCommandAllowed('curl', ['https://example.com'])?.reason).toBe('unclassified');
     // A classified binary with an unknown subcommand is still unclassified.
-    expect(checkCommandAllowed('gh', ['issue', 'list'])?.reason).toBe('unclassified');
+    // `issue list` IS classified now (the watch reads issue updates), so the
+    // unclassified case has to be a surface nothing uses.
+    // `create` is not on the forbidden-VERB list (the gh argv table has its own,
+    // stricter one), so it is refused the other way: unclassified.
+    expect(checkCommandAllowed('gh', ['issue', 'create'])?.reason).toBe('unclassified');
+    expect(checkCommandAllowed('gh', ['label', 'list'])?.reason).toBe('unclassified');
+    // `release` IS a forbidden verb, and that is checked before the table.
+    expect(checkCommandAllowed('gh', ['release', 'list'])?.reason).toBe('forbidden_verb');
   });
 
   it('refuses a forbidden verb before it even looks at the table', () => {
@@ -67,6 +74,8 @@ describe('the command policy', () => {
       ['git', ['stash', 'list']],
       ['git', ['worktree', 'list', '--porcelain']],
       ['git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']],
+      ['gh', ['run', 'list', '-R', 'acme/demo', '--limit', '10']],
+      ['gh', ['issue', 'list', '-R', 'acme/demo', '--state', 'open']],
       ['herdr', ['agent', 'list']],
       ['herdr', ['agent', 'get', 'ducky-pi-demo']],
       ['herdr', ['agent', 'read', 'ducky-pi-demo', '--source', 'detection']],

@@ -128,6 +128,8 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   { bin: 'gh', verb: ['pr', 'list'], cls: 'read_only', note: 'Open pull requests.' },
   { bin: 'gh', verb: ['pr', 'view'], cls: 'read_only', note: 'One pull request.' },
   { bin: 'gh', verb: ['pr', 'checks'], cls: 'read_only', note: 'Check results for one PR.' },
+  { bin: 'gh', verb: ['run', 'list'], cls: 'read_only', note: 'Workflow run history.' },
+  { bin: 'gh', verb: ['issue', 'list'], cls: 'read_only', note: 'Open issues.' },
   {
     bin: 'gh', verb: ['pr', 'create'], cls: 'external_mutation',
     note: 'Creates a pull request; only the approved-action path may run it.',

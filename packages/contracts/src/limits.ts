@@ -291,6 +291,18 @@ export const BRIEFING_STALE_AFTER_MS = 6 * 60 * 60_000;
 
 // ---- GitHub watches ---------------------------------------------------------
 /** Explicit owner watches are ongoing schedules, never a hidden tight loop. */
+/**
+ * How much of the wider surface one observation records.
+ *
+ * Every one of these is a slice, not a page cursor: a watch is a summary of what
+ * changed, not a mirror of the repository. The `gh` calls are bounded by
+ * `--limit` as well, so a large repository costs the same as a small one.
+ */
+export const GITHUB_WATCH_MAX_RUNS = 10;
+export const GITHUB_WATCH_MAX_ISSUES = 20;
+/** How many follow-up proposals one observation may enqueue. */
+export const GITHUB_WATCH_MAX_FOLLOWUPS = 3;
+
 export const GITHUB_WATCH_INTERVAL_MIN_MINUTES = 15;
 export const GITHUB_WATCH_INTERVAL_MAX_MINUTES = 24 * 60;
 export const MAX_GITHUB_WATCHES_PER_OWNER = 20;

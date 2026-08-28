@@ -274,7 +274,27 @@ diagnostics and in `/status`.
   lock, Herdr/Pi orchestration behind a port
 - Read-only GitHub inspection through a frozen `gh` argv table, plus bounded
   owner-configured repository watches with normalized-snapshot deduplication
-  and owner-DM change summaries
+  and owner-DM change summaries. **The final milestone widened what a watch can
+  see** — merges (via `pr list --state all`, so a merge is observable as a merge
+  rather than as a pull request that vanished), approvals, requested changes,
+  review comments, the commits under review, workflow **failures and the recovery
+  after one**, and issue activity. Every `--json` selector is recorded from `gh`
+  itself by `pnpm probe:gh` — locally, with no repository named and no network
+  request — and a test asserts the argv table against that record. Response
+  VALUES are still unrecorded, because no GitHub repository is configured in this
+  host's allowlist, so every added schema field is optional: a missing field
+  degrades the summary and never fails the observation.
+- **Requested changes propose a job; nothing submits one.** A pull request whose
+  review asked for changes produces one owner-DM proposal naming the exact
+  `/job submit` command. No job is created, no approval is bypassed, and every
+  existing gate is untouched because nothing reaches them. The proposal is tied
+  to the repository, the PR number, the head commit AND the review timestamp, and
+  deduplicated by the database (`UNIQUE (watch_id, fingerprint)`, inserted `OR
+  IGNORE`) — so it appears once per genuinely new review or new code, never once
+  per pass, and stops entirely once the PR is merged. A one-press signed control
+  would have been friendlier and would have needed a new entry on the owner-only
+  interaction manifest, which `AGENTS.md` forbids widening; the owner types the
+  command instead.
 - Redaction at the transport boundary; no secret in the database or logs
 
 ## What "verified" means here
@@ -496,7 +516,7 @@ stays `false` and `/status` reports `experimental`.
 | Slash-command registration | Development commands were deliberately registered to the configured test guild. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
-| GitHub repository watches | **Unit-tested only.** The loop uses the verified read-only `gh` surface, stores normalized snapshots and deduplicates owner-DM summaries. Recent commits, review comments/requested changes, workflow history and a live watch have not been exercised here. |
+| GitHub repository watches | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
 | Dependency checking | **No real checker exists.** The port ships with `UnavailableDependencyChecker`, which only ever answers `pending`, so a dependency wait always ends at the owner's desk on this host. The resume-on-ready and fail-on-failed paths are unit-tested against a scripted fake; neither has ever run against a real external system. |
 | Azure deployment | Documented only; nothing provisioned. |
 

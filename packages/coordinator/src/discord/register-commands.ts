@@ -60,11 +60,15 @@ const COMMANDS = [
    * that means "delete everything".
    */
   { name: 'forget', description: 'Delete data Ducky holds about one job (owner only)', options: [
-    { name: 'target', type: 3, required: true, description: 'job | conversation', choices: [
+    { name: 'target', type: 3, required: true, description: 'what kind of record to delete', choices: [
       { name: 'job', value: 'job' },
       { name: 'conversation', value: 'conversation' },
+      { name: 'capture', value: 'capture' },
+      { name: 'task', value: 'task' },
+      { name: 'reminder', value: 'reminder' },
+      { name: 'schedule', value: 'schedule' },
     ] },
-    { name: 'id', type: 3, required: false, description: 'Job id, required when target is job' },
+    { name: 'id', type: 3, required: false, description: 'The id shown when you list them. Omit to list your records.' },
   ] },
   { name: 'task', description: 'Your tasks (owner only)', options: [
     { name: 'add', type: 1, description: 'Add a task', options: [

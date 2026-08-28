@@ -25,6 +25,55 @@ export function inboxList(rows: readonly CaptureRow[], buttons: OutboundRow[]): 
   return { embeds: [embed], rows: buttons, ephemeral: true };
 }
 
+export interface ForgetCandidate {
+  readonly id: string;
+  readonly describes: string;
+}
+
+/**
+ * What the owner could delete, with the ids they can type.
+ *
+ * A READ, and deliberately a plain one: no controls, because a list of delete
+ * buttons is how somebody removes the wrong thing. The owner reads this, then
+ * names one.
+ */
+export function forgetCandidates(
+  kind: string,
+  rows: readonly ForgetCandidate[],
+): OutboundMessage {
+  if (rows.length === 0) {
+    return { content: `You have no ${kind} records to delete.`, ephemeral: true };
+  }
+  return {
+    embeds: [{
+      title: `Your ${kind} records`,
+      description: `Delete one with \`/forget target:${kind} id:<id>\`.`,
+      fields: rows.slice(0, 10).map((r) => ({
+        name: r.id,
+        value: short(r.describes, 200),
+      })),
+      footer: 'Nothing has been deleted. Naming an id shows a confirmation first.',
+    }],
+    ephemeral: true,
+  };
+}
+
+/** The confirmation step. The control is signed and bound to the owner. */
+export function forgetConfirm(
+  preview: { target: string; id: string; describes: string },
+  customId: string,
+): OutboundMessage {
+  return {
+    content:
+      `Delete this ${preview.target} \`${preview.id}\`?\n> ${short(preview.describes, 200)}\n\n` +
+      '**This cannot be undone.** Nothing else is touched.',
+    ephemeral: true,
+    rows: [{
+      buttons: [{ customId, label: `delete ${preview.id}`, style: 'danger' as const }],
+    }],
+  };
+}
+
 export function schedulePreview(draft: PendingDraft, rows: OutboundRow[]): OutboundMessage {
   const embed: OutboundEmbed = {
     title: `Schedule preview — ${draft.entries.length} entr${draft.entries.length === 1 ? 'y' : 'ies'}`,

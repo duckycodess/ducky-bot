@@ -79,6 +79,20 @@ export class SchedulesRepo {
       .map((raw) => mapRow(raw as Record<string, unknown>));
   }
 
+  /**
+   * One row, owner-scoped.
+   *
+   * Owner-scoped in the WHERE clause rather than checked afterwards: the only
+   * caller is the owner's own deletion path, and a lookup that could return
+   * somebody else's row would be the wrong shape to hand it.
+   */
+  byIdForOwner(ownerId: string, id: string): ScheduleRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM schedules WHERE id = ? AND discord_user_id = ?')
+      .get(id, ownerId);
+    return r ? mapRow(r as Record<string, unknown>) : undefined;
+  }
+
   count(): number {
     const r = this.db.prepare('SELECT COUNT(*) AS n FROM schedules').get() as { n: number };
     return Number(r.n);

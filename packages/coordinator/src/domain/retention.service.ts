@@ -139,7 +139,7 @@ export class RetentionService {
     // Jobs are a UNIT: the job row plus every row that references it, removed
     // child-first in one transaction each. Per job rather than per batch so one
     // refused job never blocks the rest.
-    for (const jobId of r.terminalJobsBefore(cutoff(p.terminalJobDays), p.batch)) {
+    for (const jobId of r.terminalJobsBefore(cutoff(p.jobMetadataDays), p.batch)) {
       const result = r.deleteJobUnitGuarded(jobId);
       if ('refusal' in result) {
         c.jobsSkipped += 1;
@@ -149,19 +149,37 @@ export class RetentionService {
       c.jobChildRowsDeleted += result.deleted.childRowsDeleted;
     }
 
-    // The assistant's own records. Each is independently transacted so a
-    // failure in one table cannot roll back another's progress.
+    // The DETAIL of jobs that are still kept. Runs after the unit pass, so a
+    // job old enough to go entirely is not first stripped of its result: it is
+    // already gone, and this then finds nothing for it.
     withTransaction(this.store.db, () => {
-      c.capturesDeleted = r.deleteClosedCaptures(cutoff(p.closedAssistantDays), p.batch);
-      c.tasksDeleted = r.deleteClosedTasks(cutoff(p.closedAssistantDays), p.batch);
-      const rem = r.deleteClosedReminders(cutoff(p.closedAssistantDays), p.batch);
+      const d = r.deleteOldJobDetails(cutoff(p.jobDetailDays), p.batch);
+      c.jobDetailRowsDeleted = d.results + d.events + d.ownerInputs;
+    });
+
+    // The assistant's own records, each with its OWN window: a finished task and
+    // a past schedule entry are not the same kind of thing, and one number for
+    // both meant choosing which of them to get wrong. Independently transacted
+    // so a failure in one table cannot roll back another's progress.
+    withTransaction(this.store.db, () => {
+      c.capturesDeleted = r.deleteClosedCaptures(cutoff(p.doneCaptureDays), p.batch);
+      c.tasksDeleted = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      const rem = r.deleteClosedReminders(cutoff(p.closedReminderDays), p.batch);
       c.remindersDeleted = rem.reminders;
       c.reminderOccurrencesDeleted = rem.occurrences;
+      // Occurrences of a reminder that is still OPEN, once they are settled.
       c.reminderOccurrencesDeleted += r.deleteSettledOccurrences(
-        cutoff(p.closedAssistantDays),
+        cutoff(p.closedReminderDays),
         p.batch,
       );
-      c.schedulesDeleted = this.prunePastSchedules(cutoff(p.closedAssistantDays), at, p.batch);
+      c.schedulesDeleted = this.prunePastSchedules(cutoff(p.pastScheduleDays), at, p.batch);
+    });
+
+    // The audit log. Bounded here so ONE policy describes every window; the
+    // reconciler keeps its own prune for an instance with retention disabled,
+    // because a record that grows forever is not acceptable either way.
+    withTransaction(this.store.db, () => {
+      c.auditRowsDeleted = r.deleteOldAuditRows(cutoff(p.auditDays), p.batch);
     });
 
     withTransaction(this.store.db, () => {
@@ -187,7 +205,7 @@ export class RetentionService {
     }
 
     withTransaction(this.store.db, () => {
-      c.workspacesDeleted = r.deleteClosedWorkspaces(cutoff(p.terminalJobDays), p.batch);
+      c.workspacesDeleted = r.deleteClosedWorkspaces(cutoff(p.jobMetadataDays), p.batch);
       c.idempotencyKeysDeleted = r.deleteIdempotencyKeys(cutoff(p.idempotencyDays), p.batch);
       c.runLogRowsDeleted = r.deleteOldRunLog(cutoff(p.runLogDays), p.batch);
     });
@@ -206,7 +224,7 @@ export class RetentionService {
    */
   private prunePastSchedules(confirmedBeforeIso: string, at: Date, limit: number): number {
     const candidates = this.store.retention.pastScheduleCandidates(confirmedBeforeIso, limit);
-    const eventCutoffMs = at.getTime() - this.policy.closedAssistantDays * DAY_MS;
+    const eventCutoffMs = at.getTime() - this.policy.pastScheduleDays * DAY_MS;
 
     const doomed: string[] = [];
     for (const c of candidates) {
@@ -243,27 +261,61 @@ export class RetentionService {
         `watch events ${counts.watchEventsDeleted}; ` +
         `workspaces ${counts.workspacesDeleted}; ` +
         `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}; ` +
-        `conversation turns ${counts.conversationTurnsDeleted}`,
+        `conversation turns ${counts.conversationTurnsDeleted}; ` +
+        `job detail rows ${counts.jobDetailRowsDeleted}; audit ${counts.auditRowsDeleted}`,
     });
   }
 }
 
-/** Reads the policy from validated configuration, falling back to the defaults. */
+/**
+ * Reads the policy from validated configuration.
+ *
+ * The two Phase-2 names -- `TERMINAL_JOBS_DAYS` and `CLOSED_ASSISTANT_DAYS` --
+ * are kept as DEPRECATED ALIASES rather than dropped. An operator who set them
+ * expressed an intent, and silently ignoring a variable that is still in their
+ * env file is worse than either honouring it or refusing it. Each maps onto the
+ * window that replaced it, and an explicit new value always wins.
+ */
 export function retentionPolicyFrom(env: {
   DUCKY_RETENTION_ENABLED: boolean;
-  DUCKY_RETENTION_TERMINAL_JOBS_DAYS: number;
-  DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: number;
+  DUCKY_RETENTION_JOB_METADATA_DAYS?: number | undefined;
+  DUCKY_RETENTION_JOB_DETAIL_DAYS: number;
+  DUCKY_RETENTION_DONE_CAPTURE_DAYS?: number | undefined;
+  DUCKY_RETENTION_CLOSED_TASK_DAYS?: number | undefined;
+  DUCKY_RETENTION_CLOSED_REMINDER_DAYS?: number | undefined;
+  DUCKY_RETENTION_PAST_SCHEDULE_DAYS?: number | undefined;
+  DUCKY_RETENTION_AUDIT_DAYS: number;
   DUCKY_RETENTION_WATCH_EVENTS_DAYS: number;
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: number;
   DUCKY_RETENTION_BATCH: number;
+  /** Deprecated aliases. */
+  DUCKY_RETENTION_TERMINAL_JOBS_DAYS?: number | undefined;
+  DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS?: number | undefined;
 }): RetentionPolicy {
+  const legacyAssistant = env.DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS;
   return Object.freeze({
     ...DEFAULT_RETENTION,
     enabled: env.DUCKY_RETENTION_ENABLED,
-    terminalJobDays: env.DUCKY_RETENTION_TERMINAL_JOBS_DAYS,
-    closedAssistantDays: env.DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS,
+    jobMetadataDays:
+      env.DUCKY_RETENTION_JOB_METADATA_DAYS ??
+      env.DUCKY_RETENTION_TERMINAL_JOBS_DAYS ??
+      DEFAULT_RETENTION.jobMetadataDays,
+    jobDetailDays: env.DUCKY_RETENTION_JOB_DETAIL_DAYS,
+    doneCaptureDays:
+      env.DUCKY_RETENTION_DONE_CAPTURE_DAYS ?? legacyAssistant ?? DEFAULT_RETENTION.doneCaptureDays,
+    closedTaskDays:
+      env.DUCKY_RETENTION_CLOSED_TASK_DAYS ?? legacyAssistant ?? DEFAULT_RETENTION.closedTaskDays,
+    closedReminderDays:
+      env.DUCKY_RETENTION_CLOSED_REMINDER_DAYS ??
+      legacyAssistant ??
+      DEFAULT_RETENTION.closedReminderDays,
+    pastScheduleDays:
+      env.DUCKY_RETENTION_PAST_SCHEDULE_DAYS ??
+      legacyAssistant ??
+      DEFAULT_RETENTION.pastScheduleDays,
+    auditDays: env.DUCKY_RETENTION_AUDIT_DAYS,
     watchEventDays: env.DUCKY_RETENTION_WATCH_EVENTS_DAYS,
     idempotencyDays: env.DUCKY_RETENTION_IDEMPOTENCY_DAYS,
     conversationOwnerDays: env.DUCKY_RETENTION_CONVERSATION_OWNER_DAYS,

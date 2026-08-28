@@ -34,10 +34,32 @@ export type RetentionForbiddenTable = (typeof RETENTION_FORBIDDEN_TABLES)[number
 export interface RetentionPolicy {
   /** Master switch. False means keep everything, forever. */
   readonly enabled: boolean;
-  /** Terminal jobs and everything hanging off them. */
-  readonly terminalJobDays: number;
-  /** Closed tasks, closed reminders, past confirmed schedules, done captures. */
-  readonly closedAssistantDays: number;
+  /**
+   * The job row, its transitions and its delivery ledger: the SHAPE of what
+   * happened. Longer than the detail below, because "what did that job do in
+   * March" is usually a question about shape.
+   */
+  readonly jobMetadataDays: number;
+  /**
+   * The DETAIL of a finished job -- the result snapshot, its events and the
+   * owner's answers -- pruned earlier than the job itself.
+   *
+   * This is the most detailed thing Ducky stores about a repository: a summary,
+   * review notes, verification output and a changed-file list. Every reader
+   * already treats a missing result as normal (a queued job has none), so the
+   * job survives its own detail without any presenter pretending otherwise.
+   */
+  readonly jobDetailDays: number;
+  /** Done or archived captures. */
+  readonly doneCaptureDays: number;
+  /** Tasks that are done or cancelled. Nothing open is ever in scope. */
+  readonly closedTaskDays: number;
+  /** Reminders that have finished or been cancelled, and their occurrences. */
+  readonly closedReminderDays: number;
+  /** Confirmed schedule entries whose event is also genuinely past. */
+  readonly pastScheduleDays: number;
+  /** The structured audit log. A record, bounded like everything else. */
+  readonly auditDays: number;
   /** Delivered or abandoned GitHub watch events. */
   readonly watchEventDays: number;
   /** Idempotency keys, which may echo a response body. */
@@ -68,8 +90,13 @@ export interface RetentionPolicy {
  */
 export const DEFAULT_RETENTION: RetentionPolicy = Object.freeze({
   enabled: false,
-  terminalJobDays: 180,
-  closedAssistantDays: 365,
+  jobMetadataDays: 90,
+  jobDetailDays: 30,
+  doneCaptureDays: 365,
+  closedTaskDays: 90,
+  closedReminderDays: 90,
+  pastScheduleDays: 180,
+  auditDays: 90,
   watchEventDays: 90,
   idempotencyDays: 7,
   cancelledWatchDays: 365,
@@ -108,6 +135,14 @@ export interface RetentionCounts {
   readonly idempotencyKeysDeleted: number;
   readonly runLogRowsDeleted: number;
   readonly conversationTurnsDeleted: number;
+  /**
+   * Detail rows removed from jobs that are still KEPT. Counted separately from
+   * `jobChildRowsDeleted`, which belongs to jobs that went entirely: the two
+   * answer different questions, and adding them together would hide the fact
+   * that a job survived while its result did not.
+   */
+  readonly jobDetailRowsDeleted: number;
+  readonly auditRowsDeleted: number;
 }
 
 export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
@@ -125,6 +160,8 @@ export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
   idempotencyKeysDeleted: 0,
   runLogRowsDeleted: 0,
   conversationTurnsDeleted: 0,
+  jobDetailRowsDeleted: 0,
+  auditRowsDeleted: 0,
 });
 
 export const totalRetentionDeletions = (c: RetentionCounts): number =>
@@ -140,21 +177,56 @@ export const totalRetentionDeletions = (c: RetentionCounts): number =>
   c.workspacesDeleted +
   c.idempotencyKeysDeleted +
   c.runLogRowsDeleted +
-  c.conversationTurnsDeleted;
+  c.conversationTurnsDeleted +
+  c.jobDetailRowsDeleted +
+  c.auditRowsDeleted;
 
 /**
  * What the owner may delete by hand, and nothing broader.
  *
  * There is deliberately no `all`, no `everything` and no wildcard: the contract
  * itself has no way to express "delete all of it", so no layer above it can
- * accidentally offer one. A `job` target always names ONE public job id.
+ * accidentally offer one. Every target except `conversation` names ONE record
+ * by the id the owner can actually see, and `conversation` means "my own
+ * conversation" -- one person's, never everyone's.
+ *
+ * These are CHOICES on the existing owner-only `/forget` command, not new
+ * commands: the owner-only surface is not widened by any of them.
  */
-export const FORGET_TARGETS = ['job', 'conversation'] as const;
+export const FORGET_TARGETS = [
+  'job',
+  'conversation',
+  'capture',
+  'task',
+  'reminder',
+  'schedule',
+] as const;
 export type ForgetTarget = (typeof FORGET_TARGETS)[number];
 
-/** Why a `/forget job` request was refused, so the reply can be exact. */
+export const isForgetTarget = (v: string): v is ForgetTarget =>
+  (FORGET_TARGETS as readonly string[]).includes(v);
+
+/** The per-record targets: everything that names one row by id. */
+export const FORGET_ENTITY_TARGETS = ['job', 'capture', 'task', 'reminder', 'schedule'] as const;
+export type ForgetEntityTarget = (typeof FORGET_ENTITY_TARGETS)[number];
+
+export const isForgetEntityTarget = (v: string): v is ForgetEntityTarget =>
+  (FORGET_ENTITY_TARGETS as readonly string[]).includes(v);
+
+export const FORGET_TARGET_LABEL = {
+  job: 'job',
+  conversation: 'conversation',
+  capture: 'capture',
+  task: 'task',
+  reminder: 'reminder',
+  schedule: 'schedule entry',
+} as const satisfies Record<ForgetTarget, string>;
+
+/** Why a `/forget` request was refused, so the reply can be exact. */
 export const FORGET_REFUSALS = [
   'unknown_job',
+  /** Nothing of that kind with that id belongs to this owner. */
+  'unknown_record',
   'job_still_running',
   'reservation_held',
   'workspace_open',
@@ -165,6 +237,9 @@ export type ForgetRefusal = (typeof FORGET_REFUSALS)[number];
 
 export const FORGET_REFUSAL_MESSAGE: Record<ForgetRefusal, string> = {
   unknown_job: 'No job with that id.',
+  // An unknown id and somebody else's id are answered IDENTICALLY, here as
+  // everywhere: the reply must not confirm that a record exists.
+  unknown_record: 'Nothing of yours with that id.',
   job_still_running: 'That job has not finished. Cancel it first.',
   reservation_held:
     'That job still holds its repository. Clear it with `/job cleanup` first.',

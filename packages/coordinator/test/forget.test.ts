@@ -196,7 +196,10 @@ describe('/forget conversation', () => {
 
 describe('there is no wipe-all path', () => {
   it('the contract cannot express one', () => {
-    expect([...FORGET_TARGETS]).toEqual(['job', 'conversation']);
+    expect([...FORGET_TARGETS]).toEqual([
+      'job', 'conversation', 'capture', 'task', 'reminder', 'schedule',
+    ]);
+    // Every one of those names ONE record, or one person's own conversation.
     expect(FORGET_TARGETS as readonly string[]).not.toContain('all');
     expect(FORGET_TARGETS as readonly string[]).not.toContain('everything');
   });
@@ -316,10 +319,183 @@ describe('the /forget route', () => {
     h.close();
   });
 
-  it('asks for an id rather than guessing one', async () => {
+  it('lists candidates rather than guessing an id, and deletes nothing', async () => {
     const h = makeHarness();
+    const publicId = seedJob(h, 'j1');
+
     const reply = await dispatch(h, { target: 'job' });
-    expect(reply?.content).toMatch(/Which job/i);
+
+    // A READ: ids to type, no delete buttons -- a row of delete buttons is how
+    // somebody removes the wrong thing.
+    expect(JSON.stringify(reply?.embeds ?? [])).toContain(publicId);
+    expect(reply?.rows ?? []).toHaveLength(0);
+    expect(h.store.jobs.byPublicId(publicId)).toBeDefined();
+    h.close();
+  });
+
+  it('refuses a target it does not know', async () => {
+    const h = makeHarness();
+    const reply = await dispatch(h, { target: 'everything' });
+    expect(reply?.content).toMatch(/Choose one of/);
+    h.close();
+  });
+});
+
+/**
+ * Per-record deletion for everything that is not a job.
+ *
+ * Same rules as a job, minus the guards a job needs: a capture, a task, a
+ * reminder and a schedule entry cannot be "live" in a way that makes deletion
+ * destructive, so there is nothing to refuse for.
+ */
+describe('per-record deletion', () => {
+  const press = async (
+    h: ReturnType<typeof makeHarness>,
+    target: string,
+    id: string,
+    userId?: string,
+  ) => {
+    await h.transport.start((e) => h.app.router.handle(e));
+    const shown = await h.transport.dispatch({
+      kind: 'command', name: 'forget', userId: h.owner.discordUserId,
+      options: { target, id },
+    } as never);
+    const customId = shown?.rows?.[0]?.buttons?.[0]?.customId;
+    if (!customId) return { shown, confirmed: undefined };
+    const confirmed = await h.transport.dispatch({
+      kind: 'component', customId, userId: userId ?? h.owner.discordUserId,
+    } as never);
+    return { shown, confirmed };
+  };
+
+  it('deletes one task the owner named, and nothing else', async () => {
+    const h = makeHarness();
+    const keep = h.app.tasks.add(h.owner, { title: 'keep me' });
+    const doomed = h.app.tasks.add(h.owner, { title: 'delete me' });
+
+    const { shown, confirmed } = await press(h, 'task', doomed.publicId);
+
+    expect(shown?.content).toMatch(/cannot be undone/i);
+    expect(confirmed?.content).toMatch(/Deleted that task/);
+    expect(h.store.tasks.byPublicId(h.owner.discordUserId, doomed.publicId)).toBeUndefined();
+    expect(h.store.tasks.byPublicId(h.owner.discordUserId, keep.publicId)).toBeDefined();
+    h.close();
+  });
+
+  it('takes a reminder’s occurrence outbox with it, child-first', async () => {
+    const h = makeHarness();
+    const rem = h.app.reminders.add(h.owner, { text: 'stand up', at: 'tomorrow 09:00' });
+    const row = h.store.reminders.byPublicId(h.owner.discordUserId, rem.publicId)!;
+    h.store.db
+      .prepare(
+        `INSERT INTO reminder_occurrences
+           (id, reminder_id, occurrence_no, scheduled_for, missed_count, created_at)
+         VALUES (?,?,?,?,?,?)`,
+      )
+      .run('occ-1', row.id, 1, nowIso(), 0, nowIso());
+
+    const { confirmed } = await press(h, 'reminder', rem.publicId);
+
+    expect(confirmed?.content).toMatch(/Deleted that reminder \(2 rows\)/);
+    expect(h.store.reminders.byPublicId(h.owner.discordUserId, rem.publicId)).toBeUndefined();
+    const left = h.store.db
+      .prepare('SELECT count(*) c FROM reminder_occurrences')
+      .get() as { c: number };
+    expect(left.c).toBe(0);
+    h.close();
+  });
+
+  it('deletes a capture by the id prefix the inbox already shows', async () => {
+    const h = makeHarness();
+    const row = h.app.captures.create(h.owner, 'a private thought');
+
+    const { confirmed } = await press(h, 'capture', row.id.slice(0, 8));
+
+    expect(confirmed?.content).toMatch(/Deleted that capture/);
+    expect(h.store.captures.get(row.id)).toBeUndefined();
+    h.close();
+  });
+
+  it('deletes one schedule entry', async () => {
+    const h = makeHarness();
+    h.store.db
+      .prepare(
+        `INSERT INTO schedules (id, discord_user_id, title, starts_at, source_kind, confirmed_at, created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run('sched-abc12345', h.owner.discordUserId, 'standup', '2026-01-01 09:00', 'text', nowIso(), nowIso());
+
+    const { confirmed } = await press(h, 'schedule', 'sched-ab');
+
+    expect(confirmed?.content).toMatch(/Deleted that schedule entry/);
+    const left = h.store.db.prepare('SELECT count(*) c FROM schedules').get() as { c: number };
+    expect(left.c).toBe(0);
+    h.close();
+  });
+
+  it('answers an id that is not the owner’s exactly like one that does not exist', async () => {
+    const h = makeHarness();
+    // A task belonging to somebody else.
+    h.store.tasks.insert({
+      id: 'task-other', publicId: 'tzzzzz', discordUserId: h.stranger.discordUserId,
+      title: 'not yours', dueAt: null, dueAllDay: false, priority: 'normal',
+      createdAt: nowIso(),
+    });
+
+    const mine = h.app.forget.previewEntity(h.owner, 'task', 'tzzzzz');
+    const absent = h.app.forget.previewEntity(h.owner, 'task', 'tqqqqq');
+
+    expect(mine.found).toBe(false);
+    expect(absent.found).toBe(false);
+    expect((mine as { message: string }).message).toBe((absent as { message: string }).message);
+    h.close();
+  });
+
+  it('refuses an ambiguous prefix rather than picking one', async () => {
+    const h = makeHarness();
+    for (const id of ['dupe1111-a', 'dupe1111-b']) {
+      h.store.db
+        .prepare(
+          `INSERT INTO captures (id, discord_user_id, content, status, created_at, updated_at)
+           VALUES (?,?,?,'open',?,?)`,
+        )
+        .run(id, h.owner.discordUserId, 'text', nowIso(), nowIso());
+    }
+
+    const preview = h.app.forget.previewEntity(h.owner, 'capture', 'dupe1111');
+
+    expect(preview.found).toBe(false);
+    expect((preview as { message: string }).message).toMatch(/More than one/);
+    const left = h.store.db.prepare('SELECT count(*) c FROM captures').get() as { c: number };
+    expect(left.c).toBe(2);
+    h.close();
+  });
+
+  it('is owner-only, and a stranger cannot press the owner’s control', async () => {
+    const h = makeHarness();
+    const task = h.app.tasks.add(h.owner, { title: 'mine' });
+
+    expect(() => h.app.forget.forgetEntity(h.chat, 'task', task.publicId)).toThrow();
+    const { confirmed } = await press(h, 'task', task.publicId, h.stranger.discordUserId);
+    expect(confirmed?.content).not.toMatch(/Deleted that task/);
+    expect(h.store.tasks.byPublicId(h.owner.discordUserId, task.publicId)).toBeDefined();
+    h.close();
+  });
+
+  it('audits every per-record deletion by count, never by content', async () => {
+    const h = makeHarness();
+    const task = h.app.tasks.add(h.owner, { title: 'a very distinctive title' });
+
+    h.app.forget.forgetEntity(h.owner, 'task', task.publicId);
+
+    const rows = h.store.db
+      .prepare("SELECT subject_ref, detail FROM audit_log WHERE event = 'data.deleted'")
+      .all() as { subject_ref: string; detail: string }[];
+    expect(rows.some((r) => r.subject_ref === `task:${task.publicId}`)).toBe(true);
+    for (const r of rows) {
+      expect(r.detail).not.toContain('distinctive');
+      expect(r.detail).toMatch(/^rows \d+$/);
+    }
     h.close();
   });
 });

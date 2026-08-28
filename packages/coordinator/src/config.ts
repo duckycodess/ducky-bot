@@ -139,8 +139,26 @@ export const EnvSchema = z.object({
    * finishes", which is not a retention policy.
    */
   DUCKY_RETENTION_ENABLED: bool(false),
-  DUCKY_RETENTION_TERMINAL_JOBS_DAYS: z.coerce.number().int().min(1).default(180),
-  DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: z.coerce.number().int().min(1).default(365),
+  /**
+   * Per-record-kind windows. The defaults are deliberately conservative and
+   * deliberately DIFFERENT from each other: a job's shape, a job's detailed
+   * result, a finished task and a past schedule entry are not the same kind of
+   * thing, and one number for all of them meant choosing which to get wrong.
+   */
+  DUCKY_RETENTION_JOB_METADATA_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_JOB_DETAIL_DAYS: z.coerce.number().int().min(1).default(30),
+  DUCKY_RETENTION_DONE_CAPTURE_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_CLOSED_TASK_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_CLOSED_REMINDER_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_PAST_SCHEDULE_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_AUDIT_DAYS: z.coerce.number().int().min(1).default(90),
+  /**
+   * DEPRECATED aliases, still honoured. An operator who set one expressed an
+   * intent, and silently ignoring a variable still sitting in their env file is
+   * worse than honouring it. An explicit new value always wins.
+   */
+  DUCKY_RETENTION_TERMINAL_JOBS_DAYS: z.coerce.number().int().min(1).optional(),
+  DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: z.coerce.number().int().min(1).optional(),
   DUCKY_RETENTION_WATCH_EVENTS_DAYS: z.coerce.number().int().min(1).default(90),
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: z.coerce.number().int().min(1).default(7),
   /**

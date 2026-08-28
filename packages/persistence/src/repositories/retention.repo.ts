@@ -369,6 +369,79 @@ export class RetentionRepo {
 
   // ----------------------------------------------------------- run log ----
 
+  // ---- per-entity deletion, for the owner's own `/forget` -----------------
+  //
+  // The SAME delete statements the scheduled pass uses, narrowed to one row and
+  // always scoped to the owner. Owner-scoped in the WHERE clause rather than
+  // checked beforehand: a lookup then a delete is two statements that can
+  // disagree, and the id the owner typed came from a message.
+  //
+  // Captures and schedule entries have no short public handle -- the surfaces
+  // that list them show the first 8 characters of the uuid -- so both accept a
+  // PREFIX and refuse an ambiguous one. Everything else takes the public id.
+
+  /** Candidate ids for a prefix, owner-scoped. More than one means ambiguous. */
+  private idsByPrefix(table: 'captures' | 'schedules', ownerId: string, prefix: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT id FROM ${table} WHERE discord_user_id = ? AND id LIKE ? || '%' LIMIT 5`,
+        )
+        .all(ownerId, prefix) as { id: string }[]
+    ).map((r) => r.id);
+  }
+
+  captureIdsByPrefix(ownerId: string, prefix: string): string[] {
+    return this.idsByPrefix('captures', ownerId, prefix);
+  }
+
+  scheduleIdsByPrefix(ownerId: string, prefix: string): string[] {
+    return this.idsByPrefix('schedules', ownerId, prefix);
+  }
+
+  deleteCaptureById(ownerId: string, id: string): number {
+    return this.db
+      .prepare('DELETE FROM captures WHERE id = ? AND discord_user_id = ?')
+      .run(id, ownerId).changes as number;
+  }
+
+  deleteScheduleById(ownerId: string, id: string): number {
+    return this.db
+      .prepare('DELETE FROM schedules WHERE id = ? AND discord_user_id = ?')
+      .run(id, ownerId).changes as number;
+  }
+
+  deleteTaskByPublicId(ownerId: string, publicId: string): number {
+    return this.db
+      .prepare('DELETE FROM tasks WHERE public_id = ? AND discord_user_id = ?')
+      .run(publicId, ownerId).changes as number;
+  }
+
+  /**
+   * Child-first, in one call: the occurrence outbox goes with its reminder.
+   *
+   * Same order as `deleteClosedReminders`, because there is one deletion order
+   * for this shape and two that could drift apart would be a bug waiting to
+   * happen.
+   */
+  deleteReminderByPublicId(
+    ownerId: string,
+    publicId: string,
+  ): { reminders: number; occurrences: number } {
+    const row = this.db
+      .prepare('SELECT id FROM reminders WHERE public_id = ? AND discord_user_id = ?')
+      .get(publicId, ownerId) as { id: string } | undefined;
+    if (!row) return { reminders: 0, occurrences: 0 };
+
+    const occurrences = this.db
+      .prepare('DELETE FROM reminder_occurrences WHERE reminder_id = ?')
+      .run(row.id).changes as number;
+    const reminders = this.db
+      .prepare('DELETE FROM reminders WHERE id = ? AND discord_user_id = ?')
+      .run(row.id, ownerId).changes as number;
+    return { reminders, occurrences };
+  }
+
   startRun(trigger: RetentionTrigger): number {
     const res = this.db
       .prepare('INSERT INTO retention_runs (started_at, trigger, outcome) VALUES (?,?,?)')

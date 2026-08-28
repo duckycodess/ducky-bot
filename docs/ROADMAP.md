@@ -335,18 +335,24 @@ Delivered:
 Decisions resolved (see
 [ADR 0020](decisions/0020-conservative-retention-and-per-entity-deletion.md)):
 
-- **Job data retention** → 180 days from `finished_at`, and pruning DOES cascade
-  to the notification ledger: the delivery row and its transition are removed in
-  the same transaction, which is what stops a pruned transition reappearing as
+- **Job data retention** → refined by the final milestone (ADR 0022) into two
+  windows: metadata at 90 days from `finished_at`, and the DETAIL (result
+  snapshot, events, owner answers) at 30. Pruning still cascades to the
+  notification ledger — the delivery row and its transition are removed in the
+  same transaction, which is what stops a pruned transition reappearing as
   undelivered.
-- **Assistant data retention** → 365 days from the column that marks the record
-  closed. Nothing open is ever in scope.
+- **Assistant data retention** → also refined per kind: closed tasks 90 days,
+  finished reminders 90, past schedules 180, done captures 365, each from the
+  column that marks the record closed. Nothing open is ever in scope.
 - **Conversation retention** → nothing is stored, so there is nothing to retain.
   `/forget conversation` says so rather than pretending to act.
 - **Attachment retention** → no byte is kept and none is derived, so there is
   nothing to age out.
 - **The owner's own deletion controls** → per-entity, confirm-then-act, audited
-  by count. Deliberately no bulk form.
+  by count, and since the final milestone covering captures, tasks, reminders
+  and schedule entries as well as jobs and conversation. Deliberately no bulk
+  form, and no new command: they are choices on `/forget`, which was already
+  owner-only.
 - **What survives a profile switch** → nothing: the profiles share no database,
   so retention is per profile and the runbook says so.
 

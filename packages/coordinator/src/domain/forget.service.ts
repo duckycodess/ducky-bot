@@ -1,8 +1,8 @@
 import {
-  AUDIT_OWNER_REF, FORGET_REFUSAL_MESSAGE,
-  DuckyError, type ForgetRefusal,
+  AUDIT_OWNER_REF, FORGET_REFUSAL_MESSAGE, FORGET_TARGET_LABEL,
+  DuckyError, type ForgetEntityTarget, type ForgetRefusal,
 } from '@ducky/contracts';
-import type { Store } from '@ducky/persistence';
+import { withTransaction, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { ConversationMemoryService } from './conversation-memory.service.js';
 
@@ -15,6 +15,19 @@ export interface ForgetServiceDeps {
    * memory service wired.
    */
   readonly memory?: ConversationMemoryService;
+}
+
+/** What a preview found, or why it found nothing. */
+export type ForgetPreview =
+  | { found: true; target: ForgetEntityTarget; id: string; describes: string }
+  | { found: false; target: ForgetEntityTarget; id: string; message: string };
+
+export interface ForgetEntityResult {
+  readonly deleted: boolean;
+  readonly target: ForgetEntityTarget;
+  readonly id: string;
+  readonly rowsDeleted: number;
+  readonly message: string;
 }
 
 export interface ForgetJobResult {
@@ -167,6 +180,170 @@ export class ForgetService {
     };
   }
 
+  // ---- per-record deletion, for everything that is not a job -------------
+
+  /**
+   * What `/forget <kind> <id>` will remove, WITHOUT removing it.
+   *
+   * Two-step for the same reason a job is: the command shows what will go and
+   * hands back a signed control, and only pressing it deletes. This half never
+   * writes, so a mistyped id costs nothing.
+   *
+   * A record that is not the owner's own and a record that does not exist are
+   * answered IDENTICALLY -- the reply must not confirm that somebody else has
+   * a task with that id.
+   */
+  previewEntity(
+    actor: ActorContext,
+    target: ForgetEntityTarget,
+    rawId: string,
+  ): ForgetPreview {
+    this.deps.authz.requireOwner(actor);
+    const id = rawId.trim().toLowerCase();
+    if (id === '') {
+      throw new DuckyError(
+        'invalid_input',
+        `Which ${FORGET_TARGET_LABEL[target]}? Give the id shown when you listed it.`,
+      );
+    }
+    const owner = actor.discordUserId;
+    const store = this.deps.store;
+
+    switch (target) {
+      case 'job': {
+        const job = store.jobs.byPublicId(id);
+        if (!job || job.discordUserId !== owner) return unknown(target, id);
+        return { found: true, target, id: job.publicId, describes: `${job.repoSlug} · ${job.state}` };
+      }
+      case 'task': {
+        const row = store.tasks.byPublicId(owner, id);
+        if (!row) return unknown(target, id);
+        return { found: true, target, id: row.publicId, describes: `${row.status} · ${row.title}` };
+      }
+      case 'reminder': {
+        const row = store.reminders.byPublicId(owner, id);
+        if (!row) return unknown(target, id);
+        return { found: true, target, id: row.publicId, describes: `${row.status} · ${row.text}` };
+      }
+      case 'capture': {
+        const ids = store.retention.captureIdsByPrefix(owner, id);
+        if (ids.length === 0) return unknown(target, id);
+        if (ids.length > 1) return ambiguous(target, id);
+        const row = store.captures.get(ids[0]!);
+        if (!row || row.discordUserId !== owner) return unknown(target, id);
+        return { found: true, target, id: row.id, describes: `${row.status} · ${row.content}` };
+      }
+      case 'schedule': {
+        const ids = store.retention.scheduleIdsByPrefix(owner, id);
+        if (ids.length === 0) return unknown(target, id);
+        if (ids.length > 1) return ambiguous(target, id);
+        const row = store.schedules.byIdForOwner(owner, ids[0]!);
+        if (!row) return unknown(target, id);
+        return { found: true, target, id: row.id, describes: `${row.startsAt} · ${row.title}` };
+      }
+    }
+  }
+
+  /**
+   * Deletes one record the owner named, and reports the COUNT.
+   *
+   * Every statement is owner-scoped in its WHERE clause rather than checked
+   * first: a lookup followed by a delete is two statements that can disagree,
+   * and the id came from a message. A reminder takes its occurrence outbox with
+   * it, child-first, through the same code the scheduled pass uses.
+   *
+   * Deliberately NOT guarded the way a job is. A job can be live in ways that
+   * make deletion destructive -- a held repository, an open workspace holding
+   * uncommitted work. A capture, a task, a reminder and a schedule entry cannot:
+   * they are the owner's own notes, and deleting one they pointed at is exactly
+   * what they asked for.
+   */
+  forgetEntity(
+    actor: ActorContext,
+    target: ForgetEntityTarget,
+    rawId: string,
+  ): ForgetEntityResult {
+    this.deps.authz.requireOwner(actor);
+    if (target === 'job') {
+      const out = this.forgetJob(actor, rawId);
+      return {
+        deleted: out.deleted,
+        target,
+        id: out.publicId,
+        rowsDeleted: out.rowsDeleted,
+        message: out.message,
+      };
+    }
+
+    const preview = this.previewEntity(actor, target, rawId);
+    if (!preview.found) {
+      return { deleted: false, target, id: rawId.trim(), rowsDeleted: 0, message: preview.message };
+    }
+
+    const owner = actor.discordUserId;
+    const store = this.deps.store;
+    const rows = withTransaction(store.db, () => {
+      switch (target) {
+        case 'task':
+          return store.retention.deleteTaskByPublicId(owner, preview.id);
+        case 'reminder': {
+          const r = store.retention.deleteReminderByPublicId(owner, preview.id);
+          return r.reminders + r.occurrences;
+        }
+        case 'capture':
+          return store.retention.deleteCaptureById(owner, preview.id);
+        case 'schedule':
+          return store.retention.deleteScheduleById(owner, preview.id);
+      }
+    });
+
+    if (rows === 0) {
+      // It was there a moment ago and is not now. Report the truth rather than
+      // claiming a deletion that did not happen.
+      return {
+        deleted: false,
+        target,
+        id: preview.id,
+        rowsDeleted: 0,
+        message: FORGET_REFUSAL_MESSAGE.unknown_record,
+      };
+    }
+
+    this.recordEntity(target, preview.id, rows);
+    return {
+      deleted: true,
+      target,
+      id: preview.id,
+      rowsDeleted: rows,
+      message:
+        `Deleted that ${FORGET_TARGET_LABEL[target]} (${rows} row${rows === 1 ? '' : 's'}). ` +
+        'This cannot be undone.',
+    };
+  }
+
+  /**
+   * Audits a per-record deletion by COUNT.
+   *
+   * The subject reference is the kind and the id -- never the title, the text or
+   * the content. An id the owner already had is not a disclosure; what they
+   * wrote is.
+   */
+  private recordEntity(target: ForgetEntityTarget, id: string, rows: number): void {
+    try {
+      this.deps.store.auditLog.record({
+        event: 'data.deleted',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind: target === 'job' ? 'job' : 'conversation',
+        subjectRef: `${target}:${id}`,
+        outcome: 'ok',
+        detail: `rows ${rows}`,
+      });
+    } catch {
+      /* a record is never worth failing a deletion the owner asked for */
+    }
+  }
+
   /** One audit row per deletion, counts only. Never throws. */
   private record(subjectKind: 'conversation', subjectRef: string, rows: number): void {
     try {
@@ -184,3 +361,25 @@ export class ForgetService {
     }
   }
 }
+
+const unknown = (target: ForgetEntityTarget, id: string): ForgetPreview => ({
+  found: false,
+  target,
+  id,
+  message: FORGET_REFUSAL_MESSAGE.unknown_record,
+});
+
+/**
+ * A prefix that could mean two records is refused rather than resolved.
+ *
+ * Guessing which one the owner meant is the one behaviour a deletion path must
+ * never have.
+ */
+const ambiguous = (target: ForgetEntityTarget, id: string): ForgetPreview => ({
+  found: false,
+  target,
+  id,
+  message:
+    `More than one ${FORGET_TARGET_LABEL[target]} starts with \`${id}\`. ` +
+    'Give a few more characters.',
+});

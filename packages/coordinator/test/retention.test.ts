@@ -29,12 +29,19 @@ const service = (h: ReturnType<typeof makeHarness>, over: Record<string, unknown
     store: h.store,
     policy: {
       enabled: true,
-      terminalJobDays: 180,
-      closedAssistantDays: 365,
+      jobMetadataDays: 90,
+      jobDetailDays: 30,
+      doneCaptureDays: 365,
+      closedTaskDays: 90,
+      closedReminderDays: 90,
+      pastScheduleDays: 180,
+      auditDays: 90,
       watchEventDays: 90,
       idempotencyDays: 7,
       cancelledWatchDays: 365,
       runLogDays: 365,
+      conversationOwnerDays: 30,
+      conversationOtherDays: 7,
       batch: 200,
       ...over,
     },
@@ -251,9 +258,13 @@ describe('schedule retention respects the owner zone', () => {
       timeZone,
       now: () => now,
       policy: {
-        enabled: true, terminalJobDays: 180, closedAssistantDays: 30,
+        enabled: true, jobMetadataDays: 90, jobDetailDays: 30,
+        doneCaptureDays: 365, closedTaskDays: 90, closedReminderDays: 90,
+        // Small on purpose: these cases are about the ZONE, not the window.
+        pastScheduleDays: 30, auditDays: 90,
         watchEventDays: 90, idempotencyDays: 7, cancelledWatchDays: 365,
-        runLogDays: 365, batch: 200,
+        runLogDays: 365, conversationOwnerDays: 30, conversationOtherDays: 7,
+        batch: 200,
       },
     });
 
@@ -335,22 +346,177 @@ describe('schedule retention respects the owner zone', () => {
  * are fixed at the defaults and documented as fixed.
  */
 describe('fixed versus configurable windows', () => {
-  it('exposes only the four windows that have environment variables', () => {
+  const base = {
+    DUCKY_RETENTION_ENABLED: true,
+    DUCKY_RETENTION_JOB_DETAIL_DAYS: 30,
+    DUCKY_RETENTION_AUDIT_DAYS: 90,
+    DUCKY_RETENTION_WATCH_EVENTS_DAYS: 90,
+    DUCKY_RETENTION_IDEMPOTENCY_DAYS: 7,
+    DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: 30,
+    DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: 7,
+    DUCKY_RETENTION_BATCH: 200,
+  };
+
+  it('reads every per-kind window from its own variable', () => {
     const policy = retentionPolicyFrom({
-      DUCKY_RETENTION_ENABLED: true,
-      DUCKY_RETENTION_TERMINAL_JOBS_DAYS: 10,
-      DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: 20,
-      DUCKY_RETENTION_WATCH_EVENTS_DAYS: 30,
-      DUCKY_RETENTION_IDEMPOTENCY_DAYS: 40,
-      DUCKY_RETENTION_BATCH: 50,
+      ...base,
+      DUCKY_RETENTION_JOB_METADATA_DAYS: 10,
+      DUCKY_RETENTION_JOB_DETAIL_DAYS: 11,
+      DUCKY_RETENTION_DONE_CAPTURE_DAYS: 12,
+      DUCKY_RETENTION_CLOSED_TASK_DAYS: 13,
+      DUCKY_RETENTION_CLOSED_REMINDER_DAYS: 14,
+      DUCKY_RETENTION_PAST_SCHEDULE_DAYS: 15,
+      DUCKY_RETENTION_AUDIT_DAYS: 16,
+      DUCKY_RETENTION_WATCH_EVENTS_DAYS: 17,
+      DUCKY_RETENTION_IDEMPOTENCY_DAYS: 18,
+      DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: 19,
+      DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: 20,
+      DUCKY_RETENTION_BATCH: 21,
     });
-    expect(policy.terminalJobDays).toBe(10);
-    expect(policy.closedAssistantDays).toBe(20);
-    expect(policy.watchEventDays).toBe(30);
-    expect(policy.idempotencyDays).toBe(40);
-    expect(policy.batch).toBe(50);
-    // Fixed, whatever the environment says.
+    expect(policy.jobMetadataDays).toBe(10);
+    expect(policy.jobDetailDays).toBe(11);
+    expect(policy.doneCaptureDays).toBe(12);
+    expect(policy.closedTaskDays).toBe(13);
+    expect(policy.closedReminderDays).toBe(14);
+    expect(policy.pastScheduleDays).toBe(15);
+    expect(policy.auditDays).toBe(16);
+    expect(policy.watchEventDays).toBe(17);
+    expect(policy.idempotencyDays).toBe(18);
+    expect(policy.conversationOwnerDays).toBe(19);
+    expect(policy.conversationOtherDays).toBe(20);
+    expect(policy.batch).toBe(21);
+    // Still fixed, whatever the environment says.
     expect(policy.cancelledWatchDays).toBe(DEFAULT_RETENTION.cancelledWatchDays);
     expect(policy.runLogDays).toBe(DEFAULT_RETENTION.runLogDays);
+  });
+
+  it('ships the conservative per-kind defaults the milestone asked for', () => {
+    const policy = retentionPolicyFrom(base);
+    expect(policy.jobMetadataDays).toBe(90);
+    expect(policy.jobDetailDays).toBe(30);
+    expect(policy.closedTaskDays).toBe(90);
+    expect(policy.closedReminderDays).toBe(90);
+    expect(policy.pastScheduleDays).toBe(180);
+    expect(policy.auditDays).toBe(90);
+    expect(policy.conversationOwnerDays).toBe(30);
+    expect(policy.conversationOtherDays).toBe(7);
+  });
+
+  it('still honours the two deprecated aliases rather than ignoring them', () => {
+    // An operator who set one expressed an intent. Silently dropping a variable
+    // that is still in their env file is the worst of the three options.
+    const policy = retentionPolicyFrom({
+      ...base,
+      DUCKY_RETENTION_TERMINAL_JOBS_DAYS: 200,
+      DUCKY_RETENTION_CLOSED_ASSISTANT_DAYS: 400,
+    });
+    expect(policy.jobMetadataDays).toBe(200);
+    expect(policy.closedTaskDays).toBe(400);
+    expect(policy.closedReminderDays).toBe(400);
+    expect(policy.pastScheduleDays).toBe(400);
+    expect(policy.doneCaptureDays).toBe(400);
+  });
+
+  it('prefers an explicit new value over a deprecated alias', () => {
+    const policy = retentionPolicyFrom({
+      ...base,
+      DUCKY_RETENTION_TERMINAL_JOBS_DAYS: 200,
+      DUCKY_RETENTION_JOB_METADATA_DAYS: 45,
+    });
+    expect(policy.jobMetadataDays).toBe(45);
+  });
+});
+
+/**
+ * The detail of a job goes before the job does.
+ *
+ * A result snapshot is the most detailed thing Ducky stores about a repository;
+ * the job row and its transitions are the shape of what happened. Different
+ * lifetimes, so different windows.
+ */
+describe('job detail and job metadata have different windows', () => {
+  const seedJobAt = (
+    h: ReturnType<typeof makeHarness>,
+    id: string,
+    daysAgo: number,
+  ): void => {
+    const at = iso(daysAgo);
+    h.store.db.prepare(
+      `INSERT INTO jobs (id, public_id, discord_user_id, repo_slug, task, context, bootstrap,
+         state, max_attempts, max_owner_input_rounds, created_at, updated_at, finished_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(id, `p-${id}`, h.owner.discordUserId, 'demo', 'task text', null, 0,
+      'completed', 3, 3, at, at, at);
+    h.store.db.prepare(
+      `INSERT INTO job_results (id, job_id, lease_id, result_sha256, verdict, summary_redacted,
+         review_json, verification_json, changed_files_json, proposed_actions_json,
+         result_snapshot_json, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      `res-${id}`, id, 'lease-1', 'sha', 'implemented', 'did the thing',
+      '{}', '{}', '[]', '[]', '{}', at,
+    );
+    h.store.db.prepare(
+      `INSERT INTO job_events (job_id, seq, kind, message_redacted, created_at) VALUES (?,?,?,?,?)`,
+    ).run(id, 1, 'submitted', 'queued', at);
+  };
+
+  it('strips the result of a job it keeps, once past the detail window', async () => {
+    const h = makeHarness();
+    // 45 days: past the 30-day detail window, inside the 90-day metadata one.
+    seedJobAt(h, 'j1', 45);
+
+    const result = await service(h).tick();
+
+    expect(result.counts.jobsDeleted).toBe(0);
+    expect(result.counts.jobDetailRowsDeleted).toBeGreaterThan(0);
+    // The job survives its own detail, and every reader already handles that:
+    // a queued job has no result either.
+    expect(h.store.jobs.byPublicId('p-j1')).toBeDefined();
+    expect(h.store.results.byJobId('j1')).toBeUndefined();
+    h.close();
+  });
+
+  it('keeps the detail of a recent job', async () => {
+    const h = makeHarness();
+    seedJobAt(h, 'j1', 5);
+
+    const result = await service(h).tick();
+
+    expect(result.counts.jobDetailRowsDeleted).toBe(0);
+    expect(h.store.results.byJobId('j1')).toBeDefined();
+    h.close();
+  });
+
+  it('removes the whole job once past the metadata window', async () => {
+    const h = makeHarness();
+    seedJobAt(h, 'j1', 120);
+
+    const result = await service(h).tick();
+
+    expect(result.counts.jobsDeleted).toBe(1);
+    expect(h.store.jobs.byPublicId('p-j1')).toBeUndefined();
+    h.close();
+  });
+
+  it('prunes the audit log on its own window, and converges', async () => {
+    const h = makeHarness();
+    const insertAudit = (at: string) => {
+      h.store.db
+        .prepare(
+          `INSERT INTO audit_log (at, event, actor_kind, actor_ref, outcome)
+           VALUES (?, 'job.created', 'system', 'test', 'ok')`,
+        )
+        .run(at);
+    };
+    insertAudit(iso(200));
+    insertAudit(iso(5));
+
+    const first = await service(h).tick();
+    expect(first.counts.auditRowsDeleted).toBe(1);
+
+    const second = await service(h).tick();
+    expect(second.counts.auditRowsDeleted).toBe(0);
+    h.close();
   });
 });

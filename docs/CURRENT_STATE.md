@@ -280,12 +280,25 @@ Three different things, and they are not interchangeable:
   existing coordinator interval — no second scheduler — and every table is
   capped at `DUCKY_RETENTION_BATCH` per pass, so a tick is short and a pass that
   hits the cap resumes on the next one.
-- **Table-by-table.** Terminal jobs (and every row referencing them) at 180
-  days; closed tasks, closed reminders, done/archived captures and past
-  confirmed schedules at 365; settled GitHub watch events at 90; idempotency
-  keys at 7. `audit_log` (90 days) and `executor_nonces` keep their existing
-  prunes, unchanged. Cancelled watches and the run log are fixed at 365 days and
-  deliberately not configurable.
+- **Per kind of record, each with its own window** (ADR 0022). Job metadata —
+  the row, its transitions and its delivery ledger — at **90** days; the job's
+  **DETAIL** (result snapshot, events, the owner's answers) at **30**, so the
+  most specific thing Ducky stores about a repository goes first while the shape
+  of what happened survives; done/archived captures at 365; closed tasks at 90;
+  finished reminders and their occurrences at 90; past confirmed schedules at
+  180; the audit log at 90; settled watch events at 90; idempotency keys at 7;
+  conversation turns at 30 (owner) and 7 (a chat-whitelist guest). Cancelled
+  watches and the retention run log stay fixed at 365 and are deliberately not
+  configurable. `executor_nonces` keeps its existing prune.
+
+  Pruning the detail of a job it keeps is safe because every reader already
+  treats a missing result as normal — a queued job has none — and the count is
+  reported separately from the child rows of jobs that went entirely, so a job
+  surviving without its detail is visible rather than hidden in one total.
+
+  The two earlier variables (`TERMINAL_JOBS_DAYS`, `CLOSED_ASSISTANT_DAYS`) are
+  kept as **deprecated aliases** rather than silently ignored: an operator who
+  set one expressed an intent, and an explicit new value always wins.
 - **Schedules are time-zone correct.** `schedules.starts_at` is wall-clock text
   in the owner's zone, so a schedule goes only when it was confirmed longer ago
   than the window AND its event is genuinely past in `DUCKY_OWNER_TIMEZONE`. The
@@ -307,7 +320,15 @@ Three different things, and they are not interchangeable:
   owner-only manifest, never shared-readable. `/forget job` is two-step: the
   command shows what will go and returns a signed control bound to the owner;
   only pressing it deletes. An unknown id and somebody else's id are answered
-  identically. **`/forget conversation` now deletes for real** — every stored
+  identically. **`/forget` also names one `capture`, `task`, `reminder` or
+  `schedule` entry** — choices on a command that was already owner-only, so no
+  command and no interaction kind was added and the owner-only surface is
+  unchanged. With no id it LISTS the owner's records with the ids they can type,
+  as a plain read with no controls; captures and schedule entries are named by
+  the 8-character id prefix `/inbox` already shows, and an ambiguous prefix is
+  refused rather than resolved. Every statement is owner-scoped in its WHERE
+  clause, a reminder takes its occurrence outbox with it child-first, and every
+  deletion is audited by count. **`/forget conversation` now deletes for real** — every stored
   turn of every thread for that owner, one step (there is no id to confirm and
   no live-work reason it could be refused), reporting and auditing the COUNT. It
   works even when continuity has since been switched off, because rows an

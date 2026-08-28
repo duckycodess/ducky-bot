@@ -1,4 +1,5 @@
 import {
+  FORGET_TARGETS, isForgetEntityTarget, isForgetTarget, type ForgetEntityTarget,
   CONVERSATIONAL_ROUTE, CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE,
   DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
@@ -380,6 +381,49 @@ export class DuckyRouter {
    * continuity is off, when the router has no memory service, or when the thread
    * is a configured shared channel.
    */
+  /**
+   * The owner's own candidates for one kind, bounded, with the ids they can
+   * type.
+   *
+   * Reads only owner-scoped list methods that already existed. Captures and
+   * schedule entries are identified by the first 8 characters of their id --
+   * which is exactly what `/inbox` already displays -- and `previewEntity`
+   * refuses a prefix that could mean two records rather than picking one.
+   */
+  private forgetCandidates(
+    actor: ActorContext,
+    target: ForgetEntityTarget,
+  ): present.ForgetCandidate[] {
+    const d = this.deps;
+    switch (target) {
+      case 'job':
+        return d.jobs.list(actor, 10).map((j) => ({
+          id: j.publicId,
+          describes: `${j.repoSlug} · ${j.state.replace(/_/g, ' ')}`,
+        }));
+      case 'task':
+        return d.tasks.list(actor, 'all', 10).map((t) => ({
+          id: t.publicId,
+          describes: `${t.status} · ${t.title}`,
+        }));
+      case 'reminder':
+        return d.reminders.list(actor, 'all', 10).map((r) => ({
+          id: r.publicId,
+          describes: `${r.status} · ${r.text}`,
+        }));
+      case 'capture':
+        return d.captures.list(actor, 'all').slice(0, 10).map((c) => ({
+          id: c.id.slice(0, 8),
+          describes: `${c.status} · ${c.content}`,
+        }));
+      case 'schedule':
+        return d.schedules.list(actor, 10).map((row) => ({
+          id: row.id.slice(0, 8),
+          describes: `${row.startsAt} · ${row.title}`,
+        }));
+    }
+  }
+
   private async converse(input: {
     actor: ActorContext;
     userId: string;
@@ -426,12 +470,23 @@ export class DuckyRouter {
     const d = this.deps;
 
     /**
-     * `/forget job <id>` and `/forget conversation`.
+     * `/forget <kind> [id]`.
      *
-     * Two-step on purpose: the command SHOWS what will go and returns a signed
-     * confirm control; only pressing it deletes. There is deliberately no
-     * `/forget all`, no filter and no wildcard -- `FORGET_TARGETS` cannot
-     * express one, so this route has nothing broader to offer.
+     * Two-step for every kind that names a record: the command SHOWS what will
+     * go and returns a signed confirm control, and only pressing it deletes.
+     * `conversation` is one step, because there is no id to confirm and no
+     * live-work reason it could be refused.
+     *
+     * With no id, the command LISTS the owner's candidates with the ids they can
+     * type. Discovery lives here rather than in the other surfaces so that
+     * captures and schedule entries -- which have no short public handle -- are
+     * still reachable without adding a command, and so `/forget` is
+     * self-contained.
+     *
+     * There is deliberately no `/forget all`, no filter and no wildcard.
+     * `FORGET_TARGETS` cannot express one, so this route has nothing broader to
+     * offer, and every kind here is a CHOICE on a command that was already
+     * owner-only -- the owner-only surface is not widened by any of them.
      */
     this.commands.set('forget', async (actor, e) => {
       this.buckets.check('interaction', actor.discordUserId);
@@ -440,40 +495,37 @@ export class DuckyRouter {
         return { content: 'Deletion is not configured on this instance.', ephemeral: true };
       }
 
-      const target = String(e.options['target'] ?? 'job');
-      if (target === 'conversation') {
-        // One step, not two: deleting stored turns cannot be refused for a
-        // live-work reason the way a job can, and there is no id to confirm.
+      const raw = String(e.options['target'] ?? 'job').trim().toLowerCase();
+      if (!isForgetTarget(raw)) {
+        return {
+          content: `Choose one of: ${FORGET_TARGETS.join(', ')}.`,
+          ephemeral: true,
+        };
+      }
+      if (raw === 'conversation') {
         return { content: forget.forgetConversation(actor).message, ephemeral: true };
       }
 
-      const publicId = String(e.options['id'] ?? '').trim();
-      if (publicId === '') {
-        return { content: 'Which job? Give the id from `/jobs`.', ephemeral: true };
-      }
+      const target: ForgetEntityTarget = raw;
+      const id = String(e.options['id'] ?? '').trim();
+      if (id === '') return present.forgetCandidates(target, this.forgetCandidates(actor, target));
 
-      // Dry run first: prove it CAN be deleted, and show the owner what for,
-      // before offering a control that actually removes it.
-      const preview = d.jobs.detail(actor, publicId);
-      return {
-        content:
-          `Delete job \`${preview.job.publicId}\` (${preview.job.repoSlug}, ` +
-          `${preview.job.state.replace(/_/g, ' ')}) and everything recorded about it — ` +
-          'its transitions, events, your answers, the result snapshot, approvals and ' +
-          'workspace record?\n\n**This cannot be undone.** Nothing else is touched.',
-        ephemeral: true,
-        rows: [{
-          buttons: [{
-            customId: d.signer.sign({
-              kind: 'forget_confirm',
-              entityId: preview.job.publicId,
-              actorUserId: actor.discordUserId,
-            }),
-            label: `delete ${preview.job.publicId}`,
-            style: 'danger' as const,
-          }],
-        }],
-      };
+      const preview = forget.previewEntity(actor, target, id);
+      if (!preview.found) return { content: preview.message, ephemeral: true };
+
+      return present.forgetConfirm(preview, d.signer.sign({
+        kind: 'forget_confirm',
+        // The kind travels WITH the id: a control minted for a task must not be
+        // replayable as a job id, and the handler must not have to guess.
+        //
+        // `.` and not `:` -- the signed custom id is itself colon-delimited and
+        // parsed as exactly five segments, so a colon here silently invalidated
+        // the signature and the egress sanitizer dropped the button before it
+        // could render. `.` is inside the entity-segment character class the
+        // sanitizer allows, and no id of any kind contains one.
+        entityId: `${target}.${preview.id}`,
+        actorUserId: actor.discordUserId,
+      }));
     });
 
     this.commands.set('capture', async (actor, e) => {
@@ -989,7 +1041,15 @@ export class DuckyRouter {
       if (!d.forget) {
         return { content: 'Deletion is not configured on this instance.', ephemeral: true };
       }
-      const result = d.forget.forgetJob(actor, entityId);
+      // `kind.id`, or a bare job id from a control minted before the other
+      // kinds existed. An unsigned or re-signed value cannot reach here.
+      const sep = entityId.indexOf('.');
+      const kind = sep < 0 ? 'job' : entityId.slice(0, sep);
+      const id = sep < 0 ? entityId : entityId.slice(sep + 1);
+      if (!isForgetEntityTarget(kind)) {
+        return { content: 'That control is no longer valid.', ephemeral: true };
+      }
+      const result = d.forget.forgetEntity(actor, kind, id);
       return { content: result.message, ephemeral: true };
     });
   }

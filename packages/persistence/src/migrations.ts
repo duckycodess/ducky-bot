@@ -863,4 +863,40 @@ CREATE INDEX ix_briefing_deliveries_pending
   ON briefing_deliveries(status, due_at) WHERE status = 'pending';
 `,
   },
+  {
+    version: 19,
+    name: 'audit_subject_kinds_v5',
+    sql: `
+-- One more subject kind: record, for a per-record deletion the owner asked for.
+--
+-- Per-record /forget was briefly filed under the conversation subject, which is
+-- the wrong kind of wrong: an audit trail that misdescribes what was removed is
+-- worse than a coarse one. AuditLogRepo.record never throws, so a kind the enum
+-- allows and this constraint does not is dropped SILENTLY -- which is why every
+-- widening gets a migration and schema.test.ts asserts the two agree.
+CREATE TABLE audit_log_v5 (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  at           TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  actor_kind   TEXT NOT NULL CHECK (actor_kind IN ('owner','executor','system','reconciler')),
+  actor_ref    TEXT,
+  subject_kind TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                 ('job','approval','executor','dependency','credential','retention','route',
+                  'config','provider','conversation','record')),
+  subject_ref  TEXT,
+  outcome      TEXT NOT NULL CHECK (outcome IN ('ok','refused','failed')),
+  detail       TEXT
+);
+
+INSERT INTO audit_log_v5 (id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+  SELECT id, at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail
+    FROM audit_log;
+
+DROP TABLE audit_log;
+ALTER TABLE audit_log_v5 RENAME TO audit_log;
+
+CREATE INDEX ix_audit_log_at ON audit_log(at);
+CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
+`,
+  },
 ];

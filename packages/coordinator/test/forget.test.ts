@@ -489,9 +489,12 @@ describe('per-record deletion', () => {
     h.app.forget.forgetEntity(h.owner, 'task', task.publicId);
 
     const rows = h.store.db
-      .prepare("SELECT subject_ref, detail FROM audit_log WHERE event = 'data.deleted'")
-      .all() as { subject_ref: string; detail: string }[];
-    expect(rows.some((r) => r.subject_ref === `task:${task.publicId}`)).toBe(true);
+      .prepare("SELECT subject_kind, subject_ref, detail FROM audit_log WHERE event = 'data.deleted'")
+      .all() as { subject_kind: string; subject_ref: string; detail: string }[];
+    const row = rows.find((r) => r.subject_ref === `task:${task.publicId}`);
+    expect(row).toBeDefined();
+    // `record`, not `conversation`: the trail has to say what KIND of thing went.
+    expect(row!.subject_kind).toBe('record');
     for (const r of rows) {
       expect(r.detail).not.toContain('distinctive');
       expect(r.detail).toMatch(/^rows \d+$/);

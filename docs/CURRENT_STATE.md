@@ -556,20 +556,47 @@ stays `false` and `/status` reports `experimental`.
 | Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
 | Azure deployment | Documented only; nothing provisioned. |
 
+## Blocked, and by what exactly
+
+Every one of these is blocked by a specific fact, not by effort. Each names what
+would unblock it.
+
+| Blocked | The exact blocker | What unblocks it |
+|---|---|---|
+| Real conversational replies | No successful OpenClaw agent turn has been observed: an agent needs model provider credentials, and none are configured on this host (`ProviderAuthError`, recorded). | The owner configures a provider for an OpenClaw agent (`openclaw agents add <id>`), then `pnpm probe:openclaw` records a reply envelope and exits 0. |
+| Conversation ATTACHMENT delivery | Two independent blockers. The provider is unverified, AND the recorded OpenClaw agent turn takes **text only** — it has no attachment input at all. | A verified provider that genuinely declares attachment support. Not OpenClaw's agent turn as recorded. |
+| Image / PDF schedule extraction | No decoder ships, none is installed (`pdftotext`, `tesseract`, `gs` are all absent), and no provider can read those bytes. Uploads are refused **before download**. | A verified binary-capable extractor or provider, plus `SCHEDULE_BINARY_EXTRACTION_ENABLED=true`. Installing a decoder is a host mutation of its own. |
+| Herdr/Pi **certification** | The readiness fix removes the known cause of `agent_prompt_stalled`, but `pnpm probe:live-job` has not been re-run since it landed, so repeatability is unmeasured. Running it against the live development database would race the executor already polling it. | Several consecutive clean `probe:live-job` runs, isolated from the running executor. `DUCKY_HERDR_VERIFIED=1` stays an operator act. |
+| A live GitHub watch | No repository in the allowlist has a GitHub mapping (`github: null`), so there is nothing to observe and nothing to point at. | The owner adds a GitHub mapping to a repository they want watched. |
+| Recent commits on a repository's default branch | Reachable only through `gh api`, and `api` is on the forbidden-verb list. | A different read-only surface, or a deliberate decision about `gh api` with its own classification. |
+| Verified dependency checking | The GitHub CI checker exists but has never run against a real repository (same reason as above), so it reports `verified: false` and the resolver refuses its `ready`. | One recorded live check. It can already **fail** a job on a definite CI failure. |
+| Live Discord delivery | Reminder DMs, briefing DMs, watch summaries and shared-channel posts all use the gateway path, which no human has exercised. Five of the twelve commands have never been registered. | `pnpm register-commands --apply --profile development`, the Message Content intent, and one real DM. |
+| `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
+| Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
+
 ## Deferred
 
-Natural-language capture and proactive (pushed) briefings, both deferred out of
-2B — the first depends on a verified conversation provider (2D), the second on
-a delivery-time preference that does not exist yet.
 Collaborator job submission (visibility shipped; writes stay owner-only);
-multi-user permissions beyond shared visibility; public bot; autonomous deployment; automatic GitHub or
-Azure writes; arbitrary shell; browser automation; container sandboxing;
-concurrent implementation writers; Tailscale provisioning.
+multi-user permissions beyond shared visibility; public bot; autonomous
+deployment; automatic GitHub or Azure writes; arbitrary shell; browser
+automation; container sandboxing; concurrent implementation writers; executor-
+routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test`, `pnpm build` all pass. See
-[TESTING.md](TESTING.md).
+`pnpm typecheck`, `pnpm test` (**81 files, 1045 tests**) and `pnpm build` all
+pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
+and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
+what each step does **not** prove.
+
+Probes run in this milestone, with their real outcomes:
+
+| Probe | Outcome |
+|---|---|
+| `pnpm probe:herdr --with-agent` | Run twice. The FIRST exited 3 — the readiness marker never matched a real pane — which is what corrected the marker. The second exited 0, with the input frame observed 8.16 s after `agent start`. |
+| `pnpm probe:openclaw` | Exits **2**: half the contract recorded, the reply half blocked on model provider credentials. |
+| `pnpm probe:gh` | Exits 0. Field lists recorded for six read-only surfaces, locally and repo-less. |
+| `pnpm probe:live-job` | **Not run in this milestone.** It would race the executor already polling the development database, and a run against a held reservation measures nothing. |
 
 ## Next
 

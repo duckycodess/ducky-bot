@@ -334,7 +334,10 @@ export class ForgetService {
         event: 'data.deleted',
         actorKind: 'owner',
         actorRef: AUDIT_OWNER_REF,
-        subjectKind: target === 'job' ? 'job' : 'conversation',
+        // `record` for anything that is not a job, so the trail says what kind
+        // of thing went. Filing a task under `conversation` would make the
+        // audit misdescribe the deletion.
+        subjectKind: target === 'job' ? 'job' : 'record',
         subjectRef: `${target}:${id}`,
         outcome: 'ok',
         detail: `rows ${rows}`,

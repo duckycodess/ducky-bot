@@ -369,6 +369,95 @@ answer and continuation under the same reservation; a rejected workspace that
 never reaches the orchestrator; a revoked credential and a wrong signing secret
 both refused.
 
+**adapters / herdr readiness** — the readiness marker classifies a banner-phase
+pane, a painted input frame and an empty snapshot; an empty one is treated as an
+observation that could not be made rather than as evidence of banners; the
+orchestrator prompts once the frame is seen TWICE, keeps looking while banners
+paint, falls back to Herdr's own signal when the marker never appears, survives
+an unreadable pane, and never reads a pane for an agent that is already working.
+In every case exactly ONE prompt is submitted.
+
+**adapters / readiness evidence** — asserted against `agent-readiness.json`,
+which only `pnpm probe:herdr --with-agent` can produce: that `agent read`
+answers with TEXT and not an envelope, that Herdr claimed `interactive_ready`
+during the banner phase, that the input frame separates banners from a
+promptable agent, and that no recorded sample carries the status footer the
+first version of the marker wrongly required. With no fixture the suite says so
+and skips.
+
+**adapters / herdr policy** — every method the orchestrator uses gets past the
+central command policy, and the argv each builds is classified; a forced
+worktree removal is refused BEFORE a subprocess exists; an unclassified herdr
+surface is refused rather than defaulted.
+
+**adapters / openclaw contract** — what `pnpm probe:openclaw` recorded: the
+agent-turn request shape, a WebSocket gateway rather than the HTTP endpoint
+first assumed, the auth model observed by running a real turn, and that an agent
+turn has NO attachment input. Plus the load-bearing one: while the REPLY half is
+unrecorded, no contract version exists, `initializable()` refuses and the
+provider reports itself unverified. No fixture may contain a credential or a
+host path.
+
+**adapters / gh fields** — every `--json` selector the frozen argv table sends is
+one this `gh` supports, checked against what `pnpm probe:gh` recorded from `gh`
+itself; no write verb appears anywhere in the table; every list is bounded by
+`--limit`.
+
+**adapters / github CI checker** — ready only when every check finished and
+passed, failed on a definite failure, pending while anything runs; unverified by
+default, which is what stops it resuming a job; `ci_run` only; a malformed key,
+an unknown repository, a missing key and a `gh` error are all pending and never
+failed; no raw `gh` error reaches a detail field.
+
+**coordinator / conversation memory** — off by default, storing nothing; rows an
+earlier run stored are still deletable after the flag goes off; history is
+isolated per user AND per thread; a configured shared channel takes no part in
+memory at all; the replay window, the per-thread row cap and the per-turn
+truncation all hold; `/forget conversation` deletes every thread of that user
+only, reports the count, and audits by count with no content; retention keeps the
+owner's history longer than a guest's and only past each window.
+
+**coordinator / intents** — the rule table reads the shapes it claims and means
+nothing far more often than something; a reminder with no time is refused rather
+than given an invented one; an inferred write is PROPOSED and never applied;
+a refusal drops it; an unrelated later message is not consent; proposals expire;
+one per thread, isolated per thread; a service refusal is reported as a refusal;
+a non-owner reaches none of it; the meal and study helpers answer from fixed
+data, honour only constraints they can check, are deterministic for a day, and
+state their own limits; and no command or interaction kind was added.
+
+**coordinator / proactive briefings** — the schedule is validated at startup and
+a bad time refuses to boot; a slot resolves in the owner's zone rather than UTC;
+a slot is claimed once and only once however many ticks run; the next civil day
+is a new slot; there is no backfill; delivery retries and abandons as a record;
+and a briefing more than six hours late is SKIPPED rather than delivered.
+
+**coordinator / retention (extended)** — a job's detail is stripped while the job
+itself is kept, and the two counts are reported separately; the audit log prunes
+on its own window and converges; every per-kind window reads from its own
+variable; the two deprecated aliases are still honoured; the shipped defaults are
+the conservative ones.
+
+**coordinator / per-record deletion** — one task, reminder, capture or schedule
+entry deleted by id, with a confirm step; a reminder takes its occurrence outbox
+with it; a capture is named by the id prefix the inbox already shows; an
+ambiguous prefix is refused rather than resolved; another owner's id and a
+missing id are answered identically; a stranger cannot press the owner's control;
+every deletion is audited by count under the `record` subject kind.
+
+**coordinator / GitHub watches (extended)** — merges, approvals, requested
+changes, review comments, workflow failure AND recovery, and issue activity each
+produce a summary line; every call the loop makes is a read; a requested change
+proposes a job and creates none; the proposal is deduplicated by
+`(watch, fingerprint)` so it appears once per genuinely new review or new code,
+and stops once the pull request merges.
+
+**persistence / backup** — the real scripts, run as subprocesses against a real
+temporary database: the copy verifies, is written `0600`, and excludes the
+credential file; a file that is not a Ducky database and a corrupt file are both
+REFUSED rather than passed; a missing source writes nothing; `--keep` reports
+prunable copies and deletes none.
+
 ## Adding tests
 
 Assert the guarantee, not the implementation. Prefer driving a service directly

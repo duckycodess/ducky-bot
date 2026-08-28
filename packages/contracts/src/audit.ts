@@ -40,6 +40,17 @@ export const AUDIT_SUBJECT_KINDS = [
    * defeat the deletion.
    */
   'conversation',
+  /**
+   * One of the owner's own records, deleted by hand: `task:tabc12`,
+   * `capture:9f2c…`. The KIND and the id the owner already had -- never the
+   * title, the text or the content.
+   *
+   * Distinct from `conversation` because filing a task under a conversation
+   * subject would make the audit trail say something untrue about what was
+   * removed, and an audit trail that misdescribes a deletion is worse than a
+   * coarse one.
+   */
+  'record',
 ] as const;
 export type AuditSubjectKind = (typeof AUDIT_SUBJECT_KINDS)[number];
 

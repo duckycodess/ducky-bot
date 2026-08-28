@@ -581,11 +581,13 @@ describe('job notification delivery: interactive components', () => {
 
     for (const [i, approval] of approvals.entries()) {
       const row = sent!.message.rows![i]!;
-      expect(row.buttons).toHaveLength(2);
+      expect(row.buttons).toHaveLength(3);
       const approve = row.buttons.find((b) => b.label.startsWith('approve'))!;
       const reject = row.buttons.find((b) => b.label.startsWith('reject'))!;
+      const details = row.buttons.find((b) => b.label.startsWith('details'))!;
       expect(h.app.signer.verify(approve.customId, OWNER)).toEqual({ kind: 'approve', entityId: approval.id });
       expect(h.app.signer.verify(reject.customId, OWNER)).toEqual({ kind: 'reject', entityId: approval.id });
+      expect(h.app.signer.verify(details.customId, OWNER)).toEqual({ kind: 'approval_details', entityId: approval.id });
     }
     h.close();
   });
@@ -750,7 +752,7 @@ describe('job notification delivery: interactive components', () => {
     // which drops any button whose customId does not match the exact signed
     // shape -- if these buttons survived, they passed that check too.
     expect(sent.message.rows).toHaveLength(1);
-    expect(sent.message.rows![0]!.buttons).toHaveLength(2);
+    expect(sent.message.rows![0]!.buttons).toHaveLength(3);
     h.close();
   });
 });

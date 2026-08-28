@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DeferredActionPerformer } from '../src/domain/action-performer.js';
-import { commitAction, implementedResult, makeHarness } from './helpers.js';
+import { commitAction, implementedResult, makeHarness, OWNER, STRANGER } from './helpers.js';
 
 const withActions = (h: ReturnType<typeof makeHarness>, n: number) => {
   const job = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
@@ -64,6 +64,37 @@ describe('per-action approvals', () => {
     expect(() => h.app.approvals.decide(h.chat, approvals[0]!.id, 'approved')).toThrow(/not authorized/i);
     h.store.db.prepare('UPDATE jobs SET discord_user_id = ? WHERE id = ?').run('999', job.id);
     expect(() => h.app.approvals.decide(h.owner, approvals[0]!.id, 'approved')).toThrow(/no longer exists/);
+    h.close();
+  });
+
+  it('shows exact action details through an owner-bound View Details control', async () => {
+    const h = makeHarness();
+    await h.transport.start((e) => h.app.router.handle(e));
+    const { job, approvals } = withActions(h, 1);
+    const approval = approvals[0]!;
+    const direct = h.app.approvals.detail(h.owner, approval.id);
+    expect(direct.job.publicId).toBe(job.publicId);
+    expect(JSON.parse(direct.approval.detailsJson)).toMatchObject({
+      message: 'feat: 0', files: ['src/a.ts'],
+    });
+
+    const customId = h.app.signer.sign({
+      kind: 'approval_details', entityId: approval.id, actorUserId: OWNER,
+    });
+    const reply = await h.transport.dispatch({
+      kind: 'component', customId, userId: OWNER,
+    });
+    const rendered = JSON.stringify(reply);
+    expect(rendered).toContain(job.publicId);
+    expect(rendered).toContain('feat: 0');
+    expect(rendered).toContain('src/a.ts');
+    expect(rendered).toContain('<t:');
+    expect(reply?.ephemeral).toBe(true);
+
+    const reused = await h.transport.dispatch({
+      kind: 'component', customId, userId: STRANGER,
+    });
+    expect(reused?.content).toMatch(/not authorized/i);
     h.close();
   });
 

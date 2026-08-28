@@ -1,6 +1,6 @@
-import type { ApprovalRow, CaptureRow, DependencyRow, JobRow } from '@ducky/persistence';
+import type { ApprovalRow, CaptureRow, DependencyRow, JobRow, Store } from '@ducky/persistence';
 import {
-  DEPENDENCY_STATE_LABEL, DEPENDENCY_TYPE_LABEL,
+  DEPENDENCY_STATE_LABEL, DEPENDENCY_TYPE_LABEL, discordTimestamp,
   ownerDetailedLabel, ownerNextStep, ownerStateLabel, type RepoStatusSummary,
 } from '@ducky/contracts';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
@@ -119,6 +119,87 @@ export function jobDetail(
     });
   }
   return { embeds: [{ title: `Job ${job.publicId}`, fields }], rows, ephemeral: true };
+}
+
+/**
+ * The exact proposal behind an approval. The list view intentionally stays
+ * compact; this owner-only control is where the repository, executor,
+ * expiration and action-specific parameters are made explicit before a
+ * decision. `detailsJson` was validated and redacted at result intake, but it
+ * is still parsed defensively here because it is persisted untrusted input.
+ */
+export function approvalDetails(
+  approval: ApprovalRow,
+  job: NonNullable<ReturnType<Store['jobs']['byId']>>,
+): OutboundMessage {
+  const details = parseApprovalDetails(approval.detailsJson);
+  const fields: OutboundEmbedField[] = [
+    { name: 'Action', value: approval.actionKind, inline: true },
+    { name: 'Repository', value: job.repoSlug, inline: true },
+    { name: 'Status', value: approval.state, inline: true },
+    { name: 'Requested by', value: 'Owner', inline: true },
+    { name: 'Requesting executor', value: job.executorId ?? 'unknown', inline: true },
+    {
+      name: 'Expires',
+      value: expirationLabel(approval.expiresAt),
+      inline: true,
+    },
+    { name: 'Proposal', value: short(approval.description, 900) },
+  ];
+
+  for (const [name, value] of detailFields(approval.actionKind, details)) {
+    fields.push({ name, value: short(value, 900) });
+  }
+
+  return {
+    embeds: [{ title: `Approval #${approval.actionIndex + 1} — ${job.publicId}`, fields }],
+    ephemeral: true,
+  };
+}
+
+function parseApprovalDetails(raw: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  } catch {
+    // A malformed historical row has no exact details to show; the proposal
+    // and its status remain useful and honest.
+  }
+  return {};
+}
+
+function detailFields(kind: string, details: Record<string, unknown>): [string, string][] {
+  const text = (key: string): string => typeof details[key] === 'string' ? details[key] as string : 'unknown';
+  const files = Array.isArray(details['files'])
+    ? details['files'].filter((v): v is string => typeof v === 'string').join(', ')
+    : 'unknown';
+  switch (kind) {
+    case 'git_commit':
+      return [['Commit message', text('message')], ['Changed files', files]];
+    case 'git_push':
+      return [['Remote', text('remote')], ['Destination branch', text('branch')]];
+    case 'github_pr':
+      return [
+        ['Title', text('title')], ['Base branch', text('base')],
+        ['Head branch', text('head')], ['Body summary', text('body')],
+      ];
+    case 'github_issue':
+      return [['Title', text('title')], ['Body', text('body')]];
+    case 'deploy':
+      return [['Target', text('target')]];
+    case 'azure_mutation':
+      return [['Operation', text('operation')]];
+    default:
+      return [];
+  }
+}
+
+function expirationLabel(iso: string): string {
+  const absolute = discordTimestamp(iso, 'F');
+  const relative = discordTimestamp(iso, 'R');
+  return absolute === '' ? 'unknown' : `${absolute} (${relative})`;
 }
 
 export function repoStatus(s: RepoStatusSummary): OutboundMessage {

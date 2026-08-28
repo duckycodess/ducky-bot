@@ -493,10 +493,14 @@ export class DuckyRouter {
           if (pending.length > 0) {
             rows.push(
               ...pending.slice(0, 4).map((a) => ({
-                buttons: (['approve', 'reject'] as const).map((kind) => ({
+                buttons: (['approve', 'reject', 'approval_details'] as const).map((kind) => ({
                   customId: d.signer.sign({ kind, entityId: a.id, actorUserId: actor.discordUserId }),
-                  label: `${kind} #${a.actionIndex + 1}`,
-                  style: kind === 'approve' ? ('success' as const) : ('danger' as const),
+                  label: `${kind === 'approval_details' ? 'details' : kind} #${a.actionIndex + 1}`,
+                  style: kind === 'approve'
+                    ? ('success' as const)
+                    : kind === 'reject'
+                      ? ('danger' as const)
+                      : ('primary' as const),
                 })),
               })),
             );
@@ -770,6 +774,10 @@ export class DuckyRouter {
     this.components.set('reject', async (actor, entityId) => {
       const outcome = d.approvals.decide(actor, entityId, 'rejected');
       return { content: `${outcome.note} Job is now ${outcome.jobState}.`, ephemeral: true };
+    });
+    this.components.set('approval_details', async (actor, entityId) => {
+      const detail = d.approvals.detail(actor, entityId);
+      return present.approvalDetails(detail.approval, detail.job);
     });
 
     // The entity id is the short public handle, not the internal UUID: the

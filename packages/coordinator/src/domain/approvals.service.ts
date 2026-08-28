@@ -16,6 +16,11 @@ export interface DecisionOutcome {
   readonly note: string;
 }
 
+export interface ApprovalDetail {
+  readonly approval: ApprovalRow;
+  readonly job: NonNullable<ReturnType<Store['jobs']['byId']>>;
+}
+
 /**
  * One approval row per proposed action, each decided individually and exactly
  * once. There is deliberately no bulk-approve entry point.
@@ -37,6 +42,21 @@ export class ApprovalsService {
     this.authz.requireOwner(actor);
     this.assertOwnsJob(actor, jobId);
     return this.store.approvals.forJob(jobId);
+  }
+
+  /**
+   * Returns the exact proposal behind one signed control, for the owner's
+   * explicit View Details action. The lookup is owner-scoped before any fields
+   * are rendered, so an approval id cannot become a cross-job oracle.
+   */
+  detail(actor: ActorContext, approvalId: string): ApprovalDetail {
+    this.authz.requireOwner(actor);
+    const approval = this.store.approvals.byId(approvalId);
+    if (!approval) throw new DuckyError('not_found', 'That approval no longer exists.');
+    this.assertOwnsJob(actor, approval.jobId);
+    const job = this.store.jobs.byId(approval.jobId);
+    if (!job) throw new DuckyError('not_found', 'That approval no longer exists.');
+    return { approval, job };
   }
 
   /**

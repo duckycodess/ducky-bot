@@ -36,6 +36,7 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'job_cleanup',
   'approve',
   'reject',
+  'approval_details',
   'task_done',
   'task_cancel',
   'reminder_cancel',

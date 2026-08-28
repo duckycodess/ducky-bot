@@ -358,10 +358,14 @@ export class JobNotifier {
 
     rows.push(
       ...pending.slice(0, MAX_APPROVAL_ROWS).map((a) => ({
-        buttons: (['approve', 'reject'] as const).map((kind) => ({
+        buttons: (['approve', 'reject', 'approval_details'] as const).map((kind) => ({
           customId: this.signer.sign({ kind, entityId: a.id, actorUserId: this.ownerId }),
-          label: `${kind} #${a.actionIndex + 1}`,
-          style: kind === 'approve' ? ('success' as const) : ('danger' as const),
+          label: `${kind === 'approval_details' ? 'details' : kind} #${a.actionIndex + 1}`,
+          style: kind === 'approve'
+            ? ('success' as const)
+            : kind === 'reject'
+              ? ('danger' as const)
+              : ('primary' as const),
         })),
       })),
     );

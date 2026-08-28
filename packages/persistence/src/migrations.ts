@@ -825,4 +825,42 @@ CREATE INDEX ix_audit_log_at ON audit_log(at);
 CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
 `,
   },
+  {
+    version: 18,
+    name: 'briefing_deliveries',
+    sql: `
+-- The outbox for PROACTIVE briefings.
+--
+-- Same shape as reminder_occurrences, and for the same reason: a durable row
+-- exists from the moment a briefing is due, a unique key makes recording a
+-- delivery idempotent, and a restart mid-outage loses nothing. What it is NOT
+-- is a second scheduler -- the pass rides the existing coordinator interval.
+--
+-- (discord_user_id, kind, day_key) is the identity of a briefing: ONE morning
+-- briefing per civil day per person, whatever happens. A repeated tick, two
+-- overlapping passes and a restart all collide on this index rather than
+-- sending twice.
+CREATE TABLE briefing_deliveries (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('morning','evening')),
+  -- The owner's own civil day, YYYY-MM-DD in DUCKY_OWNER_TIMEZONE. A date key
+  -- rather than an instant, because "today's briefing" is a civil-day concept
+  -- and the zone is a projection (ADR 0014).
+  day_key         TEXT NOT NULL,
+  -- When it became due, as a real UTC instant.
+  due_at          TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('pending','delivered','abandoned','skipped')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_error_at   TEXT,
+  delivered_at    TEXT,
+  created_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX ux_briefing_deliveries_slot
+  ON briefing_deliveries(discord_user_id, kind, day_key);
+CREATE INDEX ix_briefing_deliveries_pending
+  ON briefing_deliveries(status, due_at) WHERE status = 'pending';
+`,
+  },
 ];

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { SHARED_READABLE_ROUTES } from '@ducky/contracts';
 import {
-  HttpOpenClawProvider, MockConversationProvider, NO_ATTACHMENT_CAPABILITY, attachmentsUsable,
+  GatewayOpenClawProvider, MockConversationProvider, NO_ATTACHMENT_CAPABILITY, attachmentsUsable,
   type ConversationAttachment, type ConversationCapabilities, type ConversationInput,
   type ConversationProvider, type ConversationReply,
 } from '@ducky/adapters';
@@ -108,7 +108,7 @@ const send = (h: Awaited<ReturnType<typeof boot>>, over: Record<string, unknown>
 describe('the provider capability contract', () => {
   it('has both shipped providers advertise attachments as unavailable', () => {
     const mock = new MockConversationProvider();
-    const http = new HttpOpenClawProvider('http://127.0.0.1:8080');
+    const http = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
 
     for (const provider of [mock, http]) {
       expect(provider.capabilities.attachments).toEqual(NO_ATTACHMENT_CAPABILITY);
@@ -129,7 +129,7 @@ describe('the provider capability contract', () => {
     await expect(new MockConversationProvider().reply(input)).rejects.toThrow(
       /attachments are not accepted/i,
     );
-    await expect(new HttpOpenClawProvider('http://127.0.0.1:8080').reply(input)).rejects.toThrow(
+    await expect(new GatewayOpenClawProvider('ws://127.0.0.1:19001').reply(input)).rejects.toThrow(
       /attachments are not accepted/i,
     );
   });

@@ -11,7 +11,7 @@ pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
-pnpm probe:openclaw   # exits 2 with the blocker while OpenClaw is absent
+pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
 ```
 
 The two agent probes start a **real Pi agent**. `probe:live-job` refuses to run

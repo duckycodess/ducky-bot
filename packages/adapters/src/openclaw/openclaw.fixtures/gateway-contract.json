@@ -1,0 +1,40 @@
+{
+  "_note": "OpenClaw is a WebSocket gateway, NOT the HTTP JSON endpoint the first adapter assumed. Recorded so the assumption cannot survive in code.",
+  "exitCode": 0,
+  "flags": [
+    "--allow-unconfigured",
+    "--auth",
+    "--bind",
+    "--claude-cli-logs",
+    "--cli-backend-logs",
+    "--compact",
+    "--dev",
+    "--force",
+    "--help",
+    "--password",
+    "--password-file",
+    "--port",
+    "--raw-stream",
+    "--raw-stream-path",
+    "--reset",
+    "--tailscale",
+    "--tailscale-reset-on-exit",
+    "--token",
+    "--verbose",
+    "--ws-log"
+  ],
+  "bindModes": [
+    "loopback",
+    "lan",
+    "tailnet",
+    "auto",
+    "custom"
+  ],
+  "authModes": [
+    "none",
+    "token",
+    "password",
+    "trusted-proxy"
+  ],
+  "devDefaultUrl": null
+}

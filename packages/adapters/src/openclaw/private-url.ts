@@ -18,7 +18,12 @@ export function isPrivateGatewayUrl(raw: string): boolean {
   } catch {
     return false;
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  // `ws:`/`wss:` are accepted because that is what OpenClaw actually speaks:
+  // the recorded surface is a WebSocket gateway (`ws://127.0.0.1:19001` on its
+  // dev profile), not an HTTP JSON endpoint. `http(s):` stays accepted for a
+  // health or dashboard URL on the same host.
+  const ALLOWED = new Set(['http:', 'https:', 'ws:', 'wss:']);
+  if (!ALLOWED.has(url.protocol)) return false;
   const host = url.hostname.toLowerCase();
   if (LOOPBACK_HOSTS.has(host)) return true;
   if (isTailnetIpv4(host)) return true;

@@ -1,0 +1,17 @@
+{
+  "_note": "Existence and directory NAMES only. No value is ever read or recorded.",
+  "directories": [
+    {
+      "path": "~/.openclaw",
+      "exists": true
+    },
+    {
+      "path": "~/.openclaw-dev",
+      "exists": true
+    },
+    {
+      "path": "~/.config/openclaw",
+      "exists": false
+    }
+  ]
+}

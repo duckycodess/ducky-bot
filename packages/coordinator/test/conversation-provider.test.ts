@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isDuckyError, resolveConversationMode } from '@ducky/contracts';
 import {
-  DisabledConversationProvider, HttpOpenClawProvider, MockConversationProvider,
+  DisabledConversationProvider, GatewayOpenClawProvider, MockConversationProvider,
   RECORDED_CONTRACT_VERSION,
 } from '@ducky/adapters';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -206,7 +206,7 @@ describe('startup selection', () => {
     })();
     expect(isDuckyError(err)).toBe(true);
     const msg = isDuckyError(err) ? err.ownerMessage : '';
-    expect(msg).toMatch(/no recorded OpenClaw contract/i);
+    expect(msg).toMatch(/recorded only in HALF/i);
     expect(msg).toMatch(/probe:openclaw/);
     // And it names the mode that DOES work today.
     expect(msg).toMatch(/disabled/);
@@ -255,9 +255,9 @@ describe('startup selection', () => {
 describe('the OpenClaw initialisation contract', () => {
   it('reports not-initializable while nothing is recorded', () => {
     expect(RECORDED_CONTRACT_VERSION).toBeNull();
-    const init = HttpOpenClawProvider.initializable();
+    const init = GatewayOpenClawProvider.initializable();
     expect(init.ok).toBe(false);
-    expect(init.reason).toMatch(/no recorded OpenClaw contract/i);
+    expect(init.reason).toMatch(/recorded only in HALF/i);
   });
 
   it('is not settable from the environment', () => {
@@ -272,7 +272,7 @@ describe('the OpenClaw initialisation contract', () => {
   });
 
   it('keeps the provider unverified and attachment-incapable regardless', () => {
-    const p = new HttpOpenClawProvider('http://127.0.0.1:8080');
+    const p = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
     expect(p.verified).toBe(false);
     expect(p.capabilities.attachments.supported).toBe(false);
   });

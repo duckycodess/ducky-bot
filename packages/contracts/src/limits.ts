@@ -269,6 +269,26 @@ export const CONVERSATION_TURN_TEXT_MAX = 2_000;
 /** Hard ceiling per (user, thread), enforced in the same transaction as a write. */
 export const CONVERSATION_THREAD_ROW_CAP = 200;
 
+// ---- proactive briefings ----------------------------------------------------
+/**
+ * How many briefing deliveries one pass will attempt, and how hard it tries.
+ *
+ * Deliberately tiny: at most two briefings a day exist, so a batch bigger than
+ * this is a sign something is wrong rather than a throughput win.
+ */
+export const BRIEFING_DELIVERY_BATCH = 5;
+export const BRIEFING_MAX_DELIVERY_ATTEMPTS = 5;
+/**
+ * How late a briefing may be delivered before it is dropped as stale.
+ *
+ * A reminder is never dropped for being late -- it names a commitment. A
+ * briefing is a summary OF A DAY, and yesterday's morning briefing delivered
+ * this afternoon is worse than none: it describes a day that has already
+ * happened. So this one has a staleness window, and the row is kept as a
+ * skipped record rather than deleted.
+ */
+export const BRIEFING_STALE_AFTER_MS = 6 * 60 * 60_000;
+
 // ---- GitHub watches ---------------------------------------------------------
 /** Explicit owner watches are ongoing schedules, never a hidden tight loop. */
 export const GITHUB_WATCH_INTERVAL_MIN_MINUTES = 15;

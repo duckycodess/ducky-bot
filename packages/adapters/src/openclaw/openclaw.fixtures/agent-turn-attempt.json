@@ -1,0 +1,10 @@
+{
+  "_note": "A REAL turn attempt. Records the SHAPE of the outcome only: no reply text, no credential, no absolute path.",
+  "exitCode": 1,
+  "stdoutEmpty": true,
+  "stdoutIsJson": false,
+  "diagnosticsOnStderr": true,
+  "errorClass": "ProviderAuthError",
+  "providerNamed": "openai",
+  "remediationOffered": true
+}

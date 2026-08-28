@@ -1,0 +1,30 @@
+{
+  "_note": "The REQUEST half of the contract: the flags a caller controls. Flag NAMES only. Ducky would never pass --deliver: that would send agent output into a chat channel.",
+  "exitCode": 0,
+  "flags": [
+    "--agent",
+    "--channel",
+    "--deliver",
+    "--help",
+    "--json",
+    "--local",
+    "--message",
+    "--message-file",
+    "--model",
+    "--reply-account",
+    "--reply-channel",
+    "--reply-to",
+    "--session-id",
+    "--session-key",
+    "--thinking",
+    "--timeout",
+    "--to",
+    "--verbose"
+  ],
+  "carriesMessage": true,
+  "carriesSessionKey": true,
+  "carriesJsonOutput": true,
+  "canDeliverToChannel": true,
+  "attachmentInputOnAgentTurn": [],
+  "messageSendHasMedia": true
+}

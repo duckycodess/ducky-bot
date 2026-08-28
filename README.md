@@ -112,13 +112,18 @@ so lock the channel down first. See
   are implemented for a same-filesystem development topology, but the flag is
   off by default (`DUCKY_DEV_APPROVED_ACTIONS_ENABLED=false`). Issue, deploy,
   Azure and high-risk actions remain recorded-only.
-- **Conversation replies come from a marked mock, and that is now an explicit
-  choice.** OpenClaw is not installed here, so its API could not be verified.
+- **Conversation replies come from a marked mock, and that is an explicit
+  choice.** OpenClaw is now installed here — pinned, into a dedicated local
+  prefix, not on `PATH` — and probed. Only HALF its contract could be recorded:
+  the transport (a WebSocket gateway, not the HTTP endpoint first assumed), the
+  agent-turn request shape and the auth model are known; a successful reply is
+  not, because an agent turn needs model provider credentials nobody has
+  configured here. The provider therefore still throws rather than guessing.
   `DUCKY_CONVERSATION_PROVIDER` selects `mock`, `disabled` or `openclaw`;
   development defaults to the mock and every mock reply is prefixed `[mock]`.
-  **Production must choose and refuses to start otherwise**, and `mock` is
-  refused for production outright. The real HTTP provider throws rather than
-  guessing an API.
+  **Production must choose and refuses to start otherwise**, `mock` is refused
+  for production outright, and `openclaw` is refused there while the reply half
+  is unrecorded.
 - **Conversation attachments are built but closed.** You can attach one image
   or file to a chat message, and the whole pipeline — capability handshake,
   metadata policy, bounded download, private temp file, explicit disposal — is

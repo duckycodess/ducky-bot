@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assertPrivateGatewayUrl, isPrivateGatewayUrl } from '../src/openclaw/private-url.js';
-import { HttpOpenClawProvider } from '../src/openclaw/openclaw.http.js';
+import { GatewayOpenClawProvider } from '../src/openclaw/openclaw.gateway.js';
 import { MockConversationProvider } from '../src/openclaw/openclaw.mock.js';
 
 describe('OpenClaw gateway guard', () => {
@@ -31,11 +31,11 @@ describe('OpenClaw gateway guard', () => {
     }
   });
 
-  it('guards the HTTP provider at construction and refuses to invent an API', async () => {
-    expect(() => new HttpOpenClawProvider('https://openclaw.example.com')).toThrow();
-    const p = new HttpOpenClawProvider('http://127.0.0.1:9999');
+  it('guards the gateway provider at construction and refuses to invent an API', async () => {
+    expect(() => new GatewayOpenClawProvider('https://openclaw.example.com')).toThrow();
+    const p = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
     await expect(p.reply({ userId: '1', text: 'hi', threadKey: 't' })).rejects.toThrow(
-      /not been verified/i,
+      /has not been observed on this host/i,
     );
     expect(p.verified).toBe(false);
   });

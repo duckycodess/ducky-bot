@@ -1,6 +1,6 @@
 import {
   DeterministicScheduleExtractor, FileCredentialStore, GhCliReader, HerdrCli,
-  DisabledConversationProvider, MemoryCredentialStore, MockConversationProvider, HttpOpenClawProvider,
+  DisabledConversationProvider, MemoryCredentialStore, MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
   UnavailableDependencyChecker,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
@@ -483,7 +483,7 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
   }
   assertPrivateGatewayUrl(env.OPENCLAW_BASE_URL);
 
-  return new HttpOpenClawProvider(env.OPENCLAW_BASE_URL);
+  return new GatewayOpenClawProvider(env.OPENCLAW_BASE_URL);
 }
 
 /**
@@ -507,7 +507,7 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
 function assertModeUsable(mode: ConversationProviderMode, profile: DuckyProfile): void {
   if (mode !== 'openclaw' || profile !== 'production') return;
 
-  const init = HttpOpenClawProvider.initializable();
+  const init = GatewayOpenClawProvider.initializable();
   if (!init.ok) {
     throw new DuckyError(
       'integration_not_verified',

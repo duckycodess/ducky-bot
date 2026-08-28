@@ -1,118 +1,179 @@
 # OpenClaw integration
 
-## Status: not installed, API unverified — and now explicit about it
+## Status: installed and probed; contract recorded in HALF; provider still unverified
 
-Re-confirmed this run: `openclaw` is not on `PATH`, not in the global npm tree
-(`@earendil-works/pi-coding-agent`, `@railway/cli`, `corepack`, `npm`, `pnpm`,
-`tsx`, `typescript`, `vercel`), and no configuration directory exists at
-`~/.openclaw`, `~/.config/openclaw`, `~/.local/share/openclaw` or
-`/etc/openclaw`. A read-only registry query reports `openclaw@2026.7.1-2`, bin
-`openclaw`, engines accepting Node 24.15.0.
+OpenClaw **is** on this host now, installed deliberately for the final
+milestone:
 
-### Provider modes
+```
+npm i --prefix ~/.local/opt/ducky-openclaw openclaw@2026.7.1-2
+```
 
-`DUCKY_CONVERSATION_PROVIDER` now decides, explicitly:
+**Pinned, local, and not on `PATH`.** Not `-g`, not inside the repository, not
+production. `pnpm probe:openclaw` looks for
+`~/.local/opt/ducky-openclaw/node_modules/.bin/openclaw` first and falls back to
+`PATH` for an operator who put it somewhere else.
+
+Registry metadata, read before installing: `openclaw@2026.7.1-2`, MIT, bin
+`openclaw`, `engines.node` accepting this host's 24.15.0, 56 dependencies
+(`express`, `ws`, `undici`, `grammy`, `openai`, `kysely`, `clawpdf`…), ~87 MB
+unpacked. Described as a *multi-channel AI gateway with extensible messaging
+integrations*, which turned out to be exactly right and not at all what the
+first adapter assumed.
+
+## What the probe recorded
+
+`pnpm probe:openclaw` writes redacted fixtures into
+`packages/adapters/src/openclaw/openclaw.fixtures/`, and
+`openclaw-contract.test.ts` asserts them.
+
+| Fixture | What it pins |
+|---|---|
+| `cli.json` | version, install source, 62 top-level commands |
+| `agent-cli-contract.json` | the agent-turn REQUEST shape, flag names only |
+| `gateway-contract.json` | transport, bind modes, auth modes |
+| `agent-turn-attempt.json` | the auth model, observed by running a turn |
+| `config-locations.json` | which config directories exist; names only |
+
+### Three findings that changed the code
+
+**1. It is not an HTTP JSON endpoint.** OpenClaw runs a **WebSocket gateway**
+(`ws://127.0.0.1:19001` on its `--dev` profile), with bind modes
+`loopback | lan | tailnet | auto | custom` and auth modes
+`none | token | password | trusted-proxy`. The adapter that assumed HTTP was
+renamed accordingly (`GatewayOpenClawProvider`), and the private-URL guard now
+accepts `ws:`/`wss:` as well as `http(s):` — otherwise a correctly configured
+gateway URL would have been refused at boot.
+
+**2. The supported one-shot contract is the CLI**, and it maps cleanly onto
+`ConversationProvider.reply`:
+
+```
+openclaw agent --json --session-key agent:<id>:<thread> --message <text>
+```
+
+`--message-file` carries a long body, `--session-id`/`--session-key` carry
+thread identity, `--thinking` and `--timeout` are bounded knobs. **`--deliver`
+exists and must never be passed**: it sends the agent's reply into a chat
+channel, which is Ducky's job and not the provider's.
+
+**3. An agent turn takes TEXT ONLY.** There is no attachment input on it at all.
+`message send --media` exists, but that is *outbound to a chat channel* — a
+different operation. So milestone 2C's attachment gate stays closed for this
+provider **even after its text contract is verified**, and
+`capabilities.attachments` must stay `NO_ATTACHMENT_CAPABILITY`. Recording that
+now is the point: it is the over-claim that would have mattered most.
+
+### The half that could not be recorded, and why
+
+A real turn was attempted, in the isolated `--dev` profile, without
+`--deliver`:
+
+```
+openclaw --dev --no-color agent --local --json \
+  --session-key agent:probe:ducky-probe --message 'reply with the single word pong'
+```
+
+It failed, and **how** it failed is the recorded fact: `ProviderAuthError`
+("No API key found for provider \"openai\""), exit code 1, **empty stdout even
+with `--json`**, diagnostics on stderr, and a remediation hint pointing at
+`openclaw agents add <id>`.
+
+So no successful reply envelope has ever been observed on this host. Half a
+contract is not a contract:
+
+- `RECORDED_CONTRACT_VERSION` stays `null`;
+- `GatewayOpenClawProvider.initializable()` refuses, and says which half is
+  missing;
+- `reply()` throws `integration_not_verified`;
+- production selecting `openclaw` fails **at startup**, not on the owner's first
+  message;
+- `pnpm probe:openclaw` exits **2** — a partial recording must not read as
+  success;
+- `DUCKY_CONVERSATION_PROVIDER=disabled` remains the honest production mode.
+
+Nothing in this repository will configure a model provider for an OpenClaw
+agent. That spends money on somebody's account, and it is the owner's call.
+
+## Provider modes
+
+`DUCKY_CONVERSATION_PROVIDER` decides, explicitly:
 
 | Mode | development | production |
 |---|---|---|
 | unset | `mock` | **refused at startup** |
 | `mock` | allowed, every reply prefixed `[mock]` | **refused at startup** |
 | `disabled` | allowed | allowed — the honest choice today |
-| `openclaw` | allowed; needs a private `OPENCLAW_BASE_URL`, fails per request | **refused at startup** while no contract is recorded |
+| `openclaw` | allowed; needs a private `OPENCLAW_BASE_URL`, fails per request | **refused at startup** while no reply contract is recorded |
 
 This replaced `if (!OPENCLAW_BASE_URL) return mock`, which had **no profile
-check at all** — so a production instance with the variable unset (the default;
-it was not even in `.env.example`) silently answered the owner from a canned
-mock. The mode is resolved before any filesystem or database work, so a
-misconfigured instance fails on the cheapest possible check.
+check at all** — so a production instance with the variable unset silently
+answered the owner from a canned mock.
 
-### The initialisation contract
-
-`RECORDED_CONTRACT_VERSION` in `openclaw.contract.ts` is `null`, and
-`HttpOpenClawProvider.initializable()` reports not-initializable because of it.
-Production selecting `openclaw` is refused at startup as a result — a private URL
-proves the address is not public, not that anything there speaks a contract we
-have recorded.
-
-It is a **source constant, not an environment variable**, on purpose: an operator
-can set a variable but cannot conjure a recorded request/response shape, and
-`verified` has to mean "a contract was recorded" or it means nothing. The check
-is non-networked: reachability at boot would not prove the API either, and a
-gateway that is merely down should not block a correctly configured instance.
-
-Development may still select `openclaw` and find out per request. That is a local
-box choosing to experiment, not an instance answering the owner.
-
-`DisabledConversationProvider` refuses with `integration_not_verified` rather
-than returning prose. It is deliberately not the mock: a mock invents a
-sentence, and on a production instance the owner asking a question and getting
-prose back is the failure mode, not the fallback.
-
-The registry describes it as a *multi-channel AI gateway with extensible
-messaging integrations*. That is the extent of what can be established without
-installing it, and installing it has not been approved.
-
-## What ships instead
-
-- `ConversationProvider` — the port the coordinator depends on.
-- `MockConversationProvider` — the default. It answers, and **every reply is
-  prefixed `[mock]`** so a canned answer can never pass for a real one.
-- `HttpOpenClawProvider` — a guard, not an implementation. It validates the
-  gateway URL at construction and then **throws** from `reply()`. Guessing at
-  routes and a response shape would have produced code that looks finished and
-  fails in production; failing loudly is the honest option.
-- Both providers declare `capabilities.attachments` as
-  `NO_ATTACHMENT_CAPABILITY`, and both throw a distinct
-  capability refusal if an attachment somehow reaches them.
-
-The private-URL guard is already enforced: loopback, `100.64.0.0/10` and
-`.ts.net` are accepted, everything else is refused at construction and again at
-startup.
+`RECORDED_CONTRACT_VERSION` is a **source constant, not an environment
+variable**, on purpose: an operator can set a variable but cannot conjure an
+observed response shape, and `verified` has to mean "a contract was recorded" or
+it means nothing.
 
 ## Finishing the integration
 
-0. Run `pnpm probe:openclaw`. With OpenClaw absent it exits 2 and prints the
-   blocker rather than recording anything; it never guesses a route, a body or
-   an auth model. It captures configuration KEY NAMES and the auth header NAME
-   only — a recorded fixture containing a token would be worse than no fixture.
-1. Install it deliberately (`npm i -g openclaw`) — a host-wide environment
-   mutation that needs its own approval. **Not done in this run.**
-2. Probe the real surface: `openclaw --help`, the subcommand help, and whatever
-   HTTP routes it exposes when bound to loopback.
-3. Record what the request and response actually look like, the auth model, and
-   whether replies stream.
-4. Implement `HttpOpenClawProvider.reply()` against that, with a zod schema for
-   the response.
-5. Add a contract test over recorded responses, exactly as `herdr-contract.test.ts`
-   does.
-6. Set `OPENCLAW_BASE_URL` to a loopback or tailnet address. A public URL is
-   refused.
-7. **Only then** consider attachments. Flipping `verified` to `true` also opens
-   the 2C attachment gate, so verification must cover the attachment contract
-   and not only the text one: which MIME types the gateway really accepts, its
-   own size ceiling, and how bytes are transferred. Fill those into
-   `capabilities.attachments` from what was probed, not from what is
-   convenient — the coordinator takes the smaller cap and the intersection of
-   the type lists, so an over-claim here is the one that matters.
+1. **Configure a model provider for an OpenClaw agent** — `openclaw agents add
+   <id>`, or provider keys in the environment for `--local`. This is the only
+   remaining blocker, and it is an owner action.
+2. Run `pnpm probe:openclaw` again. It records a reply envelope **only if a turn
+   actually succeeds**, and exits 2 while one has not.
+3. Pin zod schemas against the recorded envelope and implement `reply()` over
+   the CLI contract: argv only, through `runArgv`, no shell, a mandatory
+   timeout, and never `--deliver`. Classify the operations in
+   `COMMAND_POLICY` first — an unclassified binary is refused before it spawns,
+   which is now true of `herdr` as well as `gh` and `git`.
+4. Add the response cases to `openclaw-contract.test.ts` beside the request ones.
+5. Set `RECORDED_CONTRACT_VERSION` to the version the fixtures represent.
+6. Leave `capabilities.attachments` unavailable. See finding 3.
 
 ## Consequence for conversation attachments (2C)
 
 The 2C pipeline is built and closed. An attachment on a conversation message is
 refused **before download** because `attachmentsUsable` requires the provider to
-be both `verified` and attachment-capable, and neither shipped provider is
-either. `/status` reports `unavailable (mock is unverified)`.
+be both `verified` and attachment-capable. OpenClaw is neither: its reply
+contract is unrecorded, and its agent turn has no attachment input to begin
+with.
 
 No attachment byte has ever been fetched on this host, and none is sent
 anywhere. See
 [decisions/0015](../decisions/0015-provider-agnostic-conversation-attachments.md).
 
+## Consequence for conversation continuity
+
+Bounded continuity (ADR 0021) is provider-independent and already shipped, off
+by default. `ConversationInput.history` is optional, and both stand-ins ignore
+it, so continuity does not wait on this integration — but nothing except the
+marked mock can consume it until a real provider answers.
+
+The CLI's `--session-key agent:<id>:<key>` maps onto Ducky's per-(user, thread)
+key, which is the shape continuity already stores. Ducky keeps its own history
+regardless: a provider-side session is somebody else's retention policy.
+
 ## Consequence for schedules
 
 The deterministic extractor reads text and CSV only and reports
-`supportsBinary: false`. Because no provider can read image or PDF bytes,
-`/schedule` refuses those uploads **before downloading them** rather than
-showing an invented preview — and no image or PDF decoder ships at all, which
-keeps that entire parsing surface out of Phase 1.
+`supportsBinary: false`. Nothing here changes that: an OpenClaw agent turn
+cannot be handed an image or a PDF, so image/PDF schedule extraction stays
+refused **before download**. (OpenClaw depends on `clawpdf`, so a document
+capability may exist somewhere in its own surface; it has not been probed, and
+an unprobed dependency is not a capability.)
 
-Enabling binary extraction requires both a provider that reports
+Enabling binary extraction still requires both a provider reporting
 `supportsBinary: true` and `SCHEDULE_BINARY_EXTRACTION_ENABLED=true`.
+
+## What the probe refuses to do
+
+- It never runs `onboard`, `configure`, `channels add` or `pairing`: no channel
+  is connected, no account is paired, nothing is sent anywhere.
+- It never passes `--deliver`.
+- Everything runs under the `--dev` profile, so a real configuration is never
+  touched.
+- It captures configuration directory names, flag names and an error CLASS —
+  never a value. A fixture containing a token would be worse than no fixture.
+- A partial recording exits non-zero. A probe that cannot fail is not a
+  certifier.

@@ -284,16 +284,21 @@ include verifying its attachment contract, not only its text one.
 
 Open decisions:
 
-**Boundary delivered, contract still blocked.** `DUCKY_CONVERSATION_PROVIDER`
+**Boundary delivered, half the contract recorded, the reply still blocked.** `DUCKY_CONVERSATION_PROVIDER`
 now makes the choice explicit and **production fails at startup** rather than
 silently booting on the marked mock (which it previously did whenever
 `OPENCLAW_BASE_URL` was unset — the default). `disabled` is a real mode that
 refuses to answer instead of generating a sentence. `pnpm probe:openclaw` is
 committed and exits 2 with the blocker; no route, body or auth model is guessed.
 
-- 🔶 **The API itself.** Still not known: OpenClaw is not installed, and
-  installing it is a host-wide environment mutation that needs its own
-  approval. Everything else here remains contingent.
+- ⚠️ **The API — HALF recorded.** OpenClaw is installed (pinned, local prefix)
+  and probed. The transport, the agent-turn request shape, session semantics and
+  the auth model are recorded; the REPLY envelope is not, because an agent turn
+  needs model provider credentials that are not configured here. Two findings
+  changed the code: it is a **WebSocket gateway plus a CLI**, not an HTTP JSON
+  endpoint, and **an agent turn takes text only** — so the 2C attachment gate
+  stays closed for this provider regardless. See
+  [integrations/openclaw.md](integrations/openclaw.md).
 - ✅ **Conversation memory — RESOLVED.** Bounded continuity, off by default, is
   shipped: see [ADR 0021](decisions/0021-bounded-conversation-continuity.md).
   DCStro's rule is kept and made structural rather than promised — every stored

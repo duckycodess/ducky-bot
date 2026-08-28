@@ -29,6 +29,18 @@ export const AgentInfoSchema = z.looseObject({
 export type AgentInfo = z.infer<typeof AgentInfoSchema>;
 
 /**
+ * Which terminal snapshot `agent read` returns. Recorded from the live CLI on
+ * this host (herdr 0.8.0): `visible | recent | recent-unwrapped | detection`,
+ * default `recent`.
+ *
+ * `detection` is the one readiness uses. It is the same snapshot Herdr feeds
+ * its own agent detection, so it is the closest thing to "what Herdr is looking
+ * at when it decides an agent is ready" that a caller can see.
+ */
+export const AGENT_READ_SOURCES = ['visible', 'recent', 'recent-unwrapped', 'detection'] as const;
+export type AgentReadSource = (typeof AGENT_READ_SOURCES)[number];
+
+/**
  * `agent start` answers `{ type: 'agent_started', agent, argv }` and
  * `agent prompt` answers `{ type: 'agent_prompted', agent }`.
  *

@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import {
-  DuckyError, HERDR_PROMPT_GRACE_MS, HERDR_START_TIMEOUT_MS, HERDR_TIMEOUT_MS,
+  DuckyError, HERDR_PROMPT_GRACE_MS, HERDR_READ_MAX_BYTES, HERDR_READ_SNAPSHOT_LINES,
+  HERDR_START_TIMEOUT_MS, HERDR_TIMEOUT_MS,
   checkCommandAllowed,
 } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
@@ -13,7 +14,7 @@ import {
   HERDR_STALLED_CODES, HerdrErrorEnvelopeSchema,
   PaneSplitResultSchema, WorkspaceCreateResultSchema, WorkspaceListResultSchema,
   WorktreeCreateResultSchema,
-  type AgentInfo, type WorkspaceSummary,
+  type AgentInfo, type AgentReadSource, type WorkspaceSummary,
 } from './herdr.types.js';
 
 export interface HerdrCliOptions {
@@ -165,6 +166,26 @@ export class HerdrCli implements HerdrClient {
   }
 
   /**
+   * Runs a command whose answer is PLAIN TEXT rather than a JSON envelope.
+   *
+   * Recorded on this host: `herdr agent read` writes the terminal snapshot
+   * straight to stdout and exits 0. Sending it through `call()` would fail the
+   * JSON parse and be reported as an outage, which is exactly the mistake
+   * `workspace report-metadata` (empty body, exit code only) taught earlier.
+   *
+   * The output is truncated because a pane is unbounded, untrusted text.
+   */
+  private async callText(argv: readonly string[], maxBytes: number): Promise<string> {
+    this.assertAllowed(argv);
+    this.onInvoke?.(argv);
+    const res = await runArgv(this.bin, argv, { timeoutMs: this.timeoutMs });
+    if (res.code !== 0) {
+      throw herdrError(res.stderr || res.stdout, argv);
+    }
+    return res.stdout.slice(0, maxBytes);
+  }
+
+  /**
    * @param subprocessTimeoutMs Budget for the CHILD PROCESS, which is not the
    * same thing as the `--timeout` handed to herdr inside `argv`. A blocking
    * `agent prompt --wait --timeout 2h` must be hosted by a process allowed to
@@ -235,6 +256,31 @@ export class HerdrCli implements HerdrClient {
       throw new DuckyError('herdr_unavailable', 'Herdr returned an unreadable agent record.');
     }
     return parsed.data;
+  }
+
+  /**
+   * Reads an agent's terminal snapshot. Text, never JSON; see `callText`.
+   *
+   * A missing agent is an EMPTY snapshot rather than a throw: the only caller
+   * is readiness observation, and "I could not look" must not be louder than
+   * the prompt attempt that follows it and reports the real problem.
+   */
+  async agentRead(
+    target: string,
+    opts: { source?: AgentReadSource; lines?: number } = {},
+  ): Promise<string> {
+    const argv = [
+      'agent', 'read', target,
+      '--source', opts.source ?? 'detection',
+      '--lines', String(opts.lines ?? HERDR_READ_SNAPSHOT_LINES),
+      '--format', 'text',
+    ];
+    try {
+      return await this.callText(argv, HERDR_READ_MAX_BYTES);
+    } catch (err) {
+      if (isNotFound(err)) return '';
+      throw err;
+    }
   }
 
   /**

@@ -7,23 +7,23 @@
         "agent": "pi",
         "kind": "path",
         "source": "herdr:pi",
-        "value": "~/.pi/agent/sessions/--home-tj-.herdr-worktrees-ducky-probe-3oLpLV-ducky-job-probe--/2026-08-28T06-27-24-017Z_ducky-probe.jsonl"
+        "value": "~/.pi/agent/sessions/--home-tj-.herdr-worktrees-ducky-probe-LfoDxW-ducky-job-probe--/2026-08-28T14-53-54-589Z_ducky-probe.jsonl"
       },
       "agent_status": "done",
-      "cwd": "~/.herdr/worktrees/ducky-probe-3oLpLV/ducky-job-probe",
+      "cwd": "~/.herdr/worktrees/ducky-probe-LfoDxW/ducky-job-probe",
       "focused": false,
-      "foreground_cwd": "~/.herdr/worktrees/ducky-probe-3oLpLV/ducky-job-probe",
+      "foreground_cwd": "~/.herdr/worktrees/ducky-probe-LfoDxW/ducky-job-probe",
       "interactive_ready": true,
       "name": "ducky-pi-probe",
-      "pane_id": "wQ:p1",
+      "pane_id": "w1N:p1",
       "revision": 3,
       "screen_detection_skipped": true,
-      "state_change_seq": 43,
-      "tab_id": "wQ:t1",
-      "terminal_id": "term_65a158b61efd113",
+      "state_change_seq": 97,
+      "tab_id": "w1N:t1",
+      "terminal_id": "term_65a1c9ec50f0d37",
       "terminal_title": "[REDACTED:title]",
       "terminal_title_stripped": "[REDACTED:title]",
-      "workspace_id": "wQ"
+      "workspace_id": "w1N"
     },
     "type": "agent_info"
   }

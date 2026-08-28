@@ -155,6 +155,27 @@ export const HERDR_PROMPT_GRACE_MS = 30_000;
  */
 export const HERDR_START_TIMEOUT_MS = 120_000;
 /**
+ * How long to wait for an agent's OWN pane to show that it can take input.
+ *
+ * `agent start` returning with `agent_status: idle, interactive_ready: true`
+ * does not mean Pi has finished painting its startup banners, and a prompt
+ * submitted in that window is silently dropped -- which is the documented cause
+ * of every `agent_prompt_stalled` failure on this host. Herdr's own readiness
+ * field is the thing that is wrong, so readiness is corroborated by reading the
+ * agent's terminal snapshot and looking for its interactive chrome.
+ *
+ * This is a budget for an OBSERVATION, not a sleep: the marker usually appears
+ * within a second or two and the wait ends there. When it never appears the
+ * orchestrator falls back to Herdr's own signal rather than refusing the job,
+ * so a host whose agent chrome we do not recognise behaves exactly as it did
+ * before.
+ */
+export const HERDR_READY_MARKER_WAIT_MS = 45_000;
+/** Lines of terminal snapshot to read when looking for that chrome. */
+export const HERDR_READ_SNAPSHOT_LINES = 60;
+/** Hard cap on a snapshot read. A pane is untrusted, unbounded output. */
+export const HERDR_READ_MAX_BYTES = 64 * 1024;
+/**
  * How long a phase report may wait to be coalesced into one heartbeat.
  *
  * A phase that only rode the regular `LEASE_HEARTBEAT_MS` beat could take 30
@@ -232,6 +253,21 @@ export const CONVERSATION_ATTACHMENT_TIMEOUT_MS = 20_000;
 export const CONVERSATION_ATTACHMENTS_PER_HOUR = 20;
 /** One at a time. Several files in one message is refused, never partly read. */
 export const CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE = 1;
+
+/**
+ * Conversation continuity, when the operator has enabled it.
+ *
+ * Every bound here is small on purpose. Stored turns are the owner's own words:
+ * the useful amount is "enough that a follow-up question makes sense", and
+ * anything past that is a transcript nobody asked for. A turn longer than the
+ * cap is stored truncated rather than dropped, so the record never silently
+ * omits half of what was said.
+ */
+export const CONVERSATION_MEMORY_TURNS_DEFAULT = 10;
+export const CONVERSATION_MEMORY_TURNS_MAX = 40;
+export const CONVERSATION_TURN_TEXT_MAX = 2_000;
+/** Hard ceiling per (user, thread), enforced in the same transaction as a write. */
+export const CONVERSATION_THREAD_ROW_CAP = 200;
 
 // ---- GitHub watches ---------------------------------------------------------
 /** Explicit owner watches are ongoing schedules, never a hidden tight loop. */

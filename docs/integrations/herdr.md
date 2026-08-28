@@ -50,6 +50,7 @@ are both nullable.
 | `agent start` | `{ agent, argv }`; returned in ~6 s with `agent_status: idle`, `interactive_ready: true` |
 | `agent prompt` | `{ agent }` carrying the **settled** agent; a probe turn settled `done` |
 | `agent get` | bare `agent_info`; a missing target is exit 1 with `agent_not_found` on stderr |
+| `agent read` | **plain text, not JSON**, exit 0; `--source visible \| recent \| recent-unwrapped \| detection` |
 
 The probe also confirmed a non-UUID `--session-id` is accepted, that the result
 file lands in the Herdr checkout, and that Pi will write `.ducky/phase` when the
@@ -77,8 +78,9 @@ the real thing:
    as a reason to re-prompt (that would be a second writer).
 4. **`agent start` returning does not guarantee promptability.** A resumed Pi
    session was detected while still printing banners and refused a prompt three
-   seconds later with `agent_not_ready`. Readiness is now observed before the
-   first prompt, and that code is retried a bounded number of times.
+   seconds later with `agent_not_ready`. Readiness is now OBSERVED from the
+   agent's own pane before the first prompt (see below), and `agent_not_ready`
+   is retried a bounded number of times.
 5. **A large brief does not survive a bracketed paste.** Measured: 1.5 KB / 30
    lines submitted fine; 3.3 KB / 66 lines was left sitting UNSENT in Pi's input
    buffer. The brief is therefore written to `.ducky/brief.md` and only a
@@ -135,42 +137,85 @@ not a certifier.
   `process.exit(0)` over the top of the exit code the leftover check had just
   set.
 
-## Known intermittent: a "ready" agent that is not ready
+## The "ready" agent that is not ready — now observed, not trusted
 
-Characterised over repeated production-path runs on this host. Of the runs
-attempted after the orchestration fixes landed, **two reached `completed` with an
-accepted `implemented` result and three failed this way** — and only one of the
-two was checked against the full evidence gate, because the gate was added after
-the first. So the failure is the more common outcome, not the exception:
+Characterised over repeated production-path runs on this host, and then FIXED by
+observing the thing Herdr's own field was standing in for.
 
 `agent start` returns with `agent_status: idle` and `interactive_ready: true`
 while Pi is **still painting its startup banners** (update notices, package
 notices). A prompt submitted in that window is silently dropped: Pi never enters
-`working`, and `agent prompt --wait` gives up with `agent_prompt_stalled`.
+`working`, and `agent prompt --wait` gives up with `agent_prompt_stalled`. Of the
+runs attempted after the earlier orchestration fixes, two reached `completed`
+with an accepted `implemented` result and three failed this way — the failure was
+the more common outcome.
 
-Ruled out: session accumulation. `--session-id ducky-<slugKey>` produces a
-SEPARATE timestamped session file per run (eight observed), so nothing grows
-across runs and a resumed session is not the cause. The pane content is what
-identifies it — banners and no prompt.
+Ruled out then, and still ruled out: session accumulation. `--session-id
+ducky-<slugKey>` produces a SEPARATE timestamped session file per run, so
+nothing grows across runs.
 
-Ducky's behaviour in this case is correct and deliberate, which is why it is
-documented rather than patched over:
+### What Ducky does now
 
-- the stall is not treated as an outage (it has its own error code);
-- the agent is observed for a bounded window in case it starts late;
-- it is **never re-prompted** — a second prompt to an agent that did receive the
-  first would be a second writer;
-- the workspace and the repository reservation are both retained, so the owner
-  can look;
-- `pnpm probe:live-job` exits non-zero rather than certifying.
+Readiness is **observed from the agent's own pane** before the first prompt.
+`herdr agent read --source detection --format text` returns the same snapshot
+Herdr feeds its own detection, and `observePiPromptReady`
+(`packages/adapters/src/pi/pi-ready.ts`) looks for Pi's interactive input frame
+in it. The wait ends when the frame is seen on two consecutive reads; the
+orchestrator then prompts exactly once.
 
-**No timing heuristic has been added.** Sleeping after `agent start` and hoping
-would be a guess dressed as a fix, and Herdr's own readiness signal is the thing
-that is wrong here. A real fix needs a Herdr-side readiness predicate that
-accounts for an agent's own startup output.
+Two properties are deliberate:
 
-Until there is one: a production-path run is **not reliably reproducible on this
-host**, one observed success is **not** a certified integration,
+- **No timing heuristic.** Nothing sleeps for a guessed interval and then
+  assumes. Stability is expressed as consecutive OBSERVATIONS, so a half-painted
+  frame does not count as ready.
+- **It cannot make things worse.** The marker has its own smaller budget
+  (`HERDR_READY_MARKER_WAIT_MS`). If it never appears, or the read fails, the
+  orchestrator falls back to exactly the previous behaviour and lets the prompt
+  attempt report the real problem. A host whose agent chrome we no longer
+  recognise is no worse off than before.
+
+`agent prompt` is still never retried for anything but `agent_not_ready`, the
+workspace and reservation are still retained on a stall, and a stalled turn is
+still observed rather than re-prompted. None of that changed.
+
+### The recorded evidence, including the part that corrected the code
+
+`pnpm probe:herdr --with-agent` records
+`herdr.fixtures/agent-readiness.json` and **fails (exit 3) if the marker never
+matches a real agent pane**. It did fail, on the first attempt, and that is why
+the marker is what it is.
+
+The first version required two features — the input frame *and* the status
+footer carrying the transfer counters — because both were present on the
+long-running idle agents sampled first. Against a freshly started agent the
+footer never appeared at all: it has no counters to show yet. Recorded, measured
+from `agent start` returning:
+
+| Elapsed | Rule lines | Status footer | Verdict |
+|---|---|---|---|
+| 6.1 s | 0 | no | banners |
+| 7.1 s | 0 | no | banners |
+| 8.2 s | 2 | no | **frame painted** |
+| 10.3 s → 66 s | 4 → 6 | no | steady state |
+
+Two independent agent starts put the frame at 8.24 s and 8.16 s, with Herdr
+reporting `interactive_ready: true` from ~6 s in both. So the frame is the
+discriminator on this host and the footer is recorded as corroboration only.
+
+Also recorded, and load-bearing for the adapter: **`agent read` answers with
+plain text, not a JSON envelope**, and exits 0. It needs its own call path, the
+same lesson `workspace report-metadata` (empty body, exit code only) taught
+earlier. `readiness-evidence.test.ts` asserts all of this against the fixture and
+skips honestly when no agent probe has been recorded.
+
+No pane content is ever written to the fixture: a snapshot is whatever the agent
+happened to print, so only the shape, a digest, and the timings are recorded.
+
+### What is still not certified
+
+The readiness fix removes the known cause of the stall. It does **not** by itself
+make the integration certified: that needs repeated production-path runs through
+`pnpm probe:live-job`, which has not been re-run since the fix landed.
 `HerdrPiOrchestrator.verified` stays `false`, `/status` reports `experimental`,
 and `DUCKY_HERDR_VERIFIED` is unset.
 

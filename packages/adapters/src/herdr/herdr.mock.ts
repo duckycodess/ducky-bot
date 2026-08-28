@@ -50,6 +50,24 @@ export class MockHerdr implements HerdrClient {
     return this.state.agents.find((a) => a.name === target || a.pane_id === target);
   }
 
+  /**
+   * Scripted terminal snapshots, consumed one per `agentRead`.
+   *
+   * The live CLI is the authority here, and the mock must not be more helpful
+   * than it is -- that is how the missing `worktree create --label` shipped.
+   * An empty queue therefore answers `readSnapshotDefault`, which defaults to
+   * the EMPTY string: a test that has not said what the pane shows gets "I
+   * could not tell", not "ready".
+   */
+  readSnapshots: string[] = [];
+  readSnapshotDefault = '';
+
+  async agentRead(target: string, opts: { source?: string; lines?: number } = {}): Promise<string> {
+    this.record('agentRead', { target, source: opts.source ?? 'detection' });
+    if (!this.state.available) throw new DuckyError('herdr_unavailable', 'Herdr is not running.');
+    return this.readSnapshots.shift() ?? this.readSnapshotDefault;
+  }
+
   async agentStart(
     name: string,
     kind: string,

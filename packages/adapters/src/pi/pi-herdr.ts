@@ -1,5 +1,6 @@
 import {
-  DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX, DuckyError, MAX_SLUG_KEY_LEN, isDuckyError,
+  DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX, DuckyError, HERDR_READY_MARKER_WAIT_MS,
+  MAX_SLUG_KEY_LEN, isDuckyError,
 } from '@ducky/contracts';
 import { createHash } from 'node:crypto';
 import type { HerdrClient } from '../herdr/herdr.port.js';
@@ -7,6 +8,7 @@ import type { AgentInfo } from '../herdr/herdr.types.js';
 import { FileResultReader, RESULT_RELATIVE_PATH, type ResultReader } from './result-file.js';
 import { FileBriefWriter, briefPointerPrompt, type BriefWriter } from './brief-file.js';
 import { FilePhaseReader, type PhaseReader } from './phase-file.js';
+import { PI_READY_CONSECUTIVE_OBSERVATIONS, observePiPromptReady } from './pi-ready.js';
 import type {
   CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
 } from './pi-orchestrator.port.js';
@@ -69,6 +71,16 @@ export interface HerdrPiOptions {
    * `agent_not_ready`.
    */
   readonly readyWaitMs?: number;
+  /**
+   * How long to wait for the agent's OWN pane to show its interactive chrome
+   * before falling back to Herdr's `interactive_ready`.
+   *
+   * Smaller than `readyWaitMs` on purpose: the marker appears within a second
+   * or two when it appears at all, so a long budget here would only slow down
+   * the pathological case, and the fallback is the behaviour that shipped
+   * before this existed.
+   */
+  readonly readyMarkerWaitMs?: number;
   /** Bounded retries of a prompt refused with `agent_not_ready`. */
   readonly readyRetries?: number;
 }
@@ -102,6 +114,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   private readonly briefs: BriefWriter;
   private readonly phases: PhaseReader;
   private readonly readyWaitMs: number;
+  private readonly readyMarkerWaitMs: number;
   private readonly readyRetries: number;
 
   constructor(opts: HerdrPiOptions) {
@@ -118,6 +131,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     this.briefs = opts.briefWriter ?? new FileBriefWriter();
     this.phases = opts.phaseReader ?? new FilePhaseReader();
     this.readyWaitMs = opts.readyWaitMs ?? 120_000;
+    this.readyMarkerWaitMs = opts.readyMarkerWaitMs ?? HERDR_READY_MARKER_WAIT_MS;
     this.readyRetries = opts.readyRetries ?? 3;
   }
 
@@ -619,12 +633,40 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       new DuckyError('herdr_agent_not_ready', 'The agent never became ready for input.');
   }
 
-  /** Observes an agent until it can plausibly take input, or the budget ends. */
+  /**
+   * Observes an agent until it can actually take input, or the budget ends.
+   *
+   * Two signals, and the order matters because they disagree:
+   *
+   * - **Herdr's own** `agent_status` / `interactive_ready`. Necessary, not
+   *   sufficient: it is documented (integrations/herdr.md) to report a resumed
+   *   Pi ready while it is still painting startup banners, and a prompt
+   *   submitted in that window is silently dropped.
+   * - **The agent's own terminal output**, read with `agent read --source
+   *   detection` and classified by `observePiPromptReady`. That is the signal
+   *   Herdr's readiness field was standing in for, so it is the one worth
+   *   waiting on.
+   *
+   * The marker is a POSITIVE signal with its own smaller budget. When it
+   * appears the wait ends immediately -- the common case, in a second or two.
+   * When the budget runs out without it, or the read is unavailable, this falls
+   * back to exactly the previous behaviour and lets the prompt attempt report
+   * the real problem: a host whose agent chrome we no longer recognise is no
+   * worse off than before, and `agent_prompt_stalled` is already handled
+   * honestly (bounded observation, never a re-prompt, workspace and reservation
+   * retained).
+   *
+   * Nothing here sleeps for a guessed interval and then assumes readiness.
+   */
   private async awaitInteractiveReady(
     agentName: string,
     spec: OrchestrationSpec,
   ): Promise<void> {
     const deadline = Date.now() + this.readyWaitMs;
+    const markerDeadline = Date.now() + this.readyMarkerWaitMs;
+    let readUnavailable = false;
+    let consecutive = 0;
+
     while (Date.now() < deadline) {
       if (spec.signal?.aborted) return;
       let now: AgentInfo | undefined;
@@ -635,7 +677,40 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       }
       // Absent, or already working on something: nothing useful to wait for.
       if (!now || now.agent_status === 'working' || now.agent_status === 'blocked') return;
-      if (now.interactive_ready !== false) return;
+
+      const herdrSaysReady = now.interactive_ready !== false;
+
+      if (!readUnavailable && Date.now() < markerDeadline) {
+        try {
+          const observed = observePiPromptReady(
+            await this.herdr.agentRead(agentName, { source: 'detection' }),
+          );
+          // The frame paints over a second or two, so one glimpse of it can be
+          // a half-drawn UI. Stability is expressed in observations, never in a
+          // sleep-and-assume.
+          consecutive = observed.ready ? consecutive + 1 : 0;
+          if (consecutive >= PI_READY_CONSECUTIVE_OBSERVATIONS) return;
+          // An EMPTY snapshot is not evidence of banners -- it is the absence of
+          // an observation, and spending the whole marker budget on it would
+          // delay every job on a host where the read answers nothing. A real
+          // banner phase is not empty: the recorded one was 190 bytes of
+          // update notices.
+          if (observed.reason === 'empty') {
+            readUnavailable = true;
+            continue;
+          }
+          // Herdr may say ready and the pane disagree. That IS the bug, so the
+          // pane wins while there is budget left to keep looking.
+          await this.sleep(this.pollIntervalMs);
+          continue;
+        } catch {
+          // Reading the pane is an observation, not a dependency. An older
+          // Herdr, a refused command or a dead socket must not block a job.
+          readUnavailable = true;
+        }
+      }
+
+      if (herdrSaysReady) return;
       await this.sleep(this.pollIntervalMs);
     }
   }

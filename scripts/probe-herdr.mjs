@@ -22,6 +22,7 @@
  * orphans were found on this host and had to be deleted by hand.
  */
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,6 +35,9 @@ const AGENT = 'ducky-pi-probe';
 const HOME = os.homedir();
 
 const WITH_AGENT = process.argv.includes('--with-agent');
+
+/** The `agent start` wall clock, so readiness is measured from the same zero. */
+let AGENT_STARTED_AT = 0;
 
 /**
  * Everything that makes this run NOT a valid recording.
@@ -340,6 +344,104 @@ async function main() {
 const expandHome = (p) => (typeof p === 'string' && p.startsWith('~') ? path.join(HOME, p.slice(1)) : p);
 
 /**
+ * Records the READINESS contract: what `agent read` returns, and whether the
+ * agent's own pane can be used to tell "still painting banners" from "will
+ * accept a prompt".
+ *
+ * This is the evidence behind `observePiPromptReady`. Herdr reports
+ * `interactive_ready: true` while Pi is still printing startup notices, and a
+ * prompt submitted then is silently dropped -- so the orchestrator waits for
+ * the agent's own interactive chrome instead. That marker has to be recorded
+ * against a real agent or it is a guess, which is why this fails rather than
+ * warns when the marker never appears.
+ *
+ * NOTHING FROM THE PANE IS WRITTEN TO THE FIXTURE. A terminal snapshot is
+ * whatever the agent happened to print; the contract is the SHAPE. So the
+ * fixture records the sources that answered, the elapsed time to first ready,
+ * the rejection reasons seen on the way, and a digest -- never the text.
+ */
+async function probeReadiness(started) {
+  const { observePiPromptReady } = await import(
+    path.join(ROOT, 'packages/adapters/dist/pi/pi-ready.js')
+  ).catch(() => {
+    throw new Error(
+      'packages/adapters/dist is missing: run `pnpm build` before the agent probe, so the ' +
+        'readiness observation under test is the one that ships rather than a copy.',
+    );
+  });
+
+  const sources = {};
+  for (const source of ['detection', 'recent', 'visible']) {
+    const res = await run('herdr', ['agent', 'read', AGENT, '--source', source, '--lines', '60', '--format', 'text'], { timeout: 20_000 });
+    sources[source] = {
+      exitCode: res.code,
+      // A pane snapshot is data, not contract. Length and digest only.
+      bytes: res.stdout.length,
+      isJson: res.stdout.trim().startsWith('{'),
+      sha256: createHash('sha256').update(res.stdout).digest('hex').slice(0, 16),
+      observation: observePiPromptReady(res.stdout),
+    };
+  }
+
+  const budgetMs = 60_000;
+  const deadline = Date.now() + budgetMs;
+  const attempts = [];
+  let readyAtMs = null;
+  while (Date.now() < deadline) {
+    const at = Date.now() - AGENT_STARTED_AT;
+    const res = await run('herdr', ['agent', 'read', AGENT, '--source', 'detection', '--lines', '60', '--format', 'text'], { timeout: 20_000 });
+    const observed = observePiPromptReady(res.stdout);
+    attempts.push({
+      atMs: at,
+      exitCode: res.code,
+      reason: observed.reason,
+      ruleLines: observed.ruleLines,
+      hasStatusFooter: observed.hasStatusFooter,
+    });
+    if (observed.ready) {
+      readyAtMs = at;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+
+  writeFileSync(
+    path.join(FIXTURES, 'agent-readiness.json'),
+    `${JSON.stringify(
+      redact({
+        _note:
+          'agent read returns PLAIN TEXT, not a JSON envelope. Recorded shape only: no pane ' +
+          'content is ever written here.',
+        herdrReportedInteractiveReady: started?.agent?.interactive_ready ?? null,
+        herdrReportedStatus: started?.agent?.agent_status ?? null,
+        sources,
+        pollBudgetMs: budgetMs,
+        attempts,
+        firstReadyAfterStartMs: readyAtMs,
+      }),
+      null,
+      2,
+    )}\n`,
+  );
+  console.log(
+    readyAtMs === null
+      ? 'readiness marker NEVER observed within the budget'
+      : `readiness marker observed ${readyAtMs}ms after agent start (${attempts.length} reads)`,
+  );
+
+  if (Object.values(sources).every((s) => s.exitCode !== 0)) {
+    failures.push('`agent read` failed for every snapshot source');
+  }
+  if (readyAtMs === null) {
+    // A readiness observation that never observes readiness is not a contract,
+    // and the orchestrator would silently fall back to the signal that is
+    // documented to be wrong. Fail, so the marker gets revised from a recorded
+    // snapshot rather than left claiming something it cannot do.
+    failures.push('the readiness marker never matched a real agent pane');
+  }
+}
+
+/**
  * The two commands the original probe could not cover, because they launch a
  * real Pi agent.
  *
@@ -352,6 +454,7 @@ async function probeAgent({ pane, checkout }) {
   console.log('\n--- agent stages (--with-agent) ---');
 
   const startedAt = Date.now();
+  AGENT_STARTED_AT = startedAt;
   const started = await herdr('agent-start', [
     'agent', 'start', AGENT,
     '--kind', 'pi',
@@ -361,6 +464,8 @@ async function probeAgent({ pane, checkout }) {
   ]);
   created.agentName = AGENT;
   console.log(`agent start took ${Date.now() - startedAt}ms; status=${started?.agent?.agent_status}`);
+
+  await probeReadiness(started);
 
   const brief = [
     'This is an automated contract probe. Do NOT edit, build, commit or run anything.',

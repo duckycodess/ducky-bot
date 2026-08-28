@@ -347,10 +347,27 @@ was added after the first. Three failed with `agent_prompt_stalled`, because
 `agent start` reported `interactive_ready: true` while Pi was still painting
 startup banners and the prompt was silently dropped.
 
-Ducky reports that honestly — its own error code, bounded observation, never a
-re-prompt, workspace and reservation retained, and the probe exits non-zero — but
-the integration is intermittent. **`HerdrPiOrchestrator.verified` stays `false`,
-`/status` still reports `experimental`, and `DUCKY_HERDR_VERIFIED` is unset.**
+Ducky reported that honestly — its own error code, bounded observation, never a
+re-prompt, workspace and reservation retained, and a non-zero probe exit.
+
+**That cause is now fixed by observation rather than trust.** Before the first
+prompt the orchestrator reads the agent's own pane (`herdr agent read --source
+detection`, which answers plain text and needed its own call path) and waits for
+Pi's interactive input frame on two consecutive reads. Recorded by
+`pnpm probe:herdr --with-agent` across two independent agent starts: Herdr claims
+`interactive_ready: true` from ~6 s while the pane shows no frame, and the frame
+appears at 8.16 s / 8.24 s. The probe FAILS if the marker never matches a real
+pane — and it did fail once, which is what corrected the marker: a freshly
+started Pi never paints the status footer the first version also required.
+
+There is no timing heuristic: stability is two consecutive observations, and if
+the marker never appears the orchestrator falls back to exactly the previous
+behaviour rather than refusing the job.
+
+**Still not certified.** `pnpm probe:live-job` has not been re-run since the fix,
+so repeatability on the production path is unmeasured.
+**`HerdrPiOrchestrator.verified` stays `false`, `/status` still reports
+`experimental`, and `DUCKY_HERDR_VERIFIED` is unset.**
 See [integrations/herdr.md](integrations/herdr.md).
 
 ## Verified against the live host
@@ -359,6 +376,10 @@ See [integrations/herdr.md](integrations/herdr.md).
 - Herdr `agent list`, `workspace list`, `workspace create`,
   `workspace report-metadata`, `pane split`, `worktree create` — recorded as
   fixtures by `pnpm probe:herdr` and parsed by the production schemas
+- Herdr `agent read`, recorded by the agent probe: **plain text, not a JSON
+  envelope**, exit 0, four snapshot sources. The readiness observation and the
+  banner-versus-frame timings are recorded with it — shape, digest and timings
+  only, never pane content
 - The `gh` read-only JSON surface
 - Development Discord bot identity and configured guild REST access (HTTP 200)
 - Development coordinator gateway startup on `127.0.0.1:8787`

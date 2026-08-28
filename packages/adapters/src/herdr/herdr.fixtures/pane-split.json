@@ -3,19 +3,19 @@
   "result": {
     "pane": {
       "agent_status": "unknown",
-      "cwd": "/tmp/ducky-probe-yczvst",
+      "cwd": "/tmp/ducky-probe-LfoDxW",
       "focused": false,
-      "foreground_cwd": "/tmp/ducky-probe-yczvst",
-      "pane_id": "w1E:p2",
+      "foreground_cwd": "/tmp/ducky-probe-LfoDxW",
+      "pane_id": "w1M:p2",
       "revision": 0,
       "scroll": {
         "max_offset_from_bottom": 0,
         "offset_from_bottom": 0,
-        "viewport_rows": 50
+        "viewport_rows": 25
       },
-      "tab_id": "w1E:t1",
-      "terminal_id": "term_65a1949956f442d",
-      "workspace_id": "w1E"
+      "tab_id": "w1M:t1",
+      "terminal_id": "term_65a1c9ec43d4e36",
+      "workspace_id": "w1M"
     },
     "type": "pane_info"
   }

@@ -1,0 +1,65 @@
+{
+  "_note": "agent read returns PLAIN TEXT, not a JSON envelope. Recorded shape only: no pane content is ever written here.",
+  "herdrReportedInteractiveReady": true,
+  "herdrReportedStatus": "idle",
+  "sources": {
+    "detection": {
+      "exitCode": 0,
+      "bytes": 190,
+      "isJson": false,
+      "sha256": "aa512027c1496bd7",
+      "observation": {
+        "ready": false,
+        "reason": "no_input_frame",
+        "ruleLines": 0,
+        "hasStatusFooter": false
+      }
+    },
+    "recent": {
+      "exitCode": 0,
+      "bytes": 190,
+      "isJson": false,
+      "sha256": "aa512027c1496bd7",
+      "observation": {
+        "ready": false,
+        "reason": "no_input_frame",
+        "ruleLines": 0,
+        "hasStatusFooter": false
+      }
+    },
+    "visible": {
+      "exitCode": 0,
+      "bytes": 190,
+      "isJson": false,
+      "sha256": "aa512027c1496bd7",
+      "observation": {
+        "ready": false,
+        "reason": "no_input_frame",
+        "ruleLines": 0,
+        "hasStatusFooter": false
+      }
+    }
+  },
+  "pollBudgetMs": 60000,
+  "attempts": [
+    {
+      "atMs": 6139,
+      "exitCode": 0,
+      "reason": "no_input_frame",
+      "ruleLines": 0
+    },
+    {
+      "atMs": 7149,
+      "exitCode": 0,
+      "reason": "no_input_frame",
+      "ruleLines": 0
+    },
+    {
+      "atMs": 8158,
+      "exitCode": 0,
+      "reason": "ready",
+      "ruleLines": 2
+    }
+  ],
+  "firstReadyAfterStartMs": 8158
+}

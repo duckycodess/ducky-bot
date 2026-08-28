@@ -1,9 +1,29 @@
-import type { AgentInfo, WorkspaceSummary } from './herdr.types.js';
+import type { AgentInfo, AgentReadSource, WorkspaceSummary } from './herdr.types.js';
 
 export interface HerdrClient {
   available(): Promise<boolean>;
   agentList(): Promise<AgentInfo[]>;
   agentGet(target: string): Promise<AgentInfo | undefined>;
+  /**
+   * Reads a terminal snapshot from an agent's pane.
+   *
+   * **Returns TEXT, not JSON.** Recorded on this host: `herdr agent read`
+   * writes the raw snapshot to stdout with no envelope and exits 0, so it needs
+   * its own call path -- the same lesson `workspace report-metadata` taught,
+   * which answers with an empty body.
+   *
+   * Read-only in the strongest sense: it never sends input. It exists so
+   * readiness can be OBSERVED from the agent's own output instead of trusted
+   * from Herdr's `interactive_ready`, which is documented to be wrong while an
+   * agent is still painting its banners.
+   *
+   * The returned string is truncated to `HERDR_READ_MAX_BYTES`: a pane is
+   * unbounded, untrusted output.
+   */
+  agentRead(
+    target: string,
+    opts?: { source?: AgentReadSource; lines?: number },
+  ): Promise<string>;
   agentStart(name: string, kind: string, paneId: string, agentArgs: readonly string[]): Promise<AgentInfo>;
   /**
    * Submits a prompt and waits for the turn to settle. Resolves with the

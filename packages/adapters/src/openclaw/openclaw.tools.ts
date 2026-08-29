@@ -151,13 +151,16 @@ async function readConfigPath(
 
   const res = await runArgv(bin, argv, { timeoutMs });
   const out = `${res.stdout}${res.stderr}`.trim();
+  // The real CLI exits 1 for an unset path and explains that it was not found.
+  // That is a safe absence for an override path, not an unreadable policy.
+  if (NOT_FOUND.test(out)) return null;
   if (res.code !== 0) {
     throw new DuckyError(
       'integration_not_verified',
       'The OpenClaw tool policy could not be read.',
     );
   }
-  if (out === '' || NOT_FOUND.test(out)) return null;
+  if (out === '') return null;
   return out;
 }
 

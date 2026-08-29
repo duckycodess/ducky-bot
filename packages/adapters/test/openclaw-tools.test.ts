@@ -102,7 +102,7 @@ describe('a per-agent or per-provider override cannot slip past', () => {
     writeFileSync(
       file,
       `#!/bin/sh\nfor a in "$@"; do last="$a"; done\ncase "$last" in\n${cases}\n` +
-        `    *) printf 'Config path not found: %s.' "$last" ;;\nesac\nexit 0\n`,
+        `    *) printf 'Config path not found: %s.' "$last"; exit 1 ;;\nesac\nexit 0\n`,
       { mode: 0o700 },
     );
     return file;

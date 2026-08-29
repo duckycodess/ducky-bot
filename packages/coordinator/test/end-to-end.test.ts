@@ -27,6 +27,15 @@ function initRepo(): string {
   writeFileSync(path.join(dir, 'README.md'), '# e2e\n');
   execFileSync('git', ['add', '.'], { cwd: dir, env });
   execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir, env });
+  // The allowlisted `demo` repository is configured with a GitHub mapping, and
+  // the executor now refuses a checkout whose `origin` is not the repository
+  // configuration says it is. Giving the temp checkout the matching remote is
+  // what a real one would have -- and keeps this end-to-end test exercising
+  // that check rather than routing around it.
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/demo.git'], {
+    cwd: dir,
+    env,
+  });
   return dir;
 }
 

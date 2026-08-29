@@ -33,6 +33,29 @@ export const JobPayloadSchema = z.strictObject({
   repoSlug: z.string().max(64),
   absolutePath: z.string().max(4096),
   defaultBranch: z.string().max(255).nullable(),
+  /**
+   * The GitHub repository this slug is configured to be, or null.
+   *
+   * Sent so the executor can prove the checkout in front of it is the RIGHT
+   * one before an agent touches it. With several hosts checking out the same
+   * logical slug, a path that exists and is a git repository is no longer
+   * evidence that it is the intended repository -- and the failure mode of
+   * getting that wrong is an agent editing somebody else's code.
+   *
+   * It is a claim from operator configuration, not authorization, and the
+   * executor uses it only to REFUSE.
+   */
+  github: z.strictObject({ owner: z.string().max(64), repo: z.string().max(128) }).nullable(),
+  /**
+   * Whether to `git fetch` before resolving the base ref.
+   *
+   * Off by default and opt-in per repository, because it is the one thing in
+   * workspace resolution that touches the network. It matters for a host that
+   * is not where the owner works: an Azure executor's checkout is only as
+   * current as its last fetch, and branching from a week-old `main` produces
+   * a diff nobody asked for.
+   */
+  fetchBeforeJob: z.boolean(),
   task: z.string(),
   context: z.string().nullable(),
   bootstrap: z.boolean(),

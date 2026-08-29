@@ -477,6 +477,11 @@ export class JobsService {
           repoSlug: repo.slug,
           absolutePath: placement.absolutePath,
           defaultBranch: repo.defaultBranch,
+          // Sent so the executor can PROVE the checkout in front of it is the
+          // right repository before an agent touches it. It is a claim from
+          // configuration and is only ever used to refuse.
+          github: repo.github,
+          fetchBeforeJob: repo.fetchBeforeJob,
           task: job.task,
           context: job.context,
           bootstrap: job.bootstrap,

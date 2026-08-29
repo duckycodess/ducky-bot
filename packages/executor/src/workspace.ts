@@ -38,6 +38,7 @@ async function git(cwd: string, args: readonly string[]) {
  */
 export async function resolveWorkspace(payload: JobPayload, publicId: string): Promise<ResolvedWorkspace> {
   const repoPath = assertContainedDirectory(payload.absolutePath);
+  await assertExpectedOrigin(repoPath, payload);
 
   const head = await git(repoPath, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   const hasBaseline = head.code === 0 && head.stdout.trim() !== '';
@@ -70,7 +71,10 @@ export async function resolveWorkspace(payload: JobPayload, publicId: string): P
     );
   }
 
-  const base = await resolveBaseRef(repoPath, payload);
+  // Opt-in, and after every refusal above: nothing reaches the network until
+  // the checkout has been proved to be the right repository in a usable state.
+  const fetched = await fetchIfRequested(repoPath, payload);
+  const base = await resolveBaseRef(repoPath, payload, fetched);
   const branch = `ducky/job-${publicId}`;
   const existing = await git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
   if (existing.code === 0 && existing.stdout.trim() !== '') {
@@ -101,9 +105,99 @@ function assertContainedDirectory(configured: string): string {
   return real;
 }
 
+/**
+ * The checkout has to be the repository the operator MEANT.
+ *
+ * A path that exists and contains a `.git` used to be the whole test, and with
+ * one host and one checkout per slug that was very nearly enough. It stops
+ * being enough as soon as the same logical slug is checked out on several
+ * hosts: a stale placement, a copy-pasted path, a directory somebody moved,
+ * and the executor is pointing a real agent with edit capability at somebody
+ * else's code.
+ *
+ * So when configuration says which GitHub repository a slug IS, the remote is
+ * checked against it. The claim comes from operator configuration and is used
+ * only to REFUSE -- it grants nothing and authorizes nothing.
+ *
+ * A repository with no GitHub mapping is not refused: plenty of real
+ * repositories have no remote at all, and inventing a requirement would break
+ * every local-only checkout for no safety gain.
+ */
+async function assertExpectedOrigin(repoPath: string, payload: JobPayload): Promise<void> {
+  if (!payload.github) return;
+
+  const res = await git(repoPath, ['remote', 'get-url', 'origin']);
+  const url = res.stdout.trim();
+  if (res.code !== 0 || url === '') {
+    throw new DuckyError(
+      'repo_not_allowed',
+      `\`${payload.repoSlug}\` is configured as \`${payload.github.owner}/${payload.github.repo}\` ` +
+        'on GitHub, but the checkout on this host has no `origin` remote. Refusing rather than ' +
+        'assuming it is the right repository.',
+    );
+  }
+
+  const actual = parseGitHubRemote(url);
+  const expected = `${payload.github.owner}/${payload.github.repo}`.toLowerCase();
+  if (actual === null || actual !== expected) {
+    // The URL is deliberately NOT echoed: it can carry a username, and the
+    // owner already knows what they configured. What they need is which host
+    // disagrees, not a string to compare by eye.
+    throw new DuckyError(
+      'repo_not_allowed',
+      `\`${payload.repoSlug}\` is configured as \`${expected}\`, but the checkout on this ` +
+        'host has a different `origin`. Refusing: this is not the repository the job was ' +
+        'submitted for.',
+    );
+  }
+}
+
+/**
+ * `owner/repo`, lowercased, from either remote URL form GitHub hands out.
+ *
+ * Both `https://github.com/o/r.git` and `git@github.com:o/r.git` are ordinary;
+ * anything that is not recognisably a GitHub remote returns null and is
+ * refused by the caller rather than guessed at.
+ */
+function parseGitHubRemote(url: string): string | null {
+  const m =
+    /^(?:https?:\/\/(?:[^@/]*@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+)\/(.+?)(?:\.git)?\/?$/i.exec(
+      url,
+    );
+  return m ? `${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}` : null;
+}
+
+/**
+ * Bring remote-tracking refs up to date, when the repository asked for it.
+ *
+ * Off unless a repository opts in, because this is the only step in workspace
+ * resolution that touches the network. It exists for the host that is NOT
+ * where the owner works: an Azure executor's checkout is exactly as current as
+ * its last fetch, and branching from a week-old `main` produces a diff nobody
+ * asked for and a review full of noise.
+ *
+ * A fetch FAILURE is not fatal. The network is not a precondition for doing
+ * work in a checkout that already exists, and failing the job here would turn
+ * a transient outage into a lost job. The caller is told, and falls back to
+ * the local ref.
+ */
+async function fetchIfRequested(repoPath: string, payload: JobPayload): Promise<boolean> {
+  if (!payload.fetchBeforeJob || !payload.defaultBranch) return false;
+  const res = await git(repoPath, ['fetch', '--quiet', 'origin', payload.defaultBranch]);
+  return res.code === 0;
+}
+
 /** Resolve, then verify, the base ref -- before any Herdr call is made. */
-async function resolveBaseRef(repoPath: string, payload: JobPayload): Promise<string> {
+async function resolveBaseRef(
+  repoPath: string,
+  payload: JobPayload,
+  fetched: boolean,
+): Promise<string> {
   const candidates: string[] = [];
+  // A successful fetch makes the remote-tracking ref the freshest thing here,
+  // and it is preferred ONLY then: `origin/main` after a failed fetch is just
+  // an older local copy wearing a more convincing name.
+  if (fetched && payload.defaultBranch) candidates.push(`origin/${payload.defaultBranch}`);
   if (payload.defaultBranch) candidates.push(payload.defaultBranch);
   else {
     const originHead = await git(repoPath, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);

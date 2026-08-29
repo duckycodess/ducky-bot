@@ -80,6 +80,19 @@ export const RepoConfigSchema = z
      * target, which is one permission granting another.
      */
     allowJobs: z.boolean().default(true),
+    /**
+     * Whether the executor refreshes remote-tracking refs before branching.
+     *
+     * Default OFF, because it is the only part of workspace resolution that
+     * touches the network, and a repository on the machine the owner works on
+     * is already current. It matters for a host that is somewhere else: an
+     * Azure executor's checkout is exactly as current as its last fetch, and
+     * branching from a week-old `main` produces a diff nobody asked for.
+     *
+     * A failed fetch is not fatal -- the executor falls back to the local ref
+     * rather than turning a transient outage into a lost job.
+     */
+    fetchBeforeJob: z.boolean().default(false),
     enabled: z.boolean().default(true),
   })
   .superRefine((cfg, ctx) => {
@@ -112,6 +125,24 @@ export const RepoConfigSchema = z
         message:
           `\`${cfg.slug}\` prefers executor \`${cfg.preferredExecutorId}\`, which has no ` +
           'placement here. An executor cannot be preferred for a repository it has no checkout of.',
+      });
+    }
+
+    // Fetching needs somewhere to fetch from and something to fetch.
+    if (cfg.fetchBeforeJob && cfg.github === null) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          `\`${cfg.slug}\` sets \`fetchBeforeJob\` but has no GitHub mapping. There is nothing ` +
+          'to fetch from, and no remote to check the checkout against.',
+      });
+    }
+    if (cfg.fetchBeforeJob && cfg.defaultBranch === null) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          `\`${cfg.slug}\` sets \`fetchBeforeJob\` but names no \`defaultBranch\`. Fetching ` +
+          'everything is not what this is for; name the branch jobs branch from.',
       });
     }
 

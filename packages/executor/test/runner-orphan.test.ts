@@ -50,6 +50,8 @@ const claim = (): ClaimResponse => ({
     repoSlug: 'demo',
     absolutePath: repoPath,
     defaultBranch: 'main',
+    github: null,
+    fetchBeforeJob: false,
     task: 'do it',
     context: null,
     bootstrap: true,

@@ -23,6 +23,8 @@ const payload = (absolutePath: string, over: Partial<JobPayload> = {}): JobPaylo
   repoSlug: 'demo',
   absolutePath,
   defaultBranch: null,
+  github: null,
+  fetchBeforeJob: false,
   task: 'do it',
   context: null,
   bootstrap: false,
@@ -182,5 +184,139 @@ describe('path containment', () => {
     await expect(resolveWorkspace(payload('/nope/does/not/exist'), 'jabcde')).rejects.toThrow(
       /does not exist/,
     );
+  });
+});
+
+describe('the checkout must be the repository the operator meant', () => {
+  const withOrigin = (dir: string, url: string): string => {
+    git(dir, 'remote', 'add', 'origin', url);
+    return dir;
+  };
+
+  it('accepts a matching origin in either URL form GitHub hands out', async () => {
+    for (const url of [
+      'https://github.com/acme/demo.git',
+      'https://github.com/acme/demo',
+      'git@github.com:acme/demo.git',
+      'ssh://git@github.com/acme/demo.git',
+      // Case is not identity for a GitHub owner or repository name.
+      'https://github.com/ACME/Demo.git',
+      // A token-shaped username in the URL is ordinary and must not confuse it.
+      'https://someone@github.com/acme/demo.git',
+    ]) {
+      const dir = withOrigin(initRepo(true), url);
+      const resolved = await resolveWorkspace(
+        payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+        'jabcde',
+      );
+      expect(resolved.mode, url).toBe('worktree');
+    }
+  });
+
+  it('refuses a checkout whose origin is a DIFFERENT repository', async () => {
+    const dir = withOrigin(initRepo(true), 'https://github.com/acme/something-else.git');
+    await expect(
+      resolveWorkspace(
+        payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+        'jabcde',
+      ),
+    ).rejects.toThrow(/different `origin`/);
+  });
+
+  it('refuses a mapped repository with no origin at all', async () => {
+    const dir = initRepo(true);
+    await expect(
+      resolveWorkspace(
+        payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+        'jabcde',
+      ),
+    ).rejects.toThrow(/no `origin` remote/);
+  });
+
+  it('refuses a remote that is not recognisably GitHub', async () => {
+    // Not a guess either way: an unparseable remote is refused, not accepted
+    // because it "might" be right.
+    const dir = withOrigin(initRepo(true), 'https://gitlab.com/acme/demo.git');
+    await expect(
+      resolveWorkspace(
+        payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+        'jabcde',
+      ),
+    ).rejects.toThrow(/different `origin`/);
+  });
+
+  it('leaves a repository with no GitHub mapping alone', async () => {
+    // Plenty of real checkouts have no remote. Requiring one would break them
+    // for no safety gain.
+    const dir = initRepo(true);
+    const resolved = await resolveWorkspace(payload(dir, { defaultBranch: 'main' }), 'jabcde');
+    expect(resolved.mode).toBe('worktree');
+  });
+
+  it('never echoes the remote URL, which can carry a username', async () => {
+    const dir = withOrigin(initRepo(true), 'https://secret-looking-user@github.com/acme/other.git');
+    await expect(
+      resolveWorkspace(
+        payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+        'jabcde',
+      ),
+    ).rejects.toThrow(/^(?!.*secret-looking-user).*$/s);
+  });
+});
+
+describe('fetching before a job', () => {
+  it('does nothing at all unless the repository opts in', async () => {
+    // The default path must not touch the network. A bogus origin would make a
+    // fetch fail loudly; resolution succeeds because none is attempted.
+    const dir = initRepo(true);
+    git(dir, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git');
+    const resolved = await resolveWorkspace(
+      payload(dir, { defaultBranch: 'main', github: { owner: 'acme', repo: 'demo' } }),
+      'jabcde',
+    );
+    expect(resolved.base).toBe('main');
+  });
+
+  it('falls back to the local ref when the fetch fails', async () => {
+    /**
+     * The property that matters most here. A host with no network still has a
+     * perfectly good checkout, and failing the job would turn a transient
+     * outage into lost work. The origin below is unreachable on purpose.
+     */
+    const dir = initRepo(true);
+    git(dir, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git');
+    const resolved = await resolveWorkspace(
+      payload(dir, {
+        defaultBranch: 'main',
+        github: { owner: 'acme', repo: 'demo' },
+        fetchBeforeJob: true,
+      }),
+      'jabcde',
+    );
+    // `main`, not `origin/main`: a remote-tracking ref after a FAILED fetch is
+    // just an older local copy with a more convincing name.
+    expect(resolved.base).toBe('main');
+  });
+
+  it('prefers the remote-tracking ref when the fetch succeeds', async () => {
+    /**
+     * A local clone, so the fetch genuinely succeeds with no network.
+     *
+     * `github` is null here on purpose: this isolates the base-ref preference
+     * from the origin check, which has its own tests above. Configuration
+     * would not ALLOW that combination -- `fetchBeforeJob` without a GitHub
+     * mapping is refused at startup -- and the executor still behaves
+     * correctly when handed it, which is the direction defence in depth is
+     * supposed to run.
+     */
+    const upstream = initRepo(true);
+    const dir = tmp();
+    git(path.dirname(dir), 'clone', '-q', upstream, dir);
+
+    const resolved = await resolveWorkspace(
+      payload(dir, { defaultBranch: 'main', fetchBeforeJob: true }),
+      'jabcde',
+    );
+    expect(resolved.base).toBe('origin/main');
   });
 });

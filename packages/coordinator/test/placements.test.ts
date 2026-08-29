@@ -392,3 +392,63 @@ describe('repository placements', () => {
     });
   });
 });
+
+describe('GitHub-bound sync configuration', () => {
+  it('refuses fetchBeforeJob without something to fetch from', () => {
+    expect(() =>
+      RepoAllowlist.fromJson(
+        config([{ slug: 'app', absolutePath: WSL, defaultBranch: 'main', fetchBeforeJob: true }]),
+      ),
+    ).toThrow(/no GitHub mapping/);
+  });
+
+  it('refuses fetchBeforeJob without a branch to fetch', () => {
+    expect(() =>
+      RepoAllowlist.fromJson(
+        config([
+          {
+            slug: 'app',
+            absolutePath: WSL,
+            github: { owner: 'acme', repo: 'app' },
+            fetchBeforeJob: true,
+          },
+        ]),
+      ),
+    ).toThrow(/names no `defaultBranch`/);
+  });
+
+  it('sends the mapping and the flag to the executor that claims', () => {
+    const h = makeHarness({
+      allowlistJson: config([
+        {
+          slug: 'app',
+          absolutePath: WSL,
+          defaultBranch: 'main',
+          github: { owner: 'acme', repo: 'app' },
+          fetchBeforeJob: true,
+        },
+      ]),
+    });
+    h.store.executors.upsertExecutor('wsl-dev', 'wsl-dev');
+    h.store.executors.touchExecutor('wsl-dev', '0.0.0-test');
+    h.app.jobs.submit(h.owner, { repoSlug: 'app', task: 't', bootstrap: false });
+
+    const claimed = h.app.jobs.claim('wsl-dev', 'k1');
+    // The executor cannot check that the checkout is the right repository
+    // unless it is told which repository that is.
+    expect(claimed?.payload.github).toEqual({ owner: 'acme', repo: 'app' });
+    expect(claimed?.payload.fetchBeforeJob).toBe(true);
+    h.close();
+  });
+
+  it('defaults both off, so an existing configuration changes nothing', () => {
+    const h = makeHarness({ allowlistJson: config([{ slug: 'app', absolutePath: WSL }]) });
+    h.store.executors.upsertExecutor('wsl-dev', 'wsl-dev');
+    h.store.executors.touchExecutor('wsl-dev', '0.0.0-test');
+    h.app.jobs.submit(h.owner, { repoSlug: 'app', task: 't', bootstrap: false });
+    const claimed = h.app.jobs.claim('wsl-dev', 'k1');
+    expect(claimed?.payload.github).toBeNull();
+    expect(claimed?.payload.fetchBeforeJob).toBe(false);
+    h.close();
+  });
+});

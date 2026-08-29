@@ -36,6 +36,8 @@ const claimResponse = (): ClaimResponse => ({
     repoSlug: 'demo',
     absolutePath: repoPath,
     defaultBranch: 'main',
+    github: null,
+    fetchBeforeJob: false,
     task: 'do it',
     context: null,
     // An uninitialised repo with bootstrap allowed resolves to direct mode.

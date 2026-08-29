@@ -150,6 +150,13 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   { bin: 'git', verb: ['add'], cls: 'local_mutation', note: 'Stages only explicitly approved repository-relative files.' },
   { bin: 'git', verb: ['commit'], cls: 'local_mutation', note: 'Creates a local commit from an approved proposal.' },
   { bin: 'git', verb: ['push'], cls: 'external_mutation', note: 'Publishes a branch; only the approved-action path may run it.' },
+  {
+    bin: 'git', verb: ['fetch'], cls: 'local_mutation',
+    note:
+      'Updates remote-tracking refs on this host. It READS from the remote and sends nothing, ' +
+      'so it is not an external mutation -- but it writes refs locally, so it is not read-only ' +
+      'either. Reachable only when a repository opts in with `fetchBeforeJob`.',
+  },
   { bin: 'git', verb: ['stash', 'list'], cls: 'read_only', note: 'Lists stashes; never applies, pops or drops one.' },
   { bin: 'git', verb: ['worktree', 'list'], cls: 'read_only', note: 'Lists worktrees; never adds or removes one.' },
 

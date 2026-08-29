@@ -1,0 +1,24 @@
+{
+  "_note": "The watch loop driven against live GitHub through the real composition root, with an in-memory database and the mock Discord transport. COUNTS and booleans only: no snapshot content, no summary text, no repository data of any kind.",
+  "repoSlugWatched": "ducky-bot",
+  "firstPass": {
+    "observed": 1,
+    "changed": 1,
+    "failed": 0,
+    "delivered": 1,
+    "deliveryFailed": 0,
+    "abandoned": 0
+  },
+  "secondPass": {
+    "observed": 1,
+    "changed": 0,
+    "failed": 0,
+    "delivered": 0,
+    "deliveryFailed": 0,
+    "abandoned": 0
+  },
+  "snapshotStored": true,
+  "deduplicated": true,
+  "deliveredToMockTransport": 1,
+  "realDiscordMessagesSent": 0
+}

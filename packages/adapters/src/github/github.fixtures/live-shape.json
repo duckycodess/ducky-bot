@@ -1,0 +1,65 @@
+{
+  "_note": "Recorded by scripts/probe-gh-live.ts against the SHIPPED GhCliReader. Shapes and key names only -- every leaf is a TYPE, never a value.",
+  "recordedSurfaces": 8,
+  "surfaces": [
+    {
+      "surface": "repoView",
+      "parsed": true,
+      "shape": {
+        "name": "string",
+        "defaultBranchRef": {
+          "name": "string"
+        },
+        "isPrivate": "boolean",
+        "updatedAt": "string"
+      }
+    },
+    {
+      "surface": "prList",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
+    },
+    {
+      "surface": "prListAll",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
+    },
+    {
+      "surface": "runList",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
+    },
+    {
+      "surface": "issueList",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
+    },
+    {
+      "surface": "prView",
+      "parsed": false,
+      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+    },
+    {
+      "surface": "prChecks",
+      "parsed": false,
+      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+    },
+    {
+      "surface": "prReviews",
+      "parsed": false,
+      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+    }
+  ]
+}

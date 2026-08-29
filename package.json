@@ -25,6 +25,7 @@
     "probe:live-job": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-live-job.ts",
     "probe:openclaw": "node scripts/probe-openclaw.mjs",
     "probe:gh": "node scripts/probe-gh.mjs",
+    "probe:gh-live": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-gh-live.ts",
     "backup": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/backup-db.ts",
     "backup:verify": "tsx scripts/verify-backup.ts"
   },

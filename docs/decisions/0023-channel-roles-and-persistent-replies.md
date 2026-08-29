@@ -111,6 +111,24 @@ working because they configured a channel for something else.
   ordinary sentences is the opposite of what that channel is for, and even a
   bare "yes" belongs to whichever channel proposed something.
 
+### Configuring `gpt` also contains conversation
+
+With the MessageContent intent the bot receives every message in every channel
+it can read, so conversation answered anywhere. On a small guild that was
+merely noisy; once an owner designates a channel for the model it is wrong
+twice over — model output in channels chosen for something else, and
+subscription quota spent on strays.
+
+So when, and only when, a `gpt` channel is configured, other **guild** channels
+are silent for conversation. DMs are never silenced, because there is no other
+channel a DM could belong to. Slash commands are unaffected: a command is an
+explicit act and is answered wherever it is typed.
+
+The check sits on the conversation fallthrough, **not** at the top of the
+message handler. Putting it earlier silenced the coding channel entirely —
+deterministic rules must still run there, and only the fallthrough to the model
+is contained. A test asserts both halves.
+
 ## The coding proposal
 
 Natural-language coding intent is **proposal → explicit confirmation →

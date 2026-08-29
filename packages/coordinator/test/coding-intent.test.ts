@@ -203,3 +203,97 @@ describe('a role narrows which rules may fire', () => {
     h.close();
   });
 });
+
+describe('conversation is contained once a gpt channel exists', () => {
+  const OTHER = '900000000000000099';
+
+  it('answers everywhere when no gpt channel is configured', async () => {
+    // Exactly today's behaviour, preserved: an instance that configures
+    // nothing sees no change at all.
+    const h = makeHarness();
+    await h.transport.start((e) => h.app.router.handle(e));
+    expect(await say(h, 'hello there')).toBeDefined();
+    expect(await say(h, 'hello there', OTHER)).toBeDefined();
+    h.close();
+  });
+
+  it('answers in the gpt channel and stays silent in other guild channels', async () => {
+    /**
+     * With the MessageContent intent the bot receives every message in every
+     * readable channel. Once the owner designates a channel for the model,
+     * answering elsewhere puts model output in channels chosen for something
+     * else AND spends subscription quota on strays.
+     */
+    const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
+    await h.transport.start((e) => h.app.router.handle(e));
+
+    expect(await say(h, 'hello there', GPT)).toBeDefined();
+    expect(await say(h, 'hello there', OTHER)).toBeUndefined();
+    h.close();
+  });
+
+  it('never silences a DM', async () => {
+    // There is no other channel a DM could belong to.
+    const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
+    await h.transport.start((e) => h.app.router.handle(e));
+    expect(await say(h, 'hello there')).toBeDefined();
+    h.close();
+  });
+
+  it('silences a non-owner in the same way', async () => {
+    const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
+    await h.transport.start((e) => h.app.router.handle(e));
+    expect(await say(h, 'hello there', OTHER, CHAT)).toBeUndefined();
+    expect(await say(h, 'hello there', GPT, CHAT)).toBeDefined();
+    h.close();
+  });
+
+  it('leaves slash commands alone entirely', async () => {
+    // Containment is about CONVERSATION. A command is an explicit act and is
+    // answered wherever it is typed, exactly as before.
+    const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
+    await h.transport.start((e) => h.app.router.handle(e));
+    const reply = await h.transport.dispatch({
+      kind: 'command',
+      name: 'status',
+      userId: OWNER,
+      context: inChannel(OTHER),
+      options: {},
+    });
+    expect(reply).toBeDefined();
+    h.close();
+  });
+});
+
+describe('containment does not swallow the other role channels', () => {
+  /**
+   * The bug a test caught: putting the containment check at the top of the
+   * message handler silenced the coding channel entirely, because it is a
+   * guild channel that is not the gpt channel. Deterministic rules must still
+   * run there; only the fallthrough to the model is contained.
+   */
+  it('still proposes in the coding channel while gpt is configured', async () => {
+    const h = makeHarness({
+      env: { DUCKY_DEV_CODING_CHANNEL_ID: CODING, DUCKY_DEV_GPT_CHANNEL_ID: GPT },
+    });
+    await h.transport.start((e) => h.app.router.handle(e));
+
+    const proposal = await say(h, 'implement in demo: add an endpoint', CODING);
+    expect(proposal?.content).toMatch(/nothing is saved yet/i);
+
+    // ...and a message there that matches no rule is silent rather than
+    // becoming a model turn.
+    expect(await say(h, 'just thinking out loud', CODING)).toBeUndefined();
+    h.close();
+  });
+
+  it('still answers task reads in the task channel while gpt is configured', async () => {
+    const h = makeHarness({
+      env: { DUCKY_DEV_TASK_CHANNEL_ID: TASK, DUCKY_DEV_GPT_CHANNEL_ID: GPT },
+    });
+    await h.transport.start((e) => h.app.router.handle(e));
+    const proposal = await say(h, 'i need to renew the domain', TASK);
+    expect(proposal?.content).toMatch(/nothing is saved yet/i);
+    h.close();
+  });
+});

@@ -212,6 +212,21 @@ export class DuckyRouter {
   }
 
   /**
+   * Whether conversation is deliberately silent in this channel.
+   *
+   * Only ever true when a `gpt` channel IS configured and this is a different
+   * GUILD channel. A DM has no guild and is never silenced; an instance with
+   * no `gpt` role configured silences nothing.
+   */
+  private isSilencedConversationChannel(context: IncomingContext | undefined): boolean {
+    const gpt = this.channelRoles.channelFor('gpt');
+    if (gpt === undefined) return false;
+    // A DM, or an event with no context, is not a guild channel.
+    if (!context || context.guildId === undefined) return false;
+    return context.channelId !== gpt;
+  }
+
+  /**
    * The ONE place a reply may become persistent, and it can only ever remove
    * ephemerality -- never add it.
    *
@@ -365,7 +380,7 @@ export class DuckyRouter {
   private async handleMessage(
     actor: ActorContext,
     event: Extract<Incoming, { kind: 'message' }>,
-  ): Promise<OutboundMessage> {
+  ): Promise<OutboundMessage | undefined> {
     this.deps.authz.requireConversational(actor);
     const attachments = event.attachments ?? [];
 
@@ -392,6 +407,25 @@ export class DuckyRouter {
         );
         return handled;
       }
+      /**
+       * Deterministic rules have had their say. What is left goes to the
+       * model -- and that is the part that needs containing.
+       *
+       * With the MessageContent intent the bot receives every message in every
+       * channel it can read, so before role channels existed conversation
+       * answered anywhere. On a small guild that was merely noisy. Once an
+       * owner designates a `gpt` channel it is wrong twice over: model output
+       * appears in channels chosen for something else, and every stray message
+       * spends subscription quota.
+       *
+       * The check sits HERE and not at the top of this method, because the
+       * task and coding channels must still get their proposals: containment
+       * is about conversation, not about the deterministic rules that run
+       * first. Putting it earlier silenced the coding channel entirely, which
+       * a test caught.
+       */
+      if (this.isSilencedConversationChannel(event.context)) return undefined;
+
       return this.converse({
         actor,
         userId: actor.discordUserId,

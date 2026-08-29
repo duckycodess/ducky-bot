@@ -25,6 +25,18 @@ it is opt-in, costs something, or writes somewhere, and each says which.
 | 9 | `pnpm backup:verify --file <that file>` | integrity + a schema this build knows | not that the data is *correct* |
 | 10 | `pnpm probe:extraction` | which PDF/OCR decoders this host actually has | nothing is installed or enabled; exits 2 while none is present |
 
+**Boot diagnostics now say where your own words go.** Two lines to read
+deliberately when you start the coordinator:
+
+- `assistant channels` — the roles you configured, and that your replies
+  **persist** in those channels. `none` means every guild reply stays
+  ephemeral, which is the default.
+- `proactive briefings` — names the destination: your DM, the briefing channel,
+  or both.
+
+If `assistant channels` lists a role you did not intend, stop and fix the
+configuration before anyone reads that channel.
+
 If 1–9 pass, the code is sound. Nothing above has spoken to another system.
 
 ---

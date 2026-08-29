@@ -98,6 +98,11 @@ export class BriefingNotifier {
     this.config = deps.config;
   }
 
+  /** Where briefings land. Reported at boot and in `/status`. */
+  get delivery(): BriefingDelivery {
+    return this.config.delivery;
+  }
+
   get enabled(): boolean {
     return this.config.enabled;
   }

@@ -262,6 +262,19 @@ export class DuckyRouter {
     if (!reply || reply.ephemeral === false) return reply;
     if (actor.discordUserId !== this.deps.authz.ownerId) return reply;
 
+    /**
+     * A component press is never made persistent, and that is Discord's
+     * constraint rather than a policy choice.
+     *
+     * The transport must `deferReply` before routing -- an interaction has a
+     * three-second budget and the work here can take longer -- and ephemerality
+     * is fixed at that deferral, before anything knows which channel the press
+     * came from. Threading context through would not change the outcome.
+     *
+     * The result is defensible on its own terms: the MESSAGE carrying the
+     * control persists in the role channel, which is what the owner scrolls
+     * back to, and pressing it answers privately. See ADR 0023.
+     */
     const context = event.kind === 'component' ? undefined : event.context;
     if (!this.channelRoles.isRoleChannel(context)) return reply;
     if (this.isPersistenceExempt(event)) return reply;

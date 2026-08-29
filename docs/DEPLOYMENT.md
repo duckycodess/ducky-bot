@@ -3,6 +3,22 @@
 **Nothing has been provisioned.** This is the intended shape, written so the
 decision is reviewable before anything is created.
 
+## Channels are configuration, and they are per profile
+
+Two settings decide where output goes, and they mean different things:
+
+| | Who reads it | Owner replies |
+|---|---|---|
+| `DUCKY_*_SHARED_CHANNEL_IDS` | anyone in the channel, narrow projection | stay ephemeral |
+| `DUCKY_*_{BRIEFING,TASK,CODING,GPT}_CHANNEL_ID` | anyone in the channel, in full | **persist** |
+
+Both are profile-scoped and production inherits neither. A channel listed in
+both is refused at startup. Configuring `gpt` also contains conversation to
+that channel; DMs are never affected. See
+[decisions/0023](decisions/0023-channel-roles-and-persistent-replies.md) and the
+residual risk in [SECURITY.md](SECURITY.md) — **Ducky cannot check who can read
+a channel.**
+
 ## Two profiles
 
 Ducky runs as two isolated identities. Nothing is shared between them, and

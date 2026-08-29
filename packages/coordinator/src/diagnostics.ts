@@ -81,8 +81,23 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
     'proactive briefings',
     true,
     app.briefingNotifier.enabled
-      ? 'enabled — morning and evening, to your DM, on the reconcile interval'
+      ? `enabled — morning and evening, to ${briefingDestination(app)}, on the reconcile interval`
       : 'disabled — /briefing only',
+  );
+  /**
+   * Reported because it changes where the owner's own words end up.
+   *
+   * Not a warning in either direction: no role channel is the conservative
+   * default, and configuring one is a deliberate choice. Role NAMES only -- a
+   * boot line is a health readout, not a configuration dump, and a channel id
+   * in a log adds nothing a reader can act on.
+   */
+  add(
+    'assistant channels',
+    true,
+    app.channelRoles.enabled
+      ? `${app.channelRoles.configured.map((c) => c.role).join(', ')} — your replies PERSIST there`
+      : 'none — every reply in a guild stays ephemeral',
   );
   // Not a warning: refusing to resume a job on an unchecked dependency is the
   // correct state, not a degraded one.
@@ -119,3 +134,15 @@ const safe = (fn: () => boolean): boolean => {
     return false;
   }
 };
+
+/** Where a proactive briefing lands, in the owner's terms. */
+function briefingDestination(app: App): string {
+  switch (app.briefingNotifier.delivery) {
+    case 'dm':
+      return 'your DM';
+    case 'channel':
+      return 'the briefing channel';
+    case 'both':
+      return 'your DM and the briefing channel';
+  }
+}

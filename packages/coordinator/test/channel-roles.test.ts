@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CHANNEL_ROLES } from '@ducky/contracts';
 import {
@@ -276,5 +278,42 @@ describe('persistent replies, and only in a role channel', () => {
     const reply = await h.transport.dispatch(taskList(guild(TASK)));
     expect(reply?.ephemeral).toBe(true);
     h.close();
+  });
+});
+
+describe('the authorization path never reads a channel role', () => {
+  it('is structural: authz imports nothing about channels', () => {
+    /**
+     * ADR 0009 says frozen environment configuration is the sole authority for
+     * who may act, and ADR 0023 says a channel role is presentation. This
+     * asserts the two cannot blur: the authorizer must not know channel roles
+     * exist.
+     *
+     * `Authorizer` has its own `roleOf(discordUserId)` -- owner or chat -- and
+     * the name collision with `ChannelRolePolicy.roleOf(context)` is exactly
+     * why this test is worth having rather than trusting a reader to notice.
+     */
+    const src = readFileSync(
+      path.resolve(import.meta.dirname, '..', 'src', 'security', 'authz.ts'),
+      'utf8',
+    );
+    expect(src).not.toMatch(/channel-roles/);
+    expect(src).not.toMatch(/ChannelRolePolicy/);
+    expect(src).not.toMatch(/channelId/);
+    expect(src).not.toMatch(/guildId/);
+  });
+
+  it('keeps the role policy out of every service that decides anything', () => {
+    // The policy belongs to presentation. A domain service reaching for it
+    // would be the first step toward a capability that depends on where a
+    // message was typed.
+    const domain = path.resolve(import.meta.dirname, '..', 'src', 'domain');
+    const offenders: string[] = [];
+    for (const entry of readdirSync(domain)) {
+      if (!entry.endsWith('.ts') || entry === 'channel-roles.ts') continue;
+      const text = readFileSync(path.join(domain, entry), 'utf8');
+      if (text.includes('ChannelRolePolicy')) offenders.push(entry);
+    }
+    expect(offenders).toEqual([]);
   });
 });

@@ -129,6 +129,18 @@ message handler. Putting it earlier silenced the coding channel entirely —
 deterministic rules must still run there, and only the fallthrough to the model
 is contained. A test asserts both halves.
 
+### A component press answers privately, and Discord decides that
+
+The reply to a button press stays ephemeral even in a role channel. That is not
+a policy choice: the transport must `deferReply` before routing — an
+interaction has a three-second budget and the work behind it can take longer —
+and ephemerality is fixed at that deferral, before anything knows which channel
+the press came from.
+
+It is defensible on its own terms. The **message carrying the control**
+persists, which is what the owner scrolls back to; pressing it answers
+privately. Nothing is lost that the owner was asking for.
+
 ## The coding proposal
 
 Natural-language coding intent is **proposal → explicit confirmation →

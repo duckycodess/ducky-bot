@@ -30,7 +30,7 @@ registered.
 |---|---|---|
 | Owner-only Discord surface (12 commands) | **Verified** (registration), **unit-tested** (behaviour) | 12/12 registered, read back with `register-commands --diff`; `discord.fixtures/gateway-connect.json` |
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
-| Human Discord interaction | **Owner-reported only** | The coordinator logs boot diagnostics and nothing else; this host holds no record either way |
+| Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
 | OpenClaw conversation (GPT) | **Verified, and now SELECTED on development** | `probe:openclaw` exits 0; request argv and reply envelope recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Live turns: 33 s directly, 24 s through the router |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
@@ -82,10 +82,42 @@ mock transport so neither the live database nor a gateway was touched:
 | `hi` in another guild channel | silent, as containment intends |
 | a task proposal in the task channel | proposed, and persistent |
 
+**Those checks ran through the ROUTER, not through Discord**, and that
+distinction turned out to matter: a live test in the real guild channel got no
+reply at all, because of two transport bugs the router-level checks could not
+see. Both are fixed and neither has been re-tested live yet — see below.
+
 **Proactive briefings remain OFF.** `DUCKY_BRIEFING_ENABLED` is unset, so
 configuring a briefing channel pushes nothing on its own, and
 `DUCKY_BRIEFING_DELIVERY` is still `dm`. Both are deliberate: the owner
 supplied channel ids, which is not the same as asking for a daily push.
+
+## Two transport bugs, fixed, not yet re-tested live
+
+The owner sent `hi` in the configured GPT guild channel and **no reply
+arrived**. That was not a provider failure, and the checks above could not have
+caught it: they exercise the router, and both faults were below it.
+
+**1. The gateway never delivered guild messages.** The client requested
+`Guilds + DirectMessages + MessageContent`. `Guilds` carries guild and channel
+metadata and delivers no message, so `MessageCreate` never fired for a guild
+channel. DMs worked; every guild channel was silent. `GuildMessages` is now
+requested by the transport and by the gateway probe.
+
+**2. The persistence decision was being discarded.** `deferReply` fixes whether
+a reply is ephemeral and `editReply` cannot change it. The transport deferred
+every command ephemerally *before* routing, so the router's downgrade changed
+nothing in Discord — the flag was set faithfully and thrown away silently. That
+is why a full green suite did not catch it: the router was correct in
+isolation, and so was the transport.
+
+Visibility is now decided before the deferral, by one `ReplyPersistencePolicy`
+that both the transport and the router hold. Two rules can disagree; one cannot.
+
+**Status of the fix: implemented, unit-tested, NOT confirmed live.** The last
+live evidence available is the failed attempt. A message round trip in the guild
+channel has not been re-tested since, and nothing here should be read as saying
+it has.
 
 ## Two Discord identities
 
@@ -798,7 +830,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**87 files, 1168 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**88 files, 1182 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

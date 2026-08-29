@@ -2,6 +2,11 @@
   "version": 1,
   "repos": [
     {
+      "_comment": [
+        "The single-path form. Unchanged, and still the right shape whenever",
+        "one host runs everything: this repository lives here, and any executor",
+        "may run jobs in it."
+      ],
       "slug": "example-app",
       "absolutePath": "/home/PLACEHOLDER/projects/example-app",
       "defaultBranch": "main",
@@ -19,6 +24,59 @@
       "allowWorktree": true,
       "allowBootstrap": true,
       "bootstrapAllowedEntries": [".git"],
+      "enabled": true
+    },
+    {
+      "_comment": [
+        "One logical slug, two hosts. The slug is still the only thing anyone",
+        "names -- Discord supplies a slug and never a path -- and the",
+        "repository reservation is still keyed on the slug, so ONE job runs in",
+        "this repository at a time no matter which host takes it.",
+        "",
+        "`placements` is EXHAUSTIVE: an executor not listed here is not",
+        "eligible, and its jobs wait rather than running against a directory",
+        "that means something else on that machine. Do not also set a top-level",
+        "`absolutePath`; the schema refuses both forms at once rather than",
+        "deciding which wins.",
+        "",
+        "`preferredExecutorId` is a preference, never a pin. While that host is",
+        "live it takes the work; once it is not, the other placed hosts become",
+        "eligible again, because one host being off should not mean one",
+        "repository being dead.",
+        "",
+        "`enabled: false` on a placement takes one host out of rotation without",
+        "deleting the path you will want back."
+      ],
+      "slug": "example-multi-host",
+      "defaultBranch": "main",
+      "github": { "owner": "PLACEHOLDER-ORG", "repo": "example-multi-host" },
+      "preferredExecutorId": "wsl-dev",
+      "placements": [
+        { "executorId": "wsl-dev", "absolutePath": "/home/PLACEHOLDER/projects/example-multi-host" },
+        { "executorId": "azure-prod", "absolutePath": "/var/lib/ducky/repos/example-multi-host" }
+      ],
+      "allowWorktree": true,
+      "allowBootstrap": false,
+      "bootstrapAllowedEntries": [".git"],
+      "enabled": true
+    },
+    {
+      "_comment": [
+        "Watch-only. This repository exists in the allowlist so it can be",
+        "OBSERVED through the read-only `gh` surface, and for no other reason.",
+        "",
+        "`allowJobs: false` is what keeps those two permissions apart. Watching",
+        "is a read; running a job hands a real agent edit capability in a",
+        "working tree. Before this flag, adding a GitHub mapping so a",
+        "repository could be watched also made it a job target.",
+        "",
+        "It has no path at all, on any host, and needs none: `/job submit`",
+        "refuses it before a job row is ever created."
+      ],
+      "slug": "example-watched",
+      "allowJobs": false,
+      "defaultBranch": "main",
+      "github": { "owner": "PLACEHOLDER-ORG", "repo": "example-watched" },
       "enabled": true
     }
   ]

@@ -431,17 +431,15 @@ describe('job_notifications baseline backfill on migration', () => {
     }
 
     const store = createStore(db);
-    store.repos.upsert({
-      slug: 'demo',
-      absolutePath: '/tmp/demo',
-      defaultBranch: 'main',
-      githubOwner: null,
-      githubRepo: null,
-      allowWorktree: true,
-      allowBootstrap: false,
-      bootstrapAllowedEntries: ['.git'],
-      enabled: true,
-    });
+    // Raw SQL for the same reason the job insert below uses it: this database
+    // deliberately predates later migrations, and `ReposRepo` writes today's
+    // columns -- `local_path` and `allow_jobs` do not exist yet at this point
+    // in history.
+    db.prepare(
+      `INSERT INTO repos (slug, absolute_path, default_branch, github_owner, github_repo,
+         allow_worktree, allow_bootstrap, bootstrap_allowed_entries_json, enabled, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run('demo', '/tmp/demo', 'main', null, null, 1, 0, '[".git"]', 1, new Date().toISOString());
     // Written with raw SQL, not `store.jobs.create`: today's repository code
     // writes today's columns, and the whole point of this test is a database
     // that predates them. Using the repository here would either fail on the

@@ -160,7 +160,13 @@ export function createApp(
   const allowlist = RepoAllowlist.fromJson(
     overrides.allowlistJson ?? readReposFile(paths.reposFile),
   );
-  for (const row of allowlist.toRepoRows()) store.repos.upsert(row);
+  // Config is authoritative; the tables mirror it. Placements are replaced
+  // rather than merged, so a host taken OUT of the configuration stops being
+  // listed instead of lingering as a path nobody reviewed any more.
+  for (const row of allowlist.toRepoRows()) {
+    store.repos.upsert(row);
+    store.repos.replacePlacements(row.slug, allowlist.toPlacementRows(row.slug));
+  }
 
   // Audit only -- never consulted for authorization.
   store.audit.observe(authz.ownerId, 'owner');

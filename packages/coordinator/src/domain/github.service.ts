@@ -44,6 +44,14 @@ export class GitHubService {
       latestPr: latest
         ? { number: latest.number, title: latest.title, state: latest.state, checks }
         : null,
+      placement: {
+        jobsAllowed: repo.allowJobs,
+        // Ids, never paths. `undefined` from the allowlist means "any
+        // executor"; the summary says that with null rather than an empty list,
+        // which would read as "nowhere".
+        hosts: this.allowlist.eligibleExecutors(repo) ?? null,
+        preferred: repo.preferredExecutorId,
+      },
     };
   }
 }

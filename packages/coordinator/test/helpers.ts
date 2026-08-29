@@ -68,6 +68,8 @@ export interface Harness {
 
 export interface HarnessOptions {
   readonly env?: Record<string, string | undefined>;
+  /** Replaces the default three-repo allowlist; used by the placement tests. */
+  readonly allowlistJson?: string;
   readonly registerExecutor?: boolean;
   readonly github?: GitHubReader;
   /**
@@ -143,7 +145,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       store,
       // Omitting the override exercises the real selection path in app.ts.
       ...(realTransport ? {} : { transport }),
-      allowlistJson: REPOS_JSON,
+      allowlistJson: opts.allowlistJson ?? REPOS_JSON,
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.dependencyChecker ? { dependencyChecker: opts.dependencyChecker } : {}),
       ...(opts.actionPerformer ? { actionPerformer: opts.actionPerformer } : {}),

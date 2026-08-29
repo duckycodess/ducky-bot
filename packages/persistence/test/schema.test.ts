@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, withTransaction } from '../src/db.js';
 import { appliedVersions, isUpToDate, pendingMigrations, runMigrations } from '../src/migrate.js';
@@ -56,7 +59,7 @@ describe('invariants enforced by the schema', () => {
   const seed = (db: ReturnType<typeof fresh>) => {
     const store = createStore(db);
     store.repos.upsert({
-      slug: 'demo', absolutePath: '/tmp/demo', defaultBranch: 'main', githubOwner: null,
+      slug: 'demo', localPath: '/tmp/demo', allowJobs: true, defaultBranch: 'main', githubOwner: null,
       githubRepo: null, allowWorktree: true, allowBootstrap: false,
       bootstrapAllowedEntries: ['.git'], enabled: true,
     });
@@ -259,3 +262,73 @@ describe('the audit log can persist everything its vocabulary allows', () => {
     db.close();
   });
 });
+
+describe('migration 20: the dead column', () => {
+  /**
+   * `repos.absolute_path` could not be dropped.
+   *
+   * SQLite removes a NOT NULL only by rebuilding the table, and `repos` has
+   * three children with foreign keys to it (`jobs`, `repo_reservations`,
+   * `github_watches`), so the rebuild fails inside the migration transaction
+   * even with `defer_foreign_keys` on. It was replaced by the nullable
+   * `local_path` and left behind.
+   *
+   * A dead column is only harmless while it stays dead. This is the assertion
+   * that keeps it that way: nothing may READ it. The single write site is the
+   * insert that NOT NULL forces, and it is allowed to name the column exactly
+   * once, in a statement that also writes `local_path`.
+   */
+  it('is written by exactly one INSERT and read by nothing', () => {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+    const sources = [
+      'packages/persistence/src',
+      'packages/coordinator/src',
+      'packages/executor/src',
+      'packages/adapters/src',
+    ].flatMap((dir) => walk(path.join(root, dir)));
+
+    const offenders: string[] = [];
+    for (const file of sources) {
+      const text = readFileSync(file, 'utf8');
+      if (!text.includes('absolute_path')) continue;
+      const rel = path.relative(root, file);
+      // The migration DEFINES it; the repos repository writes it once.
+      if (rel === 'packages/persistence/src/migrations.ts') continue;
+      if (rel === 'packages/persistence/src/repositories/repos.repo.ts') {
+        // Allowed only inside the repos INSERT/UPDATE, never in a SELECT.
+        for (const line of text.split('\n')) {
+          if (!line.includes('absolute_path')) continue;
+          if (/SELECT[^;]*absolute_path/i.test(line)) offenders.push(`${rel}: ${line.trim()}`);
+        }
+        continue;
+      }
+      offenders.push(rel);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('gives placements a home without touching the reservation key', () => {
+    const db = fresh();
+    const cols = (table: string): string[] =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+
+    expect(cols('repo_placements')).toEqual(
+      expect.arrayContaining(['repo_slug', 'executor_id', 'absolute_path', 'enabled']),
+    );
+    expect(cols('repos')).toEqual(expect.arrayContaining(['local_path', 'allow_jobs']));
+    // The single-writer guarantee: still one reservation row per SLUG, with no
+    // executor column that could split it per host.
+    expect(cols('repo_reservations')).not.toContain('executor_id');
+    db.close();
+  });
+});
+
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walk(full));
+    else if (entry.name.endsWith('.ts')) out.push(full);
+  }
+  return out;
+}

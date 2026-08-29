@@ -127,11 +127,25 @@ export function jobDetail(
   summary: string | null,
   rows: OutboundRow[],
   dependencies: readonly DependencyRow[] = [],
+  /**
+   * Why a queued job is not moving, when the reason is placement.
+   *
+   * Owner-only, like everything else on this surface: it names executor IDS,
+   * which are operator-chosen labels, and never a filesystem path. The shared
+   * projection has no field that could carry it.
+   */
+  placementHold?: string | undefined,
 ): OutboundMessage {
   const fields: OutboundEmbedField[] = [
     { name: 'Repository', value: job.repoSlug, inline: true },
     { name: 'State', value: ownerDetailedLabel(job.state, job.workPhase), inline: true },
-    { name: 'What happens next', value: ownerNextStep(job.state) },
+    {
+      name: 'What happens next',
+      value:
+        placementHold && (job.state === 'queued' || job.state === 'waiting_for_executor')
+          ? `${ownerNextStep(job.state)}\n-# ${placementHold}`
+          : ownerNextStep(job.state),
+    },
     { name: 'Task', value: short(job.task, 500) },
   ];
   const waiting = dependencies.find((d) => d.state === 'waiting');
@@ -262,6 +276,17 @@ export function repoStatus(s: RepoStatusSummary): OutboundMessage {
       value: `${short(s.latestPr.title, 150)}\nstate: ${s.latestPr.state} · checks: ${s.latestPr.checks}`,
     });
   }
+  fields.push({
+    name: 'Jobs',
+    value: !s.placement.jobsAllowed
+      ? 'Watched only. This repository does not accept jobs.'
+      : s.placement.hosts === null
+        ? 'Any executor.'
+        : s.placement.hosts.length === 0
+          ? 'No executor is configured to check this out.'
+          : `${s.placement.hosts.join(', ')}` +
+            (s.placement.preferred ? ` (prefers ${s.placement.preferred})` : ''),
+  });
   return {
     embeds: [{ title: `${s.slug} — ${s.repoName}`, fields, footer: 'Read-only inspection.' }],
     ephemeral: true,

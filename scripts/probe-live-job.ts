@@ -275,7 +275,20 @@ async function run(live: Live): Promise<ProbeOutcome> {
   const ownerId = app.authz.ownerId;
   const repo = app.allowlist.list().find((r) => r.slug === SLUG);
   if (!repo) throw new Error(`slug "${SLUG}" is not allowlisted`);
-  assertDisposableBaseline(repo.absolutePath, SLUG);
+  /**
+   * This probe certifies ONE host running ONE executor, so the target must use
+   * the single-path form. A repository with per-executor placements has no one
+   * path to check a baseline against, and picking one of them here would be
+   * choosing which host to pretend to be.
+   */
+  if (repo.absolutePath === null) {
+    throw new Error(
+      `"${SLUG}" has no single checkout path -- it uses per-executor placements. This probe ` +
+        'certifies one executor on one host and will not guess which placement it is.',
+    );
+  }
+  const repoPath: string = repo.absolutePath;
+  assertDisposableBaseline(repoPath, SLUG);
 
   // A leftover non-terminal job would be claimed instead of this one, and an
   // orphaned reservation blocks the repository entirely -- both of which make
@@ -436,7 +449,7 @@ async function run(live: Live): Promise<ProbeOutcome> {
     .all(row.id) as { workspace_id: string; agent_name: string; worktree_path: string | null }[];
 
   const teardown = teardownFindings({
-    repoName: path.basename(repo.absolutePath),
+    repoName: path.basename(repoPath),
     // The checkout directory name, taken from the recorded path rather than
     // reconstructed from the branch.
     checkoutNames: kept

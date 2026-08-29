@@ -130,4 +130,18 @@ export interface RepoStatusSummary {
   defaultBranch: string | null;
   openPrCount: number;
   latestPr: { number: number; title: string; state: string; checks: string } | null;
+  /**
+   * Where this repository can run, in the owner's terms.
+   *
+   * Executor IDS only. A filesystem path never reaches Discord in either
+   * direction: Discord names a slug and Ducky answers with hosts, so nothing
+   * here could be pasted back as a path. `hosts: null` means the single-path
+   * form -- any executor -- which is what every configuration meant before
+   * placements existed.
+   */
+  placement: {
+    jobsAllowed: boolean;
+    hosts: readonly string[] | null;
+    preferred: string | null;
+  };
 }

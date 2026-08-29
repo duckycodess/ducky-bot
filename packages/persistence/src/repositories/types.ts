@@ -7,13 +7,36 @@ import type {
 
 export interface RepoRow {
   slug: string;
-  absolutePath: string;
+  /**
+   * Where this repository is checked out on THIS host, or null when it has no
+   * checkout here at all -- a watch-only GitHub mapping, or a repository whose
+   * every path is expressed as a per-executor placement instead.
+   *
+   * Stored in `repos.local_path`. The older absolute-path column it replaced
+   * is dead; see migration 20 for why it could not simply be dropped, and
+   * `schema.test.ts` for the assertion that keeps it dead.
+   */
+  localPath: string | null;
   defaultBranch: string | null;
   githubOwner: string | null;
   githubRepo: string | null;
   allowWorktree: boolean;
   allowBootstrap: boolean;
   bootstrapAllowedEntries: string[];
+  /**
+   * Whether a coding job may run here. Separate from `enabled`, because
+   * watching a repository and letting an agent edit it are different
+   * permissions and one should not imply the other.
+   */
+  allowJobs: boolean;
+  enabled: boolean;
+}
+
+/** One host's checkout of one logical repository slug. */
+export interface RepoPlacementRow {
+  repoSlug: string;
+  executorId: string;
+  absolutePath: string;
   enabled: boolean;
 }
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ApprovalRow, HerdrWorkspaceRow, JobRow } from '@ducky/persistence';
 import { GitActionPerformer } from '../src/domain/git-action-performer.js';
-import { RepoAllowlist } from '../src/domain/allowlist.js';
+import { RepoAllowlist, RepoConfigSchema } from '../src/domain/allowlist.js';
 
 const runGit = (cwd: string, ...args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -53,10 +53,10 @@ describe('approved Git action performer', () => {
       await writeFile(path.join(cwd, 'a.txt'), 'changed\n');
       await writeFile(path.join(cwd, 'extra.txt'), 'unapproved\n');
 
-      const allowlist = new RepoAllowlist([{
+      const allowlist = new RepoAllowlist([RepoConfigSchema.parse({
         slug: 'demo', absolutePath: cwd, defaultBranch: 'main', github: null,
         allowWorktree: true, allowBootstrap: false, bootstrapAllowedEntries: ['.git'], enabled: true,
-      }]);
+      })]);
       const performer = new GitActionPerformer({ allowlist, enabled: true });
       await performer.perform('git_commit', {
         message: 'feat: approved change', files: ['a.txt'],
@@ -81,10 +81,10 @@ describe('approved Git action performer', () => {
       await writeFile(path.join(cwd, 'a.txt'), 'base\n');
       runGit(cwd, 'add', '.');
       runGit(cwd, 'commit', '-q', '-m', 'baseline');
-      const allowlist = new RepoAllowlist([{
+      const allowlist = new RepoAllowlist([RepoConfigSchema.parse({
         slug: 'demo', absolutePath: cwd, defaultBranch: 'main', github: null,
         allowWorktree: true, allowBootstrap: false, bootstrapAllowedEntries: ['.git'], enabled: true,
-      }]);
+      })]);
       const performer = new GitActionPerformer({ allowlist, enabled: true });
       await expect(performer.perform('git_commit', {
         message: 'feat: approved change', files: ['a.txt'],

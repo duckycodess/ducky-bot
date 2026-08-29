@@ -899,4 +899,62 @@ CREATE INDEX ix_audit_log_at ON audit_log(at);
 CREATE INDEX ix_audit_log_subject ON audit_log(subject_kind, subject_ref, id);
 `,
   },
+  {
+    version: 20,
+    name: 'repo_placements',
+    sql: `
+-- One repository slug, several hosts that can check it out.
+--
+-- The slug stays the ONLY thing anyone names. Discord supplies a slug and
+-- never a path, the reservation is still keyed on the slug and is therefore
+-- still global across every executor, and the executor-specific path is
+-- resolved on CLAIM, by the coordinator, from operator-controlled config.
+--
+-- Config remains authoritative (ADR 0009 applies to authorization; this is the
+-- same discipline for placement). These rows mirror it so \`/repo status\` and
+-- the diagnostics can report what this instance believes, exactly as the
+-- \`repos\` table already mirrors the allowlist.
+CREATE TABLE repo_placements (
+  repo_slug     TEXT NOT NULL REFERENCES repos(slug) ON DELETE CASCADE,
+  executor_id   TEXT NOT NULL,
+  absolute_path TEXT NOT NULL,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL,
+  PRIMARY KEY (repo_slug, executor_id)
+);
+
+CREATE INDEX ix_repo_placements_executor ON repo_placements(executor_id, enabled);
+
+-- Whether a repository accepts JOBS at all.
+--
+-- A GitHub mapping added purely so a repository can be WATCHED would otherwise
+-- also make it a job target -- and a job target is a directory a real Pi agent
+-- gets edit capability in. These are two different permissions and they now
+-- have two different flags. Existing rows default to 1, which is exactly what
+-- they meant before this column existed.
+ALTER TABLE repos ADD COLUMN allow_jobs INTEGER NOT NULL DEFAULT 1;
+
+-- The nullable local path, and the reason it is a SECOND column.
+--
+-- A watch-only mapping has no checkout on this host, so its path is genuinely
+-- absent -- but \`repos.absolute_path\` is NOT NULL, and SQLite can only drop a
+-- NOT NULL by rebuilding the table. Rebuilding \`repos\` is not available here:
+-- \`jobs\`, \`repo_reservations\` and \`github_watches\` all carry a foreign key to
+-- \`repos(slug)\`, and dropping the parent inside the migration transaction
+-- fails on those constraints (tried, with \`defer_foreign_keys\` on; it still
+-- fails).
+--
+-- So: \`local_path\` is nullable and is what every reader consults.
+-- \`absolute_path\` is retained and DEAD. It still has to be given SOMETHING on
+-- insert, because NOT NULL demands one, and a pathless repository gets the
+-- empty string there -- but that placeholder never means anything to anyone,
+-- because nothing reads the column. A test asserts exactly that: no repository
+-- and no service reads \`absolute_path\`. The alternative was a sentinel in a
+-- LIVE column, a value that means "no value" in a field readers consult, which
+-- is the sort of quiet encoding that gets misread later.
+ALTER TABLE repos ADD COLUMN local_path TEXT;
+
+UPDATE repos SET local_path = absolute_path;
+`,
+  },
 ];

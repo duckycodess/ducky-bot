@@ -420,7 +420,24 @@ export class JobsRepo {
    * its own -- which is what lets an answered needs_owner_input job be
    * re-claimed while still holding the repo against every other job.
    */
-  nextClaimable(): JobRow | undefined {
+  /**
+   * The next job an executor may take.
+   *
+   * `eligibleSlugs` is the set of repositories the CALLING executor can
+   * actually check out, computed by the coordinator from operator
+   * configuration. It is required rather than optional, and an EMPTY list
+   * returns nothing rather than everything: an executor with no placements is
+   * an executor with no work, and defaulting the empty case to "all
+   * repositories" would turn a misconfiguration into a job running against the
+   * wrong directory on the wrong host.
+   *
+   * The reservation predicate is unchanged and still keyed on the slug alone,
+   * which is what keeps a repository reserved GLOBALLY -- across every
+   * executor -- while one job holds it.
+   */
+  nextClaimable(eligibleSlugs: readonly string[]): JobRow | undefined {
+    if (eligibleSlugs.length === 0) return undefined;
+    const placeholders = eligibleSlugs.map(() => '?').join(',');
     const r = this.db
       .prepare(
         `SELECT j.* FROM jobs j
@@ -428,10 +445,11 @@ export class JobsRepo {
          WHERE j.state IN ('queued','waiting_for_executor')
            AND j.cancel_requested = 0
            AND (r.repo_slug IS NULL OR r.job_id = j.id)
+           AND j.repo_slug IN (${placeholders})
          ORDER BY j.created_at ASC
          LIMIT 1`,
       )
-      .get();
+      .get(...eligibleSlugs);
     return r ? mapJob(r as Record<string, unknown>) : undefined;
   }
 

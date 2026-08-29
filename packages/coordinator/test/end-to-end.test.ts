@@ -41,7 +41,7 @@ async function bootPair(repoPath: string) {
   });
   // point the allowlisted repo at a real git checkout
   h.store.repos.upsert({
-    slug: 'demo', absolutePath: repoPath, defaultBranch: 'main', githubOwner: null,
+    slug: 'demo', localPath: repoPath, allowJobs: true, defaultBranch: 'main', githubOwner: null,
     githubRepo: null, allowWorktree: true, allowBootstrap: true,
     bootstrapAllowedEntries: ['.git'], enabled: true,
   });

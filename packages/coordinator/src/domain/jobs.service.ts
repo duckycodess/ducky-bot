@@ -76,6 +76,22 @@ export class JobsService {
   ): JobRow {
     this.authz.requireOwner(actor);
     const repo = this.allowlist.resolve(input.repoSlug);
+    /**
+     * A watch-only mapping is not a job target.
+     *
+     * Refused HERE, at submit, rather than at claim: the owner finds out
+     * immediately instead of watching a job sit queued forever, and no job row
+     * is created for work that could never run. A repository is in the
+     * allowlist so it can be watched through `gh`; running a job in it hands a
+     * real agent edit capability in a working tree, which is a different
+     * permission and now needs a different flag.
+     */
+    if (!repo.allowJobs) {
+      throw new DuckyError(
+        'repo_not_allowed',
+        `\`${repo.slug}\` is configured for read-only observation only; it does not accept jobs.`,
+      );
+    }
     if (input.bootstrap && !repo.allowBootstrap) {
       throw new DuckyError(
         'repo_not_allowed',
@@ -319,10 +335,75 @@ export class JobsService {
   // ========================================================= executor side ==
 
   hasLiveExecutor(): boolean {
+    return this.liveExecutorIds().length > 0;
+  }
+
+  /** Active executors that have checked in recently enough to be trusted live. */
+  private liveExecutorIds(): string[] {
     const cutoff = isoPlus(-EXECUTOR_OFFLINE_AFTER_MS, this.now());
     return this.store.executors
       .listExecutors()
-      .some((e) => e.state === 'active' && e.lastSeenAt !== null && e.lastSeenAt >= cutoff);
+      .filter((e) => e.state === 'active' && e.lastSeenAt !== null && e.lastSeenAt >= cutoff)
+      .map((e) => e.id);
+  }
+
+  /**
+   * The slugs this executor may be handed work for, right now.
+   *
+   * Two filters, in this order:
+   *
+   * 1. **Placement.** The executor must have a checkout of the repository. A
+   *    repository with placements answers only for the executors it lists;
+   *    one with the single-path form answers for everybody, which is what it
+   *    has always meant.
+   * 2. **Preference.** A repository may name a preferred host. While that host
+   *    is LIVE it is the only eligible one; once it is not, every other placed
+   *    executor becomes eligible again. A preference that survived its own
+   *    host going offline would be a pin, and a pin means one host being off
+   *    is one repository being dead.
+   *
+   * A repository that passes neither is simply absent from the claim
+   * predicate, so its jobs stay queued rather than being handed to a host that
+   * cannot run them. That is the fail-closed direction: waiting is recoverable,
+   * running against the wrong directory is not.
+   */
+  private claimableSlugsFor(executorId: string): string[] {
+    const live = new Set(this.liveExecutorIds());
+    return this.allowlist
+      .list()
+      .filter((repo) => {
+        if (this.allowlist.placementFor(repo, executorId) === undefined) return false;
+        const preferred = repo.preferredExecutorId;
+        if (preferred === null || preferred === executorId) return true;
+        return !live.has(preferred);
+      })
+      .map((repo) => repo.slug);
+  }
+
+  /**
+   * Why a queued job is not moving, in the owner's terms.
+   *
+   * Answers only for a job that is genuinely waiting on placement, and only
+   * for the owner's private view. Undefined means "nothing unusual", and the
+   * caller falls back to the ordinary queued copy.
+   */
+  placementHold(repoSlug: string): string | undefined {
+    const repo = this.allowlist.list().find((r) => r.slug === repoSlug);
+    if (!repo) return undefined;
+    const eligible = this.allowlist.eligibleExecutors(repo);
+    // The single-path form is eligible for anybody, so it is never held here.
+    if (eligible === undefined) return undefined;
+    if (eligible.length === 0) {
+      return `No executor is configured to check out \`${repoSlug}\`.`;
+    }
+    const live = new Set(this.liveExecutorIds());
+    if (!eligible.some((id) => live.has(id))) {
+      return (
+        `Waiting for an executor that has \`${repoSlug}\` checked out. ` +
+        `Configured: ${eligible.map((id) => `\`${id}\``).join(', ')}; none is online.`
+      );
+    }
+    return undefined;
   }
 
   /**
@@ -338,7 +419,10 @@ export class JobsService {
     if (cached) return JSON.parse(cached.response_json) as ClaimResponse;
 
     return withTransaction(this.store.db, () => {
-      const job = this.store.jobs.nextClaimable();
+      // Executor-aware from here on. Before placements existed, any executor
+      // could be handed any queued job because there was only ever one path
+      // per repository; now the claim predicate has to know who is asking.
+      const job = this.store.jobs.nextClaimable(this.claimableSlugsFor(executorId));
       if (!job) return undefined;
 
       const acquired = this.store.jobs.acquireReservation(
@@ -367,6 +451,22 @@ export class JobsService {
       });
 
       const repo = this.allowlist.resolve(job.repoSlug);
+      /**
+       * The path THIS executor uses, and nobody else's.
+       *
+       * `claimableSlugsFor` already established that a placement exists, so an
+       * absent one here would mean the configuration changed underneath the
+       * transaction. That is a refusal rather than a fallback: handing over
+       * some other host's path is the one outcome this whole model exists to
+       * prevent.
+       */
+      const placement = this.allowlist.placementFor(repo, executorId);
+      if (!placement) {
+        throw new DuckyError(
+          'repo_not_allowed',
+          `\`${repo.slug}\` has no checkout configured for this executor.`,
+        );
+      }
       const recorded = this.store.herdrWorkspaces.openForJob(job.id);
       const response: ClaimResponse = {
         jobId: job.id,
@@ -375,7 +475,7 @@ export class JobsService {
         leaseExpiresAt,
         payload: {
           repoSlug: repo.slug,
-          absolutePath: repo.absolutePath,
+          absolutePath: placement.absolutePath,
           defaultBranch: repo.defaultBranch,
           task: job.task,
           context: job.context,
@@ -395,7 +495,7 @@ export class JobsService {
           ? {
               workspaceId: recorded.workspaceId,
               agentName: recorded.agentName,
-              workspacePath: recorded.workspacePath ?? repo.absolutePath,
+              workspacePath: recorded.workspacePath ?? placement.absolutePath,
               mode: recorded.mode,
               state: recorded.state,
             }
@@ -644,7 +744,7 @@ export class JobsService {
     },
   ): { registered: boolean; workspaceId: string } {
     const job = this.leasedJob(executorId, jobId, leaseId);
-    this.assertRegistrable(job, input);
+    this.assertRegistrable(executorId, job, input);
 
     // The ownership decision is made INSIDE the transaction. Checking first and
     // writing afterwards left a race where a concurrent registration could win
@@ -691,6 +791,7 @@ export class JobsService {
    * only under a Ducky-owned worktrees path, never at an arbitrary location.
    */
   private assertRegistrable(
+    executorId: string,
     job: JobRow,
     input: {
       workspaceId: string;
@@ -721,11 +822,23 @@ export class JobsService {
       bad('That workspace path is not a normalized absolute path.');
     }
 
+    /**
+     * Validated against the CLAIMING executor's own checkout.
+     *
+     * With placements there is no single "the repository path" any more, and
+     * checking against another host's would either reject a correct workspace
+     * or -- worse -- accept a path that is only meaningful somewhere else.
+     */
     const repo = this.allowlist.resolve(job.repoSlug);
-    const inRepo = isWithin(repo.absolutePath, input.workspacePath);
+    const placement = this.allowlist.placementFor(repo, executorId);
+    if (!placement) {
+      bad('That executor has no configured checkout of this repository.');
+    }
+    const repoPath = placement!.absolutePath;
+    const inRepo = isWithin(repoPath, input.workspacePath);
     if (input.mode === 'direct') {
       // Direct mode edits the checkout itself, so it must be the checkout.
-      if (input.workspacePath !== path.normalize(repo.absolutePath)) {
+      if (input.workspacePath !== path.normalize(repoPath)) {
         bad('A direct-mode workspace must be the configured repository path.');
       }
       return;

@@ -744,6 +744,7 @@ export class DuckyRouter {
             detail.result?.summaryRedacted ?? null,
             rows,
             detail.dependencies,
+            d.jobs.placementHold(detail.job.repoSlug),
           );
         }
       }

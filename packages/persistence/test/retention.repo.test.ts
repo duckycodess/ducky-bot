@@ -18,7 +18,7 @@ const iso = (daysAgo: number): string =>
 
 const seedRepo = (): void => {
   store.repos.upsert({
-    slug: 'demo', absolutePath: '/tmp/demo', defaultBranch: 'main',
+    slug: 'demo', localPath: '/tmp/demo', allowJobs: true, defaultBranch: 'main',
     githubOwner: null, githubRepo: null, allowWorktree: true, allowBootstrap: false,
     bootstrapAllowedEntries: ['.git'], enabled: true,
   });

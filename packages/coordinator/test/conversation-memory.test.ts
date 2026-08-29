@@ -264,3 +264,55 @@ describe('retention covers stored turns', () => {
     h.close();
   });
 });
+
+describe('message context, not the thread key, decides exclusion', () => {
+  /**
+   * The distinction the thread-key proxy could not make.
+   *
+   * A DM channel has an id like any other, so matching a configured shared
+   * channel id against a bare thread key answers correctly only by coincidence
+   * of the two being the same string. With real context, a DM is a DM.
+   */
+  it('excludes a message that arrives IN a configured shared channel', () => {
+    const h = makeHarness({
+      env: {
+        DUCKY_CONVERSATION_MEMORY_ENABLED: 'true',
+        DUCKY_DEV_SHARED_CHANNEL_IDS: '900000000000000001',
+      },
+    });
+    const memory = h.app.conversationMemory;
+
+    expect(memory.applies('900000000000000001')).toBe(false);
+    expect(
+      memory.applies('some-thread', { channelId: '900000000000000001' }),
+    ).toBe(false);
+    h.close();
+  });
+
+  it('keeps an unconfigured channel in memory', () => {
+    const h = makeHarness({
+      env: {
+        DUCKY_CONVERSATION_MEMORY_ENABLED: 'true',
+        DUCKY_DEV_SHARED_CHANNEL_IDS: '900000000000000001',
+      },
+    });
+    expect(
+      h.app.conversationMemory.applies('dm-1', { channelId: '900000000000000002' }),
+    ).toBe(true);
+    h.close();
+  });
+
+  it('fails closed when context is absent, exactly as before', () => {
+    // Supplying context may only ADD a reason to exclude. An event without it
+    // is treated the way it always was.
+    const h = makeHarness({
+      env: {
+        DUCKY_CONVERSATION_MEMORY_ENABLED: 'true',
+        DUCKY_DEV_SHARED_CHANNEL_IDS: '900000000000000001',
+      },
+    });
+    expect(h.app.conversationMemory.applies('900000000000000001', undefined)).toBe(false);
+    expect(h.app.conversationMemory.applies('900000000000000001', {})).toBe(false);
+    h.close();
+  });
+});

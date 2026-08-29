@@ -14,13 +14,17 @@ export interface ConversationMemoryConfig {
   /** How many earlier turns are replayed. Bounded well below the row cap. */
   readonly turns: number;
   /**
-   * Thread keys that never take part in memory, whatever else is configured.
+   * Channel ids that never take part in memory, whatever else is configured.
    *
-   * The configured SHARED channels. A message event carries no channel context,
-   * but its thread key IS the channel id, so this is the one place the two can
-   * be compared -- and a channel other people can read must never become a
-   * store of the owner's conversation, nor a source of context replayed back
-   * into a prompt.
+   * The configured SHARED channels: a channel other people can read must never
+   * become a store of the owner's conversation, nor a source of context
+   * replayed back into a prompt.
+   *
+   * Matched against the message's CHANNEL context now, not against its thread
+   * key. The two are the same string, so the old comparison got the right
+   * answer -- but it got it for the wrong reason, and it could not tell a guild
+   * channel from a DM that happened to share an id. `applies` still accepts a
+   * bare thread key so a context-less event keeps failing closed.
    */
   readonly excludedThreadKeys: readonly string[];
 }
@@ -43,8 +47,9 @@ export interface ConversationForgetResult {
  *   and puts it in the WHERE clause; there is no method that reads a thread
  *   without one. Two people in the same channel have two histories, and neither
  *   can be read into the other's prompt.
- * - **Never a shared channel.** A thread key that matches a configured shared
- *   channel is excluded from both reading and writing.
+ * - **Never a shared channel.** A message from a configured shared channel is
+ *   excluded from both reading and writing, matched on the channel context the
+ *   transport now supplies and on the thread key as before.
  *
  * What it deliberately is NOT: a transcript. The row cap is small, the replay
  * window is smaller, and a turn longer than the cap is stored truncated so the
@@ -65,9 +70,19 @@ export class ConversationMemoryService {
     return this.config.enabled;
   }
 
-  /** Whether this thread takes part in memory at all. */
-  applies(threadKey: string): boolean {
-    return this.config.enabled && !this.excluded.has(threadKey);
+  /**
+   * Whether this thread takes part in memory at all.
+   *
+   * `context` is optional and its absence is not a free pass: the thread key is
+   * still checked against the excluded set, so an event that arrives without
+   * context is treated exactly as it was before -- excluded if its key matches
+   * a shared channel. Supplying context only ever ADDS a reason to exclude.
+   */
+  applies(threadKey: string, context?: { channelId?: string | undefined }): boolean {
+    if (!this.config.enabled) return false;
+    if (this.excluded.has(threadKey)) return false;
+    const channelId = context?.channelId;
+    return !(channelId !== undefined && this.excluded.has(channelId));
   }
 
   /**
@@ -77,8 +92,12 @@ export class ConversationMemoryService {
    * somebody else's: the authorizer has already resolved who is speaking, and
    * this reads only their own rows.
    */
-  history(actor: ActorContext, threadKey: string): readonly ConversationHistoryTurn[] {
-    if (!this.applies(threadKey)) return [];
+  history(
+    actor: ActorContext,
+    threadKey: string,
+    context?: { channelId?: string | undefined },
+  ): readonly ConversationHistoryTurn[] {
+    if (!this.applies(threadKey, context)) return [];
     return this.store.conversations
       .recent(actor.discordUserId, threadKey, this.config.turns)
       .map((r) => ({ role: r.role, text: r.content }));
@@ -96,8 +115,9 @@ export class ConversationMemoryService {
     actor: ActorContext,
     threadKey: string,
     exchange: { readonly userText: string; readonly assistantText: string },
+    context?: { channelId?: string | undefined },
   ): void {
-    if (!this.applies(threadKey)) return;
+    if (!this.applies(threadKey, context)) return;
     const user = clamp(exchange.userText);
     const assistant = clamp(exchange.assistantText);
     if (user === '' && assistant === '') return;

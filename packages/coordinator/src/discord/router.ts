@@ -25,7 +25,7 @@ import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
-import type { Incoming, IncomingAttachment } from './transport.js';
+import type { Incoming, IncomingAttachment, IncomingContext } from './transport.js';
 import {
   TOO_MANY_ATTACHMENTS_MESSAGE, attachmentAvailability, conversationAttachmentsUsable,
   downloadConversationAttachment, type ConversationAttachmentConfig,
@@ -305,10 +305,12 @@ export class DuckyRouter {
       if (handled) {
         // Recorded like any other exchange, so a follow-up question still has
         // the context of what was just proposed or answered.
-        this.deps.memory?.record(actor, event.threadKey, {
-          userText: event.text,
-          assistantText: handled.content ?? '',
-        });
+        this.deps.memory?.record(
+          actor,
+          event.threadKey,
+          { userText: event.text, assistantText: handled.content ?? '' },
+          event.context,
+        );
         return handled;
       }
       return this.converse({
@@ -316,6 +318,7 @@ export class DuckyRouter {
         userId: actor.discordUserId,
         text: event.text,
         threadKey: event.threadKey,
+        ...(event.context ? { context: event.context } : {}),
       });
     }
     return this.handleConversationAttachment(actor, event, attachments);
@@ -450,10 +453,11 @@ export class DuckyRouter {
     userId: string;
     text: string;
     threadKey: string;
+    context?: IncomingContext;
     attachment?: ConversationAttachment;
   }): Promise<OutboundMessage> {
     const memory = this.deps.memory;
-    const history = memory?.history(input.actor, input.threadKey) ?? [];
+    const history = memory?.history(input.actor, input.threadKey, input.context) ?? [];
 
     let reply;
     try {
@@ -478,10 +482,12 @@ export class DuckyRouter {
     // real assistant answer.
     const content = reply.mock ? `[mock] ${reply.text}` : reply.text;
     // Recorded AFTER the reply exists, and it can never fail the reply.
-    memory?.record(input.actor, input.threadKey, {
-      userText: input.text,
-      assistantText: content,
-    });
+    memory?.record(
+      input.actor,
+      input.threadKey,
+      { userText: input.text, assistantText: content },
+      input.context,
+    );
     return { content, ephemeral: false };
   }
 

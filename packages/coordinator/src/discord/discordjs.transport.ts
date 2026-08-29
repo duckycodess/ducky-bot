@@ -106,6 +106,13 @@ export class DiscordJsTransport implements DiscordTransport {
         userId: message.author.id,
         text: message.content,
         threadKey: message.channelId,
+        // The same context a command carries. `guildId` is null in a DM, and
+        // normalizing it to undefined is what lets every policy tell a private
+        // conversation from a guild channel rather than guessing from an id.
+        context: {
+          channelId: message.channelId,
+          guildId: message.guildId ?? undefined,
+        },
         // Metadata only. Nothing is fetched here; the router decides whether
         // anything may be, and refuses before any download when it may not.
         attachments: [...message.attachments.values()].map((a) => ({

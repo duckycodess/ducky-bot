@@ -1,7 +1,53 @@
 # Current state
 
-What is actually true today. Phase 1 plus milestones 2A, 2B, 2C, lifecycle
-hardening, and explicit approved-action/watch paths; no deployment performed.
+What is actually true today.
+
+## How to read this document
+
+**The status table below is the single authority.** Everything after it
+explains, and nothing after it overrides. This document previously carried five
+sections that each described status from a different angle — "certified",
+"verified against the live host", "mocked or unverified", "blocked", and the
+smoke-test evidence — and they drifted, twice, in ways that took measurement to
+catch. There is one table now.
+
+Three status words, and they are not interchangeable:
+
+- **Verified** — exercised for real on this host, with recorded evidence a
+  reader can go and look at.
+- **Unit-tested** — the logic is covered; the external system it talks to has
+  never been contacted from here.
+- **Blocked** — named blocker, named remedy. Not "not done yet".
+
+**Nothing here says production-ready, and nothing will until a production
+cutover has actually happened.** No production credentials exist on this host,
+no production instance has ever run, and no production command has been
+registered.
+
+## Status
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Owner-only Discord surface (12 commands) | **Verified** (registration), **unit-tested** (behaviour) | 12/12 registered, read back with `register-commands --diff`; `discord.fixtures/gateway-connect.json` |
+| Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
+| Human Discord interaction | **Owner-reported only** | The coordinator logs boot diagnostics and nothing else; this host holds no record either way |
+| Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
+| OpenClaw conversation (GPT) | **Verified** | `probe:openclaw` exits 0; request argv and reply envelope recorded; a live turn through the shipped provider returned in 33 s |
+| GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
+| GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
+| CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
+| GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
+| Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
+| Channel roles + persistent replies | **Unit-tested** | No role channel is configured on this host; ADR 0023 |
+| Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
+| Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
+| Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
+| Approved Git actions | **Unit-tested** | Opt-in flag off; no live external write performed here |
+| Conversation attachments | **Closed by capability** | The recorded OpenClaw turn takes text only; no attachment byte has ever been fetched |
+| Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
+| Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
+| Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
+| Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
 ## Two Discord identities
 
@@ -11,7 +57,10 @@ to the other. Development may run token-less on the mock; production refuses to
 start without its own credentials. The active profile is in the startup
 diagnostics and in `/status`.
 
-## Working end to end (against mock Discord and mock Pi)
+## What is built
+
+Detail on each capability. The status table above says how far each has been
+exercised; this says what it does.
 
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
@@ -19,6 +68,35 @@ diagnostics and in `/status`.
   cancel), `/briefing`, `/watch` (add, list, remove), `/forget` (job,
   conversation). **The manifest is closed:** no command was added by the final
   milestone, and `AGENTS.md` forbids widening the owner-only surface.
+- **The owner's private assistant channels, off by default.** Four roles --
+  `briefing`, `task`, `coding`, `gpt` -- each naming one channel the owner has
+  decided is private enough for their own output to live in. Inside them, and
+  nowhere else, the owner's replies PERSIST instead of being ephemeral;
+  everywhere else, including every unconfigured guild channel, behaviour is
+  exactly what it was. A role is presentation and never authorization: a
+  non-owner is refused there identically to anywhere else, and their refusal
+  stays ephemeral. A channel that is also a shared channel is refused at
+  startup. `/forget`'s confirm step stays ephemeral even in a role channel,
+  because a durable one-press delete in scrollback is a different class of
+  object from a task list. See
+  [decisions/0023](decisions/0023-channel-roles-and-persistent-replies.md).
+- **Roles narrow which deterministic rules may fire, never widen.** A DM and an
+  unconfigured channel keep every rule, exactly as before. `coding` proposes
+  coding jobs and nothing else; `task` takes the personal-record writes;
+  `briefing` is reads only; `gpt` is left entirely to the provider, so
+  deterministic rules never intercept a sentence meant for the model.
+- **Coding jobs by proposal.** `implement in <repo>: <task>` proposes; an
+  explicit `yes` submits through `JobsService.submit`, the same call
+  `/job submit` makes, so the owner check, allowlist, `allowJobs`, placements,
+  reservation and approval gate all stay where they are. The repository is part
+  of the GRAMMAR rather than inferred: a message that names none matches
+  nothing, because guessing would eventually point a real agent with edit
+  capability at the wrong working tree.
+- **Briefings to the DM, the briefing channel, or both.**
+  `DUCKY_BRIEFING_DELIVERY`, default `dm`. Each target is its own ledger row,
+  so the two copies succeed, fail and retry independently; `channel` or `both`
+  without a configured channel is refused at startup rather than failing once a
+  day forever.
 - Opt-in shared job visibility (milestone 2A), **off by default**. With
   `DUCKY_SHARED_CHANNEL_IDS` empty the feature is unreachable. When a channel
   is listed, anyone who can read it gets a safe projection from `/jobs` and
@@ -370,17 +448,6 @@ diagnostics and in `/status`.
   command instead.
 - Redaction at the transport boundary; no secret in the database or logs
 
-## What "verified" means here
-
-Three different things, and they are not interchangeable:
-
-- **Verified against this host** — exercised for real, with recorded evidence.
-- **Unit-tested only** — the logic is covered, but the external system it talks
-  to has never been contacted. The real Discord payload path is in this
-  category.
-- **Unavailable** — the dependency is not installed or not probed, and the code
-  says so at runtime rather than pretending.
-
 ## Retention and deletion (milestone 2E, the substance of it)
 
 - **Bounded retention, OFF by default.** `DUCKY_RETENTION_ENABLED=false` means
@@ -448,7 +515,7 @@ Both `/forget` and the scheduled pass use the SAME deletion implementation, so
 there is one child-first order and one set of guards rather than two that could
 drift apart.
 
-## What the smoke-test evidence actually shows
+## Detail: what the smoke-test evidence actually shows
 
 The owner reports performing the development smoke tests. **This host holds no
 evidence of them**, and the distinction between "it did not happen" and "there
@@ -507,7 +574,7 @@ migration 13 widens the constraint, migration 15 widens it again for the
 approval, provider and configuration subject kinds, and a test now asserts every
 declared event, actor kind and subject kind is actually persistable.
 
-## Certified on the production code path
+## Detail: the certified production code path
 
 `pnpm probe:live-job` drives the **shipped** chain — router → `JobsService` →
 real Fastify HTTP with bearer/HMAC/nonce auth → `CoordinatorClient` →
@@ -591,7 +658,7 @@ owner's.
 See [integrations/herdr.md](integrations/herdr.md) and
 [runbooks/live-job-certification.md](runbooks/live-job-certification.md).
 
-## Verified against the live host
+## Detail: what was exercised against live tools
 
 - SQLite behaviour (`node:sqlite`, WAL, partial unique indexes, triggers)
 - Herdr `agent list`, `workspace list`, `workspace create`,
@@ -644,7 +711,7 @@ That is a recorded CONTRACT, not a certification of the integration: the
 end-to-end path is intermittent (see above), so `HerdrPiOrchestrator.verified`
 stays `false` and `/status` reports `experimental`.
 
-## Mocked or unverified — stated plainly
+## Detail: what is covered by tests but not by a live system
 
 | Area | Status |
 |---|---|
@@ -665,7 +732,7 @@ stays `false` and `/status` reports `experimental`.
 | Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
 | Azure deployment | Documented only; nothing provisioned. |
 
-## Blocked, and by what exactly
+## Detail: the blockers, and what would clear each
 
 Every one of these is blocked by a specific fact, not by effort. Each names what
 would unblock it.
@@ -693,7 +760,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**85 files, 1113 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**87 files, 1158 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

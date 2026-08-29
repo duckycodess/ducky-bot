@@ -24,6 +24,7 @@ import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
+import { ChannelRolePolicy } from '../domain/channel-roles.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
 import type { Incoming, IncomingAttachment, IncomingContext } from './transport.js';
 import {
@@ -82,6 +83,8 @@ export interface RouterDeps {
    * lose visibility, never publish.
    */
   readonly sharedPolicy?: SharedChannelPolicy;
+  /** The owner's private assistant channels. Presentation only. */
+  readonly channelRoles?: ChannelRolePolicy;
   readonly sharedJobs?: SharedJobsService;
   /** Supplied by the transport so /schedule can accept a text attachment. */
   readonly readAttachment?: (a: IncomingAttachment) => Promise<string>;
@@ -116,6 +119,7 @@ export class DuckyRouter {
   private readonly components = new Map<string, ComponentHandler>();
   private readonly buckets: CommandBuckets;
   private readonly sharedPolicy: SharedChannelPolicy;
+  private readonly channelRoles: ChannelRolePolicy;
 
   constructor(private readonly deps: RouterDeps) {
     this.buckets = deps.buckets ?? new CommandBuckets();
@@ -124,6 +128,7 @@ export class DuckyRouter {
     // `deps.sharedJobs`, so both halves must be present for anything to be
     // shared.
     this.sharedPolicy = deps.sharedPolicy ?? new SharedChannelPolicy();
+    this.channelRoles = deps.channelRoles ?? new ChannelRolePolicy();
     this.registerCommands();
     this.registerComponents();
     this.assertSurfaceMatchesManifest();
@@ -186,17 +191,86 @@ export class DuckyRouter {
   async handle(event: Incoming): Promise<OutboundMessage | undefined> {
     const actor = this.deps.authz.actor(event.userId);
     try {
+      let reply: OutboundMessage | undefined;
       switch (event.kind) {
         case 'command':
-          return await this.handleCommand(actor, event);
+          reply = await this.handleCommand(actor, event);
+          break;
         case 'component':
-          return await this.handleComponent(actor, event.customId, event.values);
+          reply = await this.handleComponent(actor, event.customId, event.values);
+          break;
         case 'message':
-          return await this.handleMessage(actor, event);
+          reply = await this.handleMessage(actor, event);
+          break;
       }
+      return this.persistInRoleChannel(actor, event, reply);
     } catch (err) {
+      // A refusal is not owner output, so it is NOT made persistent: an error
+      // reply keeps whatever visibility its own presenter chose.
       return errorReply(err);
     }
+  }
+
+  /**
+   * The ONE place a reply may become persistent, and it can only ever remove
+   * ephemerality -- never add it.
+   *
+   * Doing this at the boundary rather than in each of thirty presenters is
+   * deliberate. A presenter chooses ephemerality for a REASON -- this is
+   * personal data, this is a signed control -- and thirty places each deciding
+   * again is thirty chances to get it wrong for a channel none of them knows
+   * about. Here there is one rule and one place to read it.
+   *
+   * Every condition must hold:
+   *
+   * - the actor is the OWNER. A non-owner's reply is a refusal or ordinary
+   *   conversation, and neither becomes persistent because somebody configured
+   *   a channel;
+   * - the request arrived in a configured ROLE channel, which requires a guild
+   *   id, so a DM can never reach this;
+   * - the reply is not already persistent.
+   *
+   * A shared channel cannot reach this either: a channel that is both is
+   * refused at boot, so the two sets are disjoint by construction.
+   *
+   * **Controls persist too.** A signed control in scrollback is bound to the
+   * owner and refuses a different presser, so this is disclosure rather than
+   * privilege escalation -- and disclosure inside a channel the owner
+   * designated private is what they asked for. The one exception is documented
+   * on `PERSISTENCE_EXEMPT_INTERACTIONS` below.
+   */
+  private persistInRoleChannel(
+    actor: ActorContext,
+    event: Incoming,
+    reply: OutboundMessage | undefined,
+  ): OutboundMessage | undefined {
+    if (!reply || reply.ephemeral === false) return reply;
+    if (actor.discordUserId !== this.deps.authz.ownerId) return reply;
+
+    const context = event.kind === 'component' ? undefined : event.context;
+    if (!this.channelRoles.isRoleChannel(context)) return reply;
+    if (this.isPersistenceExempt(event)) return reply;
+
+    return { ...reply, ephemeral: false };
+  }
+
+  /**
+   * The one thing that stays ephemeral in a role channel, and why.
+   *
+   * `/forget` is two-step: the command shows what will go and returns a signed
+   * control that DELETES when pressed. That control is exempt not because the
+   * signature is weak -- it refuses anybody but the owner, like every other --
+   * but because a durable one-press delete sitting in scrollback is a different
+   * class of object from a task list. The owner scrolls back through their own
+   * channel; a stale confirm button is a hazard to them, not to a reader.
+   *
+   * This is the "structurally required by an existing safety invariant"
+   * exception, and it is documented rather than silent: the reply says it is
+   * ephemeral and why. See ADR 0023.
+   */
+  private isPersistenceExempt(event: Incoming): boolean {
+    if (event.kind === 'command') return event.name === 'forget';
+    return false;
   }
 
   private async handleCommand(

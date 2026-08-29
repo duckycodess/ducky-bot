@@ -392,6 +392,7 @@ export function createApp(
     },
     status,
     sharedPolicy,
+    channelRoles,
     sharedJobs,
     readAttachment: async (a) => {
       attachmentBudget.check(authz.ownerId);

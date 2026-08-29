@@ -179,3 +179,100 @@ describe('a role grants nobody anything', () => {
     h.close();
   });
 });
+
+describe('persistent replies, and only in a role channel', () => {
+  const bootWithRole = async () => {
+    const h = makeHarness({ env: { DUCKY_DEV_TASK_CHANNEL_ID: TASK } });
+    await h.transport.start((e) => h.app.router.handle(e));
+    return h;
+  };
+
+  const taskList = (context?: { channelId: string; guildId?: string }) => ({
+    kind: 'command' as const,
+    name: 'task',
+    subcommand: 'list',
+    userId: OWNER,
+    ...(context ? { context } : {}),
+    options: {},
+  });
+
+  it('persists the owner reply in the configured role channel', async () => {
+    const h = await bootWithRole();
+    const reply = await h.transport.dispatch(taskList(guild(TASK)));
+    expect(reply?.ephemeral).toBe(false);
+    h.close();
+  });
+
+  it('keeps an UNCONFIGURED guild channel ephemeral', async () => {
+    // The conservative default the whole feature is measured against.
+    const h = await bootWithRole();
+    const reply = await h.transport.dispatch(taskList(guild('900000000000000077')));
+    expect(reply?.ephemeral).toBe(true);
+    h.close();
+  });
+
+  it('leaves a request with no context ephemeral', async () => {
+    const h = await bootWithRole();
+    const reply = await h.transport.dispatch(taskList());
+    expect(reply?.ephemeral).toBe(true);
+    h.close();
+  });
+
+  it('never persists for a non-owner, even in the role channel', async () => {
+    const h = await bootWithRole();
+    const reply = await h.transport.dispatch({
+      ...taskList(guild(TASK)),
+      userId: '100000000000000002',
+    });
+    expect(reply?.ephemeral).toBe(true);
+    h.close();
+  });
+
+  it('can only REMOVE ephemerality, never add it', async () => {
+    /**
+     * The direction of the rule matters as much as the rule. A presenter that
+     * deliberately chose a visible reply must not be made ephemeral by a
+     * channel setting -- so the boundary only ever downgrades.
+     */
+    const h = await bootWithRole();
+    // `/briefing` is already non-ephemeral where it is delivered; a role
+    // channel leaves it exactly as the presenter chose.
+    const reply = await h.transport.dispatch({
+      kind: 'command',
+      name: 'briefing',
+      userId: OWNER,
+      context: guild(TASK),
+      options: {},
+    });
+    expect(reply?.ephemeral).toBe(false);
+    h.close();
+  });
+
+  it('keeps the /forget confirm step ephemeral, by documented exception', async () => {
+    /**
+     * The one exemption. Not because the signature is weak -- it refuses
+     * anybody but the owner, like every other control -- but because a durable
+     * one-press DELETE in scrollback is a different class of object from a task
+     * list, and the owner is the one who scrolls back through their own
+     * channel.
+     */
+    const h = await bootWithRole();
+    const reply = await h.transport.dispatch({
+      kind: 'command',
+      name: 'forget',
+      userId: OWNER,
+      context: guild(TASK),
+      options: { target: 'conversation' },
+    });
+    expect(reply?.ephemeral).toBe(true);
+    h.close();
+  });
+
+  it('does nothing at all when no role channel is configured', async () => {
+    const h = makeHarness();
+    await h.transport.start((e) => h.app.router.handle(e));
+    const reply = await h.transport.dispatch(taskList(guild(TASK)));
+    expect(reply?.ephemeral).toBe(true);
+    h.close();
+  });
+});

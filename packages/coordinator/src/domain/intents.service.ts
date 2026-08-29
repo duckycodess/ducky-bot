@@ -1,7 +1,7 @@
 import {
   BRIEFING_PROVENANCE, INTENT_PROPOSAL_TTL_MS,
   detectIntent, isAffirmation, isRefusal, isWriteIntent, zonedDateKey, zonedParts,
-  type DetectedIntent,
+  type DetectedIntent, type IntentKind,
 } from '@ducky/contracts';
 import type { ActorContext } from '../security/authz.js';
 import type { CapturesService } from './captures.service.js';
@@ -12,6 +12,38 @@ import type { OwnerClock } from './owner-clock.js';
 import { buildStudyPlan, requestedStudyMinutes, suggestMeal } from './local-helpers.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
 import type { OutboundMessage } from '../discord/message.js';
+import type { ChannelRole } from '@ducky/contracts';
+
+/**
+ * Which deterministic rules may fire in which channel.
+ *
+ * NARROWING only. A DM or an unconfigured channel has no role and every rule is
+ * live, exactly as before -- so nothing an owner relies on today stops working
+ * because they configured a channel for something else.
+ *
+ * A role channel is a statement about what that channel is FOR:
+ *
+ * - `task`: the personal-record writes and the reads that describe them. A
+ *   coding job is not a note.
+ * - `coding`: coding jobs, and nothing else. A stray "i need to renew the
+ *   domain" in the coding channel means nothing rather than a task.
+ * - `briefing`: reads only. It is where output is DELIVERED; a channel that
+ *   writes because somebody typed into it would be a surprise.
+ * - `gpt`: handled earlier and never reaches here.
+ */
+function allowedInRole(kind: IntentKind, role: ChannelRole | undefined): boolean {
+  if (role === undefined) return true;
+  switch (role) {
+    case 'task':
+      return kind !== 'job_submit';
+    case 'coding':
+      return kind === 'job_submit';
+    case 'briefing':
+      return !isWriteIntent(kind);
+    case 'gpt':
+      return false;
+  }
+}
 
 export interface IntentsServiceDeps {
   readonly clock: OwnerClock;
@@ -21,6 +53,25 @@ export interface IntentsServiceDeps {
   readonly briefing: BriefingService;
   /** The configured owner. Frozen config, never a stored row. */
   readonly ownerId: string;
+  /**
+   * Submits a confirmed coding job through the SAME path `/job submit` uses.
+   *
+   * A function rather than the service, so this cannot reach anything else on
+   * it: an inferred intent must be able to submit a job and nothing more --
+   * not cancel one, not answer one, not approve an action.
+   */
+  readonly submitJob?: (
+    actor: ActorContext,
+    input: { repoSlug: string; task: string },
+  ) => { publicId: string };
+  /**
+   * Whether a repository slug is one the owner configured, WITHOUT saying
+   * anything about it if it is not.
+   *
+   * Checked before a job is proposed, so the owner is told immediately rather
+   * than confirming something that would be refused a moment later.
+   */
+  readonly repoExists?: (slug: string) => boolean;
 }
 
 interface Pending {
@@ -72,17 +123,39 @@ export class IntentsService {
    * `undefined` means "this is ordinary conversation" and the caller falls
    * through to the provider — which is the answer for almost every message.
    */
-  handle(actor: ActorContext, threadKey: string, text: string): OutboundMessage | undefined {
+  handle(
+    actor: ActorContext,
+    threadKey: string,
+    text: string,
+    /**
+     * The role of the channel this arrived in, when it is one of the owner's
+     * configured assistant channels.
+     *
+     * Used to NARROW what may fire, never to widen it. A DM and an
+     * unconfigured channel pass `undefined` and behave exactly as they always
+     * have: every rule is live. A role channel is a statement about what that
+     * channel is FOR, so a coding proposal does not appear in the briefing
+     * channel and a `gpt` channel is left alone entirely.
+     */
+    role?: ChannelRole,
+  ): OutboundMessage | undefined {
     // Owner-only in full. A whitelist user's message is conversation, exactly as
     // it was before: they cannot write the owner's data and they do not get the
     // owner's helpers.
     if (actor.discordUserId !== this.deps.ownerId) return undefined;
+
+    // The GPT channel is for talking to the model. Deterministic rules would
+    // intercept ordinary sentences there, which is the opposite of what the
+    // channel is for -- including a pending "yes", which belongs to whichever
+    // channel proposed it.
+    if (role === 'gpt') return undefined;
 
     const answer = this.resolvePending(actor, threadKey, text);
     if (answer) return answer;
 
     const intent = detectIntent(text);
     if (!intent) return undefined;
+    if (!allowedInRole(intent.kind, role)) return undefined;
 
     if (isWriteIntent(intent.kind)) return this.propose(actor, threadKey, intent);
     return this.answerRead(actor, intent, text);
@@ -115,7 +188,24 @@ export class IntentsService {
     actor: ActorContext,
     threadKey: string,
     intent: DetectedIntent,
-  ): OutboundMessage {
+  ): OutboundMessage | undefined {
+    if (intent.kind === 'job_submit') {
+      // No performer wired, so there is nothing to propose. Silence rather than
+      // an offer that could not be kept.
+      if (!this.deps.submitJob || !this.deps.repoExists) return undefined;
+      const repo = intent.repo ?? '';
+      if (!this.deps.repoExists(repo)) {
+        // Named, but not a repository the owner configured. Refused HERE, so
+        // the owner is not asked to confirm something that would fail -- and
+        // the message says only that it is not configured, never what is.
+        return {
+          content:
+            `\`${repo}\` is not a configured repository, so there is nothing to submit. ` +
+            'Check `/repo status <slug>` for one that is.',
+          ephemeral: false,
+        };
+      }
+    }
     // Replaces any earlier proposal: one per thread, so a "yes" can only ever
     // mean the thing that was just described.
     this.pending.set(this.key(actor, threadKey), {
@@ -159,6 +249,27 @@ export class IntentsService {
         case 'capture': {
           const row = this.deps.captures.create(actor, intent.subject);
           return { content: `Captured \`${row.id.slice(0, 8)}\`.`, ephemeral: false };
+        }
+        case 'job_submit': {
+          /**
+           * Through `JobsService.submit`, exactly as `/job submit` does.
+           *
+           * So every gate stays where it is and none of them is bypassed: the
+           * owner check, the allowlist, `allowJobs`, placements, the repository
+           * reservation, and the approval gate for anything the job later
+           * proposes. A confirmed sentence and a typed command reach the same
+           * code.
+           */
+          if (!this.deps.submitJob) return { content: 'Nothing to confirm.', ephemeral: false };
+          const job = this.deps.submitJob(actor, {
+            repoSlug: intent.repo ?? '',
+            task: intent.subject,
+          });
+          return {
+            content:
+              `Job \`${job.publicId}\` submitted. Track it with \`/job status ${job.publicId}\`.`,
+            ephemeral: false,
+          };
         }
         default:
           return { content: 'Nothing to confirm.', ephemeral: false };

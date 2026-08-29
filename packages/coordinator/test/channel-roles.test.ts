@@ -11,8 +11,10 @@ const CODING = '900000000000000012';
 const GPT = '900000000000000013';
 const GUILD = '800000000000000001';
 
-const guild = (channelId: string) => ({ channelId, guildId: GUILD });
-const dm = (channelId: string) => ({ channelId, guildId: undefined });
+const guild = (channelId: string): { channelId: string; guildId: string | undefined } =>
+  ({ channelId, guildId: GUILD });
+const dm = (channelId: string): { channelId: string; guildId: string | undefined } =>
+  ({ channelId, guildId: undefined });
 
 describe('the channel role policy', () => {
   const policy = new ChannelRolePolicy({
@@ -187,7 +189,7 @@ describe('persistent replies, and only in a role channel', () => {
     return h;
   };
 
-  const taskList = (context?: { channelId: string; guildId?: string }) => ({
+  const taskList = (context?: { channelId: string; guildId: string | undefined }) => ({
     kind: 'command' as const,
     name: 'task',
     subcommand: 'list',

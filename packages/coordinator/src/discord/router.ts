@@ -375,7 +375,12 @@ export class DuckyRouter {
       // proposed and never applied until the owner confirms in their own words.
       // Everything else -- almost every message -- falls through to the provider
       // exactly as it did before.
-      const handled = this.deps.intents?.handle(actor, event.threadKey, event.text);
+      const handled = this.deps.intents?.handle(
+        actor,
+        event.threadKey,
+        event.text,
+        this.channelRoles.roleOf(event.context),
+      );
       if (handled) {
         // Recorded like any other exchange, so a follow-up question still has
         // the context of what was just proposed or answered.

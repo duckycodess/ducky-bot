@@ -26,6 +26,12 @@ export const INTENT_KINDS = [
   'task_add',
   'reminder_add',
   'capture',
+  /**
+   * A coding job. A WRITE in the strongest sense here: it puts a real agent
+   * with edit capability into a working tree, so it is proposed and never
+   * inferred into existence.
+   */
+  'job_submit',
   /** READS, answered immediately. Owner-only, and none of them generates prose. */
   'briefing',
   'meal',
@@ -34,7 +40,7 @@ export const INTENT_KINDS = [
 export type IntentKind = (typeof INTENT_KINDS)[number];
 
 /** The three that change stored data, and therefore need confirming. */
-export const WRITE_INTENTS = ['task_add', 'reminder_add', 'capture'] as const;
+export const WRITE_INTENTS = ['task_add', 'reminder_add', 'capture', 'job_submit'] as const;
 export type WriteIntent = (typeof WRITE_INTENTS)[number];
 
 export const isWriteIntent = (k: IntentKind): k is WriteIntent =>
@@ -48,6 +54,16 @@ export interface DetectedIntent {
   readonly when?: string;
   /** A repeat expression for a reminder, exactly as typed. */
   readonly every?: string;
+  /**
+   * The repository slug for a `job_submit`, exactly as typed.
+   *
+   * Always present when the kind is `job_submit`, and never inferred: the
+   * detector requires the owner to name it. Whether it is ALLOWLISTED is not
+   * decided here -- the contracts package knows nothing about configuration --
+   * so the service checks it and refuses an unknown slug rather than proposing
+   * a job that could not run.
+   */
+  readonly repo?: string;
 }
 
 /** How long a proposal waits for a yes. Short: intent is about right now. */
@@ -91,6 +107,22 @@ const RULES: readonly { kind: IntentKind; re: RegExp }[] = [
   { kind: 'task_add', re: /^(?:todo|to-do)[:,]?\s+(?<subject>.+)$/i },
   { kind: 'task_add', re: /^i need to\s+(?<subject>.+)$/i },
   { kind: 'capture', re: /^(?:capture|note|jot down|remember)[:,]?\s+(?<subject>.+)$/i },
+  /**
+   * A coding job, and the repository is MANDATORY in the pattern itself.
+   *
+   * "fix the login bug" names no repository, and there is no safe way to pick
+   * one: an assistant that guessed would eventually point a real agent with
+   * edit capability at the wrong working tree. So the slug is part of the
+   * grammar -- `in <repo>:` -- and a message without it matches nothing.
+   */
+  {
+    kind: 'job_submit',
+    re: /^(?:code|build|implement|fix|work on)\s+in\s+(?<repo>[a-z0-9][a-z0-9-]{0,63})\s*[:,]\s*(?<subject>.+)$/i,
+  },
+  {
+    kind: 'job_submit',
+    re: /^(?:submit|start) a? ?(?:coding )?job\s+in\s+(?<repo>[a-z0-9][a-z0-9-]{0,63})\s*[:,]\s*(?<subject>.+)$/i,
+  },
   { kind: 'briefing', re: /^(?:what(?:'s| is) (?:on|up) today|my day|brief me|briefing)\b.*$/i },
   { kind: 'meal', re: /^(?:what should i (?:cook|eat)|meal idea|what(?:'s| is) for (?:lunch|dinner|breakfast))\b(?<subject>.*)$/i },
   { kind: 'study', re: /^(?:help me study|study plan(?: for)?|quiz me(?: on)?)\b(?<subject>.*)$/i },
@@ -119,6 +151,14 @@ export function detectIntent(text: string): DetectedIntent | undefined {
 
   // A briefing has no subject; the others must have one to be actionable.
   if (kind === 'briefing') return { kind, subject: '' };
+
+  // A coding job carries its repository, lowercased to the slug form the
+  // allowlist uses. The subject is the task, verbatim.
+  if (kind === 'job_submit') {
+    const repo = (first.m!.groups?.['repo'] ?? '').toLowerCase();
+    if (repo === '' || subject === '') return undefined;
+    return { kind, subject, repo };
+  }
 
   let every: string | undefined;
   const everyMatch = EVERY.exec(subject);

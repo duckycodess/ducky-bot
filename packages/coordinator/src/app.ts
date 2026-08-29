@@ -261,6 +261,16 @@ export function createApp(
   // command, and no inferred write applied without an explicit confirmation.
   const intents = new IntentsService({
     clock, tasks, reminders, captures, briefing, ownerId: authz.ownerId,
+    /**
+     * The ONE job capability an inferred intent gets, passed as a function so
+     * it cannot reach anything else on `JobsService`: it may submit, and it may
+     * not cancel, answer or approve. `submit` itself still runs every gate --
+     * owner check, allowlist, `allowJobs`, placements, reservation.
+     */
+    submitJob: (actor, input) =>
+      jobs.submit(actor, { repoSlug: input.repoSlug, task: input.task, bootstrap: false }),
+    // Answers only yes/no, and says nothing about repositories that exist.
+    repoExists: (slug) => allowlist.list().some((r) => r.slug === slug && r.enabled),
   });
 
   // Which checker answers a dependency wait. The default still answers

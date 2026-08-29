@@ -32,13 +32,13 @@ registered.
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
 | Human Discord interaction | **Owner-reported only** | The coordinator logs boot diagnostics and nothing else; this host holds no record either way |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
-| OpenClaw conversation (GPT) | **Verified** | `probe:openclaw` exits 0; request argv and reply envelope recorded; a live turn through the shipped provider returned in 33 s |
+| OpenClaw conversation (GPT) | **Verified, and now SELECTED on development** | `probe:openclaw` exits 0; request argv and reply envelope recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Live turns: 33 s directly, 24 s through the router |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
 | CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
-| Channel roles + persistent replies | **Unit-tested** | No role channel is configured on this host; ADR 0023 |
+| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | The development profile now configures all four roles from owner-supplied ids; a routed message in the GPT channel returned a real reply in 24 s, persistent, with other guild channels silent — through the real router, against an in-memory database and the mock transport |
 | Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
 | Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
@@ -48,6 +48,44 @@ registered.
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
+
+## The development profile is configured; the running process is not
+
+Two different things, and the distinction is the whole reason the owner saw a
+mock reply.
+
+**The configuration on disk** now selects the verified OpenClaw route
+(`DUCKY_CONVERSATION_PROVIDER=openclaw`, the pinned binary, the `--dev`
+profile store holding the ChatGPT/Codex subscription OAuth profile, a loopback
+URL) and names all four assistant channels from owner-supplied ids.
+
+**The coordinator that is running** started before any of it existed. Its own
+boot log shows what it loaded: `conversation: mock`, `repositories: 1
+allowlisted`, a schema that was up to date at migration 15. So `hi` returned
+`[mock] No conversational backend is configured` — a correct report of that
+process's configuration, and not a provider failure.
+
+Nothing here restarts it. Until somebody does, the running instance keeps
+answering from its old configuration, and the two states are worth keeping
+apart in your head when reading anything below.
+
+Verified against the configuration on disk, with an in-memory database and the
+mock transport so neither the live database nor a gateway was touched:
+
+| Check | Result |
+|---|---|
+| provider selected | `openclaw-gateway`, `verified: true` |
+| attachments | still unsupported — the recorded turn takes text only |
+| roles resolved | briefing, task, coding, gpt — all four |
+| shared visibility | none, so no role/shared overlap exists to refuse |
+| `hi` in the GPT channel | a real reply in 24 s, not `[mock]`, persistent |
+| `hi` in another guild channel | silent, as containment intends |
+| a task proposal in the task channel | proposed, and persistent |
+
+**Proactive briefings remain OFF.** `DUCKY_BRIEFING_ENABLED` is unset, so
+configuring a briefing channel pushes nothing on its own, and
+`DUCKY_BRIEFING_DELIVERY` is still `dm`. Both are deliberate: the owner
+supplied channel ids, which is not the same as asking for a daily push.
 
 ## Two Discord identities
 
@@ -760,7 +798,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**87 files, 1158 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**87 files, 1168 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

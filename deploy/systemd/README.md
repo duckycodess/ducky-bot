@@ -7,7 +7,20 @@ a service.
 |---|---|---|
 | `ducky-coordinator@.service` | system, **per profile** | Azure VM |
 | `ducky-openclaw.service` | system | Azure VM — placeholder, unverified |
+| `ducky-executor@.service` | system, **per profile** | a headless executor host, such as the Azure VM |
 | `user/ducky-executor@.service` | user, **per profile** | WSL development machine |
+
+**There are two executor units and the difference is real.** The user unit runs
+as the developer, with their Herdr session and their Pi installation, and stops
+at logout unless lingering is enabled deliberately. The system unit runs as the
+`ducky` service account on a host with no interactive user, and starts at boot.
+Pick by host, not by preference.
+
+**One executor identity per host.** `DUCKY_EXECUTOR_ID` must be unique across
+every machine that talks to a given coordinator, and must match the
+`executorId` in that repository's `placements`. Two hosts sharing an identity
+would each be handed the other's paths. See
+[`../../docs/runbooks/second-executor.md`](../../docs/runbooks/second-executor.md).
 
 Both units are instanced on the profile name, so development and production run
 as separate services with separate environment files, databases, ports and
@@ -16,7 +29,8 @@ executor identities:
 ```bash
 systemctl enable --now ducky-coordinator@development
 systemctl enable --now ducky-coordinator@production
-systemctl --user enable --now ducky-executor@development
+systemctl enable --now ducky-executor@production        # headless host
+systemctl --user enable --now ducky-executor@development # developer machine
 ```
 
 Give each profile its own `/etc/ducky/<profile>.env`. Sharing one file would

@@ -6,7 +6,10 @@ These are templates written so the decision is reviewable *before* anything is
 created, which is the same posture `docs/DEPLOYMENT.md` has always taken.
 
 Provisioning is an owner action. When it happens, it happens deliberately, from
-a shell, by somebody who has read what follows.
+a shell, by somebody who has read what follows — starting with
+[`APPROVAL_PROPOSAL.md`](APPROVAL_PROPOSAL.md), which itemises exactly what
+would be created, what it would cost, what it would expose, and how to undo
+it.
 
 ## What the templates describe
 
@@ -15,6 +18,8 @@ a shell, by somebody who has read what follows.
 | `main.bicep` | One small Linux VM, one NSG, one managed disk, and nothing public but SSH |
 | `cloud-init.yaml` | First-boot configuration: the `ducky` user, directories, permissions |
 | `parameters.example.json` | The values you must supply. Every one is a placeholder |
+| `executor.env.example` | The executor environment for this host. Its own identity, its own credential |
+| `APPROVAL_PROPOSAL.md` | **Read this first.** The itemised decision: region, sizes, disks, exposure, cost, rollback |
 
 ## The shape, and why
 

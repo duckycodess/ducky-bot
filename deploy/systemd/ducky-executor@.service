@@ -1,0 +1,71 @@
+# TEMPLATE. Copy to /etc/systemd/system/ on a HEADLESS executor host.
+#
+# This is the system-service sibling of `user/ducky-executor@.service`. The
+# distinction is not cosmetic:
+#
+#   user/  -- the WSL development machine. The executor needs the developer's
+#             own environment, their Herdr session and their Pi installation,
+#             so it runs as them and stops when they log out unless they enable
+#             lingering deliberately.
+#   this   -- a host with no interactive user at all, such as the Azure VM. It
+#             runs as the `ducky` service account, starts at boot, and has no
+#             login session to lose.
+#
+# Instanced on the PROFILE name, like every other unit here, so development and
+# production stay separate services with separate identities and credentials.
+#
+#   systemctl enable --now ducky-executor@production
+#
+# ONE EXECUTOR IDENTITY PER HOST. `DUCKY_EXECUTOR_ID` in the environment file
+# below must be unique across every machine that talks to this coordinator, and
+# it must match the `executorId` in that repository's `placements`. Two hosts
+# sharing an identity would both claim as the same executor and each would be
+# handed the other's paths -- the exact failure the placement model exists to
+# prevent.
+[Unit]
+Description=Ducky executor (%i profile, outbound only)
+Documentation=file:///opt/ducky/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ducky
+Group=ducky
+WorkingDirectory=/opt/ducky
+
+# Credentials belong in a 0600 environment file owned by this user, never in
+# the unit: unit files are world-readable.
+EnvironmentFile=/etc/ducky/executor-%i.env
+
+ExecStart=/usr/bin/env node /opt/ducky/packages/executor/dist/main.js
+Restart=always
+RestartSec=10s
+
+# Backoff with jitter in the client already covers sleep, network changes and
+# coordinator restarts; this is the backstop for a hard crash.
+StartLimitIntervalSec=0
+
+# The executor NEVER listens. There is no inbound path to this process at all --
+# it dials the coordinator and nothing dials it -- which is why no port is
+# opened here and why the NSG needs no rule for it. A test asserts the executor
+# opens no listener; this is the deployment half of that same guarantee.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+
+# Everything this host is allowed to write to. The repository checkouts are
+# named per repository in the coordinator's allowlist as PLACEMENTS, and the
+# executor is only ever handed its own.
+ReadWritePaths=/var/lib/ducky /opt/ducky-repos
+
+# Deliberately NOT locked down further than this. The executor drives Herdr and
+# a real agent as this user, so a restricted filesystem view would break the
+# work rather than contain it. Containment comes from the repository allowlist,
+# argv-only subprocesses, the command policy and the writer lock -- not from
+# systemd. Saying so here stops somebody adding ProtectSystem=strict and
+# spending an afternoon on the resulting failure.
+
+[Install]
+WantedBy=multi-user.target

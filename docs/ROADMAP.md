@@ -435,6 +435,45 @@ shared output.
 
 ---
 
+## 🔶 Open: Discord threads for conversation continuity
+
+Assessed, not built. Nothing here changes behaviour and no setting was added.
+
+**What would work.** A thread has its own channel id, and Ducky already keys
+everything on `threadKey` — bounded memory is per `(user, thread)` and the
+provider session key is now `sha256(userId:threadKey)`. So a reply inside a
+thread already gets its own memory and its own provider session, today, with no
+code change. That part is free.
+
+**What is not free**, and why this stays a note:
+
+1. **Role channels and threads.** `ChannelRolePolicy` matches on channel id, and
+   a thread's id is not its parent's. A thread under the GPT channel would not
+   be a role channel: replies would go back to ephemeral and conversation
+   containment would silence it. Fixing that means resolving a thread to its
+   parent, which needs a Discord lookup the transport does not currently make.
+2. **Auto-creating threads is a write.** Ducky would be creating objects in the
+   owner's guild on inference. That belongs behind an explicit opt-in, and the
+   opt-in has to name which channels may sprout threads.
+3. **`GuildMessages` covers thread messages, but the bot must be able to see
+   the thread.** A private thread it was not added to delivers nothing, and the
+   failure is silent — precisely the shape of the bug that already cost a
+   debugging round.
+
+**A safe opt-in, if it is ever wanted.** `DUCKY_THREAD_CONTINUITY=off|follow`.
+`follow` would mean: when a message arrives in a thread whose PARENT is a
+configured role channel, treat it as that role (so persistence and containment
+behave), and keep the thread's own id as the memory and session key (so
+continuity is naturally scoped). Ducky would still create no thread — the owner
+makes one when they want a side conversation. That is additive, needs no new
+command or interaction kind, and widens no authorization: a thread inherits its
+parent's ROLE, never anybody's rights.
+
+Not implemented. Recorded so the next person does not have to re-derive the
+three constraints.
+
+---
+
 ## Explicitly still deferred
 
 Unchanged from Phase 1, and none of the above reopens them: multi-user

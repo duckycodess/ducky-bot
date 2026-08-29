@@ -73,6 +73,12 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
    */
   if (app.conversation.name.startsWith('openclaw')) {
     add(
+      'chat transcript',
+      true,
+      'the provider keeps its own session transcript, isolated per user and thread. ' +
+        '/forget conversation clears Ducky\'s rows and cannot reach it',
+    );
+    add(
       'chat tool policy',
       true,
       'verified on first turn; a conversation is refused unless OpenClaw is provably ' +
@@ -87,7 +93,7 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
     true,
     app.conversationMemory.enabled
       ? `enabled — bounded per (user, thread); /forget conversation deletes it`
-      : 'disabled — no conversation turn is stored',
+      : 'disabled — Ducky stores no conversation turn (the PROVIDER keeps its own session; see below)',
   );
   // Already validated in createApp; reported so the owner can see WHICH zone
   // every due date, reminder and briefing day boundary is computed in.

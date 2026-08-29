@@ -32,6 +32,7 @@ registered.
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
 | Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
+| Conversation tool policy | **Verified text-only** | `tools.profile=minimal` + `session_status` denied. Tools handed to the model went 31 → **0** under the same `--local` call; recorded in `tool-policy.json`. The provider REFUSES a turn unless it can prove this |
 | OpenClaw conversation (GPT) | **Verified, and now SELECTED on development** | `probe:openclaw` exits 0; request argv and reply envelope recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Live turns: 33 s directly, 24 s through the router |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
@@ -118,6 +119,21 @@ that both the transport and the router hold. Two rules can disagree; one cannot.
 live evidence available is the failed attempt. A message round trip in the guild
 channel has not been re-tested since, and nothing here should be read as saying
 it has.
+
+## Conversation storage: two stores, one of them not Ducky's
+
+Ducky's bounded memory is **off by default**, per `(user, thread)`, bounded
+three ways, and deletable with `/forget conversation`.
+
+The provider keeps its **own session transcript** and there is no flag that
+stops it. `/forget conversation` does not reach it, and now says so rather than
+reporting "no conversation turn is stored" — which was true of Ducky and read as
+a claim about everything. See
+[decisions/0024](decisions/0024-two-conversation-stores.md).
+
+The provider session key is `sha256(userId:threadKey)`. It was the thread alone,
+so two people in one channel shared one session: Ducky's isolation was real and
+the layer underneath it was not.
 
 ## Two Discord identities
 
@@ -830,7 +846,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**88 files, 1182 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**90 files, 1207 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

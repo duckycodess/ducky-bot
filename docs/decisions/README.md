@@ -28,6 +28,7 @@ reverse. Trivial implementation choices do not get one.
 | [0021](0021-bounded-conversation-continuity.md) | Bounded conversation continuity, off by default, isolated per (user, thread) |
 | [0022](0022-per-kind-retention-windows-and-record-deletion.md) | Per-kind retention windows and per-record deletion |
 | [0023](0023-channel-roles-and-persistent-replies.md) | Channel roles, and persistent owner replies inside them |
+| [0024](0024-two-conversation-stores.md) | Two conversation stores, and only one of them is Ducky's |
 
 ## Format
 

@@ -168,8 +168,10 @@ export class ForgetService {
       return {
         turnsDeleted,
         message: enabled
-          ? 'Nothing to forget: no conversation turn is stored for you yet.'
-          : 'Nothing to forget: conversation continuity is off, so no turn was stored.',
+          ? 'Nothing to forget: Ducky has stored no conversation turn for you. ' +
+            'The assistant provider keeps its own session transcript, which this does not reach.'
+          : 'Nothing to forget: continuity is off, so Ducky stored no turn. ' +
+            'The assistant provider keeps its own session transcript, which this does not reach.',
       };
     }
     return {

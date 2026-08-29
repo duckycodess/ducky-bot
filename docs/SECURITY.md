@@ -35,6 +35,21 @@ constructed with no reference to any privileged service.
 
 ## Shared visibility is not authorization
 
+Two channel settings exist and they mean different things. Confusing them is
+the mistake worth naming at the top of this section:
+
+| | Who reads it | What they see | Owner replies |
+|---|---|---|---|
+| **Shared channel** (ADR 0012) | anyone in the channel | a narrow safe projection: public job id, slug, coarse state | stay EPHEMERAL |
+| **Role channel** (ADR 0023) | anyone in the channel | whatever the owner's reply contains | PERSIST |
+
+Neither grants anybody any capability. A channel setting answers *where may
+this be shown?* — never *who may act?* — and both fail closed: a DM, a missing
+context and an unconfigured channel all fall through to the private, owner-only
+path. A channel configured as both is refused at startup, because the two
+answers are incompatible.
+
+
 `DUCKY_SHARED_CHANNEL_IDS` (profile-scoped, default empty) lists channels in
 which job *status* may be shown to people other than the owner. It answers
 "may this be seen here?" and never "may this person do this?".
@@ -473,6 +488,19 @@ shared state if it were ever scaled out.
 
 ## Known residual risk
 
+- **Ducky cannot verify that a configured role channel is private.** Configuring
+  `DUCKY_*_TASK_CHANNEL_ID` and friends makes the owner's replies PERSIST there
+  — full task titles, job tasks, questions, answers, and signed controls — and
+  Ducky has no view of channel membership. Configuring one is the owner
+  asserting that channel is private enough for their own output, and if that
+  assertion is wrong the disclosure is real.
+
+  What holds: it is opt-in per role and off by default; a channel that is also
+  a shared channel is refused at boot; only the OWNER's replies ever persist,
+  so a non-owner's refusal stays ephemeral; and pressing a visible control is
+  still refused by a signature bound to the owner, so this is disclosure and
+  not privilege escalation. None of that substitutes for choosing the right
+  channel. See [decisions/0023](decisions/0023-channel-roles-and-persistent-replies.md).
 - The credential file is the trust root on the coordinator host. Mitigated by
   permission checks, per-executor keys, rotation and immediate revocation; a
   keyring or Key Vault can be swapped in behind the existing port.

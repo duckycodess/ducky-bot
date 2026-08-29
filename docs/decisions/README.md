@@ -25,6 +25,9 @@ reverse. Trivial implementation choices do not get one.
 | [0018](0018-live-certified-herdr-pi-contract.md) | The Herdr/Pi contract is what the live CLI does, not what its help says |
 | [0019](0019-explicit-conversation-provider-modes.md) | Explicit conversation-provider modes; production fails closed |
 | [0020](0020-conservative-retention-and-per-entity-deletion.md) | Conservative retention, per-entity deletion, and no wipe-all |
+| [0021](0021-bounded-conversation-continuity.md) | Bounded conversation continuity, off by default, isolated per (user, thread) |
+| [0022](0022-per-kind-retention-windows-and-record-deletion.md) | Per-kind retention windows and per-record deletion |
+| [0023](0023-channel-roles-and-persistent-replies.md) | Channel roles, and persistent owner replies inside them |
 
 ## Format
 

@@ -105,11 +105,18 @@ happens without an explicit flag, and none is implied by any step above.
 
 ## What a green checklist still does not mean
 
-- **Not that the Herdr/Pi integration is certified.** One observed success is not
-  repeatability; `/status` says `experimental` until it is.
-- **Not that conversation works.** No provider is verified: OpenClaw's reply
-  contract is unrecorded and the mock is marked `[mock]`.
-- **Not that a watch has ever observed a real repository.** None is configured.
+- **Not that the Herdr/Pi integration is promoted.** Repeatability IS certified
+  now: three consecutive clean `probe:live-job` runs, each on its own throwaway
+  database. `/status` still says `experimental`, because
+  `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and no probe sets it.
+- **Not that conversation produces a reply on this host.** The OpenClaw contract
+  is recorded and the provider is verified, but the tool-policy gate refuses a
+  turn until `tools.deny` carries the full group list. That is fail-closed
+  working; see `docs/integrations/openclaw.md`.
+- **Not that a watch has delivered to a real DM.** A watch HAS observed a real
+  repository — `probe:gh-live` ran the loop twice against `duckycodess/ducky-bot`
+  and the second pass was correctly silent — but the delivery path is the
+  gateway one no human has exercised.
 - **Not that a reminder or briefing has reached a real DM.** That needs step 3
   of "External writes".
 

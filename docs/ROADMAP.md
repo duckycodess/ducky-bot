@@ -439,19 +439,31 @@ shared output.
 
 Assessed, not built. Nothing here changes behaviour and no setting was added.
 
-**What would work.** A thread has its own channel id, and Ducky already keys
-everything on `threadKey` — bounded memory is per `(user, thread)` and the
-provider session key is now `sha256(userId:threadKey)`. So a reply inside a
-thread already gets its own memory and its own provider session, today, with no
-code change. That part is free.
+**Threads do not work today, and this paragraph used to say they did.** The
+earlier wording claimed a reply in a thread already got its own memory and
+provider session "with no code change", and then listed containment as a
+separate problem below. Those two statements contradict each other, and the
+second one is the true one.
+
+**What is actually true.** The KEYING is free: Ducky keys bounded memory on
+`(user, thread)` and the provider session on `sha256(userId:threadKey)`, and a
+thread has its own channel id, so *if* a reply happened it would be correctly
+scoped. But with a `gpt` channel configured there is no reply to scope.
+`isSilencedConversationChannel` compares the incoming channel id against the
+configured GPT channel id, and a thread's id is not its parent's — so a message
+in a thread under the GPT channel is silenced and nothing is written anywhere.
+
+With no `gpt` channel configured a thread does get a reply and its own keying.
+That is a narrow case and not the one anybody means by "thread continuity".
 
 **What is not free**, and why this stays a note:
 
 1. **Role channels and threads.** `ChannelRolePolicy` matches on channel id, and
-   a thread's id is not its parent's. A thread under the GPT channel would not
-   be a role channel: replies would go back to ephemeral and conversation
-   containment would silence it. Fixing that means resolving a thread to its
-   parent, which needs a Discord lookup the transport does not currently make.
+   a thread's id is not its parent's. A thread under a role channel is not a
+   role channel: replies fall back to ephemeral, and under `gpt` conversation is
+   silenced outright as described above. Fixing it means resolving a thread to
+   its parent, which needs a Discord lookup the transport does not currently
+   make.
 2. **Auto-creating threads is a write.** Ducky would be creating objects in the
    owner's guild on inference. That belongs behind an explicit opt-in, and the
    opt-in has to name which channels may sprout threads.

@@ -11,7 +11,7 @@ they have different owners, different lifetimes and different deletion stories.
 | | Ducky's bounded memory | The provider's session transcript |
 |---|---|---|
 | Owner | Ducky, in its own SQLite | OpenClaw, in its own store on this host |
-| Default | **OFF** (`DUCKY_CONVERSATION_MEMORY_ENABLED=false`) | **Always on.** An agent turn writes a session; there is no flag that stops it |
+| Default | **OFF** (`DUCKY_CONVERSATION_MEMORY_ENABLED=false`) | **Always on for any turn that runs.** An agent turn writes a session and there is no flag that stops it. A turn refused before it starts — by the tool-policy gate, say — writes nothing, but that is a refusal rather than a setting |
 | Scope | per `(user, thread)`, in every WHERE clause | per session key, now `sha256(userId:threadKey)` |
 | Bounds | replay window, row cap per thread, per-turn length cap | whatever OpenClaw's own retention does |
 | Retention | Ducky's windows: 30 days owner, 7 days guest | not Ducky's to set |

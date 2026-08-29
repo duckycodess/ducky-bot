@@ -33,13 +33,13 @@ registered.
 | Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
 | Conversation tool policy | **Enforced, and currently REFUSING** | The rule is `tools.profile=minimal` **plus a full group deny list plus no override scope**. The development host has the profile and a partial deny, so the provider refuses conversation until the deny list is extended — fail-closed working as intended, not a defect. Tools handed to the model went 31 → **0**, measured against the `ducky` agent |
-| OpenClaw conversation (GPT) | **Verified, and now SELECTED on development** | `probe:openclaw` exits 0; request argv and reply envelope recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Live turns: 33 s directly, 24 s through the router |
+| OpenClaw conversation (GPT) | **Contract verified; SELECTED on development; currently GATED** | `probe:openclaw` exits 0; request argv and reply envelope recorded; live turns took 33 s directly and 24 s through the router. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. **A reply will not be produced on this host right now**: the tool-policy gate refuses until `tools.deny` carries the full group list. See the row above |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
 | CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
-| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | The development profile now configures all four roles from owner-supplied ids; a routed message in the GPT channel returned a real reply in 24 s, persistent, with other guild channels silent — through the real router, against an in-memory database and the mock transport |
+| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | All four roles configured from owner-supplied ids. A routed message in the GPT channel returned a real reply in 24 s, persistent, other guild channels silent — through the real router, in-memory database, mock transport. **That run predates the tool-policy gate**, which now refuses conversation on this host until the deny list is extended; the routing and persistence results still stand, the reply no longer does |
 | Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
 | Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
@@ -79,7 +79,7 @@ mock transport so neither the live database nor a gateway was touched:
 | attachments | still unsupported — the recorded turn takes text only |
 | roles resolved | briefing, task, coding, gpt — all four |
 | shared visibility | none, so no role/shared overlap exists to refuse |
-| `hi` in the GPT channel | a real reply in 24 s, not `[mock]`, persistent |
+| `hi` in the GPT channel | a real reply in 24 s, not `[mock]`, persistent — **measured before the tool-policy gate landed.** The same check today refuses, by design, until `tools.deny` carries the full group list |
 | `hi` in another guild channel | silent, as containment intends |
 | a task proposal in the task channel | proposed, and persistent |
 

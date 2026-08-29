@@ -1,0 +1,15 @@
+{
+  "_note": "Recorded by scripts/probe-discord-gateway.ts. Booleans and counts only: no token, no bot name, no guild name, no id. No handler was registered and nothing was sent.",
+  "profile": "development",
+  "intentsRequested": [
+    "Guilds",
+    "DirectMessages",
+    "MessageContent"
+  ],
+  "messageContentAccepted": true,
+  "connected": true,
+  "readyMs": 2276,
+  "guildCount": 1,
+  "handlersRegistered": 0,
+  "messagesSent": 0
+}

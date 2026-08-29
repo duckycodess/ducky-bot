@@ -19,6 +19,7 @@ it is opt-in, costs something, or writes somewhere, and each says which.
 | 5 | `pnpm migrate --dry` | which migrations are pending | applies none |
 | 6 | `pnpm register-commands --list` | the 12 commands this build DEFINES | **not** what Discord currently has |
 | 6b | `pnpm register-commands --diff --profile development` | what Discord ACTUALLY has, compared against this build. A **GET**: it needs a token but writes nothing | not offline — it is listed here because it is read-only, not because it contacts nothing |
+| 6c | `pnpm probe:discord-gateway --profile development` | that the gateway ACCEPTS this bot with the privileged MessageContent intent | **not** that anything round-trips: it registers no handler and answers nothing, so it cannot race a running coordinator |
 | 7 | `pnpm register-commands` | the exact payload a registration would send | writes nothing |
 | 8 | `pnpm backup --db <a copy> --out /tmp/x` | the backup path works | not that your live database is safe |
 | 9 | `pnpm backup:verify --file <that file>` | integrity + a schema this build knows | not that the data is *correct* |

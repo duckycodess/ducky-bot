@@ -27,6 +27,7 @@
     "probe:gh": "node scripts/probe-gh.mjs",
     "probe:gh-live": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-gh-live.ts",
     "probe:extraction": "node scripts/probe-extraction.mjs",
+    "probe:discord-gateway": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-discord-gateway.ts",
     "backup": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/backup-db.ts",
     "backup:verify": "tsx scripts/verify-backup.ts"
   },

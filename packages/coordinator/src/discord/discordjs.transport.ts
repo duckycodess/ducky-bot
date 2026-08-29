@@ -10,6 +10,66 @@ import type { DiscordSink, DiscordTransport, Incoming, IncomingHandler } from '.
  * Everything sent is sanitized here, at the boundary, before any client sees
  * it, and converted structurally so embeds, action rows and buttons survive.
  */
+/**
+ * Connect, confirm the gateway accepted us, and leave. Registers NOTHING.
+ *
+ * `MessageContent` is a PRIVILEGED intent: if it is not enabled in the
+ * developer portal the gateway refuses the connection outright rather than
+ * degrading, so every DM, reminder, briefing and conversational reply fails
+ * together and the symptom looks like "the bot will not start". That is worth
+ * being able to check without a human and without a coordinator.
+ *
+ * It lives HERE, in the one module permitted to import discord.js, rather than
+ * in the probe that uses it. A probe with its own `import('discord.js')` would
+ * make that guarantee two modules wide for the sake of one connection.
+ *
+ * **No handler is registered, deliberately.** A coordinator may already be
+ * running on this same bot identity; two connections both wired to respond
+ * would race to answer the same interaction. This one is deaf, so an event
+ * arriving while it is connected is still answered by the real coordinator.
+ */
+export async function probeGatewayConnection(
+  token: string,
+  timeoutMs = 30_000,
+): Promise<{ ok: true; ms: number; guilds: number } | { ok: false; error: string }> {
+  const discord = (await import('discord.js')) as typeof import('discord.js');
+  const { Client, GatewayIntentBits, Partials, Events } = discord;
+
+  // EXACTLY what `start` asks for. Asking for less would prove nothing about
+  // the intent that actually blocks startup.
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.MessageContent,
+    ],
+    partials: [Partials.Channel, Partials.Message],
+  });
+
+  const startedAt = Date.now();
+  const settled = new Promise<{ ok: true; ms: number; guilds: number } | { ok: false; error: string }>(
+    (resolve) => {
+      client.once(Events.ClientReady, (c) =>
+        resolve({ ok: true, ms: Date.now() - startedAt, guilds: c.guilds.cache.size }),
+      );
+      client.once(Events.Error, (err) => resolve({ ok: false, error: err.message }));
+      setTimeout(() => resolve({ ok: false, error: `no READY within ${timeoutMs}ms` }), timeoutMs)
+        .unref();
+    },
+  );
+
+  try {
+    await client.login(token);
+    return await settled;
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  } finally {
+    // Always. Leaving this open would be a second client on the bot for as
+    // long as the process lived.
+    await client.destroy().catch(() => undefined);
+  }
+}
+
 export class DiscordJsTransport implements DiscordTransport {
   readonly kind = 'real';
   #handler: IncomingHandler | undefined;

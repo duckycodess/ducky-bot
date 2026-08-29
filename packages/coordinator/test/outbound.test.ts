@@ -161,19 +161,28 @@ describe('no transport can bypass the choke point', () => {
 
   it('imports discord.js from exactly one module', () => {
     const packagesDir = path.resolve(import.meta.dirname, '..', '..');
+    // `scripts/` is scanned too. It was not, and a probe that needed a gateway
+    // connection could therefore have imported discord.js directly without
+    // tripping anything -- which would have made a one-module guarantee a
+    // two-module one quietly. The probe calls into the transport instead.
+    const repoRoot = path.resolve(packagesDir, '..');
+    const roots = [packagesDir, path.join(repoRoot, 'scripts')];
     const offenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir)) {
         if (entry === 'node_modules' || entry === 'dist' || entry === 'test') continue;
         const full = path.join(dir, entry);
         if (statSync(full).isDirectory()) walk(full);
-        else if (entry.endsWith('.ts') && readFileSync(full, 'utf8').includes("'discord.js'")) {
-          offenders.push(path.relative(packagesDir, full));
+        else if (
+          (entry.endsWith('.ts') || entry.endsWith('.mjs')) &&
+          readFileSync(full, 'utf8').includes("'discord.js'")
+        ) {
+          offenders.push(path.relative(repoRoot, full));
         }
       }
     };
-    walk(packagesDir);
-    expect(offenders).toEqual(['coordinator/src/discord/discordjs.transport.ts']);
+    for (const r of roots) walk(r);
+    expect(offenders).toEqual(['packages/coordinator/src/discord/discordjs.transport.ts']);
   });
 });
 

@@ -129,17 +129,31 @@ message handler. Putting it earlier silenced the coding channel entirely —
 deterministic rules must still run there, and only the fallthrough to the model
 is contained. A test asserts both halves.
 
-### A component press answers privately, and Discord decides that
+### Visibility is decided BEFORE the deferral, by one shared rule
 
-The reply to a button press stays ephemeral even in a role channel. That is not
-a policy choice: the transport must `deferReply` before routing — an
-interaction has a three-second budget and the work behind it can take longer —
-and ephemerality is fixed at that deferral, before anything knows which channel
-the press came from.
+`deferReply` fixes whether an interaction's reply is ephemeral, and `editReply`
+cannot change it afterwards. The first implementation missed that: the router
+faithfully marked a reply persistent *after* routing, the transport had already
+deferred it ephemeral, and Discord showed the ephemeral one. The flag was set
+and discarded silently — which looks exactly like the feature working.
 
-It is defensible on its own terms. The **message carrying the control**
+So the decision moved to where it has to be, and both callers were made to
+share it. `ReplyPersistencePolicy` is one object: the transport asks it before
+deferring, the router asks it when setting the flag. Two rules could disagree;
+one cannot.
+
+It decides on **trusted transport context and the configured owner id only** —
+never a channel name (a Discord name is not identity and changes freely), never
+the reply text (output must not widen its own exposure). A test asserts both
+exclusions against the source.
+
+### A component press still answers privately
+
+Its visibility would be fixed at a deferral that happens *before* the
+signature has been verified, so publishing it would mean publishing the refusal
+for an invalid or replayed control. The **message carrying the control**
 persists, which is what the owner scrolls back to; pressing it answers
-privately. Nothing is lost that the owner was asking for.
+privately.
 
 ## The coding proposal
 

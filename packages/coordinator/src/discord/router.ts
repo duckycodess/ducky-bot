@@ -25,6 +25,7 @@ import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import { ChannelRolePolicy } from '../domain/channel-roles.js';
+import { ReplyPersistencePolicy } from '../domain/reply-persistence.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
 import type { Incoming, IncomingAttachment, IncomingContext } from './transport.js';
 import {
@@ -85,6 +86,11 @@ export interface RouterDeps {
   readonly sharedPolicy?: SharedChannelPolicy;
   /** The owner's private assistant channels. Presentation only. */
   readonly channelRoles?: ChannelRolePolicy;
+  /**
+   * The one rule deciding reply visibility. Supplied by the composition root
+   * so the transport and the router share an instance.
+   */
+  readonly replyPersistence?: ReplyPersistencePolicy;
   readonly sharedJobs?: SharedJobsService;
   /** Supplied by the transport so /schedule can accept a text attachment. */
   readonly readAttachment?: (a: IncomingAttachment) => Promise<string>;
@@ -120,6 +126,8 @@ export class DuckyRouter {
   private readonly buckets: CommandBuckets;
   private readonly sharedPolicy: SharedChannelPolicy;
   private readonly channelRoles: ChannelRolePolicy;
+  /** Shared with the transport, so the two cannot decide differently. */
+  private readonly replyPersistence: ReplyPersistencePolicy;
 
   constructor(private readonly deps: RouterDeps) {
     this.buckets = deps.buckets ?? new CommandBuckets();
@@ -129,6 +137,8 @@ export class DuckyRouter {
     // shared.
     this.sharedPolicy = deps.sharedPolicy ?? new SharedChannelPolicy();
     this.channelRoles = deps.channelRoles ?? new ChannelRolePolicy();
+    this.replyPersistence =
+      deps.replyPersistence ?? new ReplyPersistencePolicy(this.channelRoles, deps.authz.ownerId);
     this.registerCommands();
     this.registerComponents();
     this.assertSurfaceMatchesManifest();
@@ -260,45 +270,24 @@ export class DuckyRouter {
     reply: OutboundMessage | undefined,
   ): OutboundMessage | undefined {
     if (!reply || reply.ephemeral === false) return reply;
-    if (actor.discordUserId !== this.deps.authz.ownerId) return reply;
 
     /**
-     * A component press is never made persistent, and that is Discord's
-     * constraint rather than a policy choice.
+     * The SAME policy object the transport defers on.
      *
-     * The transport must `deferReply` before routing -- an interaction has a
-     * three-second budget and the work here can take longer -- and ephemerality
-     * is fixed at that deferral, before anything knows which channel the press
-     * came from. Threading context through would not change the outcome.
-     *
-     * The result is defensible on its own terms: the MESSAGE carrying the
-     * control persists in the role channel, which is what the owner scrolls
-     * back to, and pressing it answers privately. See ADR 0023.
+     * That is the whole point of it being an object rather than a condition
+     * written twice. The transport fixes visibility at `deferReply`, before
+     * routing; this sets the flag afterwards. When the two were separate rules
+     * they disagreed, and the disagreement was invisible: the router marked a
+     * reply persistent, the transport had already deferred it ephemeral, and
+     * Discord showed the ephemeral one.
      */
-    const context = event.kind === 'component' ? undefined : event.context;
-    if (!this.channelRoles.isRoleChannel(context)) return reply;
-    if (this.isPersistenceExempt(event)) return reply;
-
-    return { ...reply, ephemeral: false };
-  }
-
-  /**
-   * The one thing that stays ephemeral in a role channel, and why.
-   *
-   * `/forget` is two-step: the command shows what will go and returns a signed
-   * control that DELETES when pressed. That control is exempt not because the
-   * signature is weak -- it refuses anybody but the owner, like every other --
-   * but because a durable one-press delete sitting in scrollback is a different
-   * class of object from a task list. The owner scrolls back through their own
-   * channel; a stale confirm button is a hazard to them, not to a reader.
-   *
-   * This is the "structurally required by an existing safety invariant"
-   * exception, and it is documented rather than silent: the reply says it is
-   * ephemeral and why. See ADR 0023.
-   */
-  private isPersistenceExempt(event: Incoming): boolean {
-    if (event.kind === 'command') return event.name === 'forget';
-    return false;
+    const persists = this.replyPersistence.persists({
+      userId: actor.discordUserId,
+      kind: event.kind,
+      context: event.kind === 'component' ? undefined : event.context,
+      ...(event.kind === 'command' ? { commandName: event.name } : {}),
+    });
+    return persists ? { ...reply, ephemeral: false } : reply;
   }
 
   private async handleCommand(

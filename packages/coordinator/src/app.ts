@@ -35,6 +35,7 @@ import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
 import { SharedChannelPolicy } from './domain/shared-visibility.js';
 import { ChannelRolePolicy } from './domain/channel-roles.js';
+import { ReplyPersistencePolicy } from './domain/reply-persistence.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
 import { RemindersService } from './domain/reminders.service.js';
@@ -51,7 +52,7 @@ import {
   attachmentAvailability, type ConversationAttachmentConfig,
 } from './discord/conversation-attachments.js';
 import { CommandBuckets, HourlyBudget } from './discord/command-buckets.js';
-import type { DiscordSink, DiscordTransport } from './discord/transport.js';
+import type { DiscordSink, DiscordTransport, Incoming } from './discord/transport.js';
 import { toDiscordPayload } from './discord/payload.js';
 import type { ProviderStatus } from './discord/presenters.js';
 
@@ -295,7 +296,25 @@ export function createApp(
   const channelRoles = new ChannelRolePolicy(resolveChannelRoles(env));
   const sharedJobs = new SharedJobsService({ store, allowlist });
 
-  const transport = overrides.transport ?? transportForProfile(discordProfile);
+  /**
+   * ONE persistence rule, handed to both callers that need it.
+   *
+   * The transport must decide visibility at `deferReply`, before routing; the
+   * router sets the flag on what it returns. Building them from the same object
+   * is what stops them disagreeing -- and they did disagree, which produced a
+   * bug that looked like the feature working.
+   */
+  const replyPersistence = new ReplyPersistencePolicy(channelRoles, authz.ownerId);
+  const transport =
+    overrides.transport ??
+    transportForProfile(discordProfile, (event) =>
+      replyPersistence.persists({
+        userId: event.userId,
+        kind: event.kind,
+        context: event.kind === 'component' ? undefined : event.context,
+        ...(event.kind === 'command' ? { commandName: event.name } : {}),
+      }),
+    );
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });
@@ -403,6 +422,7 @@ export function createApp(
     status,
     sharedPolicy,
     channelRoles,
+    replyPersistence,
     sharedJobs,
     readAttachment: async (a) => {
       attachmentBudget.check(authz.ownerId);
@@ -464,9 +484,12 @@ function credentialStoreFor(
  * Nothing falls back to the mock when a token is present -- that would
  * silently drop real traffic -- and nothing reads the other profile's token.
  */
-function transportForProfile(config: DiscordProfileConfig): DiscordTransport {
+function transportForProfile(
+  config: DiscordProfileConfig,
+  persists?: (event: Incoming) => boolean,
+): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
-  return new DiscordJsTransport(config.token, channelAwareSink);
+  return new DiscordJsTransport(config.token, channelAwareSink, undefined, persists);
 }
 
 /**

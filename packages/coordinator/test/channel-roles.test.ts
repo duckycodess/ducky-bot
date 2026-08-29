@@ -303,17 +303,45 @@ describe('the authorization path never reads a channel role', () => {
     expect(src).not.toMatch(/guildId/);
   });
 
-  it('keeps the role policy out of every service that decides anything', () => {
-    // The policy belongs to presentation. A domain service reaching for it
-    // would be the first step toward a capability that depends on where a
-    // message was typed.
+  it('keeps the role policy out of every service that grants a capability', () => {
+    /**
+     * The policy belongs to PRESENTATION. A service that decides what somebody
+     * may do reaching for it would be the first step toward a capability that
+     * depends on where a message was typed.
+     *
+     * Two files are allowed to know about it, and both are presentation:
+     * `channel-roles.ts` defines it, and `reply-persistence.ts` answers "should
+     * this reply be visible?" -- a question about rendering, not about rights.
+     * Naming them explicitly is the point: adding a third is a visible change
+     * to this list rather than a quiet import.
+     */
+    const PRESENTATION = new Set(['channel-roles.ts', 'reply-persistence.ts']);
     const domain = path.resolve(import.meta.dirname, '..', 'src', 'domain');
     const offenders: string[] = [];
     for (const entry of readdirSync(domain)) {
-      if (!entry.endsWith('.ts') || entry === 'channel-roles.ts') continue;
+      if (!entry.endsWith('.ts') || PRESENTATION.has(entry)) continue;
       const text = readFileSync(path.join(domain, entry), 'utf8');
       if (text.includes('ChannelRolePolicy')) offenders.push(entry);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('keeps the persistence policy itself free of anything that grants rights', () => {
+    // It may read the owner id and the channel role. It must not reach an
+    // authorizer, a job, a task or an approval: deciding visibility is not a
+    // place where capability decisions belong.
+    const src = readFileSync(
+      path.resolve(import.meta.dirname, '..', 'src', 'domain', 'reply-persistence.ts'),
+      'utf8',
+    );
+    // IMPORTS, not the whole file: the doc comment names `Authorizer` to say
+    // what this is NOT, and asserting on prose would forbid explaining itself.
+    // What matters is that it does not DEPEND on any of them.
+    const imports = src.split('\n').filter((l) => /^\s*import\b/.test(l)).join('\n');
+    for (const forbidden of ['Authorizer', 'JobsService', 'TasksService', 'ApprovalsService']) {
+      expect(imports, forbidden).not.toMatch(new RegExp(forbidden));
+    }
+    // What it may depend on, stated positively so the test says what it means.
+    expect(imports).toMatch(/ChannelRolePolicy/);
   });
 });

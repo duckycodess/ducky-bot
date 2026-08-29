@@ -40,6 +40,10 @@ export async function probeGatewayConnection(
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
+      // Guild MESSAGE events. `Guilds` alone carries guild and channel
+      // metadata and delivers no message at all, which is why a message in a
+      // guild channel produced no reply while DMs worked.
+      GatewayIntentBits.GuildMessages,
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
     ],
@@ -79,6 +83,19 @@ export class DiscordJsTransport implements DiscordTransport {
     private readonly token: string,
     private readonly sinkFactory: (client: unknown) => DiscordSink,
     private readonly sink?: DiscordSink,
+    /**
+     * Whether an interaction's reply should be visible in the channel.
+     *
+     * Injected as a PREDICATE rather than a policy object, so the transport
+     * holds no domain rule of its own -- it asks a question and obeys the
+     * answer. The composition root builds it from the same
+     * `ReplyPersistencePolicy` the router uses, which is what stops the two
+     * from disagreeing.
+     *
+     * Absent means ephemeral, which is the conservative default and what every
+     * instance with no role channel configured gets.
+     */
+    private readonly persists?: (event: Incoming) => boolean,
   ) {}
 
   async start(handler: IncomingHandler): Promise<void> {
@@ -90,9 +107,23 @@ export class DiscordJsTransport implements DiscordTransport {
     const client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
+        /**
+         * Guild MESSAGE events, and the reason this list is not shorter.
+         *
+         * `Guilds` carries guild and channel METADATA. It delivers no message.
+         * Without `GuildMessages`, `MessageCreate` never fires for a guild
+         * channel -- so DMs worked, every guild channel was silent, and it
+         * looked exactly like a provider that was not answering.
+         *
+         * Not privileged, unlike `MessageContent` below, so it needs no portal
+         * toggle. It is still the narrowest thing that makes a guild
+         * conversation possible: no presence, no members, no reactions, no
+         * voice.
+         */
+        GatewayIntentBits.GuildMessages,
         GatewayIntentBits.DirectMessages,
         // Privileged: must be enabled in the Discord developer portal, or DMs
-        // arrive with empty content.
+        // and guild messages arrive with empty content.
         GatewayIntentBits.MessageContent,
       ],
       partials: [Partials.Channel, Partials.Message],
@@ -217,14 +248,27 @@ export class DiscordJsTransport implements DiscordTransport {
       | import('discord.js').ModalSubmitInteraction,
     event: Incoming,
   ): Promise<void> {
+    /**
+     * Visibility is decided HERE, and it is final.
+     *
+     * `deferReply` fixes whether a reply is ephemeral; a later `editReply`
+     * cannot change it. So a router that marks a reply persistent after
+     * routing changes nothing in Discord -- which is precisely the bug this
+     * replaced: the flag was set faithfully and discarded silently.
+     *
+     * The decision uses the SAME policy object the router uses, over trusted
+     * transport context and the configured owner id only. Never a channel name,
+     * never the reply text.
+     */
+    const persistent = this.persists?.(event) ?? false;
     try {
-      await interaction.deferReply({ flags: EPHEMERAL_FLAG });
+      await interaction.deferReply(persistent ? {} : { flags: EPHEMERAL_FLAG });
     } catch {
       return; // already acknowledged or expired; nothing safe to do
     }
     const reply = (await this.route(event)) ?? { content: 'Done.', ephemeral: true };
     const payload = toDiscordPayload(reply);
-    // The deferral already set ephemeral; an edit must not repeat the flag.
+    // Visibility was fixed at the deferral above; an edit must not restate it.
     delete payload.flags;
     try {
       await interaction.editReply(payload);

@@ -448,6 +448,42 @@ Both `/forget` and the scheduled pass use the SAME deletion implementation, so
 there is one child-first order and one set of guards rather than two that could
 drift apart.
 
+## What the smoke-test evidence actually shows
+
+The owner reports performing the development smoke tests. **This host holds no
+evidence of them**, and the distinction between "it did not happen" and "there
+is nothing here to check" is worth being exact about, because only the second
+is true.
+
+What was inspected, read-only:
+
+- **`/tmp/ducky-coordinator-dev.log`** — the running development coordinator's
+  own stdout. It is **20 lines: boot diagnostics and the listening line, and
+  nothing else.** No interaction, command, DM or reply is recorded, because the
+  coordinator does not log them. So the log neither confirms nor contradicts
+  the smoke tests; it simply has nothing to say about them.
+- **The running coordinator is a STALE build**, started before this milestone's
+  work. Its own diagnostics say so: `repositories: 1 allowlisted` (the
+  `ducky-bot` watch-only mapping is not there) and `migrations: schema up to
+  date` from a time when the schema stopped at 15. Anything the owner exercised
+  ran against that build — not against placements, the watch-only mapping, or
+  the OpenClaw provider.
+- **The development database was deliberately not opened.** Migrations 16–20
+  are pending on it and the coordinator is live against it; reading it is not
+  worth the risk of a migration running underneath a running process.
+
+**What was verified independently, and is not a report:** the registered command
+set (12/12, read back) and the gateway accepting the privileged intent.
+
+One defect fell out of this inspection. The boot diagnostics printed
+`WARN discord intents: enable the privileged MessageContent intent` **whenever
+the transport was real** — an instruction phrased as a warning about a state it
+had no way of checking. It marked a healthy instance as warning forever, and on
+this host it was simply wrong: the intent is enabled. It now states the fact
+that IS knowable — Discord refuses the connection outright when the intent is
+off, so a client that connects has proved it — and points at
+`pnpm probe:discord-gateway` for an answer that does not need a coordinator.
+
 ## Security audit events
 
 The audit log recorded the lifecycle in detail and nothing about who was turned
@@ -643,7 +679,7 @@ would unblock it.
 | A live GitHub watch | **Unblocked.** `ducky-bot` carries a watch-only mapping and `pnpm probe:gh-live` has observed it, twice, deduplicating the second pass. What remains blocked is narrower: the pull-request surfaces, because that repository has no PR. | A configured repository that HAS a pull request. Opening one is a GitHub write and nothing here makes it. |
 | Recent commits on a repository's default branch | Reachable only through `gh api`, and `api` is on the forbidden-verb list. | A different read-only surface, or a deliberate decision about `gh api` with its own classification. |
 | Verified dependency checking | The GitHub CI checker still has never run against a real repository — the watched one has no pull request, so `prChecks` has nothing to check. It reports `verified: false` and the resolver refuses its `ready`. | One recorded live check against a repository with a PR. It can already **fail** a job on a definite CI failure. |
-| Live Discord delivery | Two of the three preconditions are now met and measured: all **twelve** commands are registered, and the gateway **accepts the connection with the MessageContent intent**. What remains is the part only a person can do — reminder DMs, briefing DMs, watch summaries and shared-channel posts all use a path no human has exercised. | One real slash command and one real DM, by the owner, against a running coordinator. Nothing here can stand in for it: a probe that answered interactions would race the coordinator that should. |
+| Live Discord delivery | Two preconditions are met and MEASURED: all twelve commands are registered (read back with `--diff`), and the gateway accepts the connection with the MessageContent intent (`probe:discord-gateway`, READY in 2 276 ms). **The owner reports having performed the smoke tests. That report is recorded as a report, because this host holds no evidence of it** — see "What the smoke-test evidence actually shows" below. | Interaction records that outlive the terminal. The coordinator logs boot diagnostics and nothing else, so a real DM leaves no trace to point at afterwards. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
 

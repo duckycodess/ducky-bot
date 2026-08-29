@@ -26,11 +26,26 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       ? `real client (${app.discordProfile.profile} bot)`
       : `mock transport (no ${app.discordProfile.profile} token)`,
   );
+  /**
+   * Not a warning any more, and the reason is worth stating.
+   *
+   * This line used to WARN unconditionally whenever the transport was real,
+   * telling the operator to enable an intent it had no way of checking. That
+   * makes a healthy instance report a warning forever, and it was actively
+   * wrong on this host: the intent is enabled, measured by connecting.
+   *
+   * The coordinator still cannot check it HERE -- diagnostics print before the
+   * gateway is up. But the honest fact is better than the guess either way:
+   * Discord refuses the connection outright when the intent is disabled, so a
+   * client that connects has already proved it, and `pnpm probe:discord-gateway`
+   * answers the question in a few seconds without starting a coordinator.
+   */
   add(
     'discord intents',
-    app.transport.kind !== 'real',
+    true,
     app.transport.kind === 'real'
-      ? 'enable the privileged MessageContent intent and Partials.Channel for DMs'
+      ? 'MessageContent is privileged: a gateway that CONNECTS has it enabled, because Discord ' +
+        'refuses the connection otherwise. Check without booting: pnpm probe:discord-gateway'
       : 'not applicable to the mock transport',
   );
   // Not a warning when `disabled`: refusing to answer is the correct state for

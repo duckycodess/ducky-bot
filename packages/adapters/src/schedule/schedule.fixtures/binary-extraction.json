@@ -1,0 +1,56 @@
+{
+  "_note": "Recorded by scripts/probe-extraction.mjs. Presence and version strings only. Nothing was installed, no document was read, and nothing was enabled.",
+  "recordedAt": "2026-08-29",
+  "deterministicTextExtractionAvailable": false,
+  "ocrAvailable": false,
+  "candidates": [
+    {
+      "bin": "pdftotext",
+      "package": "poppler-utils",
+      "kind": "deterministic",
+      "present": false,
+      "version": null,
+      "buys": "Extracts the text layer of a PDF. Same input, same output. `-layout` preserves columns, which is what a timetable needs."
+    },
+    {
+      "bin": "pdfinfo",
+      "package": "poppler-utils",
+      "kind": "deterministic",
+      "present": false,
+      "version": null,
+      "buys": "Reports page count and whether a PDF has a text layer at all -- which is how you tell a real PDF from a scan before trying to read it."
+    },
+    {
+      "bin": "qpdf",
+      "package": "qpdf",
+      "kind": "deterministic",
+      "present": false,
+      "version": null,
+      "buys": "Structural inspection and repair. Not an extractor; useful only to reject a malformed file early."
+    },
+    {
+      "bin": "tesseract",
+      "package": "tesseract-ocr",
+      "kind": "ocr",
+      "present": false,
+      "version": null,
+      "buys": "Reads pixels. Output is a GUESS: it varies with resolution and rendering, and it silently misreads digits -- the exact characters a schedule is made of."
+    },
+    {
+      "bin": "pdftoppm",
+      "package": "poppler-utils",
+      "kind": "ocr-support",
+      "present": false,
+      "version": null,
+      "buys": "Renders PDF pages to images, so OCR has something to look at. Only useful with an OCR engine."
+    },
+    {
+      "bin": "gs",
+      "package": "ghostscript",
+      "kind": "ocr-support",
+      "present": false,
+      "version": null,
+      "buys": "Alternative rasteriser. Large dependency; nothing here needs it if poppler is present."
+    }
+  ]
+}

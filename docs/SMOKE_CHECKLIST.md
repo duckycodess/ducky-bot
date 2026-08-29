@@ -22,6 +22,7 @@ it is opt-in, costs something, or writes somewhere, and each says which.
 | 7 | `pnpm register-commands` | the exact payload a registration would send | writes nothing |
 | 8 | `pnpm backup --db <a copy> --out /tmp/x` | the backup path works | not that your live database is safe |
 | 9 | `pnpm backup:verify --file <that file>` | integrity + a schema this build knows | not that the data is *correct* |
+| 10 | `pnpm probe:extraction` | which PDF/OCR decoders this host actually has | nothing is installed or enabled; exits 2 while none is present |
 
 If 1–9 pass, the code is sound. Nothing above has spoken to another system.
 

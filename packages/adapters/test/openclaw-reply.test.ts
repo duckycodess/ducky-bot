@@ -142,15 +142,96 @@ describe('the provider refuses before it spawns anything', () => {
     expect(() => new GatewayOpenClawProvider('wss://openclaw.example.com')).toThrow();
   });
 
-  it('reports a signed-out host with the remedy, not a stack trace', async () => {
-    // `false` exits non-zero and writes nothing, standing in for a CLI that
-    // failed. The message must name what an owner can act on.
-    const signedOut = new GatewayOpenClawProvider('ws://127.0.0.1:19001', {
+  it('checks the TOOL POLICY before it will spawn a turn at all', async () => {
+    /**
+     * Ordering matters, and it changed deliberately. A CLI that cannot run is
+     * now reported as an unprovable tool policy rather than as a failed turn,
+     * because the policy check comes first -- the point is to refuse BEFORE
+     * the owner's sentence is handed to anything.
+     *
+     * `false` exits non-zero and writes nothing, standing in for a CLI that
+     * cannot answer. Either way the message names what an owner can act on.
+     */
+    const broken = new GatewayOpenClawProvider('ws://127.0.0.1:19001', {
       bin: '/usr/bin/false',
       timeoutMs: 10_000,
     });
     await expect(
-      signedOut.reply({ userId: 'u', text: 'hi', threadKey: 't' }),
-    ).rejects.toThrow(/could not answer/i);
+      broken.reply({ userId: 'u', text: 'hi', threadKey: 't' }),
+    ).rejects.toThrow(/provably text-only/i);
+  });
+});
+
+describe('the provider session is isolated by user AND thread', () => {
+  /**
+   * Ducky's own SQLite history has always been per (user, thread) -- every
+   * repository method puts the user id in the WHERE clause. The PROVIDER keeps
+   * its own transcript under the session key, and that key used to be the
+   * thread alone: two people talking in one channel shared one OpenClaw
+   * session. Ducky's isolation was real and the layer underneath it was not,
+   * which is the worse half to get wrong because it is the half nobody looks
+   * at.
+   */
+  const keyFor = (userId: string, threadKey: string): string => {
+    const p = provider() as unknown as {
+      sessionKeyFor: (i: { userId: string; threadKey: string }) => string;
+    };
+    return p.sessionKeyFor({ userId, threadKey });
+  };
+
+  it('gives two users in the SAME channel two different sessions', () => {
+    expect(keyFor('user-a', 'chan-1')).not.toBe(keyFor('user-b', 'chan-1'));
+  });
+
+  it('gives one user in two channels two different sessions', () => {
+    expect(keyFor('user-a', 'chan-1')).not.toBe(keyFor('user-a', 'chan-2'));
+  });
+
+  it('is stable, so a conversation continues', () => {
+    expect(keyFor('user-a', 'chan-1')).toBe(keyFor('user-a', 'chan-1'));
+  });
+
+  it('never puts a raw Discord id into another tool\'s storage', () => {
+    // A session key ends up in file names and a database that is not ours.
+    const id = '100000000000000001';
+    const key = keyFor(id, '900000000000000013');
+    expect(key).not.toContain(id);
+    expect(key).not.toContain('900000000000000013');
+    expect(key).toMatch(/^agent:ducky:[0-9a-f]{32}$/);
+  });
+});
+
+describe('the persona is instructions, not stored turns', () => {
+  const promptFor = (text: string, persona?: string): string => {
+    const p = new GatewayOpenClawProvider('ws://127.0.0.1:19001', {
+      ...(persona === undefined ? {} : { persona }),
+    }) as unknown as { promptFrom: (i: { text: string; history?: unknown }) => string };
+    return p.promptFrom({ text });
+  };
+
+  it('carries the style contract on every turn', () => {
+    const prompt = promptFor('hello');
+    expect(prompt).toMatch(/Do not use emojis/i);
+    expect(prompt).toMatch(/Avoid em dashes/i);
+    expect(prompt).toMatch(/Never claim to remember/i);
+    expect(prompt).toMatch(/Do not take actions/i);
+  });
+
+  it('uses the configured persona, and still cannot drop the style rules', () => {
+    // Persona is the voice and an operator may set it. The rules that keep
+    // replies readable and honest are appended after it and are not
+    // configurable, so a persona cannot quietly undo them.
+    const prompt = promptFor('hello', 'You are Quackers, a pirate.');
+    expect(prompt).toContain('Quackers');
+    expect(prompt).toMatch(/Do not use emojis/i);
+  });
+
+  it('bounds the persona rather than letting a prompt grow without limit', () => {
+    const prompt = promptFor('hello', 'x'.repeat(5_000));
+    expect(prompt.length).toBeLessThan(3_000);
+  });
+
+  it('falls back to the default when the persona is blank', () => {
+    expect(promptFor('hello', '   ')).toMatch(/You are Ducky/i);
   });
 });

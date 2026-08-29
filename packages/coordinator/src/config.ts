@@ -140,6 +140,15 @@ export const EnvSchema = z.object({
    */
   OPENCLAW_BIN: z.string().optional(),
   /**
+   * The assistant's voice, as free text. Bounded and non-secret.
+   *
+   * INSTRUCTIONS, not authorization: it changes how Ducky sounds and grants
+   * nothing. The style rules that keep replies readable and honest are NOT
+   * configurable and are appended after this, so a persona cannot undo them.
+   * Empty or unset means the default.
+   */
+  DUCKY_ASSISTANT_PERSONA: z.string().max(600).optional(),
+  /**
    * A real model turn is not a fast HTTP call. The old 30 s default was a
    * gateway-request timeout inherited from the adapter that assumed HTTP, and
    * it would kill a normal reasoning turn.

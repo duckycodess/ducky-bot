@@ -324,9 +324,15 @@ describe('the openclaw binary is a host setting, not a constant', () => {
       } as NodeJS.ProcessEnv,
       { transport: new MockDiscordTransport(), allowlistJson: REPOS_JSON },
     );
+    /**
+     * The refusal now names the TOOL POLICY rather than the failed turn,
+     * because the policy is checked before anything is spawned. Either way it
+     * proves the configured path reached the provider: a binary that cannot be
+     * read cannot prove itself text-only.
+     */
     await expect(
       app.conversation.reply({ userId: '1', text: 'hi', threadKey: 't' }),
-    ).rejects.toThrow(/could not answer/i);
+    ).rejects.toThrow(/provably text-only/i);
     app.close();
   });
 });

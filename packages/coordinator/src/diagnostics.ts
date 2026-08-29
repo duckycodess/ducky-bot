@@ -62,6 +62,23 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
   // Not a warning when unavailable: refusing to hand files to an unverified
   // provider is the correct state, not a degraded one.
   add('chat attachments', true, attachmentAvailability(app.conversation, app.conversationAttachments));
+  /**
+   * The tool policy is PROVED per process, lazily, on the first turn -- not
+   * here. A boot-time subprocess would let a wedged CLI stop the coordinator
+   * from starting, and the property does not change under a running process
+   * without somebody editing configuration.
+   *
+   * This line says where the guarantee comes from, so an operator reading the
+   * boot output knows it is enforced rather than assumed.
+   */
+  if (app.conversation.name.startsWith('openclaw')) {
+    add(
+      'chat tool policy',
+      true,
+      'verified on first turn; a conversation is refused unless OpenClaw is provably ' +
+        'text-only (tools.profile=minimal, session_status denied)',
+    );
+  }
   // Not a warning either way: storing nothing is the safe default, and storing
   // a bounded, deletable history because the operator asked for it is a choice,
   // not a degradation.

@@ -1,0 +1,9 @@
+{
+  "_note": "The effective OpenClaw tool policy, and what the model was actually given. Names and counts only; no tool schema and no config value beyond the profile name.",
+  "profile": "minimal",
+  "denyIncludesSessionStatus": true,
+  "profileIsMinimal": true,
+  "toolsExposedToModel": 0,
+  "textOnly": true,
+  "_evidence": "Recorded at 31 tools with no profile set; 0 under minimal + deny. Same --local invocation both times, which is what proves --local honours the policy."
+}

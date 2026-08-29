@@ -174,6 +174,97 @@ create.
 Nothing in this repository will configure a model provider for an OpenClaw
 agent. That spends money on somebody's account, and it is the owner's call.
 
+## The tool policy, and why a persona is not one
+
+**An OpenClaw agent turn is only text-only if it is CONFIGURED to be.** This was
+found by audit after the integration was already working, and it is the most
+consequential thing on this page.
+
+Ducky documented conversation as a route with no tool access. That was true of
+Ducky -- one argv, no tool flag, no tool surface of its own -- and it was not
+true of the agent on the other end. `tools.profile` decides what a turn may
+reach, and the pinned docs are explicit that **unset means `full`**:
+
+| profile | includes |
+|---|---|
+| `minimal` | `session_status` only |
+| `messaging` | `group:messaging`, session read tools |
+| `coding` | `group:fs`, `group:runtime`, `group:web`, and more |
+| `full` | no restriction, and the same as unset |
+
+On this host the key was **absent entirely**. `group:runtime` is
+`exec`/`process`/`code_execution`; `group:fs` is `read`/`write`/`edit`. An
+ordinary sentence in a chat channel could in principle have reached a shell on
+the owner's machine while the documentation said conversation had no tools.
+
+### Why the persona does not fix it
+
+"Do not take actions" in a prompt is a request. A tool policy is a capability.
+Prompt injection from message content is explicitly out of scope for the prompt
+layer, so the control has to be configuration the model cannot argue with.
+
+### The required policy
+
+```bash
+openclaw --dev config set tools.profile minimal
+openclaw --dev config set tools.deny '["session_status"]' --strict-json
+```
+
+`minimal` still allows `session_status`, which reads session state. Nothing in
+a Ducky conversation needs it, so it is denied explicitly rather than tolerated
+as close enough.
+
+**A production host needs the same policy under its own profile.** It is not
+inherited, and nothing in this repository writes it.
+
+### It is proved, not assumed
+
+`GatewayOpenClawProvider` reads the effective policy through the read-only
+`config get` surface before it will run a turn, and **refuses** unless it is
+provably text-only. Absence is treated as unsafe rather than unknown: an unset
+profile IS `full`, so a missing key fails closed exactly like a permissive one.
+
+The check is cached per process and runs lazily on the first turn. A tool policy
+cannot change under a running coordinator without somebody editing
+configuration, and doing it lazily means a slow CLI delays one reply rather than
+stopping the coordinator from starting.
+
+Ducky can **read** that policy and can never **write** it: `config get` is
+classified `read_only` in `COMMAND_POLICY`, while `config set` and
+`config patch` are unlisted, and an unclassified command is refused before it
+spawns.
+
+### Does `--local` honour it? Yes, and this is the evidence
+
+The reply envelope reports how many tools the model was handed
+(`meta.systemPromptReport.tools.entries`). From the same `--local` invocation:
+
+| policy | tools given to the model |
+|---|---|
+| no `tools.profile` set | **31** |
+| `minimal` + `session_status` denied | **0** |
+
+That is a before-and-after from the code path Ducky actually uses, recorded in
+`openclaw.fixtures/tool-policy.json`, and it is why this page can say `--local`
+honours the policy instead of assuming it. `pnpm probe:openclaw` re-records it
+and **exits 2 if the turn is not provably text-only**.
+
+## Session identity is isolated by user AND thread
+
+The session key is `agent:ducky:<sha256(userId:threadKey) truncated>`.
+
+Two problems with the previous `agent:ducky:<threadKey>`. It was not isolated by
+user -- Ducky's own history has always been per (user, thread), but the provider
+keeps its own transcript under this key, so two people in one channel shared one
+OpenClaw session. And it put raw Discord ids into another tool's storage, where
+they end up in file names and a database that is not ours.
+
+The digest is one-way, so the key does not reveal an id. It is deterministic and
+unsalted, so somebody who already holds a candidate (user, thread) pair can
+confirm it by hashing. A digest cannot prevent that, and the property that
+matters here is isolation rather than secrecy: the key lives only in OpenClaw's
+own store on the owner's own host.
+
 ## Provider modes
 
 `DUCKY_CONVERSATION_PROVIDER` decides, explicitly:

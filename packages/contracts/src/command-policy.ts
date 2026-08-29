@@ -228,6 +228,13 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
     bin: 'openclaw', verb: ['models', 'status'], cls: 'read_only',
     note: 'Reports which model and auth profile are configured. Reads no credential value.',
   },
+  {
+    bin: 'openclaw', verb: ['config', 'get'], cls: 'read_only',
+    note:
+      'Reads one config path. Used to PROVE the effective tool policy is text-only before a ' +
+      'turn runs. `config set` and `config patch` are deliberately unlisted, so Ducky can read ' +
+      'that policy and can never write it.',
+  },
 ]);
 
 /**

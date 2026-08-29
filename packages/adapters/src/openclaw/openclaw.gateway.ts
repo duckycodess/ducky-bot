@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,8 @@ import { RECORDED_CONTRACT_VERSION } from './openclaw.contract.js';
 import { assertPrivateGatewayUrl } from './private-url.js';
 import { ATTACHMENTS_UNAVAILABLE_MESSAGE } from './openclaw.mock.js';
 import { OpenClawReplySchema, replyTextFrom } from './openclaw.schema.js';
+import { DEFAULT_ASSISTANT_PERSONA, buildSystemPreamble } from './openclaw.persona.js';
+import { verifyTextOnlyToolPolicy, type ToolPolicyVerdict } from './openclaw.tools.js';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
 import {
@@ -34,6 +37,11 @@ export interface GatewayOpenClawOptions {
    */
   readonly profile?: 'dev' | 'default';
   readonly timeoutMs?: number;
+  /**
+   * The assistant's voice. Bounded, non-secret, and INSTRUCTIONS rather than
+   * authorization -- see `openclaw.persona.ts`. Absent means the default.
+   */
+  readonly persona?: string | undefined;
 }
 
 /**
@@ -100,6 +108,15 @@ export class GatewayOpenClawProvider implements ConversationProvider {
   private readonly bin: string;
   private readonly profile: 'dev' | 'default';
   private readonly timeoutMs: number;
+  private readonly persona: string;
+  /**
+   * The tool-policy verdict, resolved at most once per process.
+   *
+   * Cached because a tool policy cannot change under a running coordinator
+   * without somebody editing configuration, and lazy because a slow CLI should
+   * delay one reply rather than stop the coordinator from starting.
+   */
+  private toolPolicy: Promise<ToolPolicyVerdict> | undefined;
 
   /**
    * Whether this provider could serve production traffic.
@@ -134,6 +151,7 @@ export class GatewayOpenClawProvider implements ConversationProvider {
     this.bin = opts.bin ?? PINNED_BIN;
     this.profile = opts.profile ?? 'dev';
     this.timeoutMs = opts.timeoutMs ?? 120_000;
+    this.persona = opts.persona?.trim() || DEFAULT_ASSISTANT_PERSONA;
   }
 
   /**
@@ -158,16 +176,54 @@ export class GatewayOpenClawProvider implements ConversationProvider {
   }
 
   /**
-   * `agent:<id>:<thread>`, the shape the CLI documents.
-   *
-   * Per (user, thread), matching what bounded continuity already stores. The
-   * user id is deliberately absent: a session key is not a secret, but it does
-   * not need to carry a Discord id either, and the thread is what scopes a
-   * conversation.
+   * `agent:<id>:<key>`, the shape the CLI documents, where the key isolates
+   * BOTH the user and the thread.
    */
   private sessionKeyFor(input: ConversationInput): string {
-    const thread = input.threadKey.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'default';
-    return `agent:ducky:${thread}`;
+    /**
+     * A digest of (user, thread), not the ids themselves.
+     *
+     * Two problems with the previous `agent:ducky:<threadKey>`:
+     *
+     * 1. **It was not isolated by user.** Ducky's own SQLite history has always
+     *    been per (user, thread) -- every repository method puts the user id in
+     *    the WHERE clause -- but the PROVIDER keeps its own session transcript
+     *    under this key, and a key of thread alone meant two people talking in
+     *    one channel shared one OpenClaw session. Ducky's isolation was real
+     *    and the layer underneath it was not, which is the worse half to get
+     *    wrong because it is the half nobody looks at.
+     * 2. **It put raw Discord ids into another tool's storage.** A session key
+     *    ends up in file names and a local database that is not ours.
+     *
+     * So: `sha256("<userId>:<threadKey>")`, truncated to 32 hex characters.
+     * Stable, so a conversation continues; distinct per user AND per thread, so
+     * two people in one channel get two sessions.
+     *
+     * **What this is and is not.** It is a one-way function, so the key does
+     * not reveal an id. It is deterministic and unsalted, so somebody who
+     * already has a CANDIDATE (user, thread) pair can confirm it by hashing --
+     * a digest cannot prevent that, and claiming otherwise would be the kind of
+     * over-claim this codebase avoids. It is acceptable because the key lives
+     * only in OpenClaw's own store on the owner's own host, and because the
+     * property that matters here is isolation rather than secrecy.
+     *
+     * 128 bits of the digest is far past collision risk for one person's
+     * conversations, and short enough to stay readable in a session listing.
+     */
+    const digest = createHash('sha256')
+      .update(`${input.userId}:${input.threadKey}`)
+      .digest('hex')
+      .slice(0, 32);
+    return `agent:ducky:${digest}`;
+  }
+
+  /** Resolved once per process; every caller awaits the same promise. */
+  private assertTextOnly(): Promise<ToolPolicyVerdict> {
+    this.toolPolicy ??= verifyTextOnlyToolPolicy({
+      bin: this.bin,
+      profile: this.profile,
+    });
+    return this.toolPolicy;
   }
 
   async reply(input: ConversationInput): Promise<ConversationReply> {
@@ -180,6 +236,30 @@ export class GatewayOpenClawProvider implements ConversationProvider {
       throw new DuckyError(
         'integration_not_verified',
         'The OpenClaw provider has no recorded contract on this host.',
+      );
+    }
+
+    /**
+     * Text only, PROVED, before the owner's sentence goes anywhere.
+     *
+     * Ducky documents conversation as a route with no tool access. That was
+     * true of Ducky and was not true of the agent on the other end: OpenClaw's
+     * `tools.profile` decides what a turn may reach, and an unset profile means
+     * `full` -- filesystem, runtime and web. A persona instruction cannot fix
+     * that, because "do not take actions" is a request and a tool policy is a
+     * capability.
+     *
+     * So the policy is read and checked, and anything short of provably
+     * text-only refuses the turn. Not knowing whether a shell is reachable is
+     * the same as knowing one is, for the purpose of deciding whether to send
+     * somebody's sentence to it.
+     */
+    const policy = await this.assertTextOnly();
+    if (!policy.safe) {
+      throw new DuckyError(
+        'integration_not_verified',
+        `Conversation is disabled until OpenClaw is provably text-only: ${policy.detail}. ` +
+          'See docs/integrations/openclaw.md.',
       );
     }
 
@@ -245,10 +325,22 @@ export class GatewayOpenClawProvider implements ConversationProvider {
    * is ever called. Nothing here decides what may be remembered.
    */
   private promptFrom(input: ConversationInput): string {
+    /**
+     * Instructions, then history, then the new message.
+     *
+     * The preamble is rebuilt every turn and is NEVER recorded as a
+     * conversation turn: `ConversationMemoryService` only ever sees what the
+     * owner typed and what came back, so this cannot be replayed as something
+     * they said, and enabling continuity does not fill the history with copies
+     * of it.
+     */
+    const parts = [buildSystemPreamble(this.persona)];
     const history = (input.history ?? [])
       .map((t) => `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.text}`)
       .join('\n');
-    return history === '' ? input.text : `${history}\nUser: ${input.text}`;
+    if (history !== '') parts.push('', 'Conversation so far:', history);
+    parts.push('', `User: ${input.text}`);
+    return parts.join('\n');
   }
 }
 

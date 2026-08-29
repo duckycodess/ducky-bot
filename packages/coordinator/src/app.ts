@@ -567,6 +567,11 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
     profile: env.OPENCLAW_PROFILE,
     timeoutMs: env.OPENCLAW_TIMEOUT_MS,
     ...(env.OPENCLAW_BIN === undefined ? {} : { bin: env.OPENCLAW_BIN }),
+    // Instructions, not authorization. Never logged: nothing prints the
+    // prompt, and this is part of it.
+    ...(env.DUCKY_ASSISTANT_PERSONA === undefined
+      ? {}
+      : { persona: env.DUCKY_ASSISTANT_PERSONA }),
   });
 }
 

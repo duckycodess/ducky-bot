@@ -19,6 +19,8 @@ export * from './openclaw/openclaw.disabled.js';
 export * from './openclaw/openclaw.contract.js';
 export * from './openclaw/openclaw.gateway.js';
 export * from './openclaw/openclaw.schema.js';
+export * from './openclaw/openclaw.persona.js';
+export * from './openclaw/openclaw.tools.js';
 export * from './schedule/extraction.port.js';
 export * from './schedule/extraction.deterministic.js';
 export * from './schedule/attachment-policy.js';

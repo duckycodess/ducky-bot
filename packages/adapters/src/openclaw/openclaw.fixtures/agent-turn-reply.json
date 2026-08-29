@@ -76,15 +76,8 @@
           "listChars": "number",
           "schemaChars": "number",
           "entries": {
-            "[]": {
-              "name": "string",
-              "summaryChars": "number",
-              "summaryHash": "string",
-              "schemaChars": "number",
-              "schemaHash": "string",
-              "propertiesCount": "null"
-            },
-            "length": "31"
+            "[]": "empty",
+            "length": "0"
           }
         }
       },

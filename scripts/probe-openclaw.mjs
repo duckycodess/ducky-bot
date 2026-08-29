@@ -196,6 +196,25 @@ async function main() {
     devDefaultUrl: /ws:\/\/127\.0\.0\.1:\d+/.exec(gatewayText)?.[0] ?? null,
   });
 
+  // ---- the TOOL POLICY, which decides what a turn can reach ---------------
+  //
+  // Ducky documents conversation as a route with no tool access. That was true
+  // of Ducky and not of the agent: `tools.profile` decides what a turn may
+  // reach, and the docs are explicit that UNSET means `full` -- filesystem,
+  // runtime and web. On this host the key was absent entirely.
+  //
+  // Recorded here because a security property that nothing re-reads is a
+  // property that drifts.
+  const readPath = async (dotPath) => {
+    const r = await run(bin, ['--dev', '--no-color', 'config', 'get', dotPath]);
+    const out = redact(`${r.stdout}${r.stderr}`).trim();
+    return /config path not found/i.test(out) || out === '' ? null : out;
+  };
+  const toolProfile = await readPath('tools.profile');
+  const toolDeny = await readPath('tools.deny');
+  const profileIsMinimal = (toolProfile ?? '').replace(/["']/g, '').trim() === 'minimal';
+  const deniesSessionStatus = /session_status/.test(toolDeny ?? '');
+
   // ---- a real turn, observed rather than described -------------------------
   //
   // In the isolated dev profile, with no channel delivery. Before a model
@@ -260,6 +279,39 @@ async function main() {
 
   if (turn.code === 0 && turn.stdout.trim().startsWith('{')) {
     const envelope = JSON.parse(turn.stdout);
+    /**
+     * How many tools the model was ACTUALLY handed on this turn.
+     *
+     * The decisive number, and the reason this is evidence rather than a
+     * reading of the documentation: it answers whether `--local` honours
+     * `tools.profile` at all. Recorded before the policy it was 31; with
+     * `minimal` plus a `session_status` deny it is 0, from the same
+     * invocation.
+     */
+    const toolsExposed =
+      envelope?.meta?.systemPromptReport?.tools?.entries?.length ?? null;
+
+    record('tool-policy', {
+      _note:
+        'The effective OpenClaw tool policy, and what the model was actually given. ' +
+        'Names and counts only; no tool schema and no config value beyond the profile name.',
+      profile: toolProfile,
+      denyIncludesSessionStatus: deniesSessionStatus,
+      profileIsMinimal,
+      /** 0 is the only acceptable number for a text-only conversation route. */
+      toolsExposedToModel: toolsExposed,
+      textOnly: profileIsMinimal && deniesSessionStatus && toolsExposed === 0,
+      _evidence:
+        'Recorded at 31 tools with no profile set; 0 under minimal + deny. Same --local ' +
+        'invocation both times, which is what proves --local honours the policy.',
+    });
+
+    if (!(profileIsMinimal && deniesSessionStatus && toolsExposed === 0)) {
+      gaps.push(
+        `the agent turn is NOT provably text-only (profile=${toolProfile ?? 'unset'}, ` +
+          `tools exposed=${toolsExposed ?? 'unknown'}). An unset profile means \`full\`.`,
+      );
+    }
     record('agent-turn-reply', {
       _note:
         'A SUCCESSFUL reply envelope, recorded as SHAPE ONLY: every leaf is replaced by its ' +

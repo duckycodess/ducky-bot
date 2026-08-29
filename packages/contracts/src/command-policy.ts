@@ -199,10 +199,57 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
       'Removes a Ducky-created linked worktree. NEVER forced: `--force` is a forbidden flag, so ' +
       'a dirty checkout holding uncommitted work is refused here rather than deleted.',
   },
+
+  // -- openclaw, one conversational turn (packages/adapters/src/openclaw) ----
+  //
+  // Classified BEFORE the provider that uses it exists, because an
+  // unclassified binary is refused before it spawns and the refusal would
+  // otherwise surface as a mystery at the owner's first message.
+  //
+  // `local_mutation`, not `read_only`, and the distinction is real: a turn
+  // writes a session record into OpenClaw's own store on this host. It is not
+  // `external_mutation` either -- the reply comes back to Ducky and goes
+  // nowhere else. `--deliver` is what would make it external, by sending agent
+  // output into a chat channel, and the adapter never constructs it.
+  {
+    bin: 'openclaw', verb: ['agent'], cls: 'local_mutation',
+    note:
+      'One agent turn. Writes a session record in OpenClaw\'s local store and returns the reply ' +
+      'to Ducky. NEVER built with --deliver, which would post the reply into a chat channel.',
+  },
+  {
+    bin: 'openclaw', verb: ['models', 'status'], cls: 'read_only',
+    note: 'Reports which model and auth profile are configured. Reads no credential value.',
+  },
 ]);
 
-const matchesVerb = (argv: readonly string[], verb: readonly string[]): boolean =>
-  verb.every((v, i) => argv[i] === v);
+/**
+ * Where the verb starts, once leading global flags are skipped.
+ *
+ * Some CLIs take their profile selector as a ROOT option, before the
+ * subcommand -- `openclaw --dev agent …` is the recorded shape, and pinning
+ * Ducky to the wrong OpenClaw profile is not an option. Index-0 matching alone
+ * would classify that as unlisted and refuse it.
+ *
+ * Only BOOLEAN leading flags are skipped, and deliberately so. A flag that
+ * takes a separate value (`--profile dev agent …`) leaves `dev` where the verb
+ * should be, which matches nothing and is refused. That is the correct
+ * direction to fail in: a form this function cannot read confidently is a form
+ * it does not clear.
+ *
+ * The forbidden-verb and forbidden-flag scans are unaffected -- both run over
+ * the WHOLE argv, including everything skipped here.
+ */
+function verbOffset(argv: readonly string[]): number {
+  let i = 0;
+  while (i < argv.length && argv[i]!.startsWith('-')) i += 1;
+  return i;
+}
+
+const matchesVerb = (argv: readonly string[], verb: readonly string[]): boolean => {
+  const off = verbOffset(argv);
+  return verb.every((v, i) => argv[off + i] === v);
+};
 
 /**
  * Classifies an argv against the policy, longest match first.
@@ -250,7 +297,12 @@ export function checkCommandAllowed(
   }
   const entry = classifyCommand(bin, argv);
   if (!entry) {
-    return { reason: 'unclassified', detail: `\`${bin}\` ${argv[0] ?? ''} is not a classified command.` };
+    // Named from where the VERB starts, not from argv[0]: with a root flag in
+    // front, argv[0] is `--dev` and a refusal that said so would be unhelpful.
+    return {
+      reason: 'unclassified',
+      detail: `\`${bin}\` ${argv[verbOffset(argv)] ?? ''} is not a classified command.`,
+    };
   }
   if (COMMAND_CLASS_RANK[entry.cls] > COMMAND_CLASS_RANK[maxClass]) {
     return {

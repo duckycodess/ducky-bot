@@ -7,7 +7,7 @@
     "--local",
     "--json",
     "--session-key",
-    "agent:probe:ducky-probe",
+    "agent:ducky:00000000000000000000000000000000",
     "--message-file",
     "<message-file>"
   ],

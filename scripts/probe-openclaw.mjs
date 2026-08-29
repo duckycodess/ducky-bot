@@ -212,6 +212,16 @@ async function main() {
   };
   const toolProfile = await readPath('tools.profile');
   const toolDeny = await readPath('tools.deny');
+  // Scopes that could GRANT a tool to the ducky agent. The global profile
+  // being `minimal` proves nothing while one of these can override it.
+  const overrideScopes = {};
+  for (const dotPath of [
+    'agents.list', 'agents.defaults.tools', 'tools.byProvider',
+    'tools.toolsBySender', 'tools.allow', 'tools.alsoAllow', 'tools.elevated',
+  ]) {
+    overrideScopes[dotPath] = (await readPath(dotPath)) !== null;
+  }
+  const anyOverride = Object.values(overrideScopes).some(Boolean);
   const profileIsMinimal = (toolProfile ?? '').replace(/["']/g, '').trim() === 'minimal';
   const deniesSessionStatus = /session_status/.test(toolDeny ?? '');
 
@@ -241,7 +251,15 @@ async function main() {
   writeFileSync(messageFile, PROBE_MESSAGE, { mode: 0o600 });
   const turnArgv = [
     '--dev', '--no-color', 'agent', '--local', '--json',
-    '--session-key', 'agent:probe:ducky-probe',
+    // The SAME agent id the provider targets.
+    //
+    // This used to be `agent:probe:...`, which measured a DIFFERENT agent:
+    // per-agent tool profiles exist, so a tool count recorded against `probe`
+    // proved nothing about the agent Ducky actually talks to. The key shape
+    // matches `GatewayOpenClawProvider.sessionKeyFor` -- `agent:ducky:<32 hex>`
+    // -- with a fixed all-zero digest so a probe run never lands in a real
+    // conversation's session.
+    '--session-key', `agent:ducky:${'0'.repeat(32)}`,
     '--message-file', messageFile,
   ];
   let turn;
@@ -296,20 +314,27 @@ async function main() {
         'The effective OpenClaw tool policy, and what the model was actually given. ' +
         'Names and counts only; no tool schema and no config value beyond the profile name.',
       profile: toolProfile,
+      /** Which agent the tool count below was measured against. */
+      measuredAgentId: 'ducky',
       denyIncludesSessionStatus: deniesSessionStatus,
       profileIsMinimal,
+      /** Presence only, never the value: an override is a yes/no question. */
+      overrideScopesConfigured: overrideScopes,
+      anyOverrideScopeConfigured: anyOverride,
       /** 0 is the only acceptable number for a text-only conversation route. */
       toolsExposedToModel: toolsExposed,
-      textOnly: profileIsMinimal && deniesSessionStatus && toolsExposed === 0,
+      textOnly:
+        profileIsMinimal && deniesSessionStatus && toolsExposed === 0 && !anyOverride,
       _evidence:
         'Recorded at 31 tools with no profile set; 0 under minimal + deny. Same --local ' +
         'invocation both times, which is what proves --local honours the policy.',
     });
 
-    if (!(profileIsMinimal && deniesSessionStatus && toolsExposed === 0)) {
+    if (!(profileIsMinimal && deniesSessionStatus && toolsExposed === 0 && !anyOverride)) {
       gaps.push(
         `the agent turn is NOT provably text-only (profile=${toolProfile ?? 'unset'}, ` +
-          `tools exposed=${toolsExposed ?? 'unknown'}). An unset profile means \`full\`.`,
+          `tools exposed=${toolsExposed ?? 'unknown'}, override scopes=${anyOverride}). ` +
+          'An unset profile means `full`, and a per-agent scope can override it.',
       );
     }
     record('agent-turn-reply', {

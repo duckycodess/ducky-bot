@@ -1,8 +1,19 @@
 {
   "_note": "The effective OpenClaw tool policy, and what the model was actually given. Names and counts only; no tool schema and no config value beyond the profile name.",
   "profile": "minimal",
+  "measuredAgentId": "ducky",
   "denyIncludesSessionStatus": true,
   "profileIsMinimal": true,
+  "overrideScopesConfigured": {
+    "agents.list": false,
+    "agents.defaults.tools": false,
+    "tools.byProvider": false,
+    "tools.toolsBySender": false,
+    "tools.allow": false,
+    "tools.alsoAllow": false,
+    "tools.elevated": false
+  },
+  "anyOverrideScopeConfigured": false,
   "toolsExposedToModel": 0,
   "textOnly": true,
   "_evidence": "Recorded at 31 tools with no profile set; 0 under minimal + deny. Same --local invocation both times, which is what proves --local honours the policy."

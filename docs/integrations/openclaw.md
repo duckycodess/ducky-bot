@@ -203,16 +203,38 @@ the owner's machine while the documentation said conversation had no tools.
 Prompt injection from message content is explicitly out of scope for the prompt
 layer, so the control has to be configuration the model cannot argue with.
 
-### The required policy
+### The required policy, and why the profile alone is not enough
+
+A first version of this required only `tools.profile: minimal` plus a
+`session_status` deny. That was **incomplete**, and the gap is worth stating
+because it is the kind that looks finished:
+
+> `agents.list[].tools.profile` **overrides** the global `tools.profile` for
+> that agent, and `tools.byProvider` applies between the base profile and
+> allow/deny. Global **deny** is what wins regardless.
+
+So a per-agent scope could hand the very agent Ducky talks to a filesystem while
+the global profile still read `minimal`. The profile is a default; the deny list
+is the control.
 
 ```bash
 openclaw --dev config set tools.profile minimal
-openclaw --dev config set tools.deny '["session_status"]' --strict-json
+openclaw --dev config set tools.deny \
+  '["group:fs","group:runtime","group:web","group:ui","group:sessions","group:memory","group:automation","group:messaging","group:nodes","group:agents","group:media","group:plugins","bundle-mcp","session_status"]' \
+  --strict-json
 ```
 
-`minimal` still allows `session_status`, which reads session state. Nothing in
-a Ducky conversation needs it, so it is denied explicitly rather than tolerated
-as close enough.
+Two independent controls, because either alone has a gap:
+
+1. **the deny list**, which wins even where a profile is overridden;
+2. **no override scope configured at all** — `agents.list`,
+   `agents.defaults.tools`, `tools.byProvider`, `tools.toolsBySender`,
+   `tools.allow`, `tools.alsoAllow`, `tools.elevated`.
+
+Absence is *required* rather than inspected. Reading an override and deciding it
+looks harmless would mean re-implementing OpenClaw's precedence rules inside
+Ducky and being wrong about them silently. "None configured" has an unambiguous
+answer.
 
 **A production host needs the same policy under its own profile.** It is not
 inherited, and nothing in this repository writes it.
@@ -242,7 +264,12 @@ The reply envelope reports how many tools the model was handed
 | policy | tools given to the model |
 |---|---|
 | no `tools.profile` set | **31** |
-| `minimal` + `session_status` denied | **0** |
+| `minimal` + denies | **0** |
+
+The measurement targets the session key `agent:ducky:…`, the same agent id the
+provider uses. An earlier version measured `agent:probe:…`, which proved
+nothing about the agent Ducky actually talks to once per-agent tool profiles
+are in play.
 
 That is a before-and-after from the code path Ducky actually uses, recorded in
 `openclaw.fixtures/tool-policy.json`, and it is why this page can say `--local`

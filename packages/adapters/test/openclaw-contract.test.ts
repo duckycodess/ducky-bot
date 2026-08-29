@@ -93,8 +93,16 @@ describe('the recorded OpenClaw surface', () => {
     // And the adapter builds THAT call, with only the two caller-supplied
     // values differing. An adapter pinned to a reply envelope some other
     // invocation produced would be pinned to evidence it did not create.
+    // The session key is taken FROM the recording rather than restated here,
+    // so the two cannot drift: the probe now measures the same agent id the
+    // provider targets (`agent:ducky:…`), and an earlier version measured
+    // `agent:probe:…`, which proved nothing about the agent Ducky uses once
+    // per-agent tool profiles are in play.
+    const recordedKey = recorded[recorded.indexOf('--session-key') + 1]!;
+    expect(recordedKey).toMatch(/^agent:ducky:[0-9a-f]{32}$/);
+
     const built = new GatewayOpenClawProvider('ws://127.0.0.1:19001', { profile: 'dev' })
-      .buildArgv('agent:probe:ducky-probe', '/tmp/x/message.txt');
+      .buildArgv(recordedKey, '/tmp/x/message.txt');
     expect(built.map((a) => (a === '/tmp/x/message.txt' ? '<message-file>' : a))).toEqual(recorded);
   });
 

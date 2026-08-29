@@ -32,7 +32,7 @@ registered.
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
 | Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
-| Conversation tool policy | **Verified text-only** | `tools.profile=minimal` + `session_status` denied. Tools handed to the model went 31 → **0** under the same `--local` call; recorded in `tool-policy.json`. The provider REFUSES a turn unless it can prove this |
+| Conversation tool policy | **Enforced, and currently REFUSING** | The rule is `tools.profile=minimal` **plus a full group deny list plus no override scope**. The development host has the profile and a partial deny, so the provider refuses conversation until the deny list is extended — fail-closed working as intended, not a defect. Tools handed to the model went 31 → **0**, measured against the `ducky` agent |
 | OpenClaw conversation (GPT) | **Verified, and now SELECTED on development** | `probe:openclaw` exits 0; request argv and reply envelope recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Live turns: 33 s directly, 24 s through the router |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
@@ -846,7 +846,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**90 files, 1207 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**90 files, 1217 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

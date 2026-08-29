@@ -23,7 +23,6 @@
         "usage": {
           "input": "number",
           "output": "number",
-          "cacheRead": "number",
           "total": "number"
         },
         "lastCallUsage": {
@@ -59,7 +58,7 @@
             "injectedChars": "number",
             "truncated": "boolean"
           },
-          "length": "7"
+          "length": "6"
         },
         "skills": {
           "promptChars": "number",

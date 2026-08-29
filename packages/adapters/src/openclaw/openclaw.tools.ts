@@ -62,7 +62,58 @@ export const REQUIRED_TOOL_PROFILE = 'minimal';
  * in a Ducky conversation needs it, and "text only" should mean text only, so
  * it is denied explicitly rather than tolerated as close enough.
  */
-export const REQUIRED_TOOL_DENY: readonly string[] = Object.freeze(['session_status']);
+export const REQUIRED_TOOL_DENY: readonly string[] = Object.freeze([
+  // Every group the pinned docs define, plus the one tool `minimal` still
+  // allows. Denying the GROUPS rather than trusting the profile is what makes
+  // this survive an override: the docs are explicit that a per-agent
+  // `tools.profile` overrides the global profile, while global deny wins.
+  'group:fs',
+  'group:runtime',
+  'group:web',
+  'group:ui',
+  'group:sessions',
+  'group:memory',
+  'group:automation',
+  'group:messaging',
+  'group:nodes',
+  'group:agents',
+  'group:media',
+  'group:plugins',
+  // Configured MCP servers are exposed under this plugin id and are not
+  // covered by `group:plugins` in every path.
+  'bundle-mcp',
+  'session_status',
+]);
+
+/**
+ * Config paths that can GRANT a tool, and must therefore not exist.
+ *
+ * The precedence chain is base profile → provider profile → allow/deny, and a
+ * per-agent `tools.profile` overrides the global one. So proving the global
+ * profile is `minimal` proves nothing on its own: an `agents.list[].tools` or
+ * a `tools.byProvider` entry could hand the very agent Ducky talks to a
+ * filesystem.
+ *
+ * Two independent controls, because either alone has a gap:
+ *
+ * 1. the global DENY list above, which wins even where a profile is
+ *    overridden;
+ * 2. these scopes being ABSENT, so nothing is quietly granting alongside.
+ *
+ * Absence is required rather than inspected. Reading an override and deciding
+ * it looks harmless means re-implementing OpenClaw's precedence rules in
+ * Ducky, and being wrong about them silently. "None configured" is a question
+ * with an unambiguous answer.
+ */
+export const FORBIDDEN_OVERRIDE_PATHS: readonly string[] = Object.freeze([
+  'agents.list',
+  'agents.defaults.tools',
+  'tools.byProvider',
+  'tools.toolsBySender',
+  'tools.allow',
+  'tools.alsoAllow',
+  'tools.elevated',
+]);
 
 export interface ToolPolicyVerdict {
   readonly safe: boolean;
@@ -168,7 +219,7 @@ export async function verifyTextOnlyToolPolicy(opts: {
   const denied = (denyRaw ?? '')
     .replace(/[[\]"']/g, ' ')
     .split(/[\s,]+/)
-    .map((t) => t.trim())
+    .map((t) => t.trim().toLowerCase())
     .filter((t) => t !== '');
 
   const missing = REQUIRED_TOOL_DENY.filter((t) => !denied.includes(t));
@@ -178,15 +229,49 @@ export async function verifyTextOnlyToolPolicy(opts: {
       profile: normalized,
       denied,
       detail:
-        `\`tools.profile\` is \`${normalized}\`, but ${missing.join(', ')} is not in ` +
-        '`tools.deny`. Text only should mean text only',
+        `\`tools.profile\` is \`${normalized}\`, but \`tools.deny\` is missing ` +
+        `${missing.join(', ')}. A per-agent profile can override the global profile, so the ` +
+        'deny list is what actually holds',
     };
+  }
+
+  /**
+   * Nothing may be granting alongside.
+   *
+   * Checked even though the deny list above already wins, because the two
+   * controls fail differently: a deny list can be edited, and an override that
+   * appears later would otherwise be invisible until somebody read the config.
+   */
+  for (const dotPath of FORBIDDEN_OVERRIDE_PATHS) {
+    let present: string | null;
+    try {
+      present = await readConfigPath(opts.bin, opts.profile, dotPath, timeoutMs);
+    } catch {
+      return {
+        safe: false,
+        profile: normalized,
+        denied,
+        detail: `\`${dotPath}\` could not be read, so it cannot be shown to grant nothing`,
+      };
+    }
+    if (present !== null) {
+      return {
+        safe: false,
+        profile: normalized,
+        denied,
+        detail:
+          `\`${dotPath}\` is configured. A per-agent or per-provider tool scope can grant ` +
+          'tools to the agent Ducky talks to, and Ducky will not try to decide whether a ' +
+          'particular override is harmless',
+      };
+    }
   }
 
   return {
     safe: true,
     profile: normalized,
     denied,
-    detail: `tools.profile=${normalized}, denying ${denied.join(', ')}`,
+    detail:
+      `tools.profile=${normalized}, ${denied.length} deny entries, no override scope configured`,
   };
 }

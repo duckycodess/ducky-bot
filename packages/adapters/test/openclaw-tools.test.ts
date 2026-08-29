@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkCommandAllowed } from '@ducky/contracts';
@@ -74,5 +75,96 @@ describe('the conversation route must be provably text-only', () => {
     expect(f['denyIncludesSessionStatus']).toBe(true);
     expect(f['toolsExposedToModel']).toBe(0);
     expect(f['textOnly']).toBe(true);
+  });
+});
+
+describe('a per-agent or per-provider override cannot slip past', () => {
+  /**
+   * The precedence gap this covers.
+   *
+   * The pinned docs are explicit: `agents.list[].tools.profile` overrides the
+   * global `tools.profile`, and `tools.byProvider` applies between the base
+   * profile and allow/deny. So proving `tools.profile=minimal` proves nothing
+   * on its own -- an override could hand the very agent Ducky talks to a
+   * filesystem, and the global check would still have said "safe".
+   *
+   * Two independent controls now: the global DENY list, which wins where a
+   * profile is overridden, and the absence of any scope that could grant.
+   */
+  const stub = (answers: Record<string, string>): string => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-openclaw-stub-'));
+    const file = path.join(dir, 'openclaw');
+    // Answers `config get <path>`; anything unlisted reports "not found",
+    // which is exactly what the real CLI does for an unset path.
+    const cases = Object.entries(answers)
+      .map(([k, v]) => `    ${k}) printf '%s' ${JSON.stringify(v)} ;;`)
+      .join('\n');
+    writeFileSync(
+      file,
+      `#!/bin/sh\nfor a in "$@"; do last="$a"; done\ncase "$last" in\n${cases}\n` +
+        `    *) printf 'Config path not found: %s.' "$last" ;;\nesac\nexit 0\n`,
+      { mode: 0o700 },
+    );
+    return file;
+  };
+
+  const FULL_DENY = JSON.stringify(REQUIRED_TOOL_DENY);
+
+  it('accepts a config with the full deny list and no override', async () => {
+    const v = await verifyTextOnlyToolPolicy({
+      bin: stub({ 'tools.profile': 'minimal', 'tools.deny': FULL_DENY }),
+      profile: 'dev',
+      timeoutMs: 5_000,
+    });
+    expect(v.safe).toBe(true);
+  });
+
+  it.each([
+    'agents.list',
+    'agents.defaults.tools',
+    'tools.byProvider',
+    'tools.toolsBySender',
+    'tools.allow',
+    'tools.alsoAllow',
+    'tools.elevated',
+  ])('refuses when %s is configured, however harmless it looks', async (dotPath) => {
+    /**
+     * Absence is REQUIRED rather than inspected. Reading an override and
+     * deciding it looks harmless means re-implementing OpenClaw's precedence
+     * rules inside Ducky and being wrong about them silently.
+     */
+    const v = await verifyTextOnlyToolPolicy({
+      bin: stub({
+        'tools.profile': 'minimal',
+        'tools.deny': FULL_DENY,
+        [dotPath]: '[]',
+      }),
+      profile: 'dev',
+      timeoutMs: 5_000,
+    });
+    expect(v.safe).toBe(false);
+    expect(v.detail).toContain(dotPath);
+  });
+
+  it('refuses a deny list that omits a single group', async () => {
+    // `minimal` plus a partial deny was the state this review found: it looked
+    // safe and was not, because a per-agent profile can override the profile.
+    const partial = REQUIRED_TOOL_DENY.filter((t) => t !== 'group:runtime');
+    const v = await verifyTextOnlyToolPolicy({
+      bin: stub({ 'tools.profile': 'minimal', 'tools.deny': JSON.stringify(partial) }),
+      profile: 'dev',
+      timeoutMs: 5_000,
+    });
+    expect(v.safe).toBe(false);
+    expect(v.detail).toContain('group:runtime');
+  });
+
+  it('refuses a non-minimal profile even with a full deny list', async () => {
+    const v = await verifyTextOnlyToolPolicy({
+      bin: stub({ 'tools.profile': 'coding', 'tools.deny': FULL_DENY }),
+      profile: 'dev',
+      timeoutMs: 5_000,
+    });
+    expect(v.safe).toBe(false);
   });
 });

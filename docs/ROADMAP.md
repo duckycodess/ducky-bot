@@ -394,6 +394,47 @@ Still open:
 
 ---
 
+## 🔶 Open: "public output" — which of three different things?
+
+The owner has said public output is acceptable and that they dislike ephemeral
+replies. **Nothing has been changed on the strength of that**, because the
+sentence covers three separable decisions with very different blast radii, and
+two of them are already true.
+
+| # | The decision | Status | What it would expose |
+|---|---|---|---|
+| 1 | **Command discoverability** — slash commands visible in the guild list | **Already true.** All 12 are registered guild-wide | Command NAMES and descriptions. No data. Registration says who can *see* a command exists; the router still refuses a non-owner. |
+| 2 | **Reply visibility to the owner** — the owner's own replies non-ephemeral in a channel | **Not done.** Needs a decision | Everything in that reply, to everyone who can read the channel: task titles, job tasks, repository slugs, questions, answers, and the signed controls. |
+| 3 | **Shared-channel projections** — what non-owners already see | **Already true and deliberately narrow** (ADR 0012) | The safe projection only: public job id, allowlisted slug, coarse state, safe timestamps, sanitized summary. Never a control. |
+
+**(1) and (3) are done and are not what "ephemeral" refers to. (2) is the
+actual request, and it is the one with teeth.**
+
+The specific hazard, stated plainly: `/task list`, `/job status`, `/inbox` and
+`/briefing` are owner-only *personal data*, and their replies carry signed
+interaction controls bound to the owner. Making those non-ephemeral in a
+channel publishes the content to every reader of that channel, and puts
+controls where somebody else can see them — the signature still refuses a
+different presser, so it is a disclosure problem rather than an authorization
+one, but disclosure is exactly what ephemerality was buying.
+
+A DM is the case that probably matches the intent. **In a DM, "ephemeral" is
+nearly meaningless** — there is no one else in the conversation — so making
+replies persistent *there* costs no privacy and fixes the real irritation:
+replies that vanish and cannot be scrolled back to.
+
+So the question that needs answering is not "public or not" but:
+
+> **Which surfaces, in which contexts?** Specifically: non-ephemeral in the
+> owner's DM only (safe, and probably what was meant), or also in a guild
+> channel (a disclosure decision, per command)?
+
+Until that is answered, the current behaviour stands unchanged: owner replies
+stay ephemeral, shared projections stay narrow, and no control ever appears in
+shared output.
+
+---
+
 ## Explicitly still deferred
 
 Unchanged from Phase 1, and none of the above reopens them: multi-user

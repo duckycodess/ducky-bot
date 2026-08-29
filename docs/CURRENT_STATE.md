@@ -175,6 +175,43 @@ diagnostics and in `/status`.
     and provider error alike; the startup sweep extended to the new prefix;
     per-owner hourly budget. No byte reaches SQLite, a log line, or a Discord
     reply.
+- **One logical repository, several hosts.** A repository may name a checkout
+  per executor (`placements`), and the slug stays the only thing anyone names:
+  Discord supplies a slug and never a path, and the coordinator resolves the
+  path at CLAIM time for the executor that is claiming. An executor is told
+  where its own checkout is and never about anybody else's.
+  - **The reservation is unchanged and still keyed on the slug**, so one job
+    runs in one logical repository at a time however many hosts have it checked
+    out. A test asserts that, and asserts `repo_reservations` has no executor
+    column that could split it per host.
+  - **`placements` is EXHAUSTIVE once present.** An unlisted executor is not
+    eligible and its jobs WAIT — the owner's private `/job status` says so,
+    naming the configured hosts. Waiting is recoverable; running against a
+    directory that means something else on that machine is not.
+  - `preferredExecutorId` is a preference, never a pin: while that host is live
+    it takes the work, and once it is not, the other placed hosts become
+    eligible. One host being off must not mean one repository being dead.
+  - **The single-path form is unchanged in meaning**, so no existing
+    configuration needs an edit. Setting both forms is refused at startup
+    rather than resolved by precedence.
+  - **`/repo status` reports executor IDS, never paths.** A filesystem path
+    still never reaches Discord in either direction.
+- **A watch-only GitHub mapping.** `allowJobs: false` separates "may be
+  observed" from "may be edited". Before it, adding a GitHub mapping so a
+  repository could be watched also made it a job target — and a job target is a
+  directory a real agent gets edit capability in. `/job submit` refuses a
+  watch-only repository outright, so no job row is created for work that could
+  never run.
+- **The executor proves the checkout is the right repository.** When
+  configuration says which GitHub repository a slug IS, `origin` is checked
+  against it before anything else happens; both URL forms are accepted, and
+  anything else is refused rather than assumed. A repository with no mapping is
+  not refused — plenty of real checkouts have no remote. The remote URL is
+  never echoed in the refusal, because it can carry a username.
+- **Opt-in `fetchBeforeJob`**, default off, the only part of workspace
+  resolution that touches the network. A FAILED fetch is not fatal: the base
+  stays the local ref, because `origin/main` after a failed fetch is an older
+  local copy with a more convincing name.
 - Job lifecycle: queue, claim, lease, heartbeat, result intake, cancellation
   (supervised mid-turn, acknowledged only once a stop is observed), owner-input
   rounds, per-repo reservations, durable workspace registration, crash
@@ -587,7 +624,8 @@ stays `false` and `/status` reports `experimental`.
 | Slash-command registration | **Eleven of the twelve** development commands are registered to the configured test guild. **Measured**, not recalled: `pnpm register-commands --diff --profile development` performs a GET and compares. Only `/forget` is absent. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
-| GitHub repository watches | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
+| GitHub repository watches | **Now observed against a real repository, in part.** `pnpm probe:gh-live` drives the shipped `GhCliReader` and the watch loop against `duckycodess/ducky-bot` (watch-only, `allowJobs: false`). Five read surfaces — `repoView`, `prList`, `prListAll`, `runList`, `issueList` — returned live responses that the production schemas accepted; the watch loop observed the repository and then produced NOTHING on an identical second pass, which is the deduplication property a watch lives or dies by and which had only ever been tested against a mock. `prView` / `prChecks` / `prReviews` remain **unexercised**: that repository has no pull request, open or closed, and opening one is a GitHub write. Nothing reached Discord — the loop ran through the real composition root with an in-memory database and the mock transport. Previously, and still true of the unexercised surfaces: |
+| GitHub repository watches (the rest) | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
 | Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
 | Azure deployment | Documented only; nothing provisioned. |
 
@@ -601,10 +639,10 @@ would unblock it.
 | Real conversational replies | No successful OpenClaw agent turn has been observed: an agent needs model provider credentials, and none are configured on this host (`ProviderAuthError`, recorded). Verified again by `openclaw models auth list`, which reports `Profiles: (none)` in **both** the default and the `--dev` profile store. | The owner signs in with a **ChatGPT/Codex subscription**: `openclaw --dev models auth login --provider openai --device-code`. It must carry `--dev`, because that is the profile store the probe reads. Then `pnpm probe:openclaw` records a reply envelope and exits 0. This row used to name `openclaw agents add <id>`, which is the interactive per-agent helper that also offers API-key paste; the subscription OAuth entry point is `models auth login`. |
 | Conversation ATTACHMENT delivery | Two independent blockers. The provider is unverified, AND the recorded OpenClaw agent turn takes **text only** — it has no attachment input at all. | A verified provider that genuinely declares attachment support. Not OpenClaw's agent turn as recorded. |
 | Image / PDF schedule extraction | No decoder ships and none is installed. **Re-checked, not recalled:** `pnpm probe:extraction` runs `--version` on six candidates and records the result — `pdftotext`, `pdfinfo`, `qpdf`, `tesseract`, `pdftoppm` and `gs` are all ABSENT. No provider reports `supportsBinary`, so nothing could read the bytes anyway. Uploads are refused **before download**. | `poppler-utils` (for `pdftotext`) **plus** a provider reporting `supportsBinary: true` **plus** `SCHEDULE_BINARY_EXTRACTION_ENABLED=true`. Three separate things, and installing a decoder is a host mutation of its own. OCR is deliberately not the answer: it returns a guess about pixels that misreads digits, and a wrong time the owner then confirms is worse than a refusal. |
-| Herdr/Pi **certification** | The readiness fix removes the known cause of `agent_prompt_stalled`, but `pnpm probe:live-job` has not been re-run since it landed, so repeatability is unmeasured. Running it against the live development database would race the executor already polling it. | Several consecutive clean `probe:live-job` runs, isolated from the running executor. `DUCKY_HERDR_VERIFIED=1` stays an operator act. |
-| A live GitHub watch | No repository in the allowlist has a GitHub mapping (`github: null`), so there is nothing to observe and nothing to point at. | The owner adds a GitHub mapping to a repository they want watched. |
+| Herdr/Pi **certification** | **Unblocked.** Three consecutive clean `probe:live-job` runs (162 s / 193 s / 192 s), each on its own throwaway database, each through the full evidence gate. The race that made this unmeasurable is now DETECTED rather than described: the probe refuses to start when another executor has checked into the same database in the last two minutes. | Nothing technical. `DUCKY_HERDR_VERIFIED=1` remains a deliberate operator act, and no probe sets it. |
+| A live GitHub watch | **Unblocked.** `ducky-bot` carries a watch-only mapping and `pnpm probe:gh-live` has observed it, twice, deduplicating the second pass. What remains blocked is narrower: the pull-request surfaces, because that repository has no PR. | A configured repository that HAS a pull request. Opening one is a GitHub write and nothing here makes it. |
 | Recent commits on a repository's default branch | Reachable only through `gh api`, and `api` is on the forbidden-verb list. | A different read-only surface, or a deliberate decision about `gh api` with its own classification. |
-| Verified dependency checking | The GitHub CI checker exists but has never run against a real repository (same reason as above), so it reports `verified: false` and the resolver refuses its `ready`. | One recorded live check. It can already **fail** a job on a definite CI failure. |
+| Verified dependency checking | The GitHub CI checker still has never run against a real repository — the watched one has no pull request, so `prChecks` has nothing to check. It reports `verified: false` and the resolver refuses its `ready`. | One recorded live check against a repository with a PR. It can already **fail** a job on a definite CI failure. |
 | Live Discord delivery | Reminder DMs, briefing DMs, watch summaries and shared-channel posts all use the gateway path, which no human has exercised. Eleven of the twelve commands ARE registered (measured by `--diff`); only `/forget` is missing. | `pnpm register-commands --apply --profile development`, the Message Content intent, and one real DM. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
@@ -619,7 +657,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**81 files, 1045 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**84 files, 1097 tests**) and `pnpm build` all
 pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.

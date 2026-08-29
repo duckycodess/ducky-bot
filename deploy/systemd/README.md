@@ -22,7 +22,7 @@ every machine that talks to a given coordinator, and must match the
 would each be handed the other's paths. See
 [`../../docs/runbooks/second-executor.md`](../../docs/runbooks/second-executor.md).
 
-Both units are instanced on the profile name, so development and production run
+Every unit is instanced on the profile name, so development and production run
 as separate services with separate environment files, databases, ports and
 executor identities:
 

@@ -319,3 +319,33 @@ export const AUDIT_SUBJECT_REF_MAX = 128;
 /** Rows older than this are pruned by the reconciler, so the table is bounded. */
 export const AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const AUDIT_PRUNE_BATCH = 500;
+
+/**
+ * The embed colours Ducky uses, and the only ones it may use.
+ *
+ * Named by MEANING rather than by shade, so a presenter says what a message is
+ * and not what it should look like. Restrained on purpose: a personal assistant
+ * that colour-codes everything reads as an alert system.
+ *
+ * Model text can never reach this. A colour is chosen by the presenter from
+ * this table; nothing derives one from a reply, and `sanitizeOutbound` drops
+ * any value that is not a plain integer in range.
+ */
+export const DUCKY_COLORS = Object.freeze({
+  /** Ducky itself: conversation and assistant replies. A muted amber. */
+  brand: 0xd9_a5_4b,
+  /** Neutral information: status, listings, repository reads. */
+  neutral: 0x5a_6b_7a,
+  /** Something finished as intended. */
+  success: 0x4c_8f_63,
+  /** Something needs the owner: a question, an approval, an expiry. */
+  attention: 0xc2_8a_3a,
+  /** Something failed. Used sparingly, and never for a refusal by design. */
+  failure: 0xa8_4a_4a,
+});
+export type DuckyColor = (typeof DUCKY_COLORS)[keyof typeof DUCKY_COLORS];
+
+/** Discord accepts a 24-bit integer. Anything else is dropped, not clamped. */
+export const EMBED_COLOR_MAX = 0xff_ff_ff;
+export const isValidEmbedColor = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= EMBED_COLOR_MAX;

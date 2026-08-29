@@ -132,6 +132,27 @@ export class DiscordJsTransport implements DiscordTransport {
 
     client.on(Events.MessageCreate, (message) => {
       if (message.author.bot) return;
+
+      /**
+       * Typing, while the model thinks.
+       *
+       * A real turn takes twenty to thirty seconds and Discord shows nothing
+       * during it, so the assistant reads as broken. `sendTyping` is the
+       * platform's own affordance for exactly this and carries NO content.
+       *
+       * Strictly best-effort: fired and forgotten, never awaited, and its
+       * failure is swallowed. It must not delay routing, alter it, or fail a
+       * reply -- an indicator is a courtesy, and a courtesy that can break the
+       * answer is not one. There is deliberately no fake progress text.
+       */
+      void (async () => {
+        try {
+          await (message.channel as { sendTyping?: () => Promise<unknown> }).sendTyping?.();
+        } catch {
+          /* the channel may not permit it, or may be gone; either is fine */
+        }
+      })();
+
       void this.route({
         kind: 'message',
         userId: message.author.id,

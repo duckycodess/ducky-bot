@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { INTENT_PROPOSAL_TTL_MS, detectIntent } from '@ducky/contracts';
-import { CHAT, OWNER, TestClock, makeHarness } from './helpers.js';
+import { CHAT, OWNER, TestClock, makeHarness, replyText } from './helpers.js';
 import { FILIPINO_DISHES, buildStudyPlan, mealForHour, suggestMeal } from '../src/domain/local-helpers.js';
 
 /**
@@ -60,12 +60,12 @@ describe('an inferred write is proposed, never applied', () => {
 
     const proposal = await say(h, OWNER, 'i need to renew the domain');
 
-    expect(proposal?.content).toMatch(/looks like a task/i);
-    expect(proposal?.content).toMatch(/Nothing is saved yet/);
+    expect(replyText(proposal)).toMatch(/looks like a task/i);
+    expect(replyText(proposal)).toMatch(/Nothing is saved yet/);
     expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
 
     const confirmed = await say(h, OWNER, 'yes');
-    expect(confirmed?.content).toMatch(/Task `t/);
+    expect(replyText(confirmed)).toMatch(/Task `t/);
     const tasks = h.app.tasks.list(h.owner, 'all');
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.title).toBe('renew the domain');
@@ -78,7 +78,7 @@ describe('an inferred write is proposed, never applied', () => {
 
     const dropped = await say(h, OWNER, 'no');
 
-    expect(dropped?.content).toMatch(/Dropped it/);
+    expect(replyText(dropped)).toMatch(/Dropped it/);
     expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
     h.close();
   });
@@ -91,7 +91,7 @@ describe('an inferred write is proposed, never applied', () => {
     // the proposal stays outstanding rather than being applied.
     const unrelated = await say(h, OWNER, 'what is the weather like');
 
-    expect(unrelated?.content).not.toMatch(/Task `t/);
+    expect(replyText(unrelated)).not.toMatch(/Task `t/);
     expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
     expect(h.app.intents.hasPending(h.owner, 'dm-1')).toBe(true);
     h.close();
@@ -105,7 +105,7 @@ describe('an inferred write is proposed, never applied', () => {
     clock.advance(INTENT_PROPOSAL_TTL_MS + 1_000);
     const late = await say(h, OWNER, 'yes');
 
-    expect(late?.content).not.toMatch(/Task `t/);
+    expect(replyText(late)).not.toMatch(/Task `t/);
     expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
     h.close();
   });
@@ -128,7 +128,7 @@ describe('an inferred write is proposed, never applied', () => {
 
     // A yes in ANOTHER thread confirms nothing.
     const elsewhere = await say(h, OWNER, 'yes', 'dm-2');
-    expect(elsewhere?.content).not.toMatch(/Task `t/);
+    expect(replyText(elsewhere)).not.toMatch(/Task `t/);
     expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
 
     await say(h, OWNER, 'yes', 'dm-1');
@@ -154,7 +154,7 @@ describe('none of it is reachable by a non-owner', () => {
 
     const reply = await say(h, CHAT, 'i need to renew the domain');
 
-    expect(reply?.content).toMatch(/\[mock\]/);
+    expect(replyText(reply)).toMatch(/\[mock\]/);
     expect(h.app.intents.hasPending(h.chat, 'dm-1')).toBe(false);
     h.close();
   });
@@ -162,7 +162,7 @@ describe('none of it is reachable by a non-owner', () => {
   it('gives a whitelist user no meal or study helper either', async () => {
     const h = makeHarness();
     const meal = await say(h, CHAT, 'what should i cook');
-    expect(meal?.content).toMatch(/\[mock\]/);
+    expect(replyText(meal)).toMatch(/\[mock\]/);
     h.close();
   });
 });
@@ -173,9 +173,9 @@ describe('the local helpers answer from fixed data, and say so', () => {
 
     const reply = await say(h, OWNER, 'what should i cook for dinner');
 
-    expect(reply?.content).toMatch(/For dinner:/);
-    expect(reply?.content).toMatch(/fixed list in Ducky's own source/);
-    expect(reply?.content).toMatch(/not a complete set/);
+    expect(replyText(reply)).toMatch(/For dinner:/);
+    expect(replyText(reply)).toMatch(/fixed list in Ducky's own source/);
+    expect(replyText(reply)).toMatch(/not a complete set/);
     h.close();
   });
 
@@ -217,9 +217,9 @@ describe('the local helpers answer from fixed data, and say so', () => {
 
     const reply = await say(h, OWNER, 'help me study zod schemas for 60 minutes');
 
-    expect(reply?.content).toMatch(/60 minutes on zod schemas/);
-    expect(reply?.content).toMatch(/knows nothing about the subject/);
-    expect(reply?.content).toMatch(/kept nothing/);
+    expect(replyText(reply)).toMatch(/60 minutes on zod schemas/);
+    expect(replyText(reply)).toMatch(/knows nothing about the subject/);
+    expect(replyText(reply)).toMatch(/kept nothing/);
     h.close();
   });
 

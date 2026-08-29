@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { detectIntent } from '@ducky/contracts';
-import { makeHarness, OWNER, CHAT } from './helpers.js';
+import { makeHarness, OWNER, CHAT, replyText } from './helpers.js';
 
 const CODING = '900000000000000012';
 const TASK = '900000000000000011';
@@ -60,7 +60,7 @@ describe('detecting a coding job', () => {
     await h.transport.start((e) => h.app.router.handle(e));
     const reply = await say(h, 'implement in demo: add a health endpoint');
 
-    expect(reply?.content).toMatch(/nothing is saved yet|reply \*\*yes\*\*/i);
+    expect(replyText(reply)).toMatch(/nothing is saved yet|reply \*\*yes\*\*/i);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
@@ -75,7 +75,7 @@ describe('confirming a coding job', () => {
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
 
     const confirmed = await say(h, 'yes');
-    expect(confirmed?.content).toMatch(/submitted/i);
+    expect(replyText(confirmed)).toMatch(/submitted/i);
 
     const jobs = h.store.jobs.listRecent(OWNER, 10);
     expect(jobs).toHaveLength(1);
@@ -91,7 +91,7 @@ describe('confirming a coding job', () => {
     await h.transport.start((e) => h.app.router.handle(e));
     await say(h, 'implement in demo: add a health endpoint');
     const dropped = await say(h, 'no');
-    expect(dropped?.content).toMatch(/dropped/i);
+    expect(replyText(dropped)).toMatch(/dropped/i);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
@@ -106,8 +106,8 @@ describe('confirming a coding job', () => {
     await h.transport.start((e) => h.app.router.handle(e));
     const reply = await say(h, 'implement in nothing-here: add an endpoint');
 
-    expect(reply?.content).toMatch(/not a configured repository/i);
-    expect(reply?.content).not.toMatch(/demo|other/);
+    expect(replyText(reply)).toMatch(/not a configured repository/i);
+    expect(replyText(reply)).not.toMatch(/demo|other/);
     await say(h, 'yes');
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
@@ -129,7 +129,7 @@ describe('confirming a coding job', () => {
 
     await say(h, 'implement in watched: add an endpoint');
     const confirmed = await say(h, 'yes');
-    expect(confirmed?.content).toMatch(/not saved|read-only observation/i);
+    expect(replyText(confirmed)).toMatch(/not saved|read-only observation/i);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
@@ -139,7 +139,7 @@ describe('confirming a coding job', () => {
     await h.transport.start((e) => h.app.router.handle(e));
     const reply = await say(h, 'implement in demo: add an endpoint', undefined, CHAT);
     // Ordinary conversation, exactly as before.
-    expect(reply?.content).not.toMatch(/nothing is saved yet/i);
+    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
@@ -161,7 +161,7 @@ describe('a role narrows which rules may fire', () => {
   it('proposes a coding job in the coding channel', async () => {
     const h = await roleHarness();
     const reply = await say(h, 'implement in demo: add an endpoint', CODING);
-    expect(reply?.content).toMatch(/nothing is saved yet/i);
+    expect(replyText(reply)).toMatch(/nothing is saved yet/i);
     h.close();
   });
 
@@ -169,14 +169,14 @@ describe('a role narrows which rules may fire', () => {
     // A coding job is not a note, and the task channel is for notes.
     const h = await roleHarness();
     const reply = await say(h, 'implement in demo: add an endpoint', TASK);
-    expect(reply?.content ?? '').not.toMatch(/nothing is saved yet/i);
+    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     h.close();
   });
 
   it('does not propose a task in the CODING channel', async () => {
     const h = await roleHarness();
     const reply = await say(h, 'i need to renew the domain', CODING);
-    expect(reply?.content ?? '').not.toMatch(/nothing is saved yet/i);
+    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     h.close();
   });
 
@@ -188,7 +188,7 @@ describe('a role narrows which rules may fire', () => {
      */
     const h = await roleHarness();
     const reply = await say(h, 'i need to renew the domain', GPT);
-    expect(reply?.content ?? '').not.toMatch(/nothing is saved yet/i);
+    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     h.close();
   });
 
@@ -279,7 +279,7 @@ describe('containment does not swallow the other role channels', () => {
     await h.transport.start((e) => h.app.router.handle(e));
 
     const proposal = await say(h, 'implement in demo: add an endpoint', CODING);
-    expect(proposal?.content).toMatch(/nothing is saved yet/i);
+    expect(replyText(proposal)).toMatch(/nothing is saved yet/i);
 
     // ...and a message there that matches no rule is silent rather than
     // becoming a model turn.
@@ -293,7 +293,7 @@ describe('containment does not swallow the other role channels', () => {
     });
     await h.transport.start((e) => h.app.router.handle(e));
     const proposal = await say(h, 'i need to renew the domain', TASK);
-    expect(proposal?.content).toMatch(/nothing is saved yet/i);
+    expect(replyText(proposal)).toMatch(/nothing is saved yet/i);
     h.close();
   });
 });

@@ -12,7 +12,7 @@ import {
   CONVERSATION_TEMP_PREFIX, sweepStaleTempDirs,
 } from '../src/discord/attachments.js';
 import { effectiveLimits } from '../src/discord/conversation-attachments.js';
-import { CHAT, OWNER, STRANGER, makeHarness } from './helpers.js';
+import { CHAT, OWNER, STRANGER, makeHarness, replyText } from './helpers.js';
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
 
@@ -187,8 +187,8 @@ describe('refusal happens before any download', () => {
     const h = await boot({ env: enabled, conversationFetch: spy.impl });
 
     const reply = await send(h);
-    expect(reply?.content).toMatch(/cannot accept files/i);
-    expect(reply?.content).toMatch(/Nothing was downloaded/);
+    expect(replyText(reply)).toMatch(/cannot accept files/i);
+    expect(replyText(reply)).toMatch(/Nothing was downloaded/);
     expect(spy.calls).toBe(0);
     expect(convDirs()).toHaveLength(0);
     h.close();
@@ -199,7 +199,7 @@ describe('refusal happens before any download', () => {
     const h = await boot({ conversation: new CapableProvider(), conversationFetch: spy.impl });
 
     const reply = await send(h);
-    expect(reply?.content).toMatch(/CONVERSATION_ATTACHMENTS_ENABLED is off/);
+    expect(replyText(reply)).toMatch(/CONVERSATION_ATTACHMENTS_ENABLED is off/);
     expect(spy.calls).toBe(0);
     h.close();
   });
@@ -212,7 +212,7 @@ describe('refusal happens before any download', () => {
     const h = await boot({ env: enabled, conversation: provider, conversationFetch: spy.impl });
 
     const reply = await send(h);
-    expect(reply?.content).toMatch(/unverified/);
+    expect(replyText(reply)).toMatch(/unverified/);
     expect(spy.calls).toBe(0);
     h.close();
   });
@@ -224,7 +224,7 @@ describe('refusal happens before any download', () => {
     });
 
     const reply = await send(h, { attachments: [meta(), meta({ filename: 'b.png' })] });
-    expect(reply?.content).toBe('Send one file at a time. Nothing was downloaded.');
+    expect(replyText(reply)).toBe('Send one file at a time. Nothing was downloaded.');
     expect(spy.calls).toBe(0);
     expect(convDirs()).toHaveLength(0);
     h.close();
@@ -253,7 +253,7 @@ describe('attachments are owner-only', () => {
     const reply = await h.transport.dispatch({
       kind: 'message', userId: CHAT, text: 'hello', threadKey: 't',
     });
-    expect(reply?.content).toBe('seen it');
+    expect(replyText(reply)).toBe('seen it');
     h.close();
   });
 
@@ -274,7 +274,7 @@ describe('attachments are owner-only', () => {
       kind: 'message', userId: CHAT, text: 'look', threadKey: '900000000000000001',
       attachments: [meta()],
     });
-    expect(reply?.content).toMatch(/not authorized/i);
+    expect(replyText(reply)).toMatch(/not authorized/i);
     expect(spy.calls).toBe(0);
     h.close();
   });
@@ -301,7 +301,7 @@ describe('metadata policy, still before any byte is fetched', () => {
         env: enabled, conversation: new CapableProvider(), conversationFetch: spy.impl,
       });
       const reply = await send(h, { attachments: [meta(over)] });
-      expect(reply?.content).toMatch(match);
+      expect(replyText(reply)).toMatch(match);
       expect(spy.calls).toBe(0);
       expect(convDirs()).toHaveLength(0);
       h.close();
@@ -316,7 +316,7 @@ describe('metadata policy, still before any byte is fetched', () => {
       conversationFetch: spy.impl,
     });
     const reply = await send(h, { attachments: [meta({ size: 1024 })] });
-    expect(reply?.content).toMatch(/too large/);
+    expect(replyText(reply)).toMatch(/too large/);
     expect(spy.calls).toBe(0);
     h.close();
   });
@@ -347,7 +347,7 @@ describe('the download itself', () => {
     // The metadata claims it is small, so the cheap check passes and only the
     // stream counter can catch it.
     const reply = await send(h, { attachments: [meta({ size: 10 })] });
-    expect(reply?.content).toMatch(/larger than the limit/);
+    expect(replyText(reply)).toMatch(/larger than the limit/);
     expect(provider.seen).toBeUndefined();
     expect(convDirs()).toHaveLength(0);
     h.close();
@@ -360,7 +360,7 @@ describe('the download itself', () => {
     });
 
     const reply = await send(h);
-    expect(reply?.content).toBe('seen it');
+    expect(replyText(reply)).toBe('seen it');
     expect(provider.seen?.text).toBe('what is this?');
     expect(provider.seen?.threadKey).toBe('dm-1');
     expect(provider.seen?.attachment?.metadata).toEqual({
@@ -431,7 +431,7 @@ describe('lifetime and cleanup', () => {
     });
 
     const reply = await send(h);
-    expect(reply?.content).toMatch(/went wrong/i);
+    expect(replyText(reply)).toMatch(/went wrong/i);
     expect(convDirs().length).toBe(before);
     h.close();
   });

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OWNER_ONLY_COMMANDS } from '@ducky/contracts';
 import { ComponentSigner } from '../src/security/component-signing.js';
 import { commandPayload } from '../src/discord/register-commands.js';
-import { CHAT, OWNER, implementedResult, makeHarness, secret } from './helpers.js';
+import { CHAT, OWNER, implementedResult, makeHarness, secret, replyText } from './helpers.js';
 
 const flat = (m: unknown): string => JSON.stringify(m);
 
@@ -18,7 +18,7 @@ describe('command routing', () => {
     const reply = await h.transport.dispatch({
       kind: 'command', name: 'capture', userId: OWNER, options: { text: 'remember the milk' },
     });
-    expect(reply?.content).toMatch(/^Captured/);
+    expect(replyText(reply)).toMatch(/^Captured/);
     expect(flat(reply)).not.toContain('remember the milk');
     expect(h.app.captures.list(h.owner)).toHaveLength(1);
     h.close();
@@ -42,7 +42,7 @@ describe('command routing', () => {
     const foreign = new ComponentSigner(secret());
     const forged = foreign.sign({ kind: 'inbox_done', entityId: capture.id, actorUserId: OWNER });
     const reply = await h.transport.dispatch({ kind: 'component', customId: forged, userId: OWNER });
-    expect(reply?.content).toMatch(/no longer valid/);
+    expect(replyText(reply)).toMatch(/no longer valid/);
     expect(h.app.captures.list(h.owner)[0]?.status).toBe('open');
     h.close();
   });
@@ -60,7 +60,7 @@ describe('command routing', () => {
     const confirmed = await h.transport.dispatch({
       kind: 'component', customId: confirmId, userId: OWNER,
     });
-    expect(confirmed?.content).toMatch(/Saved 1/);
+    expect(replyText(confirmed)).toMatch(/Saved 1/);
     expect(h.store.schedules.count()).toBe(1);
     h.close();
   });
@@ -70,7 +70,7 @@ describe('command routing', () => {
     const reply = await h.transport.dispatch({
       kind: 'command', name: 'schedule', userId: OWNER, options: { text: 'lunch sometime' },
     });
-    expect(reply?.content).toMatch(/No schedule entries found/);
+    expect(replyText(reply)).toMatch(/No schedule entries found/);
     expect(reply?.embeds).toBeUndefined();
     h.close();
   });
@@ -92,7 +92,7 @@ describe('command routing', () => {
     const cancelled = await h.transport.dispatch({
       kind: 'command', name: 'job', subcommand: 'cancel', userId: OWNER, options: { id: publicId },
     });
-    expect(cancelled?.content).toMatch(/cancelled/i);
+    expect(replyText(cancelled)).toMatch(/cancelled/i);
     h.close();
   });
 
@@ -114,7 +114,7 @@ describe('command routing', () => {
       kind: 'command', name: 'job', subcommand: 'answer', userId: OWNER,
       options: { id: job.publicId, answer: 'sqlite' },
     });
-    expect(answered?.content).toMatch(/queued/);
+    expect(replyText(answered)).toMatch(/queued/);
     h.close();
   });
 
@@ -131,7 +131,8 @@ describe('command routing', () => {
     const chat = await h.transport.dispatch({
       kind: 'message', userId: CHAT, text: 'hi', threadKey: 't',
     });
-    expect(chat?.content?.startsWith('[mock] ')).toBe(true);
+    // A stand-in reply keeps its marker wherever it is rendered.
+    expect(replyText(chat).startsWith('[mock] ')).toBe(true);
     h.close();
   });
 
@@ -140,7 +141,7 @@ describe('command routing', () => {
     const reply = await h.transport.dispatch({
       kind: 'command', name: 'nope', userId: OWNER, options: {},
     });
-    expect(reply?.content).toBe('Unknown command.');
+    expect(replyText(reply)).toBe('Unknown command.');
     h.close();
   });
 
@@ -202,7 +203,7 @@ describe('schedule corrections', () => {
     const opened = await h.transport.dispatch({
       kind: 'component', customId: ids.edit, userId: OWNER,
     });
-    expect(opened?.content).toContain('Standup');
+    expect(replyText(opened)).toContain('Standup');
     expect(h.store.schedules.count()).toBe(0);
     h.close();
   });
@@ -233,7 +234,7 @@ describe('schedule corrections', () => {
     const out = await h.transport.dispatch({
       kind: 'component', customId: ids.edit, userId: OWNER, values: { entries: 'nonsense' },
     });
-    expect(out?.content).toMatch(/No schedule entries found/);
+    expect(replyText(out)).toMatch(/No schedule entries found/);
     expect(h.store.schedules.count()).toBe(0);
     h.close();
   });
@@ -244,7 +245,7 @@ describe('schedule corrections', () => {
     const out = await h.transport.dispatch({
       kind: 'component', customId: ids.edit, userId: CHAT, values: { entries: 'x' },
     });
-    expect(out?.content).toMatch(/not authorized/i);
+    expect(replyText(out)).toMatch(/not authorized/i);
     h.close();
   });
 });

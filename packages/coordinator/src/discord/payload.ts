@@ -1,5 +1,5 @@
 import {
-  ACTION_ROWS_MAX, BUTTONS_PER_ROW_MAX, EMBED_FIELDS_MAX,
+  ACTION_ROWS_MAX, BUTTONS_PER_ROW_MAX, EMBED_FIELDS_MAX, isValidEmbedColor,
 } from '@ducky/contracts';
 import type { ButtonStyle, OutboundMessage } from './message.js';
 
@@ -29,6 +29,7 @@ export interface DiscordEmbedPayload {
   description?: string;
   fields?: { name: string; value: string; inline?: boolean }[];
   footer?: { text: string };
+  color?: number;
 }
 
 export interface DiscordComponentPayload {
@@ -64,6 +65,10 @@ export function toDiscordPayload(message: OutboundMessage): DiscordMessagePayloa
         }));
       }
       if (e.footer !== undefined) embed.footer = { text: e.footer };
+      // Already validated by `sanitizeOutbound`; re-checked because this
+      // function is reachable in tests without it and a bad value here would
+      // be rejected by the API at delivery time.
+      if (isValidEmbedColor(e.color)) embed.color = e.color;
       return embed;
     });
   }

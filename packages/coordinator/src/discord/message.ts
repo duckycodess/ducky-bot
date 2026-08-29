@@ -9,6 +9,14 @@ export interface OutboundEmbed {
   readonly description?: string;
   readonly fields?: readonly OutboundEmbedField[];
   readonly footer?: string;
+  /**
+   * A 24-bit colour, chosen by the PRESENTER from `DUCKY_COLORS`.
+   *
+   * Never derived from message content. A reply that could pick its own colour
+   * would be output influencing its own presentation, and the sanitizer drops
+   * anything that is not a plain integer in range rather than clamping it.
+   */
+  readonly color?: number;
 }
 
 export type ButtonStyle = 'primary' | 'secondary' | 'success' | 'danger';

@@ -23,6 +23,7 @@ import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
+import { conversationReply } from './assistant-presenters.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import { ChannelRolePolicy } from '../domain/channel-roles.js';
 import { ReplyPersistencePolicy } from '../domain/reply-persistence.js';
@@ -603,7 +604,7 @@ export class DuckyRouter {
       { userText: input.text, assistantText: content },
       input.context,
     );
-    return { content, ephemeral: false };
+    return conversationReply(content, reply.mock);
   }
 
   // ------------------------------------------------------------- commands --

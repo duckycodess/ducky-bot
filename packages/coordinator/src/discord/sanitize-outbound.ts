@@ -2,6 +2,7 @@ import {
   ACTION_ROWS_MAX, BUTTONS_PER_ROW_MAX, CUSTOM_ID_MAX, DISCORD_CONTENT_MAX,
   EMBED_DESC_MAX, EMBED_FIELDS_MAX, EMBED_FIELD_NAME_MAX, EMBED_FIELD_VALUE_MAX,
   EMBED_FOOTER_MAX, EMBED_TITLE_MAX, EMBED_TOTAL_MAX, TRUNCATION_MARKER,
+  isValidEmbedColor,
 } from '@ducky/contracts';
 import { redact, type Redactor } from '@ducky/adapters';
 import type { OutboundEmbed, OutboundMessage, OutboundRow } from './message.js';
@@ -56,7 +57,17 @@ export function sanitizeOutbound(message: OutboundMessage, r: Redactor = redact)
         description?: string;
         fields?: { name: string; value: string; inline?: boolean }[];
         footer?: string;
+        color?: number;
       } = {};
+      /**
+       * Dropped rather than clamped when invalid.
+       *
+       * Clamping would turn a nonsense value into a plausible one, which is
+       * how a bug becomes invisible. A colour is decoration: losing it costs
+       * nothing, and it does not count against the character budget because
+       * Discord does not count it either.
+       */
+      if (isValidEmbedColor(e.color)) embed.color = e.color;
       const spend = (s: string, max: number): string => {
         const clipped = clip(r(s), Math.max(0, Math.min(max, budget)));
         budget -= clipped.length;

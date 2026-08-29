@@ -221,3 +221,16 @@ export const commitAction = (message = 'feat: add a') => ({
   description: 'commit the change',
   details: { message, files: ['src/a.ts'] },
 });
+
+/**
+ * The text of a reply, wherever it lives.
+ *
+ * A conversational reply is one embed now rather than a bare paragraph, and the
+ * text is in the description and NOT duplicated into `content` -- duplicating
+ * would double every message and push a long reply past Discord's limits. This
+ * reads either shape so a test can assert on what was said without caring how
+ * it was rendered.
+ */
+export const replyText = (
+  reply: { content?: string; embeds?: readonly { description?: string }[] } | undefined,
+): string => reply?.content ?? reply?.embeds?.[0]?.description ?? '';

@@ -3,7 +3,7 @@ import {
   CONVERSATIONAL_ROUTE, OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS,
 } from '@ducky/contracts';
 import { Authorizer, loadAuthzConfig } from '../src/security/authz.js';
-import { CHAT, OWNER, STRANGER, makeHarness, secret } from './helpers.js';
+import { CHAT, OWNER, STRANGER, makeHarness, secret, replyText } from './helpers.js';
 
 describe('authorization configuration', () => {
   it('requires exactly one owner', () => {
@@ -57,7 +57,7 @@ describe('owner-only surface manifest', () => {
     const chat = await h.transport.dispatch({
       kind: 'message', userId: CHAT, text: 'hello', threadKey: 't',
     });
-    expect(chat?.content).toContain('[mock]');
+    expect(replyText(chat)).toContain('[mock]');
 
     for (const name of OWNER_ONLY_COMMANDS) {
       const reply = await h.transport.dispatch({

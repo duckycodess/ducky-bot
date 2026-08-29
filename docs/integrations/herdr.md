@@ -211,19 +211,51 @@ skips honestly when no agent probe has been recorded.
 No pane content is ever written to the fixture: a snapshot is whatever the agent
 happened to print, so only the shape, a digest, and the timings are recorded.
 
+### Repeatability, now measured
+
+The readiness fix removed the known cause of the stall. What it could not do by
+itself was prove repeatability, and that needed production-path runs.
+
+`pnpm probe:live-job` has since been run **three times consecutively, each
+against its own throwaway database**, and each exited 0 through the full
+evidence gate:
+
+| Run | Elapsed | Result |
+|---|---|---|
+| 1 | 162 s | `implemented`, independent review passed, `changedFiles=["README.md"]` |
+| 2 | 193 s | same |
+| 3 | 192 s | same, with two verification commands |
+
+Not one stalled. And the reason is visible in the recorded argv rather than
+inferred from the absence of a failure: between `agent start` and
+`agent prompt`, every run shows two or three `agent read --source detection`
+calls. That is the orchestrator watching for Pi's input frame on two
+consecutive reads instead of believing `interactive_ready`.
+
+The runs were isolated from the development coordinator and executor, which
+were left running throughout and never touched. `probe:live-job` now REFUSES to
+start when another executor has checked into the same database within the last
+two minutes — the race that made the earlier round unmeasurable, detected
+directly instead of described in a runbook. See
+[../runbooks/live-job-certification.md](../runbooks/live-job-certification.md).
+
 ### What is still not certified
 
-The readiness fix removes the known cause of the stall. It does **not** by itself
-make the integration certified: that needs repeated production-path runs through
-`pnpm probe:live-job`, which has not been re-run since the fix landed.
+Repeatability is measured; promotion has not happened.
 `HerdrPiOrchestrator.verified` stays `false`, `/status` reports `experimental`,
-and `DUCKY_HERDR_VERIFIED` is unset.
+and `DUCKY_HERDR_VERIFIED` is unset. A probe that promoted the integration on
+the strength of its own evidence would be grading its own work, so the flag
+stays what it has always been: a deliberate operator act.
+
+Nothing about Discord is proved by any of this. The transport is mocked in the
+probe on purpose — a certification run must never open a gateway.
 
 ## Verified status
 
 `HerdrPiOrchestrator.verified` is still `false` and `/status` still reports
 `experimental`. `DUCKY_HERDR_VERIFIED=1` remains a deliberate operator act —
-nothing in the code sets it, and this run did not set it.
+nothing in the code sets it, and no probe run has set it. The three certified
+runs above are the evidence an operator would weigh; they are not the act.
 
 ## Ownership rules
 

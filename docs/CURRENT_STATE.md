@@ -464,13 +464,32 @@ A successful run against the disposable allowlisted repository recorded:
 Not certified by that run, and stated plainly: no Discord gateway interaction,
 no OpenClaw, and `DUCKY_HERDR_VERIFIED` was not set.
 
-**One successful production-path run has been OBSERVED. Repeatability is NOT
-certified.** Of the runs attempted after the orchestration fixes landed, two
-reached `completed` with an accepted `implemented` result (271 s and 240 s) — and
-only the 271 s run was checked against the full evidence gate, because the gate
-was added after the first. Three failed with `agent_prompt_stalled`, because
-`agent start` reported `interactive_ready: true` while Pi was still painting
-startup banners and the prompt was silently dropped.
+**Repeatability is now CERTIFIED: three consecutive clean runs.** Before the
+readiness fix this said the opposite, and honestly so — of the runs attempted
+then, two reached `completed` (271 s and 240 s) and three failed with
+`agent_prompt_stalled`, because `agent start` reported `interactive_ready: true`
+while Pi was still painting startup banners and the prompt was silently dropped.
+
+Since the fix, `pnpm probe:live-job` has been re-run **three times in a row,
+each against its own throwaway database**, and each exited 0 through the full
+evidence gate:
+
+| Run | Elapsed | Phases observed | Result |
+|---|---|---|---|
+| 1 | 162 s | preparing → planning → implementing → reviewing → verifying | `implemented`, independent review passed |
+| 2 | 193 s | same | `implemented`, independent review passed |
+| 3 | 192 s | same | `implemented`, independent review passed, two verification commands |
+
+Every run recorded the full transition and audit history, the exact Herdr argv
+sequence including `worktree create --label ducky-mgd:…`, a `herdr_workspaces`
+row with `mode=worktree`, `changedFiles=["README.md"]`, and no leak at teardown.
+Not one run stalled.
+
+**The stall's absence is evidence, not luck.** The readiness observation is in
+each run's argv: `agent read --source detection` appears two or three times
+between `agent start` and `agent prompt`, which is the orchestrator waiting for
+Pi's input frame on two consecutive reads rather than trusting
+`interactive_ready`.
 
 Ducky reported that honestly — its own error code, bounded observation, never a
 re-prompt, workspace and reservation retained, and a non-zero probe exit.
@@ -489,11 +508,15 @@ There is no timing heuristic: stability is two consecutive observations, and if
 the marker never appears the orchestrator falls back to exactly the previous
 behaviour rather than refusing the job.
 
-**Still not certified.** `pnpm probe:live-job` has not been re-run since the fix,
-so repeatability on the production path is unmeasured.
-**`HerdrPiOrchestrator.verified` stays `false`, `/status` still reports
-`experimental`, and `DUCKY_HERDR_VERIFIED` is unset.**
-See [integrations/herdr.md](integrations/herdr.md).
+**Repeatability is measured now** — see the three runs above.
+**`HerdrPiOrchestrator.verified` nonetheless stays `false`, `/status` still
+reports `experimental`, and `DUCKY_HERDR_VERIFIED` is unset.** That is not an
+oversight and it is not modesty: promoting the integration is a deliberate
+operator act, and a probe that promoted itself on its own evidence would be
+grading its own work. The evidence is on the table; the decision is the
+owner's.
+See [integrations/herdr.md](integrations/herdr.md) and
+[runbooks/live-job-certification.md](runbooks/live-job-certification.md).
 
 ## Verified against the live host
 
@@ -596,7 +619,8 @@ Probes run in this milestone, with their real outcomes:
 | `pnpm probe:herdr --with-agent` | Run twice. The FIRST exited 3 — the readiness marker never matched a real pane — which is what corrected the marker. The second exited 0, with the input frame observed 8.16 s after `agent start`. |
 | `pnpm probe:openclaw` | Exits **2**: half the contract recorded, the reply half blocked on model provider credentials. |
 | `pnpm probe:gh` | Exits 0. Field lists recorded for six read-only surfaces, locally and repo-less. |
-| `pnpm probe:live-job` | **Not run in this milestone.** It would race the executor already polling the development database, and a run against a held reservation measures nothing. |
+| `pnpm probe:live-job` | **Run three times, all exit 0**, each against its own throwaway database in a directory outside the repository. 162 s / 193 s / 192 s, full evidence gate each time. The development coordinator and executor were left running throughout and were never touched. |
+| `pnpm probe:gh-live` | Exits **2**. Five read surfaces returned live responses that the production schemas accepted, and the watch loop observed and then deduplicated against a real repository. `prView` / `prChecks` / `prReviews` are unexercised: the target has no pull request, and opening one is a GitHub write. |
 
 ## Next
 

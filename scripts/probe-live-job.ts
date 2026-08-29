@@ -316,6 +316,38 @@ async function run(live: Live): Promise<ProbeOutcome> {
     );
   }
 
+  /**
+   * Another executor is already polling this database.
+   *
+   * This is the race the documentation kept naming in prose and nothing
+   * checked: a development executor left running against the development
+   * database will claim the probe's job, run it under a different orchestrator
+   * instance, and leave this run measuring somebody else's work -- or nothing
+   * at all. The two preconditions above cannot see it, because a competing
+   * executor that is merely IDLE holds no reservation and leaves no
+   * non-terminal job behind.
+   *
+   * Detected directly rather than inferred from the database path: an executor
+   * row that checked in seconds ago is a live poller whatever file it is
+   * reading. The fix is to point this run at its own database (see
+   * `docs/runbooks/live-job-certification.md`), never to stop the executor
+   * somebody else is using.
+   */
+  const recentCutoff = new Date(Date.now() - FOREIGN_EXECUTOR_WINDOW_MS).toISOString();
+  const pollers = app.store.executors
+    .listExecutors()
+    .filter((e) => e.state === 'active' && e.lastSeenAt !== null && e.lastSeenAt >= recentCutoff);
+  if (pollers.length > 0) {
+    throw new Error(
+      `another executor is polling this database right now: ${pollers
+        .map((e) => `${e.id} (last seen ${e.lastSeenAt})`)
+        .join(', ')}.\n` +
+        'It would claim this probe\'s job and the run would measure nothing. Give this run its ' +
+        'OWN database and credential file rather than stopping an executor somebody is using -- ' +
+        'see docs/runbooks/live-job-certification.md.',
+    );
+  }
+
   const t0 = Date.now();
   const herdr = new HerdrCli({
     onInvoke: (argv) => {
@@ -547,6 +579,15 @@ export function resolveWatchBudgetMs(raw: string | undefined): number {
 
 const TERMINALS = ['completed', 'failed', 'cancelled', 'needs_owner_input', 'needs_approval'];
 const SHUTDOWN_GRACE_MS = 15_000;
+
+/**
+ * How recently an executor must have checked in to count as still polling.
+ *
+ * Deliberately generous relative to the heartbeat interval: a false positive
+ * costs one refused probe run and a message saying exactly why, while a false
+ * negative costs a certification that measured the wrong executor.
+ */
+const FOREIGN_EXECUTOR_WINDOW_MS = 120_000;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**

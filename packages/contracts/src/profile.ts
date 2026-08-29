@@ -75,6 +75,12 @@ export const PROFILE_ENV = {
     componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_DEV_SHARED_CHANNEL_IDS',
     approvedActions: 'DUCKY_DEV_APPROVED_ACTIONS_ENABLED',
+    roleChannels: {
+      briefing: 'DUCKY_DEV_BRIEFING_CHANNEL_ID',
+      task: 'DUCKY_DEV_TASK_CHANNEL_ID',
+      coding: 'DUCKY_DEV_CODING_CHANNEL_ID',
+      gpt: 'DUCKY_DEV_GPT_CHANNEL_ID',
+    },
   },
   production: {
     token: 'DISCORD_PROD_TOKEN',
@@ -84,6 +90,12 @@ export const PROFILE_ENV = {
     componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_PROD_SHARED_CHANNEL_IDS',
     approvedActions: 'DUCKY_PROD_APPROVED_ACTIONS_ENABLED',
+    roleChannels: {
+      briefing: 'DUCKY_PROD_BRIEFING_CHANNEL_ID',
+      task: 'DUCKY_PROD_TASK_CHANNEL_ID',
+      coding: 'DUCKY_PROD_CODING_CHANNEL_ID',
+      gpt: 'DUCKY_PROD_GPT_CHANNEL_ID',
+    },
   },
 } as const satisfies Record<
   DuckyProfile,
@@ -95,8 +107,35 @@ export const PROFILE_ENV = {
     componentKey: string;
     sharedChannels: string;
     approvedActions: string;
+    roleChannels: Record<ChannelRole, string>;
   }
 >;
+
+/**
+ * The private assistant channels an owner may configure.
+ *
+ * A role says WHERE a kind of output belongs and whether the owner's replies
+ * there persist. It says nothing whatever about who may act: authorization is
+ * frozen environment configuration and a role channel grants nobody anything.
+ * See ADR 0023.
+ */
+export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt'] as const;
+export type ChannelRole = (typeof CHANNEL_ROLES)[number];
+
+/**
+ * The unscoped names, accepted on a single-profile development box only.
+ *
+ * Production reads its own `DUCKY_PROD_*` and never these -- the same rule
+ * every other cross-profile setting follows, and for the same reason: a
+ * development channel id inherited by production would publish the owner's
+ * real assistant output into a test channel.
+ */
+export const UNSCOPED_ROLE_CHANNEL_ENV = {
+  briefing: 'DUCKY_BRIEFING_CHANNEL_ID',
+  task: 'DUCKY_TASK_CHANNEL_ID',
+  coding: 'DUCKY_CODING_CHANNEL_ID',
+  gpt: 'DUCKY_GPT_CHANNEL_ID',
+} as const satisfies Record<ChannelRole, string>;
 
 /**
  * Where slash commands are registered.

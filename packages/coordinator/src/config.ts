@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { assertValidSlotTime } from './domain/briefing-notifications.service.js';
+import { assertNoChannelRoleConflicts } from './domain/channel-roles.js';
 import {
+  CHANNEL_ROLES, UNSCOPED_ROLE_CHANNEL_ENV, type ChannelRole,
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
   CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES,
@@ -58,6 +60,32 @@ export const EnvSchema = z.object({
   DUCKY_SHARED_CHANNEL_IDS: z.string().optional(),
   DUCKY_DEV_SHARED_CHANNEL_IDS: z.string().optional(),
   DUCKY_PROD_SHARED_CHANNEL_IDS: z.string().optional(),
+
+  /**
+   * The owner's PRIVATE assistant channels, one per role.
+   *
+   * Distinct from the shared-channel list in what they mean, not just in who
+   * reads them: a role channel is where a kind of output belongs AND where the
+   * owner's replies persist instead of vanishing. Configuring one is a
+   * statement that the channel is private enough for that; Ducky cannot check
+   * channel membership and does not pretend to.
+   *
+   * Profile-scoped like every other cross-profile setting. The unscoped names
+   * stay accepted for a single-profile development box; production reads ONLY
+   * its own.
+   */
+  DUCKY_BRIEFING_CHANNEL_ID: z.string().optional(),
+  DUCKY_TASK_CHANNEL_ID: z.string().optional(),
+  DUCKY_CODING_CHANNEL_ID: z.string().optional(),
+  DUCKY_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_BRIEFING_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_TASK_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_CODING_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_BRIEFING_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_TASK_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_CODING_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_GPT_CHANNEL_ID: z.string().optional(),
 
   // Consequential action execution is separately opt-in per profile. The
   // default is false, so an approval remains a recorded decision unless an
@@ -373,6 +401,47 @@ export function resolveSharedChannelIds(env: Env): readonly string[] {
     }
   }
   return Object.freeze([...new Set(ids)]);
+}
+
+/**
+ * The owner's private assistant channels, per role, for THIS profile.
+ *
+ * Same authority model and same isolation as `resolveSharedChannelIds`:
+ * frozen environment configuration, validated as Discord snowflakes, and
+ * production never inheriting the unscoped name.
+ *
+ * Conflicts are refused here rather than resolved, so a channel that means two
+ * things fails at boot instead of quietly picking one.
+ */
+export function resolveChannelRoles(env: Env): Partial<Record<ChannelRole, string>> {
+  const names = PROFILE_ENV[env.DUCKY_PROFILE];
+  const isProd = env.DUCKY_PROFILE === 'production';
+
+  const roles: Partial<Record<ChannelRole, string>> = {};
+  for (const role of CHANNEL_ROLES) {
+    const scopedName = names.roleChannels[role];
+    const scoped = blankToUndefined(env[scopedName as keyof Env] as string | undefined);
+    const unscoped = isProd
+      ? undefined
+      : blankToUndefined(env[UNSCOPED_ROLE_CHANNEL_ENV[role] as keyof Env] as string | undefined);
+    const raw = scoped ?? unscoped;
+    if (raw === undefined) continue;
+
+    if (!DISCORD_SNOWFLAKE.test(raw)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${scopedName} is not a Discord channel id.`,
+      );
+    }
+    roles[role] = raw;
+  }
+
+  assertNoChannelRoleConflicts(
+    roles,
+    resolveSharedChannelIds(env),
+    (role) => names.roleChannels[role],
+  );
+  return roles;
 }
 
 /**

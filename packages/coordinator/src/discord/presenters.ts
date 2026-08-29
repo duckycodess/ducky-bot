@@ -308,6 +308,13 @@ export interface ProviderStatus {
   readonly actions: string;
   readonly executors: string;
   readonly sharedChannels: string;
+  /**
+   * Which private assistant channels are configured. ROLE NAMES only -- a
+   * channel id is not secret, but it is not information the owner needs read
+   * back to them either, and `/status` is a health readout rather than a
+   * configuration dump.
+   */
+  readonly channelRoles: string;
   /** The configured owner timezone every assistant readback is rendered in. */
   readonly ownerTimezone: string;
   /** Whether anything can actually confirm a dependency, and what happens if not. */
@@ -336,6 +343,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Dependency checks', value: p.dependencyChecker },
           { name: 'GitHub watches', value: p.githubWatches, inline: true },
           { name: 'Shared visibility', value: p.sharedChannels },
+          { name: 'Assistant channels', value: p.channelRoles },
         ],
       },
     ],

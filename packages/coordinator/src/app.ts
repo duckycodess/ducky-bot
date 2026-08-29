@@ -15,7 +15,7 @@ import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -34,6 +34,7 @@ import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
 import { SharedChannelPolicy } from './domain/shared-visibility.js';
+import { ChannelRolePolicy } from './domain/channel-roles.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
 import { RemindersService } from './domain/reminders.service.js';
@@ -119,6 +120,8 @@ export interface App {
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
+  /** The owner's private assistant channels. Presentation only, never authority. */
+  readonly channelRoles: ChannelRolePolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
   readonly transport: DiscordTransport;
@@ -278,6 +281,8 @@ export function createApp(
   // Opt-in, profile-scoped, and empty by default: with nothing configured the
   // shared surface does not exist at all.
   const sharedPolicy = new SharedChannelPolicy(resolveSharedChannelIds(env));
+  // Refuses a channel that is both shared and role-configured, at boot.
+  const channelRoles = new ChannelRolePolicy(resolveChannelRoles(env));
   const sharedJobs = new SharedJobsService({ store, allowlist });
 
   const transport = overrides.transport ?? transportForProfile(discordProfile);
@@ -340,6 +345,9 @@ export function createApp(
     dependencyChecker: dependencies.checkerVerified
       ? `${dependencies.checkerName} (verified)`
       : `${dependencies.checkerName} — dependency waits end at your desk, never auto-resumed`,
+    channelRoles: channelRoles.enabled
+      ? `${channelRoles.configured.map((c) => c.role).join(', ')} — replies persist there`
+      : 'none configured; every owner reply stays ephemeral in a guild',
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',
@@ -401,7 +409,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, sharedJobs, router, transport,
+    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport,
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,

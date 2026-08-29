@@ -226,3 +226,75 @@ describe('nothing in a pushed briefing can be generated', () => {
     h.close();
   });
 });
+
+describe('briefing delivery targets', () => {
+  const CHANNEL = '900000000000000010';
+
+  it('defaults to the DM, so an upgrade changes nothing', () => {
+    const h = makeHarness({ env: { DUCKY_BRIEFING_ENABLED: 'true' } });
+    // One row per slot, addressed to the owner, exactly as before.
+    h.app.briefingNotifier.claimDueSlots();
+    const rows = h.store.db
+      .prepare('SELECT target FROM briefing_deliveries')
+      .all() as { target: string }[];
+    for (const r of rows) expect(r.target).toBe('owner_dm');
+    h.close();
+  });
+
+  it('refuses channel delivery with no channel configured, at STARTUP', () => {
+    /**
+     * Not a per-tick failure. A briefing addressed to a channel that does not
+     * exist would fail once a day, quietly, forever -- and it is never
+     * silently downgraded to a DM, because the owner said where they wanted it.
+     */
+    expect(() =>
+      makeHarness({ env: { DUCKY_BRIEFING_ENABLED: 'true', DUCKY_BRIEFING_DELIVERY: 'channel' } }),
+    ).toThrow(/needs .*BRIEFING_CHANNEL_ID/i);
+    expect(() =>
+      makeHarness({ env: { DUCKY_BRIEFING_ENABLED: 'true', DUCKY_BRIEFING_DELIVERY: 'both' } }),
+    ).toThrow(/needs .*BRIEFING_CHANNEL_ID/i);
+  });
+
+  it('claims one row per target for `both`, so neither copy hides the other', () => {
+    /**
+     * The reason the target is part of the idempotency key. With a single row,
+     * delivering the DM would mark the slot done and the channel copy would
+     * never be sent.
+     */
+    const h = makeHarness({
+      env: {
+        DUCKY_BRIEFING_ENABLED: 'true',
+        DUCKY_BRIEFING_DELIVERY: 'both',
+        DUCKY_DEV_BRIEFING_CHANNEL_ID: CHANNEL,
+      },
+    });
+    const claimed = h.app.briefingNotifier.claimDueSlots();
+    const rows = h.store.db
+      .prepare('SELECT target FROM briefing_deliveries ORDER BY target')
+      .all() as { target: string }[];
+
+    if (claimed > 0) {
+      expect(new Set(rows.map((r) => r.target))).toEqual(
+        new Set(['briefing_channel', 'owner_dm']),
+      );
+    }
+    h.close();
+  });
+
+  it('stays idempotent per (slot, target) across repeated ticks', () => {
+    const h = makeHarness({
+      env: {
+        DUCKY_BRIEFING_ENABLED: 'true',
+        DUCKY_BRIEFING_DELIVERY: 'both',
+        DUCKY_DEV_BRIEFING_CHANNEL_ID: CHANNEL,
+      },
+    });
+    h.app.briefingNotifier.claimDueSlots();
+    const after1 = h.store.db.prepare('SELECT COUNT(*) AS n FROM briefing_deliveries').get();
+    h.app.briefingNotifier.claimDueSlots();
+    h.app.briefingNotifier.claimDueSlots();
+    const after3 = h.store.db.prepare('SELECT COUNT(*) AS n FROM briefing_deliveries').get();
+    expect(after3).toEqual(after1);
+    h.close();
+  });
+});

@@ -68,6 +68,16 @@ export interface ConversationTurnRow {
 
 /** Which slot of the day a proactive briefing covers. */
 export type BriefingSlotKind = 'morning' | 'evening';
+
+/**
+ * Where one briefing copy goes.
+ *
+ * Part of the ledger's idempotency key, so a DM and a channel copy of the same
+ * morning succeed, fail and retry independently -- the same shape
+ * `NOTIFICATION_TARGETS` already uses for job transitions.
+ */
+export const BRIEFING_TARGETS = ['owner_dm', 'briefing_channel'] as const;
+export type BriefingTarget = (typeof BRIEFING_TARGETS)[number];
 export type BriefingDeliveryStatus = 'pending' | 'delivered' | 'abandoned' | 'skipped';
 
 /**
@@ -81,6 +91,7 @@ export interface BriefingDeliveryRow {
   discordUserId: string;
   kind: BriefingSlotKind;
   dayKey: string;
+  target: BriefingTarget;
   dueAt: string;
   status: BriefingDeliveryStatus;
   attempts: number;

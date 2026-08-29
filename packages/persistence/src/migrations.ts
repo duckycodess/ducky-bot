@@ -957,4 +957,54 @@ ALTER TABLE repos ADD COLUMN local_path TEXT;
 UPDATE repos SET local_path = absolute_path;
 `,
   },
+  {
+    version: 21,
+    name: 'briefing_delivery_targets',
+    sql: `
+-- A briefing can now go to the owner's DM, to their configured briefing
+-- channel, or to both -- so the ledger needs to know WHICH, and the
+-- idempotency key has to include it.
+--
+-- Without the target in the key, delivering to a DM would mark the whole slot
+-- done and the channel copy would never be sent; with it, the two succeed,
+-- fail and retry independently, exactly as the job-notification ledger's
+-- (transition, target) pairs already do.
+--
+-- A REBUILD is safe here and was not safe for \`repos\`: nothing carries a
+-- foreign key to \`briefing_deliveries\` (checked), so dropping it breaks no
+-- child constraint.
+--
+-- Existing rows are back-filled as \`owner_dm\`, which is what every row that
+-- exists today actually was. An upgrade therefore changes nothing about a
+-- briefing already delivered, and does not re-send one.
+CREATE TABLE briefing_deliveries_v2 (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('morning','evening')),
+  day_key         TEXT NOT NULL,
+  target          TEXT NOT NULL CHECK (target IN ('owner_dm','briefing_channel')),
+  due_at          TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('pending','delivered','abandoned','skipped')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_error_at   TEXT,
+  delivered_at    TEXT,
+  created_at      TEXT NOT NULL
+);
+
+INSERT INTO briefing_deliveries_v2
+  (id, discord_user_id, kind, day_key, target, due_at, status, attempts,
+   last_error_at, delivered_at, created_at)
+  SELECT id, discord_user_id, kind, day_key, 'owner_dm', due_at, status, attempts,
+         last_error_at, delivered_at, created_at
+    FROM briefing_deliveries;
+
+DROP TABLE briefing_deliveries;
+ALTER TABLE briefing_deliveries_v2 RENAME TO briefing_deliveries;
+
+CREATE UNIQUE INDEX ux_briefing_deliveries_slot
+  ON briefing_deliveries(discord_user_id, kind, day_key, target);
+CREATE INDEX ix_briefing_deliveries_pending
+  ON briefing_deliveries(status, due_at) WHERE status = 'pending';
+`,
+  },
 ];

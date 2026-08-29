@@ -3,8 +3,8 @@ import {
   BRIEFING_DELIVERY_BATCH, BRIEFING_MAX_DELIVERY_ATTEMPTS, BRIEFING_STALE_AFTER_MS,
   instantOfZonedWallClock, zonedDateKey, zonedParts,
 } from '@ducky/contracts';
-import type { BriefingSlotKind, Store } from '@ducky/persistence';
-import { dmTarget } from '../discord/message.js';
+import type { BriefingSlotKind, Store, BriefingTarget } from '@ducky/persistence';
+import { channelTarget, dmTarget, type SendTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
 import type { OwnerClock } from './owner-clock.js';
@@ -17,6 +17,19 @@ export interface BriefingScheduleConfig {
   /** Local wall-clock times in the owner's zone, `HH:MM`. */
   readonly morningAt: string;
   readonly eveningAt: string;
+  /**
+   * Where a briefing goes: the owner's DM, their configured briefing channel,
+   * or both.
+   *
+   * `dm` is the default and is what every existing instance already does, so
+   * an upgrade changes nothing. `channel` and `both` require
+   * `DUCKY_*_BRIEFING_CHANNEL_ID`, refused at startup otherwise -- a briefing
+   * configured to go somewhere that does not exist would fail once a day,
+   * quietly, forever.
+   */
+  readonly delivery: BriefingDelivery;
+  /** The configured briefing channel, when one is. */
+  readonly channelId?: string | undefined;
 }
 
 export interface BriefingNotifierDeps {
@@ -134,14 +147,20 @@ export class BriefingNotifier {
     ] as const) {
       const dueMs = slotInstantMs(dayKey, at, tz);
       if (dueMs === undefined || dueMs > nowMs) continue;
-      const wrote = this.store.briefings.claimSlot({
-        id: randomUUID(),
-        discordUserId: this.ownerId,
-        kind,
-        dayKey,
-        dueAt: new Date(dueMs).toISOString(),
-      });
-      if (wrote) claimed += 1;
+      // One row PER TARGET. Two rows for `both`, so the DM and the channel
+      // copy succeed, fail and retry independently -- a single row would mean
+      // delivering one marked the slot done and the other was never sent.
+      for (const target of this.targets()) {
+        const wrote = this.store.briefings.claimSlot({
+          id: randomUUID(),
+          discordUserId: this.ownerId,
+          kind,
+          dayKey,
+          target,
+          dueAt: new Date(dueMs).toISOString(),
+        });
+        if (wrote) claimed += 1;
+      }
     }
     return claimed;
   }
@@ -182,7 +201,17 @@ export class BriefingNotifier {
       try {
         const actor: ActorContext = { discordUserId: this.ownerId, role: 'owner' };
         const body = this.briefing.build(actor, row.kind);
-        await this.transport.send(dmTarget(this.ownerId), briefingMessage(body));
+        const to = this.targetFor(row.target);
+        if (!to) {
+          // The channel was configured when this row was claimed and is not
+          // any more. Retired visibly rather than retried against nothing, and
+          // never silently redirected to the DM: the owner chose where this
+          // goes.
+          this.store.briefings.markSkipped(row.id, nowIso);
+          skippedStale += 1;
+          continue;
+        }
+        await this.transport.send(to, briefingMessage(body));
         this.store.briefings.markDelivered(row.id, nowIso);
         delivered += 1;
       } catch {
@@ -193,7 +222,30 @@ export class BriefingNotifier {
     }
     return { delivered, failed, abandoned, skippedStale };
   }
+
+  /** The targets a due slot is claimed for, from configuration. */
+  private targets(): readonly BriefingTarget[] {
+    switch (this.config.delivery) {
+      case 'dm':
+        return ['owner_dm'];
+      case 'channel':
+        return ['briefing_channel'];
+      case 'both':
+        return ['owner_dm', 'briefing_channel'];
+    }
+  }
+
+  /** Where one recorded target actually sends, or undefined if it cannot. */
+  private targetFor(target: BriefingTarget): SendTarget | undefined {
+    if (target === 'owner_dm') return dmTarget(this.ownerId);
+    const channelId = this.config.channelId;
+    return channelId === undefined ? undefined : channelTarget(channelId);
+  }
 }
+
+/** Where a briefing is delivered. */
+export const BRIEFING_DELIVERY_MODES = ['dm', 'channel', 'both'] as const;
+export type BriefingDelivery = (typeof BRIEFING_DELIVERY_MODES)[number];
 
 /**
  * The instant a `HH:MM` local slot falls on for one civil day.

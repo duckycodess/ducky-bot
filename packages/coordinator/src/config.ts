@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import { assertValidSlotTime } from './domain/briefing-notifications.service.js';
+import {
+  BRIEFING_DELIVERY_MODES, assertValidSlotTime, type BriefingDelivery,
+} from './domain/briefing-notifications.service.js';
 import { assertNoChannelRoleConflicts } from './domain/channel-roles.js';
 import {
   CHANNEL_ROLES, UNSCOPED_ROLE_CHANNEL_ENV, type ChannelRole,
@@ -178,6 +180,11 @@ export const EnvSchema = z.object({
   DUCKY_BRIEFING_ENABLED: bool(false),
   DUCKY_BRIEFING_MORNING_AT: z.string().max(5).default('07:30'),
   DUCKY_BRIEFING_EVENING_AT: z.string().max(5).default('20:30'),
+  /**
+   * Where a proactive briefing goes. `dm` is the default and is what every
+   * existing instance already does, so an upgrade changes nothing.
+   */
+  DUCKY_BRIEFING_DELIVERY: z.enum(BRIEFING_DELIVERY_MODES).default('dm'),
 
   SCHEDULE_BINARY_EXTRACTION_ENABLED: bool(false),
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
@@ -490,11 +497,33 @@ export const resolveBriefingSchedule = (env: Env): {
   enabled: boolean;
   morningAt: string;
   eveningAt: string;
-} => ({
-  enabled: env.DUCKY_BRIEFING_ENABLED,
-  morningAt: assertValidSlotTime(env.DUCKY_BRIEFING_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT'),
-  eveningAt: assertValidSlotTime(env.DUCKY_BRIEFING_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT'),
-});
+  delivery: BriefingDelivery;
+  channelId?: string | undefined;
+} => {
+  const delivery = env.DUCKY_BRIEFING_DELIVERY;
+  const channelId = resolveChannelRoles(env).briefing;
+
+  /**
+   * A briefing addressed to a channel that is not configured would fail once a
+   * day, quietly, forever. Refused at startup instead -- and never silently
+   * downgraded to a DM, because the owner said where they wanted it.
+   */
+  if (delivery !== 'dm' && channelId === undefined) {
+    const name = PROFILE_ENV[env.DUCKY_PROFILE].roleChannels.briefing;
+    throw new DuckyError(
+      'invalid_input',
+      `DUCKY_BRIEFING_DELIVERY=${delivery} needs ${name} to name the channel it delivers to.`,
+    );
+  }
+
+  return {
+    enabled: env.DUCKY_BRIEFING_ENABLED,
+    morningAt: assertValidSlotTime(env.DUCKY_BRIEFING_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT'),
+    eveningAt: assertValidSlotTime(env.DUCKY_BRIEFING_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT'),
+    delivery,
+    ...(channelId === undefined ? {} : { channelId }),
+  };
+};
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

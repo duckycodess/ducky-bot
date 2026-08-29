@@ -1,12 +1,15 @@
 import type { Db } from '../db.js';
 import { nowIso } from '../db.js';
-import type { BriefingDeliveryRow, BriefingDeliveryStatus, BriefingSlotKind } from './types.js';
+import type {
+  BriefingDeliveryRow, BriefingDeliveryStatus, BriefingSlotKind, BriefingTarget,
+} from './types.js';
 
 const map = (r: Record<string, unknown>): BriefingDeliveryRow => ({
   id: String(r['id']),
   discordUserId: String(r['discord_user_id']),
   kind: String(r['kind']) as BriefingSlotKind,
   dayKey: String(r['day_key']),
+  target: String(r['target']) as BriefingTarget,
   dueAt: String(r['due_at']),
   status: String(r['status']) as BriefingDeliveryStatus,
   attempts: Number(r['attempts'] ?? 0),
@@ -29,25 +32,33 @@ export class BriefingsRepo {
   /**
    * Records that a slot has come due, or does nothing if it already was.
    *
-   * The `(user, kind, day_key)` unique index is what makes this idempotent: a
-   * repeated tick, two overlapping passes and a restart all collide on it
-   * rather than producing a second briefing for the same morning. Returns true
-   * only when THIS call created the row.
+   * The `(user, kind, day_key, TARGET)` unique index is what makes this
+   * idempotent: a repeated tick, two overlapping passes and a restart all
+   * collide on it rather than producing a second briefing for the same
+   * morning. The target is part of the key so a DM copy and a channel copy of
+   * the same slot are two independent rows -- otherwise delivering one would
+   * mark the slot done and the other would never be sent.
+   *
+   * Returns true only when THIS call created the row.
    */
   claimSlot(input: {
     id: string;
     discordUserId: string;
     kind: BriefingSlotKind;
     dayKey: string;
+    target: BriefingTarget;
     dueAt: string;
   }): boolean {
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO briefing_deliveries
-           (id, discord_user_id, kind, day_key, due_at, status, attempts, created_at)
-         VALUES (?,?,?,?,?, 'pending', 0, ?)`,
+           (id, discord_user_id, kind, day_key, target, due_at, status, attempts, created_at)
+         VALUES (?,?,?,?,?,?, 'pending', 0, ?)`,
       )
-      .run(input.id, input.discordUserId, input.kind, input.dayKey, input.dueAt, nowIso());
+      .run(
+        input.id, input.discordUserId, input.kind, input.dayKey, input.target,
+        input.dueAt, nowIso(),
+      );
     return Number(res.changes ?? 0) > 0;
   }
 
@@ -114,12 +125,14 @@ export class BriefingsRepo {
     discordUserId: string,
     kind: BriefingSlotKind,
     dayKey: string,
+    target: BriefingTarget = 'owner_dm',
   ): BriefingDeliveryRow | undefined {
     const r = this.db
       .prepare(
-        'SELECT * FROM briefing_deliveries WHERE discord_user_id = ? AND kind = ? AND day_key = ?',
+        `SELECT * FROM briefing_deliveries
+          WHERE discord_user_id = ? AND kind = ? AND day_key = ? AND target = ?`,
       )
-      .get(discordUserId, kind, dayKey);
+      .get(discordUserId, kind, dayKey, target);
     return r ? map(r as Record<string, unknown>) : undefined;
   }
 }

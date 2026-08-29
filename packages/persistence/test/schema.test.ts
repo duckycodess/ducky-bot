@@ -332,3 +332,63 @@ function walk(dir: string): string[] {
   }
   return out;
 }
+
+describe('migration 21: briefing delivery targets', () => {
+  it('back-fills existing rows as owner_dm and keys idempotency per target', () => {
+    /**
+     * Every row that existed before this migration WAS a DM, so back-filling
+     * them as `owner_dm` changes nothing about a briefing already delivered
+     * and does not re-send one.
+     */
+    const db = fresh();
+    const cols = (db.prepare('PRAGMA table_info(briefing_deliveries)').all() as { name: string }[])
+      .map((c) => c.name);
+    expect(cols).toContain('target');
+
+    const indexes = (
+      db.prepare('PRAGMA index_list(briefing_deliveries)').all() as { name: string }[]
+    ).map((i) => i.name);
+    expect(indexes).toContain('ux_briefing_deliveries_slot');
+
+    const keyed = (
+      db.prepare("PRAGMA index_info(ux_briefing_deliveries_slot)").all() as { name: string }[]
+    ).map((c) => c.name);
+    // The target is part of the key, so a DM copy and a channel copy of the
+    // same morning are two independent rows.
+    expect(keyed).toContain('target');
+    expect(keyed).toContain('day_key');
+    db.close();
+  });
+
+  it('carries a pre-migration row through as a delivered DM', () => {
+    const db = fresh0();
+    const upto20 = MIGRATIONS.filter((m) => m.version <= 20);
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+    for (const m of upto20) {
+      db.exec(m.sql);
+      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?,?,?)')
+        .run(m.version, m.name, new Date().toISOString());
+    }
+    const ts = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO briefing_deliveries
+         (id, discord_user_id, kind, day_key, due_at, status, attempts, delivered_at, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    ).run('b1', 'owner', 'morning', '2026-08-01', ts, 'delivered', 1, ts, ts);
+
+    runMigrations(db);
+
+    const row = db
+      .prepare('SELECT target, status FROM briefing_deliveries WHERE id = ?')
+      .get('b1') as { target: string; status: string };
+    expect(row.target).toBe('owner_dm');
+    expect(row.status).toBe('delivered');
+    db.close();
+  });
+});
+
+/** A database with no migrations applied, for history simulations. */
+function fresh0() {
+  return openDatabase({ location: ':memory:' });
+}

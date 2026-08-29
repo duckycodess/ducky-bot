@@ -29,9 +29,14 @@
  * because somebody typed a flag.
  *
  * To fill it in, in this order:
- *   1. configure a model provider for an OpenClaw agent (`openclaw agents add
- *      <id>`). This is the remaining blocker, and it is an OWNER action: it
- *      spends money on somebody's account, so nothing here does it;
+ *   1. sign in to a model provider. The supported subscription route is
+ *      `openclaw --dev models auth login --provider openai --device-code`,
+ *      which is ChatGPT/Codex OAuth -- NOT an API key, and never
+ *      `OPENAI_API_KEY`. `--dev` is load-bearing: the probe reads the `--dev`
+ *      profile store, and a login without it lands in a store nothing here
+ *      looks at. This is the remaining blocker and it is an OWNER action --
+ *      it spends somebody's subscription quota, and it needs a TTY, so
+ *      nothing here does it;
  *   2. run `pnpm probe:openclaw` again. It records a reply envelope only if a
  *      turn actually succeeds, and exits 2 while one has not;
  *   3. pin zod schemas against the recorded envelope and implement `reply()`

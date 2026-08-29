@@ -79,6 +79,12 @@ It failed, and **how** it failed is the recorded fact: `ProviderAuthError`
 with `--json`**, diagnostics on stderr, and a remediation hint pointing at
 `openclaw agents add <id>`.
 
+`agents add` is the interactive per-agent helper, and it will also happily take
+a pasted API key. The route this project takes is the **subscription** one —
+`models auth login --provider openai` — for the reason given under "Finishing
+the integration" below. `openclaw models auth list` confirms the current state
+directly: `Profiles: (none)`, in the default store *and* the `--dev` store.
+
 So no successful reply envelope has ever been observed on this host. Half a
 contract is not a contract:
 
@@ -117,9 +123,41 @@ it means nothing.
 
 ## Finishing the integration
 
-1. **Configure a model provider for an OpenClaw agent** — `openclaw agents add
-   <id>`, or provider keys in the environment for `--local`. This is the only
-   remaining blocker, and it is an owner action.
+1. **Sign in with a ChatGPT/Codex subscription.** This is the only remaining
+   blocker, and it is an owner action: it needs a TTY and it spends somebody's
+   subscription quota.
+
+   ```bash
+   openclaw --dev models auth login --provider openai --device-code
+   ```
+
+   Three things about that command, each recorded rather than assumed:
+
+   - **`--provider openai` is the subscription route.** OpenClaw uses one
+     provider id for both API-key auth and ChatGPT/Codex subscription auth
+     (`docs/providers/openai.md` in the pinned install). `models auth login`
+     runs the provider's OAuth flow; `--device-code` is its headless variant,
+     which `models auth login --help` confirms exists.
+   - **`--dev` is load-bearing.** `models auth list` reports the auth state
+     store per profile: `~/.openclaw/agents/main/agent/openclaw-agent.sqlite`
+     by default, `~/.openclaw-dev/…` under `--dev`. The probe runs everything
+     under `--dev`, so a login without it lands in a store the probe never
+     reads and the turn still fails with `ProviderAuthError`.
+   - **Never an API key.** Not `OPENAI_API_KEY`, not `OPENAI_ADMIN_KEY`, not
+     `models auth paste-api-key`. Those are OpenAI Platform billing, which is a
+     different account and a different bill from the subscription the owner
+     chose. Nothing in this repository configures one.
+
+   Afterwards, select the subscription-backed model — also an owner-scoped
+   local config write, in the `--dev` profile only:
+
+   ```bash
+   openclaw --dev config set agents.defaults.model.primary openai/gpt-5.6-sol
+   openclaw --dev models list --provider openai   # confirms what this account exposes
+   ```
+
+   If the account does not expose GPT-5.6, `openai/gpt-5.5` is the explicit
+   recovery choice. OpenClaw does not silently downgrade and neither does this.
 2. Run `pnpm probe:openclaw` again. It records a reply envelope **only if a turn
    actually succeeds**, and exits 2 while one has not.
 3. Pin zod schemas against the recorded envelope and implement `reply()` over

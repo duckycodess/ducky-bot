@@ -56,10 +56,14 @@ export class GatewayOpenClawProvider implements ConversationProvider {
    * Whether this provider could serve production traffic.
    *
    * A non-networked, verifiable startup contract: the provider can initialise
-   * only when a recorded contract exists for it. Today none does -- OpenClaw is
-   * not installed, `pnpm probe:openclaw` exits 2, and there are no fixtures --
-   * so this is always `false` and production refuses to start rather than
-   * discovering it on the owner's first message.
+   * only when a recorded contract exists for it.
+   *
+   * The comment here used to say "OpenClaw is not installed and there are no
+   * fixtures", which stopped being true the moment the pinned install landed
+   * and `openclaw.fixtures/` filled up. What is missing is narrower and is the
+   * only thing that matters: no successful agent turn has been recorded, so
+   * `RECORDED_CONTRACT_VERSION` is null and this stays `false`. Production then
+   * refuses at startup rather than discovering it on the owner's first message.
    *
    * It is deliberately NOT a flag an operator can set. `verified` has to mean
    * "a contract was recorded", or it means nothing.

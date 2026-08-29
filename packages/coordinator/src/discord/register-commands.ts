@@ -210,6 +210,89 @@ async function apply(profileArg: string | undefined): Promise<void> {
   );
 }
 
+/**
+ * What this build DEFINES versus what Discord currently HAS.
+ *
+ * `--list` can only ever answer the first half, and says so. Answering the
+ * second half needs a token, which is why it lives behind its own flag -- but
+ * it is a **GET**, and the distinction matters: this reads the registered
+ * command set and changes nothing. Registration stays `--apply`, stays
+ * explicit, and stays a separate decision.
+ *
+ * The comparison is by NAME only. Ids, tokens and the option trees are not
+ * printed: the question this answers is "which commands are missing", and a
+ * diff of the full payload would bury that in noise.
+ */
+async function diff(profileArg: string | undefined): Promise<void> {
+  if (!profileArg) {
+    process.stderr.write(
+      `--diff requires --profile <${DUCKY_PROFILES.join('|')}>. ` +
+        'Refusing to guess which bot to ask about.\n',
+    );
+    process.exit(1);
+  }
+
+  let config;
+  try {
+    config = resolveDiscordProfile(profileArg, process.env);
+  } catch (err) {
+    process.stderr.write(`${redact((err as Error).message)}\n`);
+    process.exit(1);
+  }
+
+  const names = PROFILE_ENV[config.profile];
+  if (!config.token || !config.appId) {
+    process.stderr.write(`${names.token} and ${names.appId} are both required.\n`);
+    process.exit(1);
+  }
+
+  const scope = commandScopeFor(config);
+  const url =
+    scope.kind === 'guild'
+      ? `https://discord.com/api/v10/applications/${config.appId}/guilds/${scope.guildId}/commands`
+      : `https://discord.com/api/v10/applications/${config.appId}/commands`;
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { authorization: `Bot ${config.token}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    // The body can echo request detail; print the status only.
+    process.stderr.write(`Discord refused the read (HTTP ${res.status}).\n`);
+    process.exit(1);
+  }
+
+  const live = ((await res.json()) as { name?: unknown }[])
+    .map((c) => String(c.name ?? ''))
+    .filter((n) => n !== '')
+    .sort();
+  const defined = COMMANDS.map((c) => c.name).sort();
+  const missing = defined.filter((n) => !live.includes(n));
+  const extra = live.filter((n) => !defined.includes(n));
+
+  process.stdout.write(
+    [
+      `profile:    ${config.profile}`,
+      `scope:      ${scope.kind === 'guild' ? `guild ${scope.guildId}` : 'global'}`,
+      `defined:    ${defined.length} — ${defined.map((n) => `/${n}`).join(' ')}`,
+      `registered: ${live.length} — ${live.map((n) => `/${n}`).join(' ') || '(none)'}`,
+      '',
+      missing.length === 0
+        ? 'Nothing is missing: every command this build defines is registered.'
+        : `MISSING (defined here, absent from Discord): ${missing.map((n) => `/${n}`).join(' ')}`,
+      extra.length === 0
+        ? 'Nothing is stale: Discord has no command this build does not define.'
+        : `STALE (registered but not defined here): ${extra.map((n) => `/${n}`).join(' ')}`,
+      '',
+      'This was a READ. Nothing was written.',
+      missing.length + extra.length === 0
+        ? ''
+        : `Applying would replace the whole set: run \`--apply --profile ${config.profile}\` deliberately.`,
+    ].join('\n') + '\n',
+  );
+}
+
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
@@ -222,6 +305,9 @@ const invokedDirectly =
 if (invokedDirectly) {
   if (process.argv.includes('--apply')) {
     void apply(flag('profile'));
+  } else if (process.argv.includes('--diff')) {
+    // A GET. Reads what Discord currently has; writes nothing.
+    void diff(flag('profile'));
   } else if (process.argv.includes('--list')) {
     // The inventory, for the smoke checklist. Writes nothing, contacts nothing.
     process.stdout.write(`${commandInventory().join('\n')}\n`);
@@ -229,12 +315,13 @@ if (invokedDirectly) {
       `\n${commandPayload().length} command(s) DEFINED by this build, and every entry on ` +
         'OWNER_ONLY_COMMANDS has a definition (asserted here and by a test).\n' +
         'What Discord currently HAS is a different question, and needs a token: this command ' +
-        'does not ask.\n',
+        'does not ask. `--diff --profile <p>` does, with a GET that writes nothing.\n',
     );
   } else {
     process.stdout.write(`${JSON.stringify(commandPayload(), null, 2)}\n`);
     process.stdout.write(
       '\nDry run. This wrote nothing to Discord.\n' +
+        '`--diff --profile <p>` compares this payload against what Discord actually has.\n' +
         `Registering is an external write: re-run with --apply --profile <${DUCKY_PROFILES.join('|')}>, ` +
         'and only deliberately.\n',
     );

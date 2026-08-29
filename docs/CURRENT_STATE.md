@@ -537,12 +537,24 @@ See [integrations/herdr.md](integrations/herdr.md) and
     `/jobs`, `/repo`, `/status`, `/watch`, `/forget`, `/task`, `/reminder`,
     `/briefing`. `OWNER_ONLY_COMMANDS` and the registration payload agree on all
     12, asserted by a test.
-  - **REGISTERED LIVE: the seven that existed at the time of the one recorded
-    registration.** The five added since (`/task`, `/reminder`, `/briefing`,
-    `/watch`, `/forget`) have never been written to Discord. Registering is an
-    external write, is never done at boot, and has not been done in any run
-    since. Run `pnpm register-commands --apply --profile development`
-    deliberately; the default remains a dry run.
+  - **REGISTERED LIVE: eleven of the twelve, measured rather than recalled.**
+    This document previously said seven, and named five commands as never
+    registered. That was wrong: `pnpm register-commands --diff --profile
+    development` performs a GET against the configured guild and compares it
+    with what this build defines, and the guild has `/briefing`, `/capture`,
+    `/inbox`, `/job`, `/jobs`, `/reminder`, `/repo`, `/schedule`, `/status`,
+    `/task` and `/watch`. Nothing stale is registered either.
+
+    **`/forget` is the one missing command**, and it is the one that deletes
+    the owner's own data. Registering it is an external write: it replaces the
+    whole guild command set, so it is never done at boot and never inferred.
+    Run `pnpm register-commands --apply --profile development` deliberately;
+    the default remains a dry run.
+
+    The lesson is the reason `--diff` now exists. "What is registered?" had
+    been answered from memory of a past run for several milestones, and memory
+    was wrong in the direction that makes a system look less finished than it
+    is -- which is the safer direction, but still wrong.
 - Development executor authentication, polling, and liveness heartbeat
 
 The probe caught a real detail: Herdr checks a linked worktree out under its own
@@ -572,7 +584,7 @@ stays `false` and `/status` reports `experimental`.
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |
 | Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
-| Slash-command registration | **Seven of the twelve** development commands were registered to the configured test guild, in the one recorded registration run. `/task`, `/reminder`, `/briefing`, `/watch` and `/forget` have never been written to Discord. This row used to read "development commands were registered", which overstated it and contradicted the live-host section of this same document. Production remains unregistered; the default command-registration mode remains a dry run. |
+| Slash-command registration | **Eleven of the twelve** development commands are registered to the configured test guild. **Measured**, not recalled: `pnpm register-commands --diff --profile development` performs a GET and compares. Only `/forget` is absent. Production remains unregistered; the default command-registration mode remains a dry run. |
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
 | GitHub repository watches | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
@@ -593,7 +605,7 @@ would unblock it.
 | A live GitHub watch | No repository in the allowlist has a GitHub mapping (`github: null`), so there is nothing to observe and nothing to point at. | The owner adds a GitHub mapping to a repository they want watched. |
 | Recent commits on a repository's default branch | Reachable only through `gh api`, and `api` is on the forbidden-verb list. | A different read-only surface, or a deliberate decision about `gh api` with its own classification. |
 | Verified dependency checking | The GitHub CI checker exists but has never run against a real repository (same reason as above), so it reports `verified: false` and the resolver refuses its `ready`. | One recorded live check. It can already **fail** a job on a definite CI failure. |
-| Live Discord delivery | Reminder DMs, briefing DMs, watch summaries and shared-channel posts all use the gateway path, which no human has exercised. Five of the twelve commands have never been registered. | `pnpm register-commands --apply --profile development`, the Message Content intent, and one real DM. |
+| Live Discord delivery | Reminder DMs, briefing DMs, watch summaries and shared-channel posts all use the gateway path, which no human has exercised. Eleven of the twelve commands ARE registered (measured by `--diff`); only `/forget` is missing. | `pnpm register-commands --apply --profile development`, the Message Content intent, and one real DM. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
 

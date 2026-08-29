@@ -284,55 +284,51 @@ is dependable. `HerdrPiOrchestrator.verified` stays `false` and
 
 ---
 
-## 2D — Verified OpenClaw adapter contract
+## 2D — Verified OpenClaw adapter contract ✅ delivered
 
-The conversation provider is the last major unverified integration:
-`HttpOpenClawProvider` throws rather than guessing an API, the mock prefixes
-every reply with `[mock]`, and `/status` says so
-([ADR 0005](decisions/0005-openclaw-adapter-with-mock.md)).
+The OpenClaw conversation route is installed in a pinned local prefix and
+verified against a real ChatGPT/Codex subscription turn. The recorded contract
+covers its WebSocket gateway, CLI request, auth model, reply envelope and the
+fact that the agent turn accepts text only. `DUCKY_CONVERSATION_PROVIDER`
+selects `mock`, `disabled` or `openclaw`; production never silently falls back
+to a mock.
 
-**No real conversational traffic is enabled until the contract is verified
-against a running instance**, in the sense `CURRENT_STATE.md` already defines:
-exercised for real, with recorded evidence — the standard `pnpm probe:herdr`
-already meets for Herdr.
+The provider also requires an independently configured text-only OpenClaw tool
+policy before it sends a turn. Its session key is isolated by user and thread.
+The provider keeps its own transcript separately from Ducky's optional bounded
+memory, so `/forget conversation` only deletes Ducky's rows.
 
-Scope: install or reach an instance; record request/response fixtures the way
-the Herdr probe does; pin the schemas; only then let the provider report
-`verified: true`.
-
-2B's natural-language capture and 2C's attachment *delivery* both depend on
-this. 2C's pipeline ships without it precisely because it refuses rather than
-guesses: until a provider is verified AND declares attachment support, the
-capability gate keeps the path closed. Verifying that provider must therefore
-include verifying its attachment contract, not only its text one.
+2B's natural-language capture and 2C's attachment delivery both depend on the
+provider boundary. The attachment gate remains closed because the recorded
+agent turn declares no attachment input. See
+[integrations/openclaw.md](integrations/openclaw.md) and
+[decisions/0024-two-conversation-stores.md](decisions/0024-two-conversation-stores.md).
 
 Open decisions:
 
-**Boundary delivered, half the contract recorded, the reply still blocked.** `DUCKY_CONVERSATION_PROVIDER`
-now makes the choice explicit and **production fails at startup** rather than
-silently booting on the marked mock (which it previously did whenever
-`OPENCLAW_BASE_URL` was unset — the default). `disabled` is a real mode that
-refuses to answer instead of generating a sentence. `pnpm probe:openclaw` is
-committed and exits 2 with the blocker; no route, body or auth model is guessed.
+**Boundary delivered, with a verified text-only OpenClaw route.**
+`DUCKY_CONVERSATION_PROVIDER` makes the choice explicit and **production fails
+at startup** rather than silently booting on the marked mock. `disabled` is a
+real mode that refuses to answer instead of generating a sentence.
+`pnpm probe:openclaw` now records a successful reply envelope and the effective
+zero-tool evidence. The development profile also has the required full deny
+list and no override scope. A production host still needs its own policy and
+independent OAuth sign-in.
 
-- ⚠️ **The API — HALF recorded.** OpenClaw is installed (pinned, local prefix)
-  and probed. The transport, the agent-turn request shape, session semantics and
-  the auth model are recorded; the REPLY envelope is not, because an agent turn
-  needs model provider credentials that are not configured here. Two findings
-  changed the code: it is a **WebSocket gateway plus a CLI**, not an HTTP JSON
-  endpoint, and **an agent turn takes text only** — so the 2C attachment gate
-  stays closed for this provider regardless. See
-  [integrations/openclaw.md](integrations/openclaw.md).
+- ✅ **The API — recorded and verified.** OpenClaw is installed in a pinned
+  local prefix. The transport, agent-turn request shape, session semantics,
+  auth model and reply envelope are recorded. The route is a WebSocket gateway
+  plus a CLI, not an HTTP JSON endpoint, and an agent turn takes text only, so
+  the 2C attachment gate stays closed for this provider. The provider session
+  is isolated by user and thread, but its transcript remains provider-owned.
+  See [integrations/openclaw.md](integrations/openclaw.md).
 - ✅ **Conversation memory — RESOLVED.** Bounded continuity, off by default, is
   shipped: see [ADR 0021](decisions/0021-bounded-conversation-continuity.md).
-  DCStro's rule is kept and made structural rather than promised — every stored
-  turn is scoped to one (user, thread), the repository has no method that could
-  read another account's words, and a configured shared channel takes no part in
-  memory at all.
-- 🔶 **Failure behaviour.** When the provider is down mid-conversation: fail
-  loudly, or fall back to the marked mock? Silent degradation to a mock in a
-  *conversation* is the kind of plausible-looking fake `PROJECT_CONTEXT.md`
-  rules out.
+  Every stored turn is scoped to one (user, thread), and a configured shared
+  channel takes no part in memory. OpenClaw's separate session transcript is
+  reported honestly and is not deleted by `/forget conversation`.
+- ✅ **Failure behaviour.** A provider refusal or failure is reported clearly,
+  audited by provider and error code, and never falls back to the marked mock.
 
 ---
 
@@ -373,8 +369,10 @@ Decisions resolved (see
 - **Assistant data retention** → also refined per kind: closed tasks 90 days,
   finished reminders 90, past schedules 180, done captures 365, each from the
   column that marks the record closed. Nothing open is ever in scope.
-- **Conversation retention** → nothing is stored, so there is nothing to retain.
-  `/forget conversation` says so rather than pretending to act.
+- **Conversation retention** → Ducky's bounded memory is off by default and,
+  when enabled, uses separate owner and guest windows. `/forget conversation`
+  deletes Ducky's rows and states that the provider-owned OpenClaw transcript is
+  outside its reach.
 - **Attachment retention** → no byte is kept and none is derived, so there is
   nothing to age out.
 - **The owner's own deletion controls** → per-entity, confirm-then-act, audited

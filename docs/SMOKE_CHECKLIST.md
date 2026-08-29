@@ -68,7 +68,7 @@ If 1–9 pass, the code is sound. Nothing above has spoken to another system.
 | Probe | Cost | Exits non-zero when |
 |---|---|---|
 | `pnpm probe:gh` | none: local, repo-less, no network | it cannot read a field list |
-| `pnpm probe:openclaw` | starts nothing; runs one local agent turn that fails | the reply half is unrecorded (2) |
+| `pnpm probe:openclaw` | starts nothing; runs one local agent turn under the required text-only policy | the provider contract or policy evidence is missing (2) |
 | `pnpm probe:herdr` | creates and removes a temp git repository | evidence is missing, or cleanup left something (3) |
 | `pnpm probe:herdr --with-agent` | **starts a real Pi agent; real model capacity** | the readiness marker never matched (3) |
 | `pnpm probe:live-job` | **a real Pi agent with edit capability, on the disposable repo** | evidence missing (4), leftovers (5) |
@@ -109,10 +109,11 @@ happens without an explicit flag, and none is implied by any step above.
   now: three consecutive clean `probe:live-job` runs, each on its own throwaway
   database. `/status` still says `experimental`, because
   `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and no probe sets it.
-- **Not that conversation produces a reply on this host.** The OpenClaw contract
-  is recorded and the provider is verified, but the tool-policy gate refuses a
-  turn until `tools.deny` carries the full group list. That is fail-closed
-  working; see `docs/integrations/openclaw.md`.
+- **Not that conversation produces a reply on every host.** The development
+  host has a recorded OpenClaw contract and a passing text-only policy. A
+  production host must configure and independently verify its own policy and
+  sign-in; otherwise the provider refuses, as designed. See
+  `docs/integrations/openclaw.md`.
 - **Not that a watch has delivered to a real DM.** A watch HAS observed a real
   repository — `probe:gh-live` ran the loop twice against `duckycodess/ducky-bot`
   and the second pass was correctly silent — but the delivery path is the

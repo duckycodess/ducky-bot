@@ -58,7 +58,9 @@ Nothing about it widens what anyone can do:
 
 - Every write stays owner-only, re-checked in the router and again in every
   service method.
-- Every owner-only reply stays ephemeral.
+- Every owner-only reply stays ephemeral outside a configured role channel.
+  Role-channel replies persist only for the owner, and shared projections are
+  deliberately public but contain no controls or private fields.
 - No signed control is ever emitted into a shared channel, and the router
   asserts at construction that no interaction kind is shared-readable.
 
@@ -246,18 +248,25 @@ than a log stream:
 filesystem or database work**, so a misconfigured instance fails on the
 cheapest check. Production must choose; an unset value is refused and `mock` is
 refused outright, because a canned reply must never be mistaken for a real one.
-`disabled` refuses to answer rather than generating a sentence, and is the
-correct production mode while no provider is verified.
+`disabled` refuses to answer rather than generating a sentence, and remains the
+safe production mode on a host that has not independently verified and
+configured a real provider.
 
 **Production additionally requires the provider to be able to initialise.** A
 private URL proves the address is not public; it proves nothing about whether
-anything there speaks a contract we have recorded. So production selecting
-`openclaw` is refused at startup while `RECORDED_CONTRACT_VERSION` is `null` —
-which it is, because OpenClaw is not installed and no fixtures exist. The check
-is non-networked on purpose: reachability at boot would not prove the API either,
-and a gateway that is merely down should not stop a correctly configured instance
-from starting. It is a source constant, not an environment variable: an operator
-can set a variable, but cannot conjure a recorded request/response shape.
+anything there speaks a contract we have recorded. Production selecting
+`openclaw` is refused while `RECORDED_CONTRACT_VERSION` is `null`. The check is
+non-networked on purpose: reachability at boot would not prove the API either,
+and a gateway that is merely down should not stop a correctly configured
+instance from starting. It is a source constant, not an environment variable:
+an operator can set a variable, but cannot conjure a recorded request/response
+shape.
+
+Before any conversation turn runs, the provider also requires OpenClaw's
+text-only policy: `tools.profile=minimal`, the full deny list for tool groups and
+no override scopes. Missing or unreadable policy fails closed. The development
+host has been checked with the same `--local` route and exposed zero tools. A
+production host must configure and verify its own OpenClaw profile.
 
 The previous selection had no profile check at all, so a production instance
 with `OPENCLAW_BASE_URL` unset — the default — silently answered the owner from

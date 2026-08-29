@@ -32,14 +32,14 @@ registered.
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
 | Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
-| Conversation tool policy | **Enforced, and currently REFUSING** | The rule is `tools.profile=minimal` **plus a full group deny list plus no override scope**. The development host has the profile and a partial deny, so the provider refuses conversation until the deny list is extended — fail-closed working as intended, not a defect. Tools handed to the model went 31 → **0**, measured against the `ducky` agent |
-| OpenClaw conversation (GPT) | **Contract verified; SELECTED on development; currently GATED** | `probe:openclaw` exits 0; request argv and reply envelope recorded; live turns took 33 s directly and 24 s through the router. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. **A reply will not be produced on this host right now**: the tool-policy gate refuses until `tools.deny` carries the full group list. See the row above |
+| Conversation tool policy | **Verified text-only** | The rule is `tools.profile=minimal` plus the full group deny list and no override scope. The development host passes the provider check. Tools handed to the model went 31 → **0**, measured against the `ducky` agent |
+| OpenClaw conversation (GPT) | **Contract verified and selected on development** | `probe:openclaw` exits 0; request argv, reply envelope and zero-tool evidence are recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Real Discord delivery after the latest restart is still awaiting a human test |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
 | CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
-| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | All four roles configured from owner-supplied ids. A routed message in the GPT channel returned a real reply in 24 s, persistent, other guild channels silent — through the real router, in-memory database, mock transport. **That run predates the tool-policy gate**, which now refuses conversation on this host until the deny list is extended; the routing and persistence results still stand, the reply no longer does |
+| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | All four roles configured from owner-supplied ids. A routed message in the GPT channel returned a real reply in 24 s, persistent, other guild channels silent through the real router, in-memory database and mock transport. A real Discord round trip after the latest transport and policy changes is still awaiting a human test |
 | Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
 | Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
@@ -50,28 +50,20 @@ registered.
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
-## The development profile is configured; the running process is not
+## The development profile is configured and the current process loaded it
 
-Two different things, and the distinction is the whole reason the owner saw a
-mock reply.
-
-**The configuration on disk** now selects the verified OpenClaw route
+The configuration on disk selects the verified OpenClaw route
 (`DUCKY_CONVERSATION_PROVIDER=openclaw`, the pinned binary, the `--dev`
 profile store holding the ChatGPT/Codex subscription OAuth profile, a loopback
 URL) and names all four assistant channels from owner-supplied ids.
 
-**The coordinator that is running** started before any of it existed. Its own
-boot log shows what it loaded: `conversation: mock`, `repositories: 1
-allowlisted`, a schema that was up to date at migration 15. So `hi` returned
-`[mock] No conversational backend is configured` — a correct report of that
-process's configuration, and not a provider failure.
+The coordinator was restarted after the transport, persona and tool-policy
+changes. Its boot diagnostics report `conversation: openclaw-gateway`, current
+migrations, the provider transcript boundary and a passing text-only policy.
+The executor remains running with the verified Herdr/Pi setting.
 
-Nothing here restarts it. Until somebody does, the running instance keeps
-answering from its old configuration, and the two states are worth keeping
-apart in your head when reading anything below.
-
-Verified against the configuration on disk, with an in-memory database and the
-mock transport so neither the live database nor a gateway was touched:
+The configuration was verified with an in-memory database and the mock
+transport so the live database and Discord gateway were not touched:
 
 | Check | Result |
 |---|---|
@@ -79,7 +71,7 @@ mock transport so neither the live database nor a gateway was touched:
 | attachments | still unsupported — the recorded turn takes text only |
 | roles resolved | briefing, task, coding, gpt — all four |
 | shared visibility | none, so no role/shared overlap exists to refuse |
-| `hi` in the GPT channel | a real reply in 24 s, not `[mock]`, persistent — **measured before the tool-policy gate landed.** The same check today refuses, by design, until `tools.deny` carries the full group list |
+| `hi` in the GPT channel | a real reply in 24 s, not `[mock]`, persistent through the router. This was not a Discord round trip and predates the final persona and tool-policy checks |
 | `hi` in another guild channel | silent, as containment intends |
 | a task proposal in the task channel | proposed, and persistent |
 
@@ -280,8 +272,8 @@ exercised; this says what it does.
 - **Bounded conversation continuity, OFF by default.** See
   [decisions/0021](decisions/0021-bounded-conversation-continuity.md)
   - `DUCKY_CONVERSATION_MEMORY_ENABLED` defaults to false, and with it off
-    nothing is read and nothing is written: the previous guarantee ("no
-    transcript exists") holds exactly.
+    Ducky reads and writes no conversation row. The provider-owned OpenClaw
+    transcript is a separate store and is reported separately below.
   - When enabled, turns are stored **scoped to one (user, thread)**. Every
     repository method takes the user id and puts it in the WHERE clause; there is
     no `byId`, no `listAll` and no thread-only read, so there is no method that
@@ -302,10 +294,10 @@ exercised; this says what it does.
   - The `role` column allows `user` and `assistant` only. There is deliberately
     no `system` role: a stored preamble would be configuration masquerading as
     history.
-  - **Close to inert on this host**, and honestly so: no conversation provider is
-    verified, so the only thing that can consume history is the marked mock. The
-    storage, isolation and deletion rules are built now because they are the part
-    that must not be retrofitted around a provider later.
+  - **The coordinator memory is separate from provider history.** OpenClaw is
+    now verified and can receive the bounded history Ducky supplies when this
+    feature is enabled. Its own session transcript remains provider-owned and
+    is not removed by `/forget conversation`.
 - **Conversation attachments (milestone 2C): the PIPELINE only, and closed on
   this host.** See
   [decisions/0015](decisions/0015-provider-agnostic-conversation-attachments.md)
@@ -801,12 +793,12 @@ stays `false` and `/status` reports `experimental`.
 
 | Area | Status |
 |---|---|
-| OpenClaw conversation | **VERIFIED — the full contract is recorded and the shipped adapter answers.** The owner signed in with a ChatGPT/Codex **subscription** (`models auth login --provider openai --device-code`, under `--dev`); read-only checks report `oauth=1, token=0, **api_key=0**` and the runtime route `openai via codex … status=usable`. No API key is configured and nothing here reads one. Model: `openai/gpt-5.6-sol`, the documented Codex route, chosen from what that account actually exposes. `pnpm probe:openclaw` exits **0** and records both halves: the argv it actually ran, and the reply envelope `{ payloads: [{ text, mediaUrl }], meta }` as a **type-only shape**, so a model's answer never reaches a committed file. `RECORDED_CONTRACT_VERSION = '2026.7.1-2'` and `verified` is DERIVED from it, so the two cannot drift. A live turn through the shipped `GatewayOpenClawProvider` returned the exact expected text in **33 s** with `mock: false`. **Attachments stay unavailable** — the recorded agent turn takes text only, and that flag now carries the whole 2C gate on its own. |
+| OpenClaw conversation | **VERIFIED — the full contract is recorded and the shipped adapter answers.** The owner signed in with a ChatGPT/Codex **subscription** (`models auth login --provider openai --device-code`, under `--dev`); read-only checks report `oauth=1, token=0, **api_key=0**` and the runtime route `openai via codex … status=usable`. No API key is configured and nothing here reads one. Model: `openai/gpt-5.6-sol`, the documented Codex route, chosen from what that account actually exposes. `pnpm probe:openclaw` exits **0** and records both halves: the argv it actually ran, the reply envelope as a **type-only shape**, and zero tools exposed to the `ducky` agent under the required policy. `RECORDED_CONTRACT_VERSION = '2026.7.1-2'` and `verified` is DERIVED from it, so the two cannot drift. A live turn through the shipped `GatewayOpenClawProvider` returned the exact expected text in **33 s** with `mock: false`. The provider session is isolated by user and thread, but its transcript remains provider-owned. **Attachments stay unavailable** because the recorded agent turn takes text only. |
 | Conversation attachment delivery | **Unreachable, by design.** The pipeline is unit-tested against an injected `fetch` and a test-only provider that supplies the one thing this host lacks — a verified, attachment-capable endpoint. **No live attachment byte has been fetched on this host, and none is sent anywhere.** It becomes reachable only when 2D produces a verified provider that declares attachment support. |
 | Image / PDF schedule extraction | **Unsupported, and now re-checked rather than remembered.** Those uploads are refused before download. No decoder ships in Phase 1, and 2C did not add one: it forwards bytes, it does not read them. `pnpm probe:extraction` records what is actually installed, so the claim cannot drift the day somebody installs poppler for something else. A test asserts the shipped extractor reports `supportsBinary: false` whatever is on PATH — a decoder appearing on the host does not open the path. |
 | `herdr agent start` / `agent prompt` | **Now exercised, repeatedly, against a real Pi agent** — by `pnpm probe:herdr --with-agent` (contract) and `pnpm probe:live-job` (production path). Five real defects were found and fixed as a result; see [integrations/herdr.md](integrations/herdr.md). The orchestrator nonetheless still reports `experimental`: `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and this run did not set it. |
 | Cleanup after a completed worktree job | **Keeps the workspace, by design.** `herdr worktree remove` refuses a checkout holding uncommitted work, and a finished job's checkout holds the implementation plus `.ducky/result.json`. Ducky does not force — that would delete the work — so it reports the workspace as kept. The repository reservation IS released, so nothing is blocked; the owner clears the workspace with `/job cleanup`, and the reconciler sweeps a stale one after `HERDR_WORKSPACE_TTL_MS`. |
-| Real Discord gateway | **The gateway accepts this bot, with the privileged intent, measured.** `pnpm probe:discord-gateway --profile development` connected and reached READY in 2 276 ms with `Guilds + DirectMessages + MessageContent` — so **Message Content is enabled in the portal**, because the gateway refuses the connection outright rather than degrading when it is not. This document had listed that toggle as an open blocker. What is still NOT verified is a human interaction round-trip: the probe registers NO handler and answers nothing, deliberately, because a coordinator may be running on the same bot identity and two wired connections would race for the same interaction. Proactive job notifications use this path, so their delivery is still unverified by an owner-initiated live DM. |
+| Real Discord gateway | **The gateway accepts this bot, with the privileged intent, measured.** `pnpm probe:discord-gateway --profile development` connected and reached READY in 2 276 ms with `Guilds + GuildMessages + DirectMessages + MessageContent` — so **Message Content is enabled in the portal**, because the gateway refuses the connection outright rather than degrading when it is not. What is still NOT verified is a post-fix human interaction round-trip: the probe registers NO handler and answers nothing, deliberately, because a coordinator may be running on the same bot identity and two wired connections would race for the same interaction. Proactive job notifications use this path, so their delivery is still unverified by an owner-initiated live DM. |
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |
 | Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
@@ -825,7 +817,7 @@ would unblock it.
 
 | Blocked | The exact blocker | What unblocks it |
 |---|---|---|
-| Real conversational replies | **UNBLOCKED.** The owner signed in with a ChatGPT/Codex subscription, the probe records a successful turn, and the shipped adapter returned a real reply in 33 s. What is NOT proved is delivery to a person: no owner has yet seen an OpenClaw reply arrive in Discord, because that needs the gateway path a human must exercise. | Nothing technical for the provider itself. For a DIFFERENT host — production, say — its own sign-in under its own `OPENCLAW_PROFILE`; a signed-out host refuses per request with the remedy named. |
+| Real conversational replies | **UNBLOCKED.** The owner signed in with a ChatGPT/Codex subscription, the probe records a successful turn under the verified zero-tool policy, and the shipped adapter returned a real reply in 33 s. What is NOT proved is delivery after the latest restart: a human must exercise that Discord path. | Nothing technical for the provider itself. For a DIFFERENT host, such as production, its own sign-in under its own `OPENCLAW_PROFILE` and its own text-only tool policy; a signed-out or permissive host refuses rather than falling back. |
 | Conversation ATTACHMENT delivery | **One blocker now, not two, and that is worth stating rather than celebrating.** The provider used to be unverified AND incapable; it is now verified, so the only thing refusing an attachment is the capability flag — honest, because the recorded agent turn has no attachment input at all. A test asserts the two shipped providers are shut for *different* reasons, so this cannot be flattened into "both unavailable" and flipped later. | A verified provider that genuinely declares attachment support. Not OpenClaw's agent turn as recorded. |
 | Image / PDF schedule extraction | No decoder ships and none is installed. **Re-checked, not recalled:** `pnpm probe:extraction` runs `--version` on six candidates and records the result — `pdftotext`, `pdfinfo`, `qpdf`, `tesseract`, `pdftoppm` and `gs` are all ABSENT. No provider reports `supportsBinary`, so nothing could read the bytes anyway. Uploads are refused **before download**. | `poppler-utils` (for `pdftotext`) **plus** a provider reporting `supportsBinary: true` **plus** `SCHEDULE_BINARY_EXTRACTION_ENABLED=true`. Three separate things, and installing a decoder is a host mutation of its own. OCR is deliberately not the answer: it returns a guess about pixels that misreads digits, and a wrong time the owner then confirms is worse than a refusal. |
 | Herdr/Pi **certification** | **Unblocked.** Three consecutive clean `probe:live-job` runs (162 s / 193 s / 192 s), each on its own throwaway database, each through the full evidence gate. The race that made this unmeasurable is now DETECTED rather than described: the probe refuses to start when another executor has checked into the same database in the last two minutes. | Nothing technical. `DUCKY_HERDR_VERIFIED=1` remains a deliberate operator act, and no probe sets it. |

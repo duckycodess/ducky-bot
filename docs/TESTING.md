@@ -92,6 +92,8 @@ confirmation.
 idempotence; `runArgv` refuses shell strings, non-array argv and metacharacter
 commands, and does not interpret metacharacters inside arguments; the OpenClaw
 gateway guard accepts loopback and tailnet and rejects everything else; the
+OpenClaw provider checks a full text-only tool policy before spawning, isolates
+provider sessions by user and thread, and bounds persona instructions; the
 `gh` table is frozen and contains no write verb; the schedule extractor never
 guesses; attachment policy rejects binaries, bad hosts and oversize files.
 
@@ -144,7 +146,10 @@ bulk methods.
 **coordinator / conversation provider** — production refuses `openclaw` while no
 contract is recorded, says why, points at the probe rather than a flag, and names
 the mode that works today; production still boots on `disabled`, so an instance
-is never bricked; the contract constant is asserted not to read `process.env`.
+is never bricked; the contract constant is asserted not to read `process.env`;
+the OpenClaw route is refused unless its effective tool policy is provably
+text-only; and a conversational reply is rendered as a sanitized branded
+embed.
 
 **coordinator / audit coverage** — `approval.requested` records action KINDS and
 a count and never an action's details; `approval.expired` is recorded by the
@@ -392,11 +397,11 @@ surface is refused rather than defaulted.
 
 **adapters / openclaw contract** — what `pnpm probe:openclaw` recorded: the
 agent-turn request shape, a WebSocket gateway rather than the HTTP endpoint
-first assumed, the auth model observed by running a real turn, and that an agent
-turn has NO attachment input. Plus the load-bearing one: while the REPLY half is
-unrecorded, no contract version exists, `initializable()` refuses and the
-provider reports itself unverified. No fixture may contain a credential or a
-host path.
+first assumed, the auth model observed by running a real turn, the successful
+reply envelope, zero tools handed to the `ducky` agent under the required policy,
+and that an agent turn has NO attachment input. The reply contract is pinned by
+`RECORDED_CONTRACT_VERSION`; a missing contract still makes initialization
+refuse. No fixture may contain a credential, model text or a host path.
 
 **adapters / gh fields** — every `--json` selector the frozen argv table sends is
 one this `gh` supports, checked against what `pnpm probe:gh` recorded from `gh`
@@ -409,13 +414,15 @@ default, which is what stops it resuming a job; `ci_run` only; a malformed key,
 an unknown repository, a missing key and a `gh` error are all pending and never
 failed; no raw `gh` error reaches a detail field.
 
-**coordinator / conversation memory** — off by default, storing nothing; rows an
+**coordinator / conversation memory** — Ducky memory is off by default; rows an
 earlier run stored are still deletable after the flag goes off; history is
 isolated per user AND per thread; a configured shared channel takes no part in
 memory at all; the replay window, the per-thread row cap and the per-turn
-truncation all hold; `/forget conversation` deletes every thread of that user
-only, reports the count, and audits by count with no content; retention keeps the
-owner's history longer than a guest's and only past each window.
+truncation all hold; `/forget conversation` deletes every Ducky row for that
+user only, reports the count, and audits by count with no content; retention
+keeps the owner's history longer than a guest's and only past each window; and
+the provider-owned transcript is disclosed as a separate store rather than
+claimed to be deleted.
 
 **coordinator / intents** — the rule table reads the shapes it claims and means
 nothing far more often than something; a reminder with no time is refused rather

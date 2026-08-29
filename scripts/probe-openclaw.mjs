@@ -18,11 +18,10 @@
  * - the gateway transport, bind modes and auth modes;
  * - whether an agent turn accepts an ATTACHMENT at all.
  *
- * It cannot record a successful REPLY, because an agent turn needs model
- * provider credentials that are not configured on this host. That is the exact
- * blocker, and it is why `RECORDED_CONTRACT_VERSION` stays null: half a contract
- * is not a contract, and inventing the reply shape is precisely what this file
- * exists to refuse.
+ * When the selected profile is signed in, it records a successful REPLY as a
+ * type-only shape. When it is not signed in, it records the failure class and
+ * leaves the reply fixture absent. A partial contract is never treated as a
+ * successful integration, and a reply fixture never contains model text.
  *
  * SAFETY
  * - Read-only against OpenClaw's own state, and everything runs under the
@@ -361,8 +360,8 @@ async function main() {
     });
   } else {
     gaps.push(
-      'no successful agent turn: the reply envelope is unrecorded because no model ' +
-        `provider credential is configured${authError ? ` (${authError})` : ''}`,
+      'no successful agent turn: the reply envelope is unrecorded because the ' +
+        `agent invocation failed${authError ? ` (${authError})` : ''}`,
     );
   }
 

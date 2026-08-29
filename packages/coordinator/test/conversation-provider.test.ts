@@ -296,3 +296,37 @@ describe('the OpenClaw initialisation contract', () => {
     expect(p.capabilities.attachments.supported).toBe(false);
   });
 });
+
+describe('the openclaw binary is a host setting, not a constant', () => {
+  it('passes a configured path through to the provider', async () => {
+    /**
+     * "The binary lives here" is a fact about a HOST. The default is the
+     * pinned prefix this host installed into; a machine that put it elsewhere
+     * should not need a code change to say so.
+     *
+     * Asserted by behaviour rather than by reading a private field: a path
+     * that cannot execute produces the provider's own refusal, which proves
+     * the setting reached it.
+     */
+    const app = createApp(
+      {
+        NODE_ENV: 'test',
+        DUCKY_PROFILE: 'development',
+        OWNER_DISCORD_USER_ID: '100000000000000001',
+        DUCKY_DEV_COMPONENT_SIGNING_KEY: 'k'.repeat(64),
+        DUCKY_EXECUTOR_CREDENTIALS: JSON.stringify({ version: 1, executors: [] }),
+        DUCKY_DB_PATH: ':memory:',
+        DUCKY_REPOS_FILE: 'unused-in-tests',
+        DUCKY_CONVERSATION_PROVIDER: 'openclaw',
+        OPENCLAW_BASE_URL: 'http://127.0.0.1:8080',
+        OPENCLAW_BIN: '/nonexistent/openclaw',
+        OPENCLAW_TIMEOUT_MS: '5000',
+      } as NodeJS.ProcessEnv,
+      { transport: new MockDiscordTransport(), allowlistJson: REPOS_JSON },
+    );
+    await expect(
+      app.conversation.reply({ userId: '1', text: 'hi', threadKey: 't' }),
+    ).rejects.toThrow(/could not answer/i);
+    app.close();
+  });
+});

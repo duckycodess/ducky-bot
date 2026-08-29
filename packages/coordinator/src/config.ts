@@ -131,6 +131,15 @@ export const EnvSchema = z.object({
    */
   OPENCLAW_PROFILE: z.enum(['dev', 'default']).default('dev'),
   /**
+   * Where the `openclaw` binary is.
+   *
+   * Defaults to the pinned local prefix this host installed it into. It is a
+   * setting rather than a constant because "the binary lives here" is a fact
+   * about a HOST, and a production machine that installed it somewhere else
+   * should not need a code change to say so.
+   */
+  OPENCLAW_BIN: z.string().optional(),
+  /**
    * A real model turn is not a fast HTTP call. The old 30 s default was a
    * gateway-request timeout inherited from the adapter that assumed HTTP, and
    * it would kill a normal reasoning turn.

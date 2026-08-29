@@ -543,6 +543,7 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
   return new GatewayOpenClawProvider(env.OPENCLAW_BASE_URL, {
     profile: env.OPENCLAW_PROFILE,
     timeoutMs: env.OPENCLAW_TIMEOUT_MS,
+    ...(env.OPENCLAW_BIN === undefined ? {} : { bin: env.OPENCLAW_BIN }),
   });
 }
 

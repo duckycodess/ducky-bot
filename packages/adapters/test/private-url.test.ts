@@ -31,13 +31,18 @@ describe('OpenClaw gateway guard', () => {
     }
   });
 
-  it('guards the gateway provider at construction and refuses to invent an API', async () => {
+  it('guards the gateway provider at construction', () => {
+    // A public address for this provider means somebody intends a gateway to
+    // be reached, and should be told now rather than later.
     expect(() => new GatewayOpenClawProvider('https://openclaw.example.com')).toThrow();
+    expect(() => new GatewayOpenClawProvider('ws://127.0.0.1:19001')).not.toThrow();
+
+    // `verified` is now true, because a reply contract was RECORDED -- see
+    // openclaw-contract.test.ts, which pins that to the fixtures. It does not
+    // open the attachment path, and that is asserted there too.
     const p = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
-    await expect(p.reply({ userId: '1', text: 'hi', threadKey: 't' })).rejects.toThrow(
-      /has not been observed on this host/i,
-    );
-    expect(p.verified).toBe(false);
+    expect(p.verified).toBe(true);
+    expect(p.capabilities.attachments.supported).toBe(false);
   });
 
   it('marks every mock reply so it cannot pass for a real answer', async () => {

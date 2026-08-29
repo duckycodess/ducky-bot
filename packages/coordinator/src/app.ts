@@ -521,7 +521,10 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
   }
   assertPrivateGatewayUrl(env.OPENCLAW_BASE_URL);
 
-  return new GatewayOpenClawProvider(env.OPENCLAW_BASE_URL);
+  return new GatewayOpenClawProvider(env.OPENCLAW_BASE_URL, {
+    profile: env.OPENCLAW_PROFILE,
+    timeoutMs: env.OPENCLAW_TIMEOUT_MS,
+  });
 }
 
 /**
@@ -537,6 +540,15 @@ function conversationFromEnv(env: Env, mode: ConversationProviderMode): Conversa
  * "discover it in production" outcome the provider modes exist to prevent. A
  * private URL proves the address is not public; it proves nothing about whether
  * anything there speaks a contract we have recorded.
+ *
+ * A contract IS recorded now, so this gate passes and production may select
+ * openclaw. What it still does not check is whether THIS host is signed in to
+ * a model provider, and that omission is deliberate: checking would mean
+ * running the CLI at boot, and a login that expired overnight would then stop
+ * the coordinator from starting rather than making one reply fail. A signed-out
+ * host produces a per-request refusal naming the remedy -- which is a different
+ * thing from the failure this gate exists for, because it refuses rather than
+ * fabricating an answer.
  *
  * Non-networked on purpose. Reachability at boot would not prove the API
  * either, and a gateway that is merely down should not stop a correctly

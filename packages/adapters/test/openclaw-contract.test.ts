@@ -14,11 +14,12 @@ const read = (name: string): Record<string, unknown> | undefined => {
 /**
  * What `pnpm probe:openclaw` actually recorded, asserted.
  *
- * OpenClaw is installed on this host (pinned, local prefix), so unlike before
- * there ARE fixtures. What there is not is a successful agent turn: that needs
- * model provider credentials nobody has configured here. These tests pin both
- * halves of that state — what is known, and that the unknown half keeps the
- * provider unverified — so neither can drift quietly.
+ * BOTH halves are now recorded: the request argv that was exercised, and the
+ * reply envelope a real successful turn produced. These tests pin the contract
+ * to those fixtures, so the adapter cannot drift away from the call that
+ * actually produced the evidence — and so the one capability that stayed
+ * closed (attachments) cannot quietly open just because the provider became
+ * verified.
  */
 describe('the recorded OpenClaw surface', () => {
   const cli = read('cli');
@@ -64,31 +65,101 @@ describe('the recorded OpenClaw surface', () => {
     expect(isPrivateGatewayUrl('wss://openclaw.example.com')).toBe(false);
   });
 
-  it('records the auth blocker as an observation, not a description', () => {
+  it('records a real turn as an observation, not a description', () => {
     if (!turn) return;
-    // A real turn was attempted and failed for a specific, recorded reason.
-    expect(turn['exitCode']).toBe(1);
-    expect(turn['errorClass']).toBe('ProviderAuthError');
-    expect(turn['stdoutEmpty']).toBe(true);
+    // This asserted `exitCode: 1` and `ProviderAuthError` for two milestones,
+    // which was the honest state then. A provider is signed in now and the
+    // turn succeeds; the assertion moved with the evidence.
+    expect(turn['exitCode']).toBe(0);
+    expect(turn['stdoutIsJson']).toBe(true);
+    expect(turn['errorClass']).toBeNull();
   });
 
-  it('keeps the provider unverified while the reply half is unrecorded', () => {
-    // The load-bearing assertion. A reply envelope has never been observed, so
-    // no version is recorded, `initializable()` refuses, and `reply()` throws --
-    // production cannot select this provider by accident.
+  it('pins the adapter to the argv that actually produced the reply', () => {
+    if (!turn) return;
+    const recorded = turn['requestArgv'] as string[];
+
+    // `--deliver` would post the agent's output into a chat channel. It is
+    // absent from the recorded call and unconstructable by the adapter.
+    expect(recorded).not.toContain('--deliver');
+    expect(turn['neverDelivers']).toBe(true);
+
+    // The owner's words must never enter argv: `checkCommandAllowed` scans
+    // every element for forbidden verbs, so a question containing "push" or
+    // "login" would be refused before it reached the subprocess.
+    expect(recorded).toContain('--message-file');
+    expect(recorded).not.toContain('--message');
+
+    // And the adapter builds THAT call, with only the two caller-supplied
+    // values differing. An adapter pinned to a reply envelope some other
+    // invocation produced would be pinned to evidence it did not create.
+    const built = new GatewayOpenClawProvider('ws://127.0.0.1:19001', { profile: 'dev' })
+      .buildArgv('agent:probe:ducky-probe', '/tmp/x/message.txt');
+    expect(built.map((a) => (a === '/tmp/x/message.txt' ? '<message-file>' : a))).toEqual(recorded);
+  });
+
+  it('is verified only because a reply envelope was recorded', () => {
+    // The load-bearing assertion, in both directions: the constant and the
+    // fixture must agree. `verified` is DERIVED from the constant, so somebody
+    // cannot flip the flag without producing the evidence.
     const replyRecorded = read('agent-turn-reply') !== undefined;
     expect(replyRecorded).toBe(RECORDED_CONTRACT_VERSION !== null);
 
-    if (!replyRecorded) {
-      const init = GatewayOpenClawProvider.initializable();
-      expect(init.ok).toBe(false);
-      expect(init.reason).toMatch(/recorded only in HALF/i);
-      expect(new GatewayOpenClawProvider('ws://127.0.0.1:19001').verified).toBe(false);
-    }
+    const provider = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
+    expect(provider.verified).toBe(RECORDED_CONTRACT_VERSION !== null);
+    expect(GatewayOpenClawProvider.initializable().ok).toBe(RECORDED_CONTRACT_VERSION !== null);
+  });
+
+  it('records a reply envelope of TYPES, never the model\'s answer', () => {
+    const reply = read('agent-turn-reply');
+    if (!reply) return;
+    expect(reply['keys']).toEqual(['meta', 'payloads']);
+    expect(reply['hasPayloads']).toBe(true);
+    expect(reply['firstPayloadKeys']).toEqual(['mediaUrl', 'text']);
+
+    // The observed envelope carried no deliveryStatus, because --deliver was
+    // never passed. One appearing would mean an argv nobody intended.
+    expect(reply['hasDeliveryStatus']).toBe(false);
+
+    // Every leaf is a type word or a count. A real string surviving would mean
+    // the model's answer reached a committed file.
+    const allowed = new Set(['string', 'number', 'boolean', 'null', 'undefined', 'object', 'empty']);
+    const walk = (node: unknown, at: string): void => {
+      if (typeof node === 'string') {
+        if (/^\d+$/.test(node)) return;
+        expect(allowed.has(node), `${at} = ${JSON.stringify(node)}`).toBe(true);
+        return;
+      }
+      if (node && typeof node === 'object') {
+        for (const [k, v] of Object.entries(node)) walk(v, `${at}.${k}`);
+      }
+    };
+    walk(reply['shape'], 'shape');
+  });
+
+  it('keeps attachments unavailable EVEN THOUGH the provider is now verified', () => {
+    /**
+     * The gate that matters most, and the reason it matters more now than it
+     * did before. `attachmentsUsable` requires `verified` AND a declared
+     * capability; `verified` used to be false, so the capability flag was
+     * belt and braces. It is now the only thing holding the line.
+     *
+     * The recorded turn takes text only -- the fixture's
+     * `attachmentInputOnAgentTurn` is empty -- so declaring otherwise would be
+     * an over-claim on the path that carries the owner's personal files.
+     */
+    const provider = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
+    expect(provider.verified).toBe(true);
+    expect(provider.capabilities.attachments.supported).toBe(false);
+    expect(provider.capabilities.attachments.contentTypes).toEqual([]);
+    expect(provider.capabilities.attachments.maxBytes).toBe(0);
   });
 
   it('never records a credential or a host path in a fixture', () => {
-    for (const name of ['cli', 'agent-cli-contract', 'gateway-contract', 'agent-turn-attempt', 'config-locations']) {
+    for (const name of [
+      'cli', 'agent-cli-contract', 'gateway-contract', 'agent-turn-attempt',
+      'agent-turn-reply', 'config-locations',
+    ]) {
       const body = read(name);
       if (!body) continue;
       const text = JSON.stringify(body);

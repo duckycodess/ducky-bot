@@ -88,7 +88,24 @@ export const EnvSchema = z.object({
    */
   DUCKY_CONVERSATION_PROVIDER: z.string().optional(),
   OPENCLAW_BASE_URL: z.string().optional(),
-  OPENCLAW_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  /**
+   * Which OpenClaw PROFILE store to run turns under: `dev` (the isolated
+   * `~/.openclaw-dev` state) or `default`.
+   *
+   * A choice about which local account store to use, not a claim that a backend
+   * exists -- so it does not offend ADR 0019, which forbids asserting a
+   * provider into existence from configuration. `dev` is the default because
+   * that is where the recorded contract was observed and where the signed-in
+   * account on this host lives; a production host that signed in under its own
+   * default profile sets `default`.
+   */
+  OPENCLAW_PROFILE: z.enum(['dev', 'default']).default('dev'),
+  /**
+   * A real model turn is not a fast HTTP call. The old 30 s default was a
+   * gateway-request timeout inherited from the adapter that assumed HTTP, and
+   * it would kill a normal reasoning turn.
+   */
+  OPENCLAW_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
   /**
    * Operator opt-in for conversation attachments. Default OFF.

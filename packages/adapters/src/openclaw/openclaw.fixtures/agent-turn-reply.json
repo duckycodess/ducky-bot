@@ -1,0 +1,129 @@
+{
+  "_note": "A SUCCESSFUL reply envelope, recorded as SHAPE ONLY: every leaf is replaced by its TYPE. The agent answered a real prompt, so its text is the model's output and this file must not contain it -- but a parser cannot be written against a list of top-level key names either, which is what this recorded before.",
+  "keys": [
+    "meta",
+    "payloads"
+  ],
+  "shape": {
+    "payloads": {
+      "[]": {
+        "text": "string",
+        "mediaUrl": "null"
+      },
+      "length": "1"
+    },
+    "meta": {
+      "durationMs": "number",
+      "agentMeta": {
+        "sessionId": "string",
+        "provider": "string",
+        "model": "string",
+        "contextTokens": "number",
+        "agentHarnessId": "string",
+        "usage": {
+          "input": "number",
+          "output": "number",
+          "cacheRead": "number",
+          "total": "number"
+        },
+        "lastCallUsage": {
+          "input": "number",
+          "output": "number",
+          "cacheRead": "number",
+          "cacheWrite": "number",
+          "total": "number"
+        },
+        "promptTokens": "number"
+      },
+      "aborted": "boolean",
+      "systemPromptReport": {
+        "source": "string",
+        "generatedAt": "number",
+        "sessionId": "string",
+        "sessionKey": "string",
+        "provider": "string",
+        "model": "string",
+        "workspaceDir": "string",
+        "systemPrompt": {
+          "chars": "number",
+          "projectContextChars": "number",
+          "nonProjectContextChars": "number",
+          "hash": "string"
+        },
+        "injectedWorkspaceFiles": {
+          "[]": {
+            "name": "string",
+            "path": "string",
+            "missing": "boolean",
+            "rawChars": "number",
+            "injectedChars": "number",
+            "truncated": "boolean"
+          },
+          "length": "7"
+        },
+        "skills": {
+          "promptChars": "number",
+          "hash": "string",
+          "entries": {
+            "[]": {
+              "name": "string",
+              "blockChars": "number"
+            },
+            "length": "21"
+          }
+        },
+        "tools": {
+          "listChars": "number",
+          "schemaChars": "number",
+          "entries": {
+            "[]": {
+              "name": "string",
+              "summaryChars": "number",
+              "summaryHash": "string",
+              "schemaChars": "number",
+              "schemaHash": "string",
+              "propertiesCount": "null"
+            },
+            "length": "31"
+          }
+        }
+      },
+      "finalAssistantVisibleText": "string",
+      "finalAssistantRawText": "string",
+      "replayInvalid": "boolean",
+      "livenessState": "string",
+      "stopReason": "string",
+      "executionTrace": {
+        "winnerProvider": "string",
+        "winnerModel": "string",
+        "attempts": {
+          "[]": {
+            "provider": "string",
+            "model": "string",
+            "result": "string",
+            "stage": "string"
+          },
+          "length": "1"
+        },
+        "fallbackUsed": "boolean",
+        "runner": "string"
+      },
+      "requestShaping": {
+        "authMode": "string",
+        "thinking": "string"
+      },
+      "completion": {
+        "stopReason": "string",
+        "finishReason": "string"
+      }
+    }
+  },
+  "hasPayloads": true,
+  "payloadCount": 1,
+  "firstPayloadKeys": [
+    "mediaUrl",
+    "text"
+  ],
+  "hasDeliveryStatus": false,
+  "status": null
+}

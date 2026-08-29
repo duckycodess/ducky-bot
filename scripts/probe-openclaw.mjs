@@ -35,7 +35,7 @@
  *   fixture at all.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +70,33 @@ const redact = (text) =>
     .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '[REDACTED:guid]')
     .replace(/\b(sk|pk|api|key|token|secret)[-_][A-Za-z0-9._-]{8,}/gi, '[REDACTED:secretish]')
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[REDACTED:jwt]');
+
+/**
+ * A value's SHAPE, with every leaf replaced by its type.
+ *
+ * The recursion is what makes the reply envelope safe to commit: a string
+ * never survives it, so the model's actual answer cannot reach a fixture.
+ * Arrays collapse to one merged item shape plus a count -- ten payloads have
+ * one shape, and recording ten copies would only add ten chances to leak.
+ */
+function shapeOf(v) {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) {
+    const merged = {};
+    for (const item of v) {
+      const s = shapeOf(item);
+      if (typeof s === 'string') merged['*'] = s;
+      else for (const [k, val] of Object.entries(s)) merged[k] = val;
+    }
+    return { '[]': v.length === 0 ? 'empty' : merged, length: String(v.length) };
+  }
+  if (typeof v === 'object') {
+    const o = {};
+    for (const [k, val] of Object.entries(v)) o[k] = shapeOf(val);
+    return o;
+  }
+  return typeof v;
+}
 
 /** Flag names only, from a `--help` block. Never an example value. */
 const flagsOf = (help) =>
@@ -169,26 +196,58 @@ async function main() {
     devDefaultUrl: /ws:\/\/127\.0\.0\.1:\d+/.exec(gatewayText)?.[0] ?? null,
   });
 
-  // ---- the auth model, observed rather than described ----------------------
+  // ---- a real turn, observed rather than described -------------------------
   //
-  // A real turn, in the isolated dev profile, with no channel delivery. Without
-  // model provider credentials this FAILS, and how it fails is the fact worth
-  // recording: it is the exact blocker between here and a verified provider.
-  const turn = await run(
-    bin,
-    [
-      '--dev', '--no-color', 'agent', '--local', '--json',
-      '--session-key', 'agent:probe:ducky-probe',
-      '--message', 'reply with the single word pong',
-    ],
-    { timeout: 90_000 },
-  );
+  // In the isolated dev profile, with no channel delivery. Before a model
+  // provider was configured this FAILED, and how it failed was the fact worth
+  // recording. Now it succeeds, and the reply envelope is the other half of the
+  // contract.
+  //
+  // The argv is built ONCE, here, and recorded alongside the outcome. That is
+  // what lets a test assert the shipped adapter builds the same call: an
+  // adapter written against a reply envelope that arrived from some OTHER
+  // invocation would be pinned to evidence it did not produce.
+  // The message body goes in a FILE, not in argv, and that is a safety
+  // requirement rather than a style choice. `checkCommandAllowed` scans every
+  // argv element for forbidden verbs, so an ordinary owner question containing
+  // "push", "login" or "auth" would be refused before it ever reached the
+  // subprocess. `--message-file` keeps the owner's words out of the command
+  // line entirely.
+  //
+  // The probe therefore exercises the invocation Ducky ACTUALLY builds. A
+  // recording of `--message` would have pinned the contract to a call the
+  // adapter never makes.
+  const PROBE_MESSAGE = 'reply with the single word pong';
+  const messageFile = path.join(os.tmpdir(), `ducky-openclaw-probe-${process.pid}.txt`);
+  writeFileSync(messageFile, PROBE_MESSAGE, { mode: 0o600 });
+  const turnArgv = [
+    '--dev', '--no-color', 'agent', '--local', '--json',
+    '--session-key', 'agent:probe:ducky-probe',
+    '--message-file', messageFile,
+  ];
+  let turn;
+  try {
+    turn = await run(bin, turnArgv, { timeout: 90_000 });
+  } finally {
+    rmSync(messageFile, { force: true });
+  }
   const stderr = redact(turn.stderr);
   const authError = /(\w*AuthError)/.exec(stderr)?.[1] ?? null;
   record('agent-turn-attempt', {
     _note:
       'A REAL turn attempt. Records the SHAPE of the outcome only: no reply text, ' +
       'no credential, no absolute path.',
+    /**
+     * The exact call that produced the recorded reply, with the message BODY
+     * replaced. Flags and their fixed values are contract; the prompt is not.
+     *
+     * `--local` is part of it and is not incidental: that is the invocation
+     * that was actually exercised, so it is the invocation the adapter builds.
+     * A gateway-backed run is a different code path and has not been observed.
+     */
+    requestArgv: turnArgv.map((a) => (a === messageFile ? '<message-file>' : a)),
+    /** Asserted here so a drift trips the probe, not just a reader. */
+    neverDelivers: !turnArgv.includes('--deliver'),
     exitCode: turn.code,
     stdoutEmpty: turn.stdout.trim() === '',
     stdoutIsJson: turn.stdout.trim().startsWith('{'),
@@ -200,9 +259,28 @@ async function main() {
   });
 
   if (turn.code === 0 && turn.stdout.trim().startsWith('{')) {
+    const envelope = JSON.parse(turn.stdout);
     record('agent-turn-reply', {
-      _note: 'Shape only: keys of a SUCCESSFUL reply envelope. No content.',
-      keys: Object.keys(JSON.parse(turn.stdout)).sort(),
+      _note:
+        'A SUCCESSFUL reply envelope, recorded as SHAPE ONLY: every leaf is replaced by its ' +
+        'TYPE. The agent answered a real prompt, so its text is the model\'s output and this ' +
+        'file must not contain it -- but a parser cannot be written against a list of ' +
+        'top-level key names either, which is what this recorded before.',
+      keys: Object.keys(envelope).sort(),
+      shape: shapeOf(envelope),
+      /**
+       * The three the port depends on, called out so a drift is loud rather
+       * than buried in a shape tree.
+       */
+      hasPayloads: Array.isArray(envelope.payloads),
+      payloadCount: Array.isArray(envelope.payloads) ? envelope.payloads.length : 0,
+      firstPayloadKeys: Array.isArray(envelope.payloads) && envelope.payloads[0]
+        ? Object.keys(envelope.payloads[0]).sort()
+        : [],
+      /** Present only with --deliver, which Ducky never passes. Expect false. */
+      hasDeliveryStatus: Object.hasOwn(envelope, 'deliveryStatus'),
+      /** `in_flight` when a run for this session is already active. */
+      status: typeof envelope.status === 'string' ? envelope.status : null,
     });
   } else {
     gaps.push(

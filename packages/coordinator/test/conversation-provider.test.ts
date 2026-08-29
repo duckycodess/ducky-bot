@@ -4,7 +4,7 @@ import {
   DisabledConversationProvider, GatewayOpenClawProvider, MockConversationProvider,
   RECORDED_CONTRACT_VERSION,
 } from '@ducky/adapters';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../src/app.js';
@@ -153,63 +153,75 @@ describe('startup selection', () => {
     ).toThrow(/loopback or a private tailnet/i);
   });
 
-  it('openclaw on loopback constructs in DEVELOPMENT, and refuses per request', async () => {
-    // Development may point at a gateway and find out per request. That is a
-    // local box choosing to experiment, not an instance answering the owner.
+  it('openclaw on loopback constructs and is verified, because a contract is recorded', () => {
     const app = boot({
       DUCKY_CONVERSATION_PROVIDER: 'openclaw',
       OPENCLAW_BASE_URL: 'http://127.0.0.1:8080',
     });
-    expect(app.conversation.verified).toBe(false);
-    await expect(
-      app.conversation.reply({ userId: '1', text: 'x', threadKey: 't' }),
-    ).rejects.toThrow(/not implemented|not been verified/i);
+    // `verified` means "a reply contract was recorded", and one now is.
+    expect(app.conversation.verified).toBe(true);
+    // What being verified must NOT do: open the attachment path. The recorded
+    // agent turn takes text only.
+    expect(app.conversation.capabilities.attachments.supported).toBe(false);
     app.close();
   });
 
   /**
-   * PRODUCTION is different, and this is the case the first pass got wrong.
+   * PRODUCTION was the case the first pass got wrong, and the gate is still
+   * here -- it simply passes now, because the thing it gates on has happened.
    *
    * A private URL proves the address is not public. It proves nothing about
-   * whether anything there speaks a contract we have recorded. Booting on it
-   * and throwing on the owner's first message is precisely the "discover it in
-   * production" outcome the provider modes exist to prevent.
+   * whether anything there speaks a contract we have recorded. That contract
+   * has now been recorded from a real successful turn, so production may
+   * select openclaw.
    */
-  it('a PRODUCTION instance refuses openclaw while no contract is recorded', () => {
-    expect(() =>
-      boot({
-        DUCKY_PROFILE: 'production',
-        DUCKY_CONVERSATION_PROVIDER: 'openclaw',
-        OPENCLAW_BASE_URL: 'http://127.0.0.1:8080',
-        DISCORD_PROD_TOKEN: 't'.repeat(40),
-        DISCORD_PROD_APP_ID: '200000000000000002',
-        DUCKY_PROD_COMPONENT_SIGNING_KEY: 'p'.repeat(64),
+  it('a PRODUCTION instance may select openclaw now that a contract is recorded', () => {
+    // Production legitimately requires its own credential FILE (inline
+    // credentials are refused there), so a realistic boot needs one.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-openclaw-prod-'));
+    const file = path.join(dir, 'executor-credentials-production.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        executors: [{
+          executorId: 'exec-p', keyId: 'k1',
+          bearerToken: 'b'.repeat(43), hmacSecret: 'h'.repeat(43),
+          state: 'active',
+        }],
       }),
-    ).toThrow(/cannot be used on the production profile/i);
+      { mode: 0o600 },
+    );
+    chmodSync(file, 0o600);
+
+    const app = boot({
+      DUCKY_PROFILE: 'production',
+      DUCKY_CONVERSATION_PROVIDER: 'openclaw',
+      OPENCLAW_BASE_URL: 'http://127.0.0.1:8080',
+      DISCORD_PROD_TOKEN: 't'.repeat(40),
+      DISCORD_PROD_APP_ID: '200000000000000002',
+      DUCKY_PROD_COMPONENT_SIGNING_KEY: 'p'.repeat(64),
+      DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE: file,
+    });
+    expect(app.conversation.verified).toBe(true);
+    app.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  it('says WHY, and points at the probe rather than at a flag', () => {
-    const err = (() => {
-      try {
-        boot({
-          DUCKY_PROFILE: 'production',
-          DUCKY_CONVERSATION_PROVIDER: 'openclaw',
-          OPENCLAW_BASE_URL: 'http://127.0.0.1:8080',
-          DISCORD_PROD_TOKEN: 't'.repeat(40),
-          DISCORD_PROD_APP_ID: '200000000000000002',
-          DUCKY_PROD_COMPONENT_SIGNING_KEY: 'p'.repeat(64),
-        });
-        return undefined;
-      } catch (e) {
-        return e;
-      }
-    })();
-    expect(isDuckyError(err)).toBe(true);
-    const msg = isDuckyError(err) ? err.ownerMessage : '';
-    expect(msg).toMatch(/recorded only in HALF/i);
-    expect(msg).toMatch(/probe:openclaw/);
-    // And it names the mode that DOES work today.
-    expect(msg).toMatch(/disabled/);
+  it('still refuses production the moment the recorded contract goes away', () => {
+    /**
+     * The gate itself, exercised without pretending the contract is absent.
+     *
+     * `initializable()` is the whole production check, and it answers from the
+     * recorded constant. Asserting the two agree is what keeps the gate real:
+     * if the fixtures were ever lost and the constant reset to null,
+     * production would refuse again, and this says so in one place.
+     */
+    const init = GatewayOpenClawProvider.initializable();
+    expect(init.ok).toBe(RECORDED_CONTRACT_VERSION !== null);
+    expect(init.reason).toMatch(
+      RECORDED_CONTRACT_VERSION === null ? /probe:openclaw/ : /contract /,
+    );
   });
 
   it('production CAN boot on disabled, so the instance is not bricked', () => {
@@ -253,11 +265,11 @@ describe('startup selection', () => {
  * RECORDED.
  */
 describe('the OpenClaw initialisation contract', () => {
-  it('reports not-initializable while nothing is recorded', () => {
-    expect(RECORDED_CONTRACT_VERSION).toBeNull();
+  it('reports initializable exactly when a contract is recorded', () => {
+    // Not "expect it to be set": the assertion is that the two AGREE, so this
+    // test keeps working whichever state the host is in.
     const init = GatewayOpenClawProvider.initializable();
-    expect(init.ok).toBe(false);
-    expect(init.reason).toMatch(/recorded only in HALF/i);
+    expect(init.ok).toBe(RECORDED_CONTRACT_VERSION !== null);
   });
 
   it('is not settable from the environment', () => {
@@ -271,9 +283,16 @@ describe('the OpenClaw initialisation contract', () => {
     expect(src).not.toMatch(/process\.env/);
   });
 
-  it('keeps the provider unverified and attachment-incapable regardless', () => {
+  it('keeps the provider attachment-incapable even once it is verified', () => {
+    /**
+     * The assertion that had to survive verification, and the reason this file
+     * still has teeth. `attachmentsUsable` requires `verified` AND a declared
+     * capability. `verified` used to be false, so the capability flag was belt
+     * and braces; it is now the only thing holding the line, and the recorded
+     * turn takes text only.
+     */
     const p = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
-    expect(p.verified).toBe(false);
+    expect(p.verified).toBe(RECORDED_CONTRACT_VERSION !== null);
     expect(p.capabilities.attachments.supported).toBe(false);
   });
 });

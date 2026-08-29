@@ -108,15 +108,31 @@ const send = (h: Awaited<ReturnType<typeof boot>>, over: Record<string, unknown>
 describe('the provider capability contract', () => {
   it('has both shipped providers advertise attachments as unavailable', () => {
     const mock = new MockConversationProvider();
-    const http = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
+    const openclaw = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
 
-    for (const provider of [mock, http]) {
+    for (const provider of [mock, openclaw]) {
       expect(provider.capabilities.attachments).toEqual(NO_ATTACHMENT_CAPABILITY);
       expect(provider.capabilities.attachments.supported).toBe(false);
-      expect(provider.verified).toBe(false);
       // Even with the operator switch on, the gate stays shut.
       expect(attachmentsUsable(provider, true)).toBe(false);
     }
+
+    /**
+     * The two providers are shut for DIFFERENT reasons, and the difference now
+     * matters.
+     *
+     * The mock is unverified, so `attachmentsUsable` would refuse it even if
+     * it claimed a capability. OpenClaw is VERIFIED -- a reply contract was
+     * recorded from a real turn -- so the only thing refusing it is the
+     * capability flag itself, and that flag is honest because the recorded
+     * agent turn has no attachment input at all.
+     *
+     * Asserting them identically would hide that. If the capability were ever
+     * flipped without evidence, the mock would still be safe and OpenClaw
+     * would not be.
+     */
+    expect(mock.verified).toBe(false);
+    expect(openclaw.verified).toBe(true);
   });
 
   it('has both shipped providers refuse an attachment honestly if one reaches them', async () => {

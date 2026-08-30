@@ -33,11 +33,12 @@ a package publish, someone merging another PR — parks in
 kept**, and a bounded resolver checks on a schedule with two independent
 ceilings. Nothing polls forever.
 
-**No real dependency checker ships.** The one that does answers `pending` for
-everything, because nothing on this host can observe a CI run. So a wait runs
-out its budget and comes back to you — "I held your repository, I could not
-confirm this, over to you" — rather than resuming on a check that did not
-happen. See
+**A real dependency checker exists but is unverified and opt-in.** The default
+checker answers `pending` for everything, because no applicable live CI check
+has been recorded on this host. The optional GitHub checker can fail a job on a
+definite CI failure, but it cannot resume one until its read-only contract has
+been verified. So an unchecked wait runs out its budget and comes back to you
+rather than resuming on a check that did not happen. See
 [`docs/decisions/0016`](docs/decisions/0016-work-phases-dependency-waits-and-audit.md).
 
 Alongside it: a central command policy classifying every `gh`, `git` and
@@ -148,8 +149,9 @@ so lock the channel down first. See
   metadata policy, bounded download, private temp file, explicit disposal — is
   in place and tested. It is **unreachable on this host**, deliberately: bytes
   are fetched only when the operator has opted in *and* the provider is
-  `verified` *and* it declares attachment support, and no provider here is
-  either of the last two. So an upload is refused **before download** and
+  `verified` *and* it declares attachment support. OpenClaw is now verified,
+  but the recorded agent turn declares no attachment input, so an upload is
+  refused **before download** and
   **no attachment byte has ever been fetched or sent anywhere**. Accepting a
   type is not a claim that anything can read it — no vision or extraction
   capability is claimed. Attachments are owner-only even though plain chat is
@@ -158,12 +160,11 @@ so lock the channel down first. See
 - **The Herdr/Pi orchestrator has been run for real, and is still
   `experimental`.** `pnpm probe:herdr --with-agent` records the agent contract,
   and `pnpm probe:live-job` drives the production code path with a real Pi
-  agent. **One run was observed to pass the full evidence gate** —
+  agent. **Three consecutive isolated runs passed the full evidence gate** —
   `preparing → planning → implementing → reviewing → fixing → verifying →
-  completed` in 271 seconds, with an independent passing review and real
-  verification exit codes.
-  **That is one observed success, not a certified integration:** other runs
-  failed with `agent_prompt_stalled`, so repeatability is not established.
+  completed` in 162, 193 and 192 seconds, with independent passing reviews and
+  real verification exit codes. The integration remains `experimental` until
+  the host-specific `DUCKY_HERDR_VERIFIED=1` operator setting is enabled.
   Running it for real did find five defects no unit test could have caught,
   because every mock was more accommodating than the live CLI. `verified` stays
   `false` and `DUCKY_HERDR_VERIFIED` is unset — it is a deliberate operator act
@@ -186,8 +187,10 @@ so lock the channel down first. See
 - **The development Discord gateway is connected and its command set has been
   registered.** The twelve-command owner surface was read back against the
   development guild. Message Content is enabled and the transport requests the
-  least privilege needed for guild messages and DMs. A post-fix human round
-  trip remains a manual check because this host has no Discord interaction log.
+  least privilege needed for guild messages and DMs. One post-fix GPT guild
+  message round trip is now confirmed by the owner. DMs, slash commands and
+  proactive deliveries remain manual checks because this host has no durable
+  Discord interaction log.
 
 ## Quick start
 

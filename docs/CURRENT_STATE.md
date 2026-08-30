@@ -30,16 +30,16 @@ registered.
 |---|---|---|
 | Owner-only Discord surface (12 commands) | **Verified** (registration), **unit-tested** (behaviour) | 12/12 registered, read back with `register-commands --diff`; `discord.fixtures/gateway-connect.json` |
 | Discord gateway + MessageContent intent | **Verified** | `pnpm probe:discord-gateway`, READY in 2 276 ms; the intent is enabled, or the gateway would have refused |
-| Human Discord interaction | **Failed live, fix unverified** | `hi` in the configured GPT guild channel produced no reply. Cause found and fixed (two transport bugs, below); NOT re-tested since |
+| Human Discord interaction | **Verified for the configured GPT channel** | After the controlled development restart, the owner sent `hi` in the configured GPT guild channel and confirmed an actual reply. This verifies one guild-message round trip; DMs, slash commands and the other role channels remain untested live |
 | Herdr/Pi production path | **Verified, repeatably** | 3 consecutive isolated `probe:live-job` passes: 162 s / 193 s / 192 s, full evidence gate |
 | Conversation tool policy | **Verified text-only** | The rule is `tools.profile=minimal` plus the full group deny list and no override scope. The development host passes the provider check. Tools handed to the model went 31 → **0**, measured against the `ducky` agent |
-| OpenClaw conversation (GPT) | **Contract verified and selected on development** | `probe:openclaw` exits 0; request argv, reply envelope and zero-tool evidence are recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, so `/status` reports `openclaw-gateway` rather than the marked mock. Real Discord delivery after the latest restart is still awaiting a human test |
+| OpenClaw conversation (GPT) | **Verified on development for one owner-initiated guild turn** | `probe:openclaw` exits 0; request argv, reply envelope and zero-tool evidence are recorded. The development profile sets `DUCKY_CONVERSATION_PROVIDER=openclaw`, and the owner confirmed `hi` produced a real reply after the latest restart. DMs, slash commands and production delivery remain unverified |
 | GitHub read surfaces (repo/PR list/runs/issues) | **Verified** | `probe:gh-live`; production schemas accepted live responses |
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
 | CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
-| Channel roles + persistent replies | **Verified (configuration), unit-tested (behaviour)** | All four roles configured from owner-supplied ids. A routed message in the GPT channel returned a real reply in 24 s, persistent, other guild channels silent through the real router, in-memory database and mock transport. A real Discord round trip after the latest transport and policy changes is still awaiting a human test |
+| Channel roles + persistent replies | **Verified for the GPT smoke path; unit-tested elsewhere** | All four roles are configured from owner-supplied ids. The owner confirmed a real reply in the configured GPT guild channel after the transport and policy restart. The other role channels, unconfigured-channel silence and slash-command persistence remain covered by tests or configuration rather than live evidence |
 | Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
 | Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
@@ -85,7 +85,7 @@ configuring a briefing channel pushes nothing on its own, and
 `DUCKY_BRIEFING_DELIVERY` is still `dm`. Both are deliberate: the owner
 supplied channel ids, which is not the same as asking for a daily push.
 
-## Two transport bugs, fixed, not yet re-tested live
+## Two transport bugs, fixed and confirmed for the GPT smoke path
 
 The owner sent `hi` in the configured GPT guild channel and **no reply
 arrived**. That was not a provider failure, and the checks above could not have
@@ -107,10 +107,11 @@ isolation, and so was the transport.
 Visibility is now decided before the deferral, by one `ReplyPersistencePolicy`
 that both the transport and the router hold. Two rules can disagree; one cannot.
 
-**Status of the fix: implemented, unit-tested, NOT confirmed live.** The last
-live evidence available is the failed attempt. A message round trip in the guild
-channel has not been re-tested since, and nothing here should be read as saying
-it has.
+**Status of the fix: implemented, unit-tested and confirmed for one live GPT
+message.** After a controlled development-only restart loaded the rebuilt
+adapter, the owner retried `hi` and confirmed that Discord delivered the reply.
+This does not certify slash-command delivery, DMs, reminders or the other role
+channels.
 
 ## Conversation storage: two stores, one of them not Ducky's
 
@@ -595,10 +596,11 @@ drift apart.
 
 ## Detail: what the smoke-test evidence actually shows
 
-The owner reports performing the development smoke tests. **This host holds no
-evidence of them**, and the distinction between "it did not happen" and "there
-is nothing here to check" is worth being exact about, because only the second
-is true.
+The owner confirmed one development smoke test: after a controlled restart,
+`hi` in the configured GPT guild channel produced an actual reply. **This host
+still holds no durable interaction record**, because the coordinator does not
+log message content or replies; the confirmation is therefore recorded here as
+owner-provided live evidence rather than as a replayable fixture.
 
 What was inspected, read-only:
 
@@ -607,18 +609,16 @@ What was inspected, read-only:
   nothing else.** No interaction, command, DM or reply is recorded, because the
   coordinator does not log them. So the log neither confirms nor contradicts
   the smoke tests; it simply has nothing to say about them.
-- **The running coordinator is a STALE build**, started before this milestone's
-  work. Its own diagnostics say so: `repositories: 1 allowlisted` (the
-  `ducky-bot` watch-only mapping is not there) and `migrations: schema up to
-  date` from a time when the schema stopped at 15. Anything the owner exercised
-  ran against that build — not against placements, the watch-only mapping, or
-  the OpenClaw provider.
-- **The development database was deliberately not opened.** Migrations 16–20
-  are pending on it and the coordinator is live against it; reading it is not
-  worth the risk of a migration running underneath a running process.
+- **The running coordinator is the rebuilt development process.** Its boot
+  diagnostics report the current 21-migration schema, two allowlisted
+  repositories, the selected OpenClaw provider and the passing text-only policy.
+- **The development database is current.** `pnpm migrate --dry` reports the
+  schema is up to date, and the running coordinator passed readiness against it.
 
 **What was verified independently, and is not a report:** the registered command
-set (12/12, read back) and the gateway accepting the privileged intent.
+set (12/12, read back), the gateway accepting the privileged intent, the current
+policy check, and the coordinator health and readiness endpoints. The live GPT
+reply itself is owner-confirmed evidence.
 
 One defect fell out of this inspection. The boot diagnostics printed
 `WARN discord intents: enable the privileged MessageContent intent` **whenever
@@ -798,7 +798,7 @@ stays `false` and `/status` reports `experimental`.
 | Image / PDF schedule extraction | **Unsupported, and now re-checked rather than remembered.** Those uploads are refused before download. No decoder ships in Phase 1, and 2C did not add one: it forwards bytes, it does not read them. `pnpm probe:extraction` records what is actually installed, so the claim cannot drift the day somebody installs poppler for something else. A test asserts the shipped extractor reports `supportsBinary: false` whatever is on PATH — a decoder appearing on the host does not open the path. |
 | `herdr agent start` / `agent prompt` | **Now exercised, repeatedly, against a real Pi agent** — by `pnpm probe:herdr --with-agent` (contract) and `pnpm probe:live-job` (production path). Five real defects were found and fixed as a result; see [integrations/herdr.md](integrations/herdr.md). The orchestrator nonetheless still reports `experimental`: `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and this run did not set it. |
 | Cleanup after a completed worktree job | **Keeps the workspace, by design.** `herdr worktree remove` refuses a checkout holding uncommitted work, and a finished job's checkout holds the implementation plus `.ducky/result.json`. Ducky does not force — that would delete the work — so it reports the workspace as kept. The repository reservation IS released, so nothing is blocked; the owner clears the workspace with `/job cleanup`, and the reconciler sweeps a stale one after `HERDR_WORKSPACE_TTL_MS`. |
-| Real Discord gateway | **The gateway accepts this bot, with the privileged intent, measured.** `pnpm probe:discord-gateway --profile development` connected and reached READY in 2 276 ms with `Guilds + GuildMessages + DirectMessages + MessageContent` — so **Message Content is enabled in the portal**, because the gateway refuses the connection outright rather than degrading when it is not. What is still NOT verified is a post-fix human interaction round-trip: the probe registers NO handler and answers nothing, deliberately, because a coordinator may be running on the same bot identity and two wired connections would race for the same interaction. Proactive job notifications use this path, so their delivery is still unverified by an owner-initiated live DM. |
+| Real Discord gateway | **The gateway accepts this bot, with the privileged intent, measured.** `pnpm probe:discord-gateway --profile development` connected and reached READY in 2 276 ms with `Guilds + GuildMessages + DirectMessages + MessageContent` — so **Message Content is enabled in the portal**, because the gateway refuses the connection outright rather than degrading when it is not. The owner also confirmed one post-fix GPT message round trip through the running coordinator. The probe registers NO handler and answers nothing, deliberately, because a coordinator may be running on the same bot identity and two wired connections would race for the same interaction. Proactive job notifications still lack an owner-initiated live DM test. |
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |
 | Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
@@ -817,14 +817,14 @@ would unblock it.
 
 | Blocked | The exact blocker | What unblocks it |
 |---|---|---|
-| Real conversational replies | **UNBLOCKED.** The owner signed in with a ChatGPT/Codex subscription, the probe records a successful turn under the verified zero-tool policy, and the shipped adapter returned a real reply in 33 s. What is NOT proved is delivery after the latest restart: a human must exercise that Discord path. | Nothing technical for the provider itself. For a DIFFERENT host, such as production, its own sign-in under its own `OPENCLAW_PROFILE` and its own text-only tool policy; a signed-out or permissive host refuses rather than falling back. |
+| Real conversational replies | **UNBLOCKED on development.** The owner signed in with a ChatGPT/Codex subscription, the probe records a successful turn under the verified zero-tool policy, the shipped adapter returned a real reply in 33 s, and the owner confirmed a GPT reply after the latest restart. | Nothing technical for development. For a DIFFERENT host, such as production, its own sign-in under its own `OPENCLAW_PROFILE` and its own text-only tool policy; a signed-out or permissive host refuses rather than falling back. |
 | Conversation ATTACHMENT delivery | **One blocker now, not two, and that is worth stating rather than celebrating.** The provider used to be unverified AND incapable; it is now verified, so the only thing refusing an attachment is the capability flag — honest, because the recorded agent turn has no attachment input at all. A test asserts the two shipped providers are shut for *different* reasons, so this cannot be flattened into "both unavailable" and flipped later. | A verified provider that genuinely declares attachment support. Not OpenClaw's agent turn as recorded. |
 | Image / PDF schedule extraction | No decoder ships and none is installed. **Re-checked, not recalled:** `pnpm probe:extraction` runs `--version` on six candidates and records the result — `pdftotext`, `pdfinfo`, `qpdf`, `tesseract`, `pdftoppm` and `gs` are all ABSENT. No provider reports `supportsBinary`, so nothing could read the bytes anyway. Uploads are refused **before download**. | `poppler-utils` (for `pdftotext`) **plus** a provider reporting `supportsBinary: true` **plus** `SCHEDULE_BINARY_EXTRACTION_ENABLED=true`. Three separate things, and installing a decoder is a host mutation of its own. OCR is deliberately not the answer: it returns a guess about pixels that misreads digits, and a wrong time the owner then confirms is worse than a refusal. |
 | Herdr/Pi **certification** | **Unblocked.** Three consecutive clean `probe:live-job` runs (162 s / 193 s / 192 s), each on its own throwaway database, each through the full evidence gate. The race that made this unmeasurable is now DETECTED rather than described: the probe refuses to start when another executor has checked into the same database in the last two minutes. | Nothing technical. `DUCKY_HERDR_VERIFIED=1` remains a deliberate operator act, and no probe sets it. |
 | A live GitHub watch | **Unblocked.** `ducky-bot` carries a watch-only mapping and `pnpm probe:gh-live` has observed it, twice, deduplicating the second pass. What remains blocked is narrower: the pull-request surfaces, because that repository has no PR. | A configured repository that HAS a pull request. Opening one is a GitHub write and nothing here makes it. |
 | Recent commits on a repository's default branch | Reachable only through `gh api`, and `api` is on the forbidden-verb list. | A different read-only surface, or a deliberate decision about `gh api` with its own classification. |
 | Verified dependency checking | The GitHub CI checker still has never run against a real repository — the watched one has no pull request, so `prChecks` has nothing to check. It reports `verified: false` and the resolver refuses its `ready`. | One recorded live check against a repository with a PR. It can already **fail** a job on a definite CI failure. |
-| Live Discord delivery | Two preconditions are met and MEASURED: all twelve commands are registered (read back with `--diff`), and the gateway accepts the connection with the MessageContent intent (`probe:discord-gateway`, READY in 2 276 ms). **The owner reports having performed the smoke tests. That report is recorded as a report, because this host holds no evidence of it** — see "What the smoke-test evidence actually shows" below. | Interaction records that outlive the terminal. The coordinator logs boot diagnostics and nothing else, so a real DM leaves no trace to point at afterwards. |
+| Live Discord delivery | **Partially verified.** All twelve commands are registered (read back with `--diff`), the gateway accepts the connection with the MessageContent intent (`probe:discord-gateway`, READY in 2 276 ms), and the owner confirmed one GPT guild-message round trip after the restart. Slash-command delivery, DMs, reminders, briefings, watches and shared-channel posts remain unverified live. | Interaction records that outlive the terminal. The coordinator logs boot diagnostics and nothing else, so the owner-confirmed reply leaves no durable local interaction record. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
 

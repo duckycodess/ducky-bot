@@ -94,10 +94,10 @@ happens without an explicit flag, and none is implied by any step above.
 - **`pnpm register-commands --apply --profile <development|production>`** —
   writes the command set to Discord. Required once per bot, and again whenever
   the surface changes.
-- **A real Discord DM or slash command.** The gateway path is exercised only by
-  a human doing it. Until then reminder delivery, briefing delivery, watch
-  summaries and shared-channel posts are unit-tested only, and
-  `docs/CURRENT_STATE.md` says so.
+- **A real Discord DM or slash command.** The owner has now exercised one GPT
+  guild-message round trip. Slash-command delivery, reminder delivery, briefing
+  delivery, watch summaries, shared-channel posts and real DMs still require
+  their own owner-initiated tests, and `docs/CURRENT_STATE.md` says so.
 - **`/job execute` with `DUCKY_*_APPROVED_ACTIONS_ENABLED=true`** — commit, push
   or PR, after an approval, one action at a time.
 
@@ -116,8 +116,8 @@ happens without an explicit flag, and none is implied by any step above.
   `docs/integrations/openclaw.md`.
 - **Not that a watch has delivered to a real DM.** A watch HAS observed a real
   repository — `probe:gh-live` ran the loop twice against `duckycodess/ducky-bot`
-  and the second pass was correctly silent — but the delivery path is the
-  gateway one no human has exercised.
+  and the second pass was correctly silent — but no watch summary has reached a
+  real DM.
 - **Not that a reminder or briefing has reached a real DM.** That needs step 3
   of "External writes".
 

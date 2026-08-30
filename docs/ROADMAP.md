@@ -446,10 +446,10 @@ second one is the true one.
 **What is actually true.** The KEYING is free: Ducky keys bounded memory on
 `(user, thread)` and the provider session on `sha256(userId:threadKey)`, and a
 thread has its own channel id, so *if* a reply happened it would be correctly
-scoped. But with a `gpt` channel configured there is no reply to scope.
+scoped. The configured GPT channel itself now delivers replies, but a message
+in a thread under that channel is still silenced because
 `isSilencedConversationChannel` compares the incoming channel id against the
-configured GPT channel id, and a thread's id is not its parent's — so a message
-in a thread under the GPT channel is silenced and nothing is written anywhere.
+configured GPT channel id, and a thread's id is not its parent's.
 
 With no `gpt` channel configured a thread does get a reply and its own keying.
 That is a narrow case and not the one anybody means by "thread continuity".

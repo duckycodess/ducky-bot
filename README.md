@@ -221,6 +221,14 @@ production registers globally, and a production instance **refuses to start**
 without its own credentials rather than borrowing the development bot. The
 active profile is shown in the startup diagnostics and in `/status`.
 
+## Local checks
+
+Run these before opening a pull request:
+
+- `pnpm typecheck` — force-builds every package and typechecks the tests.
+- `pnpm test` — runs the full Vitest suite once.
+- `pnpm build` — compiles the packages to `dist/`.
+
 ## Commands
 
 | Command | Purpose |

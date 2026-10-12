@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectIntent } from '@ducky/contracts';
+import { INTENT_KINDS, WRITE_INTENTS, detectIntent } from '@ducky/contracts';
 import { makeHarness, OWNER, CHAT, replyText } from './helpers.js';
 
 const CODING = '900000000000000012';
@@ -23,124 +23,70 @@ const say = (
     ...(channelId ? { context: inChannel(channelId) } : {}),
   });
 
-describe('detecting a coding job', () => {
-  it('requires the repository in the grammar itself', () => {
-    /**
-     * The rule that matters. "fix the login bug" names no repository, and there
-     * is no safe way to pick one: an assistant that guessed would eventually
-     * point a real agent with edit capability at the wrong working tree.
-     */
-    expect(detectIntent('fix the login bug')).toBeUndefined();
-    expect(detectIntent('code something for me')).toBeUndefined();
-    expect(detectIntent('implement in : do a thing')).toBeUndefined();
-
-    const found = detectIntent('implement in demo: add a health endpoint');
-    expect(found?.kind).toBe('job_submit');
-    expect(found?.repo).toBe('demo');
-    expect(found?.subject).toBe('add a health endpoint');
+/**
+ * The entry-point contract from issue #7, tested from the outside.
+ *
+ * Engineering work starts at `$grill-me`, `$ticket` and `$agentize` and
+ * nowhere else. These tests exist to make the ABSENCE of a prose path
+ * structural: a future rule that reintroduces one fails here rather than
+ * shipping as a convenience.
+ */
+describe('prose cannot start engineering work', () => {
+  it('has no job-submitting intent left in the rule table', () => {
+    expect(INTENT_KINDS).not.toContain('job_submit');
+    expect(WRITE_INTENTS).not.toContain('job_submit');
   });
 
-  it('accepts the forms a person actually types', () => {
+  it('reads every old coding phrase as ordinary text', () => {
     for (const text of [
+      'implement in demo: add a health endpoint',
+      'code in demo: something',
       'fix in demo: the flaky test',
       'work on in demo, the flaky test',
       'submit a coding job in demo: the flaky test',
       'start job in demo: the flaky test',
+      'implement this',
+      'fix the login bug',
     ]) {
-      expect(detectIntent(text)?.kind, text).toBe('job_submit');
+      expect(detectIntent(text), text).toBeUndefined();
     }
   });
 
-  it('lowercases the slug to the form the allowlist uses', () => {
-    expect(detectIntent('code in DEMO: something')?.repo).toBe('demo');
-  });
-
-  it('is a WRITE, so it can never apply on inference alone', async () => {
+  it('creates no job however the owner phrases it, and never asks to confirm one', async () => {
     const h = makeHarness();
     await h.transport.start((e) => h.app.router.handle(e));
+
     const reply = await say(h, 'implement in demo: add a health endpoint');
-
-    expect(replyText(reply)).toMatch(/nothing is saved yet|reply \*\*yes\*\*/i);
-    expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
-    h.close();
-  });
-});
-
-describe('confirming a coding job', () => {
-  it('submits through JobsService only after an explicit yes', async () => {
-    const h = makeHarness();
-    await h.transport.start((e) => h.app.router.handle(e));
-
-    await say(h, 'implement in demo: add a health endpoint');
+    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
 
-    const confirmed = await say(h, 'yes');
-    expect(replyText(confirmed)).toMatch(/submitted/i);
-
-    const jobs = h.store.jobs.listRecent(OWNER, 10);
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.repoSlug).toBe('demo');
-    expect(jobs[0]!.task).toBe('add a health endpoint');
-    // Submitted, not started: every existing gate is still in front of it.
-    expect(['queued', 'waiting_for_executor']).toContain(jobs[0]!.state);
-    h.close();
-  });
-
-  it('drops the proposal on no, and saves nothing', async () => {
-    const h = makeHarness();
-    await h.transport.start((e) => h.app.router.handle(e));
-    await say(h, 'implement in demo: add a health endpoint');
-    const dropped = await say(h, 'no');
-    expect(replyText(dropped)).toMatch(/dropped/i);
-    expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
-    h.close();
-  });
-
-  it('refuses a repository that is not configured, before asking to confirm', async () => {
-    /**
-     * Refused at proposal time, so the owner is never asked to confirm
-     * something that would fail a moment later -- and the message says only
-     * that it is not configured, never which repositories are.
-     */
-    const h = makeHarness();
-    await h.transport.start((e) => h.app.router.handle(e));
-    const reply = await say(h, 'implement in nothing-here: add an endpoint');
-
-    expect(replyText(reply)).toMatch(/not a configured repository/i);
-    expect(replyText(reply)).not.toMatch(/demo|other/);
+    // ...and a later bare "yes" has nothing to confirm, so it still creates
+    // nothing. A stale affirmative must never find a coding proposal waiting.
     await say(h, 'yes');
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
 
-  it('refuses a watch-only repository through the same gate as the command', async () => {
-    // `allowJobs: false` is enforced by `JobsService.submit`, which is the
-    // whole point of routing through it rather than around it.
-    const h = makeHarness({
-      allowlistJson: JSON.stringify({
-        version: 1,
-        repos: [
-          { slug: 'demo', absolutePath: '/tmp/ducky-demo', defaultBranch: 'main' },
-          { slug: 'watched', allowJobs: false, github: { owner: 'acme', repo: 'watched' } },
-        ],
-      }),
-    });
+  it('is equally inert for a whitelist user', async () => {
+    const h = makeHarness();
     await h.transport.start((e) => h.app.router.handle(e));
-
-    await say(h, 'implement in watched: add an endpoint');
-    const confirmed = await say(h, 'yes');
-    expect(replyText(confirmed)).toMatch(/not saved|read-only observation/i);
+    await say(h, 'implement in demo: add an endpoint', undefined, CHAT);
     expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
     h.close();
   });
+});
 
-  it('is unreachable by a non-owner', async () => {
+describe('the personal-record rules are untouched', () => {
+  it('still proposes a task and applies it only on an explicit yes', async () => {
     const h = makeHarness();
     await h.transport.start((e) => h.app.router.handle(e));
-    const reply = await say(h, 'implement in demo: add an endpoint', undefined, CHAT);
-    // Ordinary conversation, exactly as before.
-    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
-    expect(h.store.jobs.listRecent(OWNER, 10)).toHaveLength(0);
+
+    const proposal = await say(h, 'i need to renew the domain');
+    expect(replyText(proposal)).toMatch(/nothing is saved yet/i);
+    expect(h.store.tasks.listForOwner(OWNER, 'open', 10)).toHaveLength(0);
+
+    await say(h, 'yes');
+    expect(h.store.tasks.listForOwner(OWNER, 'open', 10)).toHaveLength(1);
     h.close();
   });
 });
@@ -158,34 +104,26 @@ describe('a role narrows which rules may fire', () => {
     return h;
   };
 
-  it('proposes a coding job in the coding channel', async () => {
-    const h = await roleHarness();
-    const reply = await say(h, 'implement in demo: add an endpoint', CODING);
-    expect(replyText(reply)).toMatch(/nothing is saved yet/i);
-    h.close();
-  });
-
-  it('does not propose a coding job in the TASK channel', async () => {
-    // A coding job is not a note, and the task channel is for notes.
-    const h = await roleHarness();
-    const reply = await say(h, 'implement in demo: add an endpoint', TASK);
-    expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
-    h.close();
-  });
-
-  it('does not propose a task in the CODING channel', async () => {
+  it('fires no deterministic rule in the coding channel', async () => {
+    /**
+     * The coding channel is the repository-WORKFLOW channel now. The commands
+     * that belong there are handled before the intent table is consulted, and
+     * nothing else there means anything.
+     */
     const h = await roleHarness();
     const reply = await say(h, 'i need to renew the domain', CODING);
     expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
     h.close();
   });
 
+  it('still proposes a task in the task channel', async () => {
+    const h = await roleHarness();
+    const reply = await say(h, 'i need to renew the domain', TASK);
+    expect(replyText(reply)).toMatch(/nothing is saved yet/i);
+    h.close();
+  });
+
   it('leaves the GPT channel entirely to the provider', async () => {
-    /**
-     * Deterministic rules intercepting ordinary sentences is the opposite of
-     * what a GPT channel is for. Even a bare "yes" belongs to whichever channel
-     * proposed something, not to this one.
-     */
     const h = await roleHarness();
     const reply = await say(h, 'i need to renew the domain', GPT);
     expect(replyText(reply)).not.toMatch(/nothing is saved yet/i);
@@ -193,12 +131,10 @@ describe('a role narrows which rules may fire', () => {
   });
 
   it('keeps every rule live in a DM and in an unconfigured channel', async () => {
-    // Nothing an owner relies on stops working because they configured a
-    // channel for something else.
     const h = await roleHarness();
     expect((await say(h, 'i need to renew the domain'))?.content).toMatch(/nothing is saved yet/i);
     expect(
-      (await say(h, 'implement in demo: add an endpoint', '900000000000000099'))?.content,
+      (await say(h, 'remember: the deploy key rotates in March', '900000000000000099'))?.content,
     ).toMatch(/nothing is saved yet/i);
     h.close();
   });
@@ -208,8 +144,6 @@ describe('conversation is contained once a gpt channel exists', () => {
   const OTHER = '900000000000000099';
 
   it('answers everywhere when no gpt channel is configured', async () => {
-    // Exactly today's behaviour, preserved: an instance that configures
-    // nothing sees no change at all.
     const h = makeHarness();
     await h.transport.start((e) => h.app.router.handle(e));
     expect(await say(h, 'hello there')).toBeDefined();
@@ -218,12 +152,6 @@ describe('conversation is contained once a gpt channel exists', () => {
   });
 
   it('answers in the gpt channel and stays silent in other guild channels', async () => {
-    /**
-     * With the MessageContent intent the bot receives every message in every
-     * readable channel. Once the owner designates a channel for the model,
-     * answering elsewhere puts model output in channels chosen for something
-     * else AND spends subscription quota on strays.
-     */
     const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
     await h.transport.start((e) => h.app.router.handle(e));
 
@@ -233,7 +161,6 @@ describe('conversation is contained once a gpt channel exists', () => {
   });
 
   it('never silences a DM', async () => {
-    // There is no other channel a DM could belong to.
     const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
     await h.transport.start((e) => h.app.router.handle(e));
     expect(await say(h, 'hello there')).toBeDefined();
@@ -249,8 +176,6 @@ describe('conversation is contained once a gpt channel exists', () => {
   });
 
   it('leaves slash commands alone entirely', async () => {
-    // Containment is about CONVERSATION. A command is an explicit act and is
-    // answered wherever it is typed, exactly as before.
     const h = makeHarness({ env: { DUCKY_DEV_GPT_CHANNEL_ID: GPT } });
     await h.transport.start((e) => h.app.router.handle(e));
     const reply = await h.transport.dispatch({
@@ -266,27 +191,6 @@ describe('conversation is contained once a gpt channel exists', () => {
 });
 
 describe('containment does not swallow the other role channels', () => {
-  /**
-   * The bug a test caught: putting the containment check at the top of the
-   * message handler silenced the coding channel entirely, because it is a
-   * guild channel that is not the gpt channel. Deterministic rules must still
-   * run there; only the fallthrough to the model is contained.
-   */
-  it('still proposes in the coding channel while gpt is configured', async () => {
-    const h = makeHarness({
-      env: { DUCKY_DEV_CODING_CHANNEL_ID: CODING, DUCKY_DEV_GPT_CHANNEL_ID: GPT },
-    });
-    await h.transport.start((e) => h.app.router.handle(e));
-
-    const proposal = await say(h, 'implement in demo: add an endpoint', CODING);
-    expect(replyText(proposal)).toMatch(/nothing is saved yet/i);
-
-    // ...and a message there that matches no rule is silent rather than
-    // becoming a model turn.
-    expect(await say(h, 'just thinking out loud', CODING)).toBeUndefined();
-    h.close();
-  });
-
   it('still answers task reads in the task channel while gpt is configured', async () => {
     const h = makeHarness({
       env: { DUCKY_DEV_TASK_CHANNEL_ID: TASK, DUCKY_DEV_GPT_CHANNEL_ID: GPT },

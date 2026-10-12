@@ -16,6 +16,8 @@ export * from './job-visibility.js';
 export * from './time.js';
 export * from './assistant.js';
 export * from './intent.js';
+export * from './skill-commands.js';
+export * from './ticket-spec.js';
 export * from './dependency.js';
 export * from './command-policy.js';
 export * from './audit.js';

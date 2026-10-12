@@ -53,6 +53,7 @@ import {
 } from './discord/conversation-attachments.js';
 import { CommandBuckets, HourlyBudget } from './discord/command-buckets.js';
 import type { DiscordSink, DiscordTransport, Incoming } from './discord/transport.js';
+import type { SendTarget } from './discord/message.js';
 import { toDiscordPayload } from './discord/payload.js';
 import type { ProviderStatus } from './discord/presenters.js';
 
@@ -260,18 +261,16 @@ export function createApp(
   const reconciler = new Reconciler({ store, approvals, pending });
   // Deterministic rules over the owner's own messages: no provider, no new
   // command, and no inferred write applied without an explicit confirmation.
+  //
+  // `IntentsService` is handed NO job capability at all, and that is the
+  // change issue #7 makes to this wiring. It used to receive a `submitJob`
+  // function so a confirmed `implement in <repo>: <task>` could reach
+  // `JobsService.submit`. Engineering work now starts at `$grill-me` /
+  // `$ticket` / `$agentize` and nowhere else, so the function is removed
+  // rather than left unused: a capability that is not passed cannot be
+  // reached by a later edit that forgets why it was off.
   const intents = new IntentsService({
     clock, tasks, reminders, captures, briefing, ownerId: authz.ownerId,
-    /**
-     * The ONE job capability an inferred intent gets, passed as a function so
-     * it cannot reach anything else on `JobsService`: it may submit, and it may
-     * not cancel, answer or approve. `submit` itself still runs every gate --
-     * owner check, allowlist, `allowJobs`, placements, reservation.
-     */
-    submitJob: (actor, input) =>
-      jobs.submit(actor, { repoSlug: input.repoSlug, task: input.task, bootstrap: false }),
-    // Answers only yes/no, and says nothing about repositories that exist.
-    repoExists: (slug) => allowlist.list().some((r) => r.slug === slug && r.enabled),
   });
 
   // Which checker answers a dependency wait. The default still answers
@@ -512,28 +511,96 @@ export function channelAwareSink(client: unknown): DiscordSink {
     channels?: { fetch(id: string): Promise<unknown> };
   };
 
+  /**
+   * Resolves whichever destination the target names, once.
+   *
+   * Shared by `deliver` and the card methods so the two cannot drift about
+   * what a missing channel means -- which is the kind of divergence that turns
+   * a retryable outage into a silently dropped message.
+   */
+  const resolve = async (
+    target: SendTarget,
+  ): Promise<{
+    send: (p: unknown) => Promise<unknown>;
+    messages?: { fetch(id: string): Promise<unknown> };
+  }> => {
+    if (target.kind === 'channel') {
+      if (!c.channels) throw new DuckyError('not_found', 'The Discord client is not connected.');
+      const channel = (await c.channels.fetch(target.channelId)) as
+        | {
+            isTextBased?: () => boolean;
+            send?: (p: unknown) => Promise<unknown>;
+            messages?: { fetch(id: string): Promise<unknown> };
+          }
+        | null;
+      // A missing, non-text or unsendable channel fails LOUDLY rather than
+      // silently dropping the update: the notifier then leaves that
+      // transition pending and retries it on the next sweep.
+      if (!channel || channel.isTextBased?.() === false || typeof channel.send !== 'function') {
+        throw new DuckyError('not_found', 'That shared channel cannot receive messages.');
+      }
+      return {
+        send: channel.send.bind(channel),
+        ...(channel.messages ? { messages: channel.messages } : {}),
+      };
+    }
+
+    if (!c.users) throw new DuckyError('not_found', 'The Discord client is not connected.');
+    const user = (await c.users.fetch(target.userId)) as {
+      send(payload: unknown): Promise<unknown>;
+      dmChannel?: { messages?: { fetch(id: string): Promise<unknown> } } | null;
+    };
+    return {
+      send: user.send.bind(user),
+      ...(user.dmChannel?.messages ? { messages: user.dmChannel.messages } : {}),
+    };
+  };
+
   return {
     deliver: async (target, message) => {
-      const payload = toDiscordPayload({ ...message, ephemeral: false });
+      const { send } = await resolve(target);
+      await send(toDiscordPayload({ ...message, ephemeral: false }));
+    },
 
-      if (target.kind === 'channel') {
-        if (!c.channels) throw new DuckyError('not_found', 'The Discord client is not connected.');
-        const channel = (await c.channels.fetch(target.channelId)) as
-          | { isTextBased?: () => boolean; send?: (p: unknown) => Promise<unknown> }
-          | null;
-        // A missing, non-text or unsendable channel fails LOUDLY rather than
-        // silently dropping the update: the notifier then leaves that
-        // transition pending and retries it on the next sweep.
-        if (!channel || channel.isTextBased?.() === false || typeof channel.send !== 'function') {
-          throw new DuckyError('not_found', 'That shared channel cannot receive messages.');
-        }
-        await channel.send(payload);
-        return;
+    /**
+     * Sends and reports the id, when the client gives one back.
+     *
+     * A client that returns something without an `id` is not an error: the
+     * caller treats `undefined` as "this card cannot be edited" and posts a
+     * fresh one next time. Losing in-place editing is a worse experience;
+     * guessing an id would be a wrong one.
+     */
+    deliverCard: async (target, message) => {
+      const { send } = await resolve(target);
+      const sent = (await send(toDiscordPayload({ ...message, ephemeral: false }))) as
+        | { id?: unknown }
+        | undefined;
+      return typeof sent?.id === 'string' ? sent.id : undefined;
+    },
+
+    /**
+     * Edits a message this instance sent.
+     *
+     * Returns false for a message that is gone, which is NORMAL -- the owner
+     * may have deleted the card. It throws only for a destination that cannot
+     * be reached at all, so a real outage is still retried rather than being
+     * mistaken for a deleted message.
+     */
+    editCard: async (target, messageId, message) => {
+      const { messages } = await resolve(target);
+      if (!messages) return false;
+      let existing: { edit?: (p: unknown) => Promise<unknown> } | null;
+      try {
+        existing = (await messages.fetch(messageId)) as { edit?: (p: unknown) => Promise<unknown> };
+      } catch {
+        return false;
       }
-
-      if (!c.users) throw new DuckyError('not_found', 'The Discord client is not connected.');
-      const user = await c.users.fetch(target.userId);
-      await user.send(payload);
+      if (!existing || typeof existing.edit !== 'function') return false;
+      const payload = toDiscordPayload({ ...message, ephemeral: false });
+      // An edit must not restate visibility; the original send fixed it.
+      delete payload.flags;
+      await existing.edit(payload);
+      return true;
     },
   };
 }

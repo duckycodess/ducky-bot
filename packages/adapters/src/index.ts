@@ -37,3 +37,7 @@ export * from './pi/brief.js';
 export * from './pi/pi-ready.js';
 export * from './pi/pi-herdr.js';
 export * from './pi/pi.mock.js';
+export * from './frontdoor/frontdoor.port.js';
+export * from './frontdoor/frontdoor.cli.js';
+export * from './frontdoor/frontdoor.disabled.js';
+export * from './frontdoor/frontdoor.mock.js';

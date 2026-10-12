@@ -1007,4 +1007,68 @@ CREATE INDEX ix_briefing_deliveries_pending
   ON briefing_deliveries(status, due_at) WHERE status = 'pending';
 `,
   },
+  {
+    version: 22,
+    name: 'agent_threads',
+    sql: `
+-- The repository-workflow binding for one Discord thread (issue #7).
+--
+-- ONE ROW PER (owner, thread), replaced in place. That shape is the whole
+-- design, not an optimisation:
+--
+--   * A thread is a conversation, and a conversation is about one repository
+--     at a time. Binding once and rebinding on an explicit change is what lets
+--     $ticket and $agentize act without guessing a target -- and guessing a
+--     target means pointing a real agent at the wrong working tree.
+--   * One row cannot grow. There is no per-message append anywhere here except
+--     \`intent_notes\`, which is a JSON array the repository itself truncates,
+--     so a long grill costs a bounded amount of storage rather than a
+--     transcript.
+--   * The CURRENT card lives on the same row, so a restart can find the
+--     message it was editing. A thread has at most one workflow command in
+--     flight, exactly as it has at most one pending intent proposal.
+--
+-- \`checkout_root\` is a host filesystem path and is NEVER rendered: Discord
+-- supplies a repository name and gets a repository name back, here as
+-- everywhere else in this codebase.
+CREATE TABLE agent_threads (
+  discord_user_id  TEXT NOT NULL,
+  thread_key       TEXT NOT NULL,
+  -- \`owner/name\`, the only repository form the installed contract accepts.
+  repository       TEXT,
+  checkout_root    TEXT,
+  grilling         INTEGER NOT NULL DEFAULT 0,
+  grill_started_at TEXT,
+  -- The owner's OWN words, bounded and truncated by the repository. Nothing
+  -- Ducky generated, and nothing the model said.
+  intent_notes     TEXT NOT NULL DEFAULT '[]',
+  -- The canonical TicketSpec id for this thread's publication. Minted once and
+  -- REUSED on every retry, which is what makes a retry enrich the same issue
+  -- instead of opening a second one.
+  ticket_uuid      TEXT,
+  issue_number     INTEGER,
+  issue_url        TEXT,
+  run_id           TEXT,
+  run_command      TEXT
+    CHECK (run_command IS NULL OR run_command IN ('$grill-me','$ticket','$agentize')),
+  run_status       TEXT
+    CHECK (run_status IS NULL OR run_status IN
+      ('scanning','grilling','publishing','published','queued','onboarding','onboarded',
+       'needs_input','failed','cancelled')),
+  run_detail       TEXT,
+  run_ready        INTEGER NOT NULL DEFAULT 0,
+  run_queued       INTEGER NOT NULL DEFAULT 0,
+  run_started_at   TEXT,
+  run_finished_at  TEXT,
+  card_channel_id  TEXT,
+  card_message_id  TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, thread_key)
+);
+
+-- The card controls carry the run id, so pressing one has to find its row.
+CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
+`,
+  },
 ];

@@ -113,6 +113,20 @@ export interface ConversationInput {
    * duration of this call only.
    */
   readonly attachment?: ConversationAttachment;
+  /**
+   * Extra INSTRUCTIONS for this turn only, supplied by the coordinator.
+   *
+   * Instructions are not authorization, exactly as the persona is not: a line
+   * here grants no capability and the real controls are untouched. It exists
+   * because one surface genuinely needs to change how a turn is conducted
+   * rather than what it is about -- the repository grill, which runs the
+   * INSTALLED upstream skill's own text, read from the configured private
+   * path at call time and never copied into this repository.
+   *
+   * Rebuilt per turn and never recorded as a conversation turn, so it cannot
+   * be replayed back as something the owner said.
+   */
+  readonly instructions?: readonly string[];
 }
 
 export interface ConversationReply {

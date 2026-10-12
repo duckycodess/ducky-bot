@@ -335,6 +335,14 @@ export class GatewayOpenClawProvider implements ConversationProvider {
      * of it.
      */
     const parts = [buildSystemPreamble(this.persona)];
+    /**
+     * Per-turn instructions sit AFTER the style contract and BEFORE the
+     * history, so they shape how this turn is conducted without displacing
+     * the rules that keep every reply honest. They are bounded by the
+     * coordinator before they get here.
+     */
+    const instructions = (input.instructions ?? []).filter((x) => x.trim() !== '');
+    if (instructions.length > 0) parts.push('', 'For this turn:', ...instructions);
     const history = (input.history ?? [])
       .map((t) => `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.text}`)
       .join('\n');

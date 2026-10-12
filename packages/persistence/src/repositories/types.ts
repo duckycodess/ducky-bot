@@ -1,8 +1,8 @@
 import type {
-  ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome, AuditSubjectKind,
-  CaptureState, ConversationRole, DependencyCheckStatus, DependencyState, DependencyType,
-  GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
-  TaskPriority, TaskState,
+  AgentCardStatus, ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome,
+  AuditSubjectKind, CaptureState, ConversationRole, DependencyCheckStatus, DependencyState,
+  DependencyType, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
+  SkillCommand, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -410,3 +410,41 @@ export interface AuditLogRow {
 
 export const toBool = (v: unknown): boolean => Number(v) === 1;
 export const fromBool = (v: boolean): number => (v ? 1 : 0);
+
+/**
+ * One Discord thread's repository-workflow binding, plus the card currently
+ * in flight there.
+ *
+ * `checkoutRoot` is a host filesystem path. It exists so a follow-up helper
+ * call reaches the same checkout, and it is NEVER rendered: no presenter reads
+ * it, asserted by a test.
+ */
+export interface AgentThreadRow {
+  discordUserId: string;
+  threadKey: string;
+  /** `owner/name`, or null when the thread has no repository yet. */
+  repository: string | null;
+  checkoutRoot: string | null;
+  grilling: boolean;
+  grillStartedAt: string | null;
+  /** The owner's own lines, bounded. Nothing generated and nothing quoted. */
+  intentNotes: string[];
+  /** The canonical TicketSpec id. Minted once per thread, reused on retries. */
+  ticketUuid: string | null;
+  issueNumber: number | null;
+  issueUrl: string | null;
+  runId: string | null;
+  runCommand: SkillCommand | null;
+  runStatus: AgentCardStatus | null;
+  runDetail: string | null;
+  /** Whether the owner typed `--ready` on the run that produced this card. */
+  runReady: boolean;
+  /** Whether the exact `agent:ready` label was applied AND verified. */
+  runQueued: boolean;
+  runStartedAt: string | null;
+  runFinishedAt: string | null;
+  cardChannelId: string | null;
+  cardMessageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

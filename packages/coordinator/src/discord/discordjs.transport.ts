@@ -213,6 +213,34 @@ export class DiscordJsTransport implements DiscordTransport {
     await sink.deliver(target, safe);
   }
 
+  /**
+   * Same choke point, and the id comes back.
+   *
+   * Sanitization is applied here exactly as it is for `send`, so a card is
+   * past the egress boundary before any client sees it -- a new primitive must
+   * not become a new way around the redactor.
+   */
+  async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+    const safe = sanitizeOutbound(message);
+    const sink = this.sink ?? this.sinkFactory(this.#client);
+    if (!sink.deliverCard) {
+      await sink.deliver(target, safe);
+      return undefined;
+    }
+    return sink.deliverCard(target, safe);
+  }
+
+  async updateCard(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean> {
+    const safe = sanitizeOutbound(message);
+    const sink = this.sink ?? this.sinkFactory(this.#client);
+    if (!sink.editCard) return false;
+    return sink.editCard(target, messageId, safe);
+  }
+
   // --------------------------------------------------------------------------
 
   private async route(event: Incoming): Promise<OutboundMessage | undefined> {

@@ -312,6 +312,30 @@ export const GITHUB_WATCH_MAX_PR_CHECKS = 5;
 export const GITHUB_WATCH_SUMMARY_MAX = 1200;
 export const GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS = 8;
 
+// ---- the installed workflow front door (issue #7) ---------------------------
+/**
+ * Budgets for the installed Agent Flow helper. Every one is a CEILING handed
+ * to `runArgv`, which has a mandatory timeout: there is no unbounded helper
+ * call anywhere.
+ *
+ * `inspect` reads a tree and may touch GitHub; `ticket` and `agentize` make
+ * real network round trips through `gh` and are given more room, but still a
+ * fixed amount. A helper that hangs must fail the command, not the process.
+ */
+export const FRONTDOOR_READ_TIMEOUT_MS = 60_000;
+export const FRONTDOOR_PUBLISH_TIMEOUT_MS = 180_000;
+/**
+ * Hard cap on helper stdout. The helper answers with small JSON documents;
+ * anything larger is a malfunction, and an unbounded read of a subprocess is
+ * how a log file becomes a Discord message.
+ */
+export const FRONTDOOR_MAX_OUTPUT_BYTES = 512 * 1024;
+/** How long a thread's grill stays active without a message. */
+export const GRILL_SESSION_TTL_MS = 12 * 60 * 60_000;
+/** Bounds on what a card ever shows about a completed implementation. */
+export const AGENT_CARD_CHANGED_FILES_MAX = 10;
+export const AGENT_CARD_DETAIL_MAX = 1_200;
+
 // ---- audit log --------------------------------------------------------------
 /** Every free-text audit detail is redacted and then clamped to this. */
 export const AUDIT_DETAIL_MAX = 300;

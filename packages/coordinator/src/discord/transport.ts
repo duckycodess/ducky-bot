@@ -84,9 +84,44 @@ export interface DiscordTransport {
   start(handler: IncomingHandler): Promise<void>;
   stop(): Promise<void>;
   send(target: SendTarget, message: OutboundMessage): Promise<void>;
+  /**
+   * Sends a message and reports WHICH message it is.
+   *
+   * The one thing `send` cannot do, and the reason a status card needs it: a
+   * card that is edited in place has to be found again, and after a restart
+   * the only thing that can find it is a stored id. `undefined` means the
+   * transport could not report one -- the card then falls back to being an
+   * ordinary message, which is a worse experience and never a wrong one.
+   */
+  sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined>;
+  /**
+   * Edits a message this instance previously sent.
+   *
+   * Returns false when the message is gone, which is a NORMAL outcome: the
+   * owner may have deleted it. The caller posts a fresh card rather than
+   * failing the command, so a deleted card costs a duplicate and never a lost
+   * update.
+   */
+  updateCard(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean>;
 }
 
-/** What a transport hands to the underlying client after sanitization. */
+/**
+ * What a transport hands to the underlying client after sanitization.
+ *
+ * `deliverCard` and `editCard` are OPTIONAL. A sink that cannot do them is not
+ * broken -- it simply has no editable-message capability, and the transport
+ * degrades to ordinary sends rather than pretending.
+ */
 export interface DiscordSink {
   deliver(target: SendTarget, message: OutboundMessage): Promise<void>;
+  deliverCard?(target: SendTarget, message: OutboundMessage): Promise<string | undefined>;
+  editCard?(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean>;
 }

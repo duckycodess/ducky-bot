@@ -21,11 +21,50 @@ export interface OutboundEmbed {
 
 export type ButtonStyle = 'primary' | 'secondary' | 'success' | 'danger';
 
-export interface OutboundButton {
+/**
+ * A button, which is EITHER a signed control or a link, never both.
+ *
+ * A discriminated union rather than two optional fields, because the
+ * difference matters: a signed control acts on the owner's behalf and is
+ * verified on the way back in; a link acts on nobody's behalf and never
+ * reaches Ducky again. Expressing both on one object would make "which is
+ * this?" a question with a wrong answer available.
+ */
+export interface OutboundControlButton {
   readonly customId: string;
   readonly label: string;
   readonly style?: ButtonStyle;
 }
+
+/**
+ * A link button. Carries no custom id, so it cannot act and cannot be
+ * replayed; the sanitizer restricts the URL to the exact hosts a Ducky message
+ * is ever allowed to point at.
+ */
+export interface OutboundLinkButton {
+  readonly url: string;
+  readonly label: string;
+}
+
+export type OutboundButton = OutboundControlButton | OutboundLinkButton;
+
+export const isLinkButton = (b: OutboundButton): b is OutboundLinkButton =>
+  'url' in b && typeof b.url === 'string';
+
+/**
+ * The signed id of a control button, or the empty string for a link.
+ *
+ * A narrowing helper for the many callers that only ever deal in controls.
+ * Returning '' rather than throwing is deliberate: a link where a control was
+ * expected is a presentation mistake, and an empty id simply fails
+ * verification like any other invalid one.
+ */
+export const controlId = (b: OutboundButton | undefined): string =>
+  b && !isLinkButton(b) ? b.customId : '';
+
+/** The style of a control button, or undefined for a link. */
+export const controlStyle = (b: OutboundButton | undefined): ButtonStyle | undefined =>
+  b && !isLinkButton(b) ? b.style : undefined;
 
 export interface OutboundRow {
   readonly buttons: readonly OutboundButton[];

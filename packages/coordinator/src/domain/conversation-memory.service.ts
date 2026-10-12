@@ -43,10 +43,24 @@ export interface ConversationForgetResult {
   readonly turnsDeleted: number;
   readonly enabled: boolean;
   /**
-   * How many provider sessions were ROTATED. Rotation is not deletion: see
-   * `ProviderDeletionOutcome`.
+   * How many of the ACTOR'S OWN provider sessions were rotated.
+   *
+   * Rotation is not deletion. It changes the key the next turn uses, so the
+   * old session can never come back as context; the data itself is still in
+   * the provider's own store, and every message that mentions this says so.
    */
   readonly providerSessionsRotated: number;
+  /**
+   * How many OTHER people's provider sessions were rotated because they shared
+   * a thread with the deleted conversation.
+   *
+   * A shared thread feeds every speaker's provider session with everybody's
+   * turns, so after a deletion those sessions still hold the deleted words.
+   * Rotating them is what stops that context reappearing. It removes nothing
+   * of theirs: their own stored turns are untouched and their next turn simply
+   * starts a fresh session.
+   */
+  readonly sharedSessionsRotated: number;
 }
 
 /** One turn's worth of prompt context, with its provenance kept separate. */
@@ -519,19 +533,46 @@ export class ConversationMemoryService {
     const threads = this.store.conversationThreads;
     return withTransaction(this.store.db, () => {
       const turnsDeleted = this.store.conversations.deleteForUser(actor.discordUserId);
+
       let rotated = 0;
       for (const session of threads.sessionsFor(actor.discordUserId)) {
         threads.rotate(session.threadKey, actor.discordUserId);
         rotated += 1;
       }
-      // A checkpoint is derived from turns that are now gone, so it has to go
-      // with them: leaving it would replay a summary of deleted words.
+
+      /**
+       * Every OTHER session a shared thread contaminated.
+       *
+       * This is the half that is easy to miss. A shared thread replays
+       * everybody's turns to everybody's provider session, so after this
+       * deletion the other participants' sessions still hold the deleted
+       * words. Rotating them orphans that context without touching a single
+       * row of theirs -- their stored turns stay, and their next turn opens a
+       * clean session.
+       *
+       * The counts are kept apart because they are different facts, and the
+       * reply says both rather than adding them into one reassuring number.
+       */
+      let shared = 0;
       for (const threadId of threads.threadsFor(actor.discordUserId)) {
+        for (const other of threads.sessionActorsFor(threadId)) {
+          if (other === actor.discordUserId) continue;
+          threads.rotate(threadId, other);
+          shared += 1;
+        }
+        // A checkpoint derived from turns that are now gone has to go with
+        // them: leaving it would replay a summary of deleted words.
         if (this.store.conversations.countForThread(actor.discordUserId, threadId) === 0) {
           threads.deleteCheckpoint(threadId);
         }
       }
-      return { turnsDeleted, enabled: this.config.enabled, providerSessionsRotated: rotated };
+
+      return {
+        turnsDeleted,
+        enabled: this.config.enabled,
+        providerSessionsRotated: rotated,
+        sharedSessionsRotated: shared,
+      };
     });
   }
 
@@ -547,7 +588,12 @@ export class ConversationMemoryService {
       if (this.store.conversations.countForThread(actor.discordUserId, threadKey) === 0) {
         threads.deleteCheckpoint(threadKey);
       }
-      return { turnsDeleted, enabled: this.config.enabled, providerSessionsRotated: 1 };
+      return {
+        turnsDeleted,
+        enabled: this.config.enabled,
+        providerSessionsRotated: 1,
+        sharedSessionsRotated: 0,
+      };
     });
   }
 

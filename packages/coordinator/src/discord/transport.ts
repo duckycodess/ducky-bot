@@ -171,8 +171,18 @@ export interface DiscordTransport {
     readonly name: string;
     readonly autoArchiveMinutes: number;
   }): Promise<ThreadStartOutcome>;
-  /** Installs the hook above. Called once, by the composition root. */
-  useConversationThreads?(enter: ConversationThreadEntry): void;
+  /**
+   * Installs the hook above, and the one that records a thread as GONE.
+   *
+   * Called once, by the composition root. `onGone` fires only on Discord's
+   * `Unknown Channel`, which is the single durable signal that a thread has
+   * been deleted; closing a mapping starts the retention clock and removes
+   * nothing.
+   */
+  useConversationThreads?(
+    enter: ConversationThreadEntry,
+    onGone?: (threadId: string) => void,
+  ): void;
 }
 
 /** What a transport hands to the underlying client after sanitization. */

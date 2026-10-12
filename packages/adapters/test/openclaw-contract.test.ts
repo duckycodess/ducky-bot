@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { RECORDED_CONTRACT_VERSION } from '../src/openclaw/openclaw.contract.js';
+import {
+  RECORDED_CONTRACT_VERSION, RECORDED_SESSION_DELETION,
+} from '../src/openclaw/openclaw.contract.js';
 import { GatewayOpenClawProvider } from '../src/openclaw/openclaw.gateway.js';
 import { isPrivateGatewayUrl } from '../src/openclaw/private-url.js';
 
@@ -116,6 +118,44 @@ describe('the recorded OpenClaw surface', () => {
     const provider = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
     expect(provider.verified).toBe(RECORDED_CONTRACT_VERSION !== null);
     expect(GatewayOpenClawProvider.initializable().ok).toBe(RECORDED_CONTRACT_VERSION !== null);
+  });
+
+  /**
+   * Provider session DELETION, and the gap `/forget` reports honestly.
+   *
+   * The constant, the capability and the fixture all have to agree, in both
+   * directions. Somebody cannot declare deletion supported without a recording,
+   * and a recording cannot quietly make it supported either: the probe records
+   * the SURFACE (names only, nothing deleted), and the constant stays null
+   * until a narrow command AND an independent readback have been exercised.
+   */
+  it('declares session deletion unsupported while no contract is recorded', () => {
+    const provider = new GatewayOpenClawProvider('ws://127.0.0.1:19001');
+    const capability = provider.capabilities.sessionDeletion;
+
+    expect(capability.supported).toBe(RECORDED_SESSION_DELETION !== null);
+    if (!capability.supported) {
+      // The reason has to be actionable, not the word "unsupported".
+      expect(capability.reason).toMatch(/probe:openclaw/);
+      expect(capability.reason).toMatch(/readback/);
+    }
+  });
+
+  it('records the deletion SURFACE without ever using it', () => {
+    const surface = read('session-deletion-surface');
+    if (!surface) return;
+
+    // Recording what a command is called is not evidence that it works, and
+    // these two flags are what keep the difference legible.
+    expect(surface['verifiedDeletion']).toBe(false);
+    expect(surface['verifiedReadback']).toBe(false);
+    // And recording it never licenses the capability on its own.
+    expect(RECORDED_SESSION_DELETION).toBeNull();
+
+    // Names only: nothing that looks like a session id reached the fixture.
+    const flat = JSON.stringify(surface);
+    expect(flat).not.toMatch(/[0-9a-f]{32}/);
+    expect(flat).not.toMatch(/agent:ducky:/);
   });
 
   it('records a reply envelope of TYPES, never the model\'s answer', () => {

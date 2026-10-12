@@ -319,6 +319,24 @@ export class ConversationThreadService {
   }
 
   /**
+   * Records that a thread is gone from Discord.
+   *
+   * Closing a mapping deletes NOTHING. It starts the retention clock -- a live
+   * thread is out of retention's reach entirely, and a closed one ages out
+   * whole -- so this is the single moment a conversation becomes eligible to
+   * be forgotten by the passage of time.
+   *
+   * Ducky learns this the next time it tries to use the thread, because it has
+   * no channel-delete event wired and inventing one would mean asking for
+   * another gateway intent. The honest consequence is stated in ADR 0025: a
+   * deleted thread nobody writes to again is never observed as deleted, and
+   * its transcript stays until `/forget` removes it.
+   */
+  observeGone(threadId: string): void {
+    this.deps.store.conversationThreads.close(threadId);
+  }
+
+  /**
    * Opens a BRANCH: a separate visible thread beside the one the control was
    * pressed in.
    *

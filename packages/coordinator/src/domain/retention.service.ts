@@ -204,6 +204,33 @@ export class RetentionService {
       });
     }
 
+    /**
+     * Closed conversation threads, removed WHOLE.
+     *
+     * Lifecycle-aware rather than age-only, because issue #4 asks for the full
+     * transcript of a thread while it LIVES. So the age windows above skip
+     * every live thread (the SQL excludes them), and the bound is here: once
+     * Ducky has observed that a thread is gone from Discord, its turns, its
+     * checkpoint, its participation rows, its provider session records and its
+     * mapping age out together.
+     *
+     * A live thread is counted as SKIPPED rather than passed over in silence,
+     * on the same reasoning as a skipped job: "this pass deliberately left
+     * something alone" is a fact an operator should be able to read off the
+     * report. There is still no path here that deletes across threads or users
+     * -- `purgeThread` takes one id and refuses a thread that is not closed.
+     */
+    withTransaction(this.store.db, () => {
+      const threads = this.store.conversationThreads;
+      c.conversationThreadsSkipped = threads.countLive();
+      for (const row of threads.closedBefore(cutoff(p.closedThreadDays), p.batch)) {
+        const out = threads.purgeThread(row.threadId);
+        if (!out.deleted) continue;
+        c.conversationThreadsDeleted += 1;
+        c.conversationThreadRowsDeleted += out.rows;
+      }
+    });
+
     withTransaction(this.store.db, () => {
       c.workspacesDeleted = r.deleteClosedWorkspaces(cutoff(p.jobMetadataDays), p.batch);
       c.idempotencyKeysDeleted = r.deleteIdempotencyKeys(cutoff(p.idempotencyDays), p.batch);
@@ -262,6 +289,9 @@ export class RetentionService {
         `workspaces ${counts.workspacesDeleted}; ` +
         `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}; ` +
         `conversation turns ${counts.conversationTurnsDeleted}; ` +
+        `closed threads ${counts.conversationThreadsDeleted} ` +
+        `(+${counts.conversationThreadRowsDeleted} rows, ` +
+        `${counts.conversationThreadsSkipped} live kept); ` +
         `job detail rows ${counts.jobDetailRowsDeleted}; audit ${counts.auditRowsDeleted}`,
     });
   }
@@ -289,6 +319,7 @@ export function retentionPolicyFrom(env: {
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: number;
+  DUCKY_RETENTION_CLOSED_THREAD_DAYS: number;
   DUCKY_RETENTION_BATCH: number;
   /** Deprecated aliases. */
   DUCKY_RETENTION_TERMINAL_JOBS_DAYS?: number | undefined;
@@ -320,6 +351,7 @@ export function retentionPolicyFrom(env: {
     idempotencyDays: env.DUCKY_RETENTION_IDEMPOTENCY_DAYS,
     conversationOwnerDays: env.DUCKY_RETENTION_CONVERSATION_OWNER_DAYS,
     conversationOtherDays: env.DUCKY_RETENTION_CONVERSATION_OTHER_DAYS,
+    closedThreadDays: env.DUCKY_RETENTION_CLOSED_THREAD_DAYS,
     batch: env.DUCKY_RETENTION_BATCH,
   });
 }

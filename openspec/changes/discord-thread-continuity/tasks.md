@@ -11,13 +11,13 @@
 
 - [x] 2.1 Add numbered SQLite migration for mapping/participants/checkpoint/provider epoch and full transcript; require verified participation proof at thread-read signature level, explicitly supersede ADR 0021 §2/§3 and verify migration/restart/per-thread participant isolation with `pnpm migrate --dry`.
 - [x] 2.2 Add separate checkpoint and manual/automatic Compact with configured byte-budget provider input, durable decisions/recent turns and refusal when even compact context exceeds budget; verify memory/provider tests including restart, oversized context and unchanged transcript count.
-- [ ] 2.3 Make retention lifecycle-aware with explicit deleted-thread cleanup, preserving full live transcript without wipe-all paths per owner-approved issue; document unbounded-live storage/privacy tradeoff and guest owner-mediated deletion in docs/SECURITY.md, update ADR 0020/0021/0022; verify retention tests and dry-run counts.
+- [x] 2.3 Make retention lifecycle-aware with explicit deleted-thread cleanup, preserving full live transcript without wipe-all paths per owner-approved issue; document unbounded-live storage/privacy tradeoff and guest owner-mediated deletion in docs/SECURITY.md, update ADR 0020/0021/0022; verify retention tests and dry-run counts.
 
 ## 3. Targeted two-store deletion
 
-- [ ] 3.1 Extend safe OpenClaw probe to record deletion/readback capability names without values, then verify a narrow supported deletion/readback contract and argv policy; if absent or forbidden, ship honest unsupported/partial status without weakening forbidden verbs, with recorded fixtures and no shell execution.
-- [ ] 3.2 Keep existing all-user `/forget conversation` default; add safe targeted scope if supported without widening owner-only surface, track all provider actor sessions contaminated by a shared thread, persist epoch rotation for stale-session prevention and report orphaned provider data/partial deletion honestly; verify conversation-provider, conversation-memory, authz and forget tests and count-only audit.
-- [ ] 3.3 Update ADR 0024 and operator docs for deletion guarantees and caveats; verify doc matches supported provider behavior.
+- [x] 3.1 Extend safe OpenClaw probe to record deletion/readback capability names without values, then verify a narrow supported deletion/readback contract and argv policy; if absent or forbidden, ship honest unsupported/partial status without weakening forbidden verbs, with recorded fixtures and no shell execution.
+- [x] 3.2 Keep existing all-user `/forget conversation` default; add safe targeted scope if supported without widening owner-only surface, track all provider actor sessions contaminated by a shared thread, persist epoch rotation for stale-session prevention and report orphaned provider data/partial deletion honestly; verify conversation-provider, conversation-memory, authz and forget tests and count-only audit.
+- [x] 3.3 Update ADR 0024 and operator docs for deletion guarantees and caveats; verify doc matches supported provider behavior.
 
 ## 4. Presentation and integration
 

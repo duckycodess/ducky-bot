@@ -241,7 +241,9 @@ export function createApp(
     store,
     config: resolveConversationMemory(env),
   });
-  const forget = new ForgetService({ store, authz, memory: conversationMemory });
+  // `conversation` is passed for ONE reason: so `/forget` can report the second
+  // store honestly (ADR 0024). Nothing in ForgetService calls `reply`.
+  const forget = new ForgetService({ store, authz, memory: conversationMemory, conversation });
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
@@ -346,7 +348,10 @@ export function createApp(
   // The decision lives in the domain; the transport only performs it. Absent
   // on a transport that does not support threads, which leaves routing exactly
   // as it was.
-  transport.useConversationThreads?.((event) => conversationThreads.enter({ event }));
+  transport.useConversationThreads?.(
+    (event) => conversationThreads.enter({ event }),
+    (threadId) => conversationThreads.observeGone(threadId),
+  );
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });

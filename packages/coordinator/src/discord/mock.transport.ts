@@ -34,8 +34,22 @@ export class MockDiscordTransport implements DiscordTransport {
    */
   threadStartFailure: ThreadStartOutcome | undefined;
 
-  useConversationThreads(enter: ConversationThreadEntry): void {
+  #threadGone: ((threadId: string) => void) | undefined;
+
+  useConversationThreads(enter: ConversationThreadEntry, onGone?: (threadId: string) => void): void {
     this.#enterThread = enter;
+    this.#threadGone = onGone;
+  }
+
+  /**
+   * Test helper: models Discord answering `Unknown Channel` for a thread.
+   *
+   * The real transport learns this by trying to post into a thread that is no
+   * longer there; a test should not have to fake a REST error to exercise what
+   * follows from it.
+   */
+  markThreadGone(threadId: string): void {
+    this.#threadGone?.(threadId);
   }
 
   async start(handler: IncomingHandler): Promise<void> {

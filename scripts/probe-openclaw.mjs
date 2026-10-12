@@ -365,6 +365,87 @@ async function main() {
     );
   }
 
+  // ---- the SESSION-DELETION surface, names only ---------------------------
+  //
+  // /forget deletes Ducky's own conversation turns and cannot reach OpenClaw's
+  // session transcript (ADR 0024). Whether it ever could is a question about
+  // THIS surface, and the first half of answering it is recording what the
+  // surface is -- subcommand and flag NAMES, from `--help`, with no session id
+  // and no session value ever read.
+  //
+  // Every command here is `--help` and nothing else. The probe does not list
+  // sessions, does not read a transcript, and above all does not DELETE one:
+  // a probe that deleted something to find out whether it could delete things
+  // would be the worst possible way to learn it.
+  //
+  // Recording this does not authorize deletion. Deletion stays unsupported
+  // until a NARROW command and an INDEPENDENT readback have both been
+  // observed, and `RECORDED_SESSION_DELETION` is the constant that says so.
+  const deletionSurfaces = {};
+  for (const [name, argv] of [
+    ['sessions', ['sessions', '--help']],
+    ['transcripts', ['transcripts', '--help']],
+    ['memory', ['memory', '--help']],
+  ]) {
+    const out = await run(bin, argv);
+    const text = redact(out.stdout);
+    deletionSurfaces[name] = {
+      exitCode: out.code,
+      present: out.code === 0,
+      flags: flagsOf(out.stdout),
+      // Subcommand names only, read the same way the top-level list is.
+      subcommands: [
+        ...new Set(
+          (text.match(/^ {2}([a-z][a-z0-9-]*)(?: \*)?\s{2,}\S/gm) ?? [])
+            .map((m) => m.trim().split(/\s/)[0]),
+        ),
+      ].sort(),
+    };
+  }
+
+  const deletionVerbs = ['delete', 'remove', 'clear', 'forget', 'reset', 'purge', 'rm'];
+  const named = Object.entries(deletionSurfaces).flatMap(([surface, info]) =>
+    info.subcommands.filter((c) => deletionVerbs.includes(c)).map((c) => `${surface} ${c}`),
+  );
+  // Verbs this repository refuses to construct in ANY argv, whatever a CLI
+  // offers. See ALWAYS_FORBIDDEN_COMMAND_VERBS in @ducky/contracts: the list is
+  // not going to be relaxed to make a deletion possible, so a surface that
+  // needs one of them is unusable here by policy rather than by capability.
+  const alwaysForbidden = ['reset', 'purge', 'rm', 'destroy', 'drop'];
+  const usable = named.filter((n) => !alwaysForbidden.includes(n.split(' ')[1]));
+
+  record('session-deletion-surface', {
+    _note:
+      'Which OpenClaw commands could, in principle, remove a session. NAMES ONLY -- no ' +
+      'session id, no transcript, no value. Nothing was deleted to record this, and ' +
+      'recording it does not authorize deletion: that needs a verified narrow command AND ' +
+      'an independent readback proving the session is gone.',
+    surfaces: deletionSurfaces,
+    deletionVerbsNamed: named,
+    /** Named, minus the verbs this repository refuses to build an argv from. */
+    deletionVerbsUsableUnderArgvPolicy: usable,
+    readbackCommandNamed:
+      (deletionSurfaces.sessions?.subcommands ?? []).some((c) => ['list', 'show', 'get'].includes(c)),
+    verifiedDeletion: false,
+    verifiedReadback: false,
+  });
+
+  if (usable.length === 0) {
+    gaps.push(
+      'no OpenClaw session-deletion command is usable: ' +
+        (named.length === 0
+          ? 'none of `sessions`, `transcripts` or `memory` names a deletion subcommand'
+          : `the only candidates (${named.join(', ')}) use verbs this repository never ` +
+            'builds an argv from'),
+    );
+  } else {
+    gaps.push(
+      `an OpenClaw session-deletion command exists (${usable.join(', ')}) but has NOT been ` +
+        'exercised: deletion stays unsupported until it and an independent readback have both ' +
+        'been observed. RECORDED_SESSION_DELETION stays null until then.',
+    );
+  }
+
   // ---- configuration locations, names only --------------------------------
   const configDirs = ['.openclaw', '.openclaw-dev', '.config/openclaw'].map((d) => path.join(HOME, d));
   record('config-locations', {
@@ -388,7 +469,9 @@ async function main() {
       '  * the conversation provider stays unverified and refuses to answer;',
       '  * DUCKY_CONVERSATION_PROVIDER=disabled remains the honest production mode;',
       '  * the 2C attachment gate stays closed -- and an agent turn takes TEXT ONLY,',
-      '    so it would stay closed for this provider even with credentials.',
+      '    so it would stay closed for this provider even with credentials;',
+      '  * RECORDED_SESSION_DELETION stays null, so /forget reports provider deletion',
+      '    as PARTIAL and rotates the session epoch instead of claiming an erasure.',
       '',
       'The owner action that would close the gap: configure a model provider for an',
       'OpenClaw agent (`openclaw agents add <id>`), then run this probe again.',

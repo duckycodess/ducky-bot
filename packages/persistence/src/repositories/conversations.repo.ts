@@ -259,8 +259,17 @@ export class ConversationsRepo {
         `DELETE FROM conversation_turns
           WHERE id IN (
             SELECT id FROM conversation_turns
-             WHERE (discord_user_id = ?  AND created_at < ?)
-                OR (discord_user_id <> ? AND created_at < ?)
+             WHERE ((discord_user_id = ?  AND created_at < ?)
+                OR (discord_user_id <> ? AND created_at < ?))
+               -- A LIVE native thread keeps its full transcript, whatever the
+               -- age windows say. Issue #4 asks for exactly that, and the
+               -- bound moved to closedThreadDays: once Ducky has observed
+               -- that the thread is gone from Discord, the whole conversation
+               -- ages out together through purgeThread. A conversation you
+               -- can still scroll back to is one Ducky can still answer about.
+               AND thread_key NOT IN (
+                 SELECT thread_id FROM conversation_threads WHERE closed_at IS NULL
+               )
              LIMIT ?
           )`,
       )

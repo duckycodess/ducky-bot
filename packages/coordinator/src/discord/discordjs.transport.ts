@@ -83,6 +83,7 @@ export class DiscordJsTransport implements DiscordTransport {
   #handler: IncomingHandler | undefined;
   #client: unknown;
   #enterThread: ConversationThreadEntry | undefined;
+  #threadGone: ((threadId: string) => void) | undefined;
 
   constructor(
     private readonly token: string,
@@ -103,8 +104,9 @@ export class DiscordJsTransport implements DiscordTransport {
     private readonly persists?: (event: Incoming) => boolean,
   ) {}
 
-  useConversationThreads(enter: ConversationThreadEntry): void {
+  useConversationThreads(enter: ConversationThreadEntry, onGone?: (threadId: string) => void): void {
     this.#enterThread = enter;
+    this.#threadGone = onGone;
   }
 
   async start(handler: IncomingHandler): Promise<void> {
@@ -313,7 +315,21 @@ export class DiscordJsTransport implements DiscordTransport {
       if (!channel || typeof channel.send !== 'function') return false;
       await channel.send(payload);
       return true;
-    } catch {
+    } catch (err) {
+      /**
+       * `Unknown Channel` is the one failure that means something durable: the
+       * thread has been deleted. Recording it starts the retention clock on
+       * that conversation, and it is the ONLY signal Ducky has -- there is no
+       * channel-delete event wired, and adding one would mean another gateway
+       * intent for a fact this already establishes.
+       *
+       * Every other failure is transient and leaves the mapping alone: a
+       * permission that was revoked for an afternoon must not age a
+       * conversation out.
+       */
+      if ((err as { code?: unknown } | undefined)?.code === UNKNOWN_CHANNEL) {
+        this.#threadGone?.(channelId);
+      }
       return false;
     }
   }
@@ -502,6 +518,14 @@ export class DiscordJsTransport implements DiscordTransport {
  * of opening a second beside it.
  */
 const MESSAGE_ALREADY_HAS_THREAD = 160004;
+
+/**
+ * Discord's code for a channel that is not there any more.
+ *
+ * The only failure that means a thread is GONE rather than temporarily
+ * unreachable, which is why it is the only one that closes a mapping.
+ */
+const UNKNOWN_CHANNEL = 10003;
 
 /** Discord REST codes that mean a permission is missing rather than a bug. */
 const MISSING_PERMISSION_CODES = new Set([50001, 50013]);

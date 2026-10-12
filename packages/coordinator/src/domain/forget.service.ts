@@ -2,6 +2,7 @@ import {
   AUDIT_OWNER_REF, FORGET_REFUSAL_MESSAGE, FORGET_TARGET_LABEL,
   DuckyError, type ForgetEntityTarget, type ForgetRefusal,
 } from '@ducky/contracts';
+import type { ConversationProvider } from '@ducky/adapters';
 import { withTransaction, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { ConversationMemoryService } from './conversation-memory.service.js';
@@ -15,6 +16,17 @@ export interface ForgetServiceDeps {
    * memory service wired.
    */
   readonly memory?: ConversationMemoryService;
+  /**
+   * The conversation provider, consulted ONLY for what it says about deleting
+   * its own sessions.
+   *
+   * Nothing here ever calls `reply`. It is here so `/forget` can report the
+   * SECOND store honestly (ADR 0024) instead of describing Ducky's own
+   * deletion as though it were the whole picture. Omitting it means the reply
+   * says a provider transcript may exist and that Ducky did not reach it,
+   * which is the conservative truth for an unwired instance.
+   */
+  readonly conversation?: ConversationProvider;
 }
 
 /** What a preview found, or why it found nothing. */
@@ -28,6 +40,21 @@ export interface ForgetEntityResult {
   readonly id: string;
   readonly rowsDeleted: number;
   readonly message: string;
+}
+
+/**
+ * What `/forget conversation` did, in BOTH stores.
+ *
+ * `providerDeletion` is deliberately not a boolean: "we could not" and "we did
+ * not have to" are different facts, and collapsing them would let a reply imply
+ * completeness it has not got.
+ */
+export interface ForgetConversationResult {
+  readonly message: string;
+  readonly turnsDeleted: number;
+  readonly providerSessionsRotated: number;
+  readonly sharedSessionsRotated: number;
+  readonly providerDeletion: 'unsupported' | 'requested';
 }
 
 export interface ForgetJobResult {
@@ -148,38 +175,87 @@ export class ForgetService {
    * No attachment byte is involved either way: none is ever kept, and none is
    * ever derived, so there is nothing of that kind to remove.
    */
-  forgetConversation(actor: ActorContext): { message: string; turnsDeleted: number } {
+  forgetConversation(actor: ActorContext): ForgetConversationResult {
     this.deps.authz.requireOwner(actor);
 
     const memory = this.deps.memory;
     if (!memory) {
       return {
         turnsDeleted: 0,
+        providerSessionsRotated: 0,
+        sharedSessionsRotated: 0,
+        providerDeletion: 'unsupported',
         message:
           'There is nothing to forget: conversation continuity is not configured on this ' +
           'instance, so no turn is stored. No attachment byte has ever been kept either.',
       };
     }
 
-    const { turnsDeleted, enabled } = memory.forgetConversationFor(actor);
-    this.record('conversation', 'all', turnsDeleted);
+    const outcome = memory.forgetConversationFor(actor);
+    const { turnsDeleted, enabled, providerSessionsRotated, sharedSessionsRotated } = outcome;
+    // COUNTS only, and the rotation count beside the deletion count: both are
+    // numbers about what happened, and neither quotes a word of what went.
+    this.record(
+      'conversation',
+      'all',
+      turnsDeleted,
+      `; sessions rotated ${providerSessionsRotated}+${sharedSessionsRotated}`,
+    );
+
+    const provider = this.providerNote(providerSessionsRotated + sharedSessionsRotated);
 
     if (turnsDeleted === 0) {
       return {
-        turnsDeleted,
-        message: enabled
-          ? 'Nothing to forget: Ducky has stored no conversation turn for you. ' +
-            'The assistant provider keeps its own session transcript, which this does not reach.'
-          : 'Nothing to forget: continuity is off, so Ducky stored no turn. ' +
-            'The assistant provider keeps its own session transcript, which this does not reach.',
+        ...outcome,
+        providerDeletion: 'unsupported',
+        message:
+          (enabled
+            ? 'Nothing to forget: Ducky has stored no conversation turn for you. '
+            : 'Nothing to forget: continuity is off, so Ducky stored no turn. ') + provider,
       };
     }
     return {
-      turnsDeleted,
+      ...outcome,
+      providerDeletion: 'unsupported',
       message:
         `Deleted ${turnsDeleted} stored conversation turn(s) across every thread. ` +
-        'This cannot be undone. No attachment byte was ever kept.',
+        'This cannot be undone. No attachment byte was ever kept. ' +
+        provider,
     };
+  }
+
+  /**
+   * What happened in the OTHER store, said plainly.
+   *
+   * ADR 0024 records that there are two conversation stores and only one of
+   * them is Ducky's. The provider's own session transcript is not Ducky's to
+   * delete -- no deletion contract has been recorded for it, so claiming a
+   * deletion would be the one thing a deletion path must never do.
+   *
+   * What Ducky CAN do, and now does, is stop using the contaminated session:
+   * the session key carries an epoch, and bumping it means the next turn opens
+   * a different session. That is ORPHANING, not erasure, and the sentence says
+   * so in those words rather than leaving the owner to infer it.
+   */
+  private providerNote(rotated: number): string {
+    const capability = this.deps.conversation?.capabilities.sessionDeletion;
+    const why = capability?.reason
+      ?? 'no conversation provider is wired here, so nothing is known about its storage';
+
+    if (capability?.supported === true) {
+      // Reachable only once a deletion contract has been RECORDED against a
+      // provider. Nothing on this host reports one.
+      return 'The assistant provider reports that it can delete its own session, and that ' +
+        'deletion was requested.';
+    }
+
+    const rotation = rotated === 0
+      ? 'No provider session had been opened for it yet.'
+      : `${rotated} provider session(s) were rotated instead, so no further turn can reuse ` +
+        'the old context. The data behind them is ORPHANED, not erased.';
+
+    return 'This is PARTIAL. The assistant provider keeps its own session transcript and ' +
+      `Ducky cannot delete it: ${why} ${rotation}`;
   }
 
   // ---- per-record deletion, for everything that is not a job -------------
@@ -350,7 +426,12 @@ export class ForgetService {
   }
 
   /** One audit row per deletion, counts only. Never throws. */
-  private record(subjectKind: 'conversation', subjectRef: string, rows: number): void {
+  private record(
+    subjectKind: 'conversation',
+    subjectRef: string,
+    rows: number,
+    extra = '',
+  ): void {
     try {
       this.deps.store.auditLog.record({
         event: 'data.deleted',
@@ -359,7 +440,7 @@ export class ForgetService {
         subjectKind,
         subjectRef,
         outcome: 'ok',
-        detail: `rows ${rows}`,
+        detail: `rows ${rows}${extra}`,
       });
     } catch {
       /* a record is never worth failing a deletion the owner asked for */

@@ -130,6 +130,55 @@ export class ConversationThreadsRepo {
       .run(atIso, threadId);
   }
 
+  /**
+   * Closed threads old enough to remove, oldest first.
+   *
+   * Only ever returns a thread with a `closed_at`, so a live conversation
+   * cannot be selected by widening a window. Bounded like every other
+   * retention read.
+   */
+  closedBefore(cutoffIso: string, limit: number): ConversationThreadRow[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM conversation_threads
+            WHERE closed_at IS NOT NULL AND closed_at < ?
+            ORDER BY closed_at
+            LIMIT ?`,
+        )
+        .all(cutoffIso, limit) as Record<string, unknown>[]
+    ).map(mapThread);
+  }
+
+  /** How many threads are still live, and therefore out of retention's reach. */
+  countLive(): number {
+    return this.countOpen();
+  }
+
+  /**
+   * Removes one CLOSED thread and everything hanging off it, child rows first.
+   *
+   * Refuses a live thread outright rather than relying on the caller having
+   * selected correctly: the guard is here, at the statement, because a
+   * mis-scoped delete of a live conversation is exactly the thing that must
+   * fail rather than succeed quietly. Returns COUNTS, never content.
+   */
+  purgeThread(threadId: string): { deleted: boolean; rows: number } {
+    const row = this.byThreadId(threadId);
+    if (!row || row.closedAt === null) return { deleted: false, rows: 0 };
+
+    let rows = 0;
+    const run = (sql: string): void => {
+      rows += Number(this.db.prepare(sql).run(threadId).changes ?? 0);
+    };
+    run('DELETE FROM conversation_turns WHERE thread_key = ?');
+    run('DELETE FROM conversation_checkpoints WHERE thread_id = ?');
+    run('DELETE FROM conversation_participants WHERE thread_id = ?');
+    run('DELETE FROM conversation_provider_sessions WHERE thread_key = ?');
+    run('DELETE FROM conversation_threads WHERE thread_id = ?');
+    return { deleted: true, rows };
+  }
+
   countOpen(): number {
     const r = this.db
       .prepare('SELECT COUNT(*) AS n FROM conversation_threads WHERE closed_at IS NULL')

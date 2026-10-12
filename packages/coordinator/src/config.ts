@@ -295,6 +295,15 @@ export const EnvSchema = z.object({
    */
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: z.coerce.number().int().min(1).default(30),
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: z.coerce.number().int().min(1).default(7),
+  /**
+   * How long a CLOSED conversation thread is kept, with everything in it.
+   *
+   * A LIVE native thread is out of retention's reach entirely -- that is what
+   * issue #4 asks for -- so this is where the bound actually lives. It starts
+   * counting from the moment Ducky observes that the thread is gone from
+   * Discord, not from when the conversation last moved.
+   */
+  DUCKY_RETENTION_CLOSED_THREAD_DAYS: z.coerce.number().int().min(1).default(14),
   DUCKY_RETENTION_BATCH: z.coerce.number().int().min(1).max(10_000).default(200),
 
   /**

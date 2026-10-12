@@ -218,7 +218,9 @@ describe('/forget conversation deletes, and says what it deleted', () => {
       .all() as { subject_kind: string; subject_ref: string; detail: string }[];
     const row = rows.find((r) => r.subject_kind === 'conversation')!;
     expect(row.subject_ref).toBe('all');
-    expect(row.detail).toBe('rows 2');
+    // Counts only, and now the rotation counts beside the deletion count --
+    // both numbers, neither quoting a word of what went.
+    expect(row.detail).toBe('rows 2; sessions rotated 0+0');
     expect(row.detail).not.toContain('distinctive');
     h.close();
   });

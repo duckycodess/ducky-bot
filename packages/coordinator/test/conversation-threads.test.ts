@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CONVERSATION_THREAD_ROW_CAP, THREAD_AUTO_ARCHIVE_MINUTES, THREAD_NAME_MAX,
+  CONVERSATION_THREAD_ROW_CAP, OWNER_ONLY_COMMANDS,
+  THREAD_AUTO_ARCHIVE_MINUTES, THREAD_NAME_MAX,
 } from '@ducky/contracts';
 import { NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION } from '@ducky/adapters';
 import type {
@@ -374,8 +375,10 @@ describe('a thread inherits its parent’s role and none of anybody’s rights',
     );
     expect(replyText(chat)).toContain('echo:');
 
-    // Every owner-only command, in the very same thread, is refused.
-    for (const name of ['jobs', 'task', 'forget', 'status']) {
+    // EVERY owner-only command, in the very same thread, is refused. The whole
+    // manifest rather than a sample: inheriting a role must not widen the
+    // surface by even one entry, and a sample cannot say that.
+    for (const name of OWNER_ONLY_COMMANDS) {
       const refused = await h.transport.dispatch({
         kind: 'command',
         name,

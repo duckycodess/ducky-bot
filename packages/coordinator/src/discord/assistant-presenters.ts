@@ -107,7 +107,6 @@ export function tasksList(
       name: `${TASK_STATE_LABEL[t.status]} · ${t.publicId}`,
       value: taskLine(t, tz),
     })),
-    footer: `Times shown in ${tz}.`,
   };
   return { embeds: [embed], rows: buttons, ephemeral: true };
 }
@@ -164,7 +163,6 @@ export function remindersList(
           : `-# ${recurrenceLabel(r)}`,
       ].join('\n'),
     })),
-    footer: `Times shown in ${tz}.`,
   };
   return { embeds: [embed], rows: buttons, ephemeral: true };
 }
@@ -361,7 +359,6 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     embeds: [
       {
         title: `${BRIEFING_TITLE[b.kind]} — ${b.dayKey}`,
-        description: `Times shown in ${tz}.`,
         fields,
         footer: BRIEFING_PROVENANCE,
       },

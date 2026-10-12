@@ -45,6 +45,9 @@ registered.
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
 | Approved Git actions | **Unit-tested** | Opt-in flag off; no live external write performed here |
 | Conversation attachments | **Closed by capability** | The recorded OpenClaw turn takes text only; no attachment byte has ever been fetched |
+| Native conversation threads (issue #4) | **Unit-tested** | Off by default: no channel is configured to open one here, and no Discord thread has ever been created from this build. 78 tests cover thread creation, routing, role inheritance, participation, compaction, the controls and deletion |
+| Conversation thread live checks | **Blocked** | No `.env`/`.env.development` exists in this worktree, so no development profile, token or guild is configured. Discord thread creation, reply anchoring, the Branch and Compact buttons and a two-store Forget have NOT been exercised against a real guild |
+| Provider session deletion | **Blocked** | `RECORDED_SESSION_DELETION` is null. `pnpm probe:openclaw` exits 2 here because the pinned binary is not installed, so the deletion-capable command surface is unrecorded and `/forget` reports provider deletion as PARTIAL and rotates the session epoch instead |
 | Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
@@ -526,6 +529,47 @@ exercised; this says what it does.
   interaction manifest, which `AGENTS.md` forbids widening; the owner types the
   command instead.
 - Redaction at the transport boundary; no secret in the database or logs
+
+## Native conversation threads (issue #4)
+
+**Built, off by default, and never run against Discord from this worktree.**
+
+A qualifying top-level message in a channel named in
+`DUCKY_*_THREAD_PARENT_CHANNEL_IDS` opens one visible thread, and that thread's
+id becomes the conversation's identity. Nothing is configured here, so nothing
+happens here: the list is empty by default and an instance that names no channel
+behaves exactly as it did before.
+
+What is true of the implementation:
+
+| | |
+|---|---|
+| One thread per starter | Idempotent on the starter message id; Discord's `MESSAGE_ALREADY_HAS_THREAD` recovered by the documented id identity |
+| Failure | Refuses visibly, answers NOWHERE. No fallback into the parent channel |
+| Role | A thread inherits its parent's role, and nobody's rights. `Authorizer` still reads frozen env config |
+| History | Full transcript while the thread lives; the bound is a per-turn BYTE budget, with compaction and a refusal past it |
+| Reads | A thread read takes a participation proof, issued only when a participation row exists |
+| Controls | Branch and Compact, the first two interaction kinds a non-owner may press, on their own positive manifest |
+| Deletion | `/forget conversation` rotates the provider session epoch and reports PARTIAL; retention removes a CLOSED thread whole |
+
+**This reverses the roadmap's own proposal**, which said Ducky would create no
+thread. The owner asked for the opposite in issue #4 and the issue wins; both
+documents now say so, and the reasoning is in
+[ADR 0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md).
+
+**What has NOT been verified**, stated rather than implied by the test count:
+
+- no Discord thread has ever been created by this build. There is no `.env` or
+  `.env.development` in the worktree it was written in, so there is no
+  development token, no guild and no configured parent channel;
+- the Branch and Compact buttons have never been rendered by a real client, and
+  no human has pressed one;
+- `probe:openclaw` could not run (the pinned binary is absent), so the provider
+  session-deletion surface is unrecorded and `RECORDED_SESSION_DELETION` stays
+  null;
+- the thread-permission failure paths (Create Public Threads, Send Messages in
+  Threads, rate limiting, `Unknown Channel`) are covered by faked transport
+  outcomes, not by Discord refusing anything.
 
 ## Retention and deletion (milestone 2E, the substance of it)
 

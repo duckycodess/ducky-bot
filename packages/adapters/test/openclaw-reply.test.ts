@@ -212,7 +212,11 @@ describe('the persona is instructions, not stored turns', () => {
   it('carries the style contract on every turn', () => {
     const prompt = promptFor('hello');
     expect(prompt).toMatch(/Do not use emojis/i);
-    expect(prompt).toMatch(/Avoid em dashes/i);
+    // "Avoid em dashes" became "Do not use em dashes", alongside the other
+    // plain-Markdown rules issue #4 asked for: no headings, no heavy bold, no
+    // middle dots, and no action word printed as though it were a control.
+    expect(prompt).toMatch(/Do not use em dashes/i);
+    expect(prompt).toMatch(/Do not use headings/i);
     expect(prompt).toMatch(/Never claim to remember/i);
     expect(prompt).toMatch(/Do not take actions/i);
   });

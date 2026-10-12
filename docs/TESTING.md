@@ -459,6 +459,47 @@ proposes a job and creates none; the proposal is deduplicated by
 `(watch, fingerprint)` so it appears once per genuinely new review or new code,
 and stops once the pull request merges.
 
+**coordinator / conversation threads** — one visible thread per qualifying
+starter and no recursion; idempotency on the starter message id and recovery of
+Discord's `MESSAGE_ALREADY_HAS_THREAD`; the seven-day auto-archive; bot, webhook,
+unknown-author, DM, stranger, unconfigured-channel and id-less messages all
+spawn nothing; a shared channel, a briefing channel and a task channel are each
+refused as a thread parent AT BOOT; every creation failure refuses visibly and
+answers nowhere; a thread under the `gpt` channel is answered while an unrelated
+channel stays silent; the extra chat user converses in a thread and is refused
+every owner-only command and the owner's controls; a native thread keeps its
+full transcript past the legacy row cap while an ordinary channel still does
+not; compaction runs automatically inside the byte budget and a turn past it is
+refused before the provider is called; a restart keeps the thread identity and
+its history; participation is issued only to somebody who has spoken.
+
+**coordinator / conversation controls** — the owner-only and conversational
+interaction manifests are disjoint and their union is the registered set; Branch
+and Compact appear as real buttons inside a thread and nowhere else; Compact
+leaves the transcript intact and says so; a non-participant, a copied control
+and a stranger are each refused differently and correctly; a branch is a
+separate thread with a separate provider session, seeded with only the selected
+anchor, leaving the source untouched; an unknown anchor is refused; a reply
+anchors inside its own thread, a cross-thread or unreadable reference is labelled
+and dropped, and Ducky's own earlier message is labelled assistant.
+
+**coordinator / conversation deletion** — `/forget conversation` reports PARTIAL
+and names why the provider cannot be reached; the session epoch rotates so the
+deleted conversation cannot be picked back up; every actor contaminated by a
+SHARED thread is rotated without a row of theirs being deleted; the audit carries
+the deletion and rotation counts and no content; a checkpoint goes with the turns
+it summarized; retention keeps a LIVE thread however old, ages an ordinary
+channel out normally, removes a CLOSED thread whole once past its own window, and
+refuses to purge a live thread even when asked directly.
+
+**coordinator / conversation presentation** — the style contract asks for short
+plain paragraphs and forbids headings, em dashes, middle dots, heavy bold and
+printing an action word as though it were a control, and a persona cannot
+replace it; no source file in any package names `$grill-me`, `$ticket` or
+`$agentize`, and a quoted one is ordinary conversation that creates no job and no
+task; task lists, reminder lists and briefings carry no timezone suffix and no
+reminder-lead line while the configured zone still drives scheduling.
+
 **persistence / backup** — the real scripts, run as subprocesses against a real
 temporary database: the copy verifies, is written `0600`, and excludes the
 credential file; a file that is not a Ducky database and a corrupt file are both

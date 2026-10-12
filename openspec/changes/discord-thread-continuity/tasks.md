@@ -21,5 +21,5 @@
 
 ## 4. Presentation and integration
 
-- [ ] 4.1 Render concise Markdown conversation/grilling where existing, numbered unblocked questions where supported, actual controls, no new workflow trigger subsystem, and clean local deadline display; verify presenter/router tests for quoted data, controls and deadlines.
-- [ ] 4.2 Update docs/CURRENT_STATE.md, docs/SECURITY.md, docs/ROADMAP.md and document manifest for the owner's explicit reversal of the roadmap follow-only proposal; exercise relevant focused tests, then pnpm typecheck, pnpm test, pnpm build and OpenSpec validation; document live Discord/provider checks that cannot run without a configured development profile.
+- [x] 4.1 Render concise Markdown conversation/grilling where existing, numbered unblocked questions where supported, actual controls, no new workflow trigger subsystem, and clean local deadline display; verify presenter/router tests for quoted data, controls and deadlines.
+- [x] 4.2 Update docs/CURRENT_STATE.md, docs/SECURITY.md, docs/ROADMAP.md and document manifest for the owner's explicit reversal of the roadmap follow-only proposal; exercise relevant focused tests, then pnpm typecheck, pnpm test, pnpm build and OpenSpec validation; document live Discord/provider checks that cannot run without a configured development profile.

@@ -390,7 +390,7 @@ export function clarificationMessage(problems: readonly BulkProblem[]): string {
     .map((p) => `Line ${p.lineNo} ${BULK_PROBLEM_MESSAGE[p.kind]}`);
   const more = problems.length > lines.length ? `\n…and ${problems.length - lines.length} more.` : '';
   return (
-    'Nothing was saved — I will not guess at these:\n' +
+    'Nothing was saved. I will not guess at these:\n' +
     lines.map((l) => `• ${l}`).join('\n') +
     more +
     '\nFix them and send the list again.'

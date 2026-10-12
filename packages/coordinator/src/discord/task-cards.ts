@@ -109,13 +109,16 @@ export function bulkPreview(
   timeZone: string,
   nowMs: number,
 ): OutboundMessage {
+  // Numbered and bracketed the way the owner typed it, so checking the
+  // preview against the paste is a line-by-line comparison rather than a
+  // translation. No separator dash: this is a list, not a sentence.
   const lines = preview.items.map(
     (item, i) =>
-      `${i + 1}. ${short(item.title, 120)} — ${
+      `${i + 1}. ${short(item.title, 120)} (${
         item.dueAt
           ? formatDeadline(item.dueAt, { timeZone, allDay: item.dueAllDay, nowMs })
           : 'no deadline'
-      }`,
+      })`,
   );
   const notes: string[] = [];
   if (preview.ignoredLeadingLines > 0) {

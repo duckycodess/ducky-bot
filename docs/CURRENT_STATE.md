@@ -151,7 +151,10 @@ exercised; this says what it does.
   presses Save. One ambiguous line refuses the whole batch with a clarification
   naming it: `10/13` means two different days to two different people and is
   never guessed at. Quoted text, fenced code and ordinary prose are never read
-  as a list, and a non-owner never reaches the path at all. Saving is
+  as a list, a **configured shared channel is closed to the path entirely** --
+  the preview is a visible message with signed controls, and a shared channel
+  is where other people read a narrow job projection -- and a non-owner never
+  reaches the path at all. Saving is
   all-or-nothing and idempotent on the preview, so a retry or a double tap
   reports the same tasks rather than creating a second set. **No command was
   added:** the Discord half is a message the owner pastes, and the three

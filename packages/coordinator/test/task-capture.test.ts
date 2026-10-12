@@ -192,6 +192,58 @@ describe('pasting a list into Discord', () => {
   });
 });
 
+describe('a shared channel is closed to pasted lists', () => {
+  const SHARED = '900000000000000123';
+
+  const bootShared = async () => {
+    const clock = new TestClock(START, MANILA);
+    const h = makeHarness({ clock, env: { DUCKY_DEV_SHARED_CHANNEL_IDS: SHARED } });
+    await h.transport.start((e) => h.app.router.handle(e));
+    return h;
+  };
+
+  const inChannel = async (h: Awaited<ReturnType<typeof bootShared>>, channelId: string) =>
+    h.transport.dispatch({
+      kind: 'message',
+      userId: OWNER,
+      text: PASTE,
+      threadKey: channelId,
+      context: { channelId, guildId: '900000000000000001' },
+    } as never);
+
+  it('shows no preview, stores nothing and leaves no control there', async () => {
+    const h = await bootShared();
+    const reply = await inChannel(h, SHARED);
+
+    // Whatever conversation says, it is not a preview: no "nothing is saved
+    // yet" card, no Save/Edit/Discard, and nothing written down.
+    expect(flat(reply)).not.toContain('Nothing is saved yet');
+    expect(reply?.rows ?? []).toHaveLength(0);
+    expect(h.store.db.prepare('SELECT COUNT(*) AS n FROM task_previews').get()).toEqual({ n: 0 });
+    expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
+    h.close();
+  });
+
+  it('still reads a list in an ordinary guild channel, so the guard is narrow', async () => {
+    const h = await bootShared();
+    const reply = await inChannel(h, '900000000000000999');
+    expect(flat(reply)).toContain('Nothing is saved yet');
+    expect(reply?.rows?.[0]?.buttons).toHaveLength(3);
+    h.close();
+  });
+
+  it('still reads a list in a DM', async () => {
+    const h = await bootShared();
+    const reply = await h.transport.dispatch({
+      kind: 'message', userId: OWNER, text: PASTE, threadKey: SHARED,
+    } as never);
+    // Same id, but no guild: a DM is never a shared channel, and the thread
+    // key alone must not be read as one.
+    expect(flat(reply)).toContain('Nothing is saved yet');
+    h.close();
+  });
+});
+
 describe('a save is all or nothing', () => {
   it('writes no task and no reminder when the batch would pass the open-task cap', async () => {
     const { h } = await boot();

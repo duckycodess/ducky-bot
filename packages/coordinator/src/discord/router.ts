@@ -520,6 +520,25 @@ export class DuckyRouter {
     const capture = this.deps.taskCapture;
     if (!capture) return undefined;
     if (actor.discordUserId !== this.deps.authz.ownerId) return undefined;
+    /**
+     * A configured SHARED channel is closed to this path entirely, and it is
+     * checked FIRST because it is the only one of these conditions where
+     * getting it wrong discloses something.
+     *
+     * A shared channel exists so other people can read a narrow projection of
+     * job status. A pasted list is the owner's own task text, the preview is a
+     * visible channel message rather than an ephemeral reply, and it carries
+     * signed controls -- so a list pasted there would publish titles and
+     * deadlines to everyone who can read the channel and leave buttons in
+     * their scrollback. A shared channel has no ROLE, so the role check below
+     * would have waved it through.
+     *
+     * Failing closed costs the feature in one channel. Failing open costs the
+     * owner their task list, which is precisely the trade ADR 0012 settles.
+     * The message falls through to conversation exactly as it did before this
+     * feature existed.
+     */
+    if (this.sharedPolicy.isSharedRequest(event.context)) return undefined;
     const role = this.channelRoles.roleOf(event.context);
     if (role !== undefined && role !== 'task') return undefined;
     if (!looksLikeBulkTaskList(event.text)) return undefined;
@@ -1319,14 +1338,22 @@ export class DuckyRouter {
     this.components.set('task_edit', async (actor, entityId, values) => {
       const typed = values?.['deadline'];
       if (typed === undefined) {
-        // The real transport opens a modal here; this is the path a client
-        // without one takes. It shows what the deadline is now rather than
-        // asking the owner to remember it.
+        /**
+         * Edit asks Discord for a short form, and the deadline typed there
+         * comes back through this same handler. Reaching here means the form
+         * did not open.
+         *
+         * So this says what is true and offers only what actually works. It
+         * used to invite the owner to "send a new one", which nothing
+         * consumes: there is no pending-edit state and their next message
+         * would be read as ordinary conversation. A promise the code does not
+         * keep is worse than a plain refusal.
+         */
         const task = d.tasks.get(actor, entityId);
         return {
           content:
-            `Current deadline: ${deadlineLine(task, d.tasks.timeZone, d.tasks.nowMs())}.\n` +
-            'Send a new one like `October 15` or `October 15 11:59 PM`, or `none` to clear it.',
+            'Nothing changed: the edit box did not open. ' +
+            `${deadlineLine(task, d.tasks.timeZone, d.tasks.nowMs())}. Press Edit again.`,
           ephemeral: true,
         };
       }
@@ -1372,7 +1399,7 @@ export class DuckyRouter {
       const cards = saved.tasks.slice(0, TASK_CARDS_PER_MESSAGE);
       return {
         content: saved.replayed
-          ? `Already saved — the same ${saved.tasks.length} task(s), not a second copy.`
+          ? `Already saved. The same ${saved.tasks.length} task(s), not a second copy.`
           : `Saved ${saved.tasks.length} task(s).`,
         embeds: cards.map(
           (task) =>
@@ -1392,9 +1419,17 @@ export class DuckyRouter {
         if (!pending) {
           return { content: 'That list is no longer waiting to be saved.', ephemeral: true };
         }
+        /**
+         * Same situation as `task_edit`, with one difference that makes a
+         * different answer honest: a numbered list pasted back IS read as a
+         * list, so inviting that works. It starts a NEW preview rather than
+         * correcting this one, and saying so is the whole point -- the owner
+         * should not be left wondering which draft they are about to save.
+         */
         return {
           content:
-            'Edit the list and send it again, one numbered item per line:\n```\n' +
+            'The edit box did not open. Paste this back as a new list to change it. ' +
+            'This preview is untouched, and nothing is saved either way:\n```\n' +
             editableListText(pending.items, capture.timeZone, d.tasks.nowMs()) +
             '\n```',
           ephemeral: true,

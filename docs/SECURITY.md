@@ -56,6 +56,12 @@ which job *status* may be shown to people other than the owner. It answers
 
 Nothing about it widens what anyone can do:
 
+- **A pasted task list is closed there entirely.** The owner's own numbered
+  list produces a VISIBLE preview carrying signed controls, and a shared
+  channel has no role -- so the role narrowing alone would have waved it
+  through. The capture path checks the shared-channel policy first and falls
+  through to conversation exactly as it did before the feature existed: no
+  preview, no control, and nothing written down.
 - Every write stays owner-only, re-checked in the router and again in every
   service method.
 - Every owner-only reply stays ephemeral outside a configured role channel.
@@ -193,7 +199,14 @@ What holds it up:
   RFC1918, `100.64.0.0/10` or `fd7a:115c:a1e0::/48`. `0.0.0.0` is refused
   explicitly — it is not an address, it is every interface. With the flag off
   the routes are not registered at all.
-- **Constant-time comparison**, and ten attempts per five minutes per caller.
+- **Constant-time comparison**, and ten attempts per five minutes **keyed on
+  the caller's address**. The server-wide key generator reads
+  `x-ducky-executor-id`, which is right for the executor surface -- that header
+  names a credential the request then has to prove -- and would have been a
+  hole here, where nothing is authenticated yet: varying it would buy a fresh
+  bucket per attempt. The phone routes ignore the header, and a refusal on one
+  of them records no claimed executor id, so an unauthenticated caller cannot
+  write a plausible actor into the audit trail either.
 - **A stateless, bounded, signed session.** No session table to protect. The
   signing key is derived from the stored verifier, so changing the passcode
   invalidates every live session by construction.
@@ -214,6 +227,11 @@ What holds it up:
   which was already true before this page existed.
 - **Nothing is logged.** The passcode arrives in a form body, never a URL, and
   no handler writes the passcode, the session, or any pasted text.
+- **The form parser belongs to the page alone.** It is registered inside an
+  encapsulated Fastify scope, so the executor routes still accept exactly one
+  content type: their signature covers the raw JSON bytes, and a second body
+  format on that path would be a second way to disagree about what was signed.
+  A test posts a form body to an executor route and expects 415.
 
 See [decisions/0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md).
 

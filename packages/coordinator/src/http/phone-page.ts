@@ -187,7 +187,7 @@ read.addEventListener('click', async () => {
       try {
         const saved = await post('/app/tasks/save', { previewId: id });
         clear();
-        say('ok', (saved.replayed ? 'Already saved — the same ' : 'Saved ') + saved.tasks.length + ' task(s).');
+        say('ok', (saved.replayed ? 'Already saved. The same ' : 'Saved ') + saved.tasks.length + ' task(s).');
         const done = el('ol');
         for (const t of saved.tasks) {
           const li = el('li', null, t.title);

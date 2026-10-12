@@ -230,6 +230,72 @@ describe('owner authentication, distinct from the executor credential', () => {
   });
 });
 
+describe('the login ceiling is the whole defence, so it cannot be side-stepped', () => {
+  it('counts attempts by ADDRESS, whatever executor id the caller claims', async () => {
+    const { h, app } = await boot();
+    // The server-wide key generator reads `x-ducky-executor-id`. If the phone
+    // routes inherited it, varying that header would hand an attacker a fresh
+    // bucket on every attempt and the ten-per-five-minutes ceiling on a human
+    // passcode would mean nothing.
+    const codes: number[] = [];
+    for (let i = 0; i < 14; i += 1) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/app/session',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-ducky-executor-id': `forged-${i}`,
+        },
+        payload: 'passcode=not-the-passcode',
+      });
+      codes.push(res.statusCode);
+    }
+    expect(codes.filter((c) => c === 429).length).toBeGreaterThan(0);
+    // And it is the LIMIT that stopped them, not a lucky guess: none ever
+    // succeeded.
+    expect(codes.filter((c) => c === 303)).toHaveLength(0);
+    h.close();
+  });
+
+  it('records a refused phone attempt without the executor id the caller supplied', async () => {
+    const { h, app } = await boot();
+    for (let i = 0; i < 14; i += 1) {
+      await app.inject({
+        method: 'POST',
+        url: '/app/session',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-ducky-executor-id': 'plausible-looking-id',
+        },
+        payload: 'passcode=no',
+      });
+    }
+    const rows = h.store.auditLog.recent(50).filter((r) => r.event === 'rate_limit.exceeded');
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]!.subjectRef).toBe('/app/session');
+    // An unauthenticated caller must not be able to write a plausible executor
+    // id into the trail as the ACTOR of their own refusal.
+    expect(rows.every((r) => r.actorRef === null)).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain('plausible-looking-id');
+    h.close();
+  });
+
+  it('keeps its form parser to itself: the executor routes still take JSON only', async () => {
+    const { h, app } = await boot();
+    // The page needs a form body for the login POST. A content-type parser
+    // added at the ROOT would have taught the executor routes to accept one
+    // too, and their signature covers the raw JSON bytes.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/executor/heartbeat',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: 'executorId=exec-a&version=1',
+    });
+    expect(res.statusCode).toBe(415);
+    h.close();
+  });
+});
+
 describe('capturing from the phone', () => {
   it('reads the owner’s own example back, saving nothing yet', async () => {
     const { h, app } = await boot();

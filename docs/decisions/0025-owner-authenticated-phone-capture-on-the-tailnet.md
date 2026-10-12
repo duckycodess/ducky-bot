@@ -127,8 +127,17 @@ is a small change here rather than a parallel implementation of the assistant.
   about this surface relaxes them.
 - The passcode is a human secret and is therefore the weakest credential in the
   system. It is scrypt-hashed with expensive parameters, compared in constant
-  time, rate limited at ten attempts per five minutes, and it reaches a
-  tailnet-only listener in the first place.
+  time, rate limited at ten attempts per five minutes **by address**, and it
+  reaches a tailnet-only listener in the first place. The limit is keyed on
+  `req.ip` rather than on the server-wide generator, which reads
+  `x-ducky-executor-id`: that header is meaningful on the executor surface,
+  where the request then has to prove the credential it names, and on an
+  unauthenticated login route it would simply have handed an attacker a fresh
+  bucket per attempt.
+- The page's routes live in their own encapsulated Fastify scope, so the form
+  parser the login POST needs cannot reach the executor routes -- whose
+  signature covers the raw JSON bytes, and for whom a second accepted body
+  format would be a second way to disagree about what was signed.
 - The page is served inline with no third-party request: no CDN, no font, no
   analytics, and nothing fetched from anywhere the page could be changed from.
 - If the owner ever wants this from outside the tailnet, that is a new decision

@@ -205,8 +205,12 @@ describe('a pasted-list preview', () => {
       Date.parse('2026-10-13T02:00:00.000Z'),
     );
     expect(message.embeds?.[0]?.footer).toBe('Nothing is saved yet.');
-    expect(message.embeds?.[0]?.description).toContain('1. ENG 30 Letters — October 13, 11:59 PM');
-    expect(message.embeds?.[0]?.description).toContain('2. Speech 30 Letters — October 15');
+    // Numbered and bracketed the way the owner typed it, so checking the
+    // preview against the paste is a comparison rather than a translation --
+    // and with no separator dash, because this is a list and not a sentence.
+    expect(message.embeds?.[0]?.description).toContain('1. ENG 30 Letters (October 13, 11:59 PM)');
+    expect(message.embeds?.[0]?.description).toContain('2. Speech 30 Letters (October 15)');
+    expect(message.embeds?.[0]?.description).not.toContain('—');
     expect(message.rows?.[0]?.buttons.map((b) => b.label)).toEqual([
       'Save tasks', 'Edit', 'Discard',
     ]);

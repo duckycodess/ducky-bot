@@ -49,7 +49,28 @@ export interface PhoneCaptureConfig {
  *   environment configuration. There is no user table and no way for this
  *   surface to act as anybody else.
  */
-export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureConfig): void {
+/**
+ * Every phone route's rate limit, keyed by the CALLER'S ADDRESS.
+ *
+ * The server-wide key generator reads `x-ducky-executor-id` -- which is right
+ * for the executor surface, where that header names a credential the request
+ * then has to prove. Inherited HERE it was a hole: nothing on the login route
+ * is authenticated yet, so an attacker varying that header on each attempt
+ * would get a fresh bucket every time and the ten-attempts-per-five-minutes
+ * ceiling on a human passcode would mean nothing.
+ *
+ * So the phone routes key on `req.ip` and ignore the header entirely. One
+ * place, used by every route below, because a route that forgot it would be
+ * the one that is actually attacked.
+ */
+const byAddress = (max: number, timeWindow: number) => ({
+  rateLimit: { max, timeWindow, keyGenerator: (req: FastifyRequest) => req.ip },
+});
+
+export async function registerPhoneRoutes(
+  app: FastifyInstance,
+  config: PhoneCaptureConfig,
+): Promise<void> {
   const now = config.nowMs ?? (() => Date.now());
   const owner = () => config.authz.actor(config.authz.ownerId);
 
@@ -97,12 +118,45 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
       };
 
   /**
+   * Everything below lives in its own ENCAPSULATED scope, and that is what
+   * makes the next paragraph true rather than merely intended.
+   *
+   * A Fastify content-type parser added to an instance applies to every route
+   * on it. Added at the root, the form parser below would also have taught the
+   * EXECUTOR routes to accept `application/x-www-form-urlencoded` -- and their
+   * signature covers the raw JSON bytes, so a second body format on that path
+   * would be a second way to disagree about what was signed. Inside
+   * `register`, the parser belongs to this scope alone: the executor routes
+   * answer 415 to a form body, exactly as they did before this page existed,
+   * and a test asserts it.
+   */
+  await app.register(async (scope) => {
+    registerScopedPhoneRoutes(scope, config, { now, owner, isSecure, sessionOf, html, authed });
+  });
+}
+
+interface ScopeHelpers {
+  readonly now: () => number;
+  readonly owner: () => ReturnType<Authorizer['actor']>;
+  readonly isSecure: (req: FastifyRequest) => boolean;
+  readonly sessionOf: (req: FastifyRequest) => PhoneSession | undefined;
+  readonly html: (reply: FastifyReply, body: string, code?: number) => FastifyReply;
+  readonly authed: (
+    handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>,
+  ) => (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+}
+
+function registerScopedPhoneRoutes(
+  app: FastifyInstance,
+  config: PhoneCaptureConfig,
+  { now, owner, isSecure, sessionOf, html, authed }: ScopeHelpers,
+): void {
+  /**
    * The login form, and the ONLY form-encoded body this server accepts.
    *
-   * Registered here rather than globally so the executor surface keeps exactly
-   * one content type: its signature covers the raw JSON bytes, and a second
-   * parser on that path would be a second way to disagree about what was
-   * signed. Bounded, and parsed with `URLSearchParams` rather than by hand.
+   * Scoped to the routes below (see the `register` above), bounded by the
+   * server's own body limit, and parsed with `URLSearchParams` rather than by
+   * hand.
    */
   app.addContentTypeParser(
     'application/x-www-form-urlencoded',
@@ -116,7 +170,7 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
     },
   );
 
-  app.get('/app', async (req, reply) => {
+  app.get('/app', { config: byAddress(60, 60_000) }, async (req, reply) => {
     const session = sessionOf(req);
     if (!session) return html(reply, phoneLoginPage(false), 401);
     return html(reply, phoneCapturePage(phoneCsrfToken(config.sessionKey, session)));
@@ -136,7 +190,9 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
    */
   app.post(
     '/app/session',
-    { config: { rateLimit: { max: 10, timeWindow: 5 * 60_000 } } },
+    // Ten attempts per five minutes per ADDRESS. The one route where the
+    // ceiling is the whole defence, because nothing here is authenticated yet.
+    { config: byAddress(10, 5 * 60_000) },
     async (req, reply) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const passcode = typeof body['passcode'] === 'string' ? body['passcode'] : '';
@@ -158,7 +214,7 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
     },
   );
 
-  app.post('/app/logout', authed(async (_req, reply) =>
+  app.post('/app/logout', { config: byAddress(30, 60_000) }, authed(async (_req, reply) =>
     reply.header('set-cookie', clearedPhoneSessionCookie()).send({ ok: true }),
   ));
 
@@ -177,7 +233,7 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
    */
   app.post(
     '/app/tasks/preview',
-    { config: { rateLimit: { max: 30, timeWindow: 60_000 } } },
+    { config: byAddress(30, 60_000) },
     authed(async (req, reply) => {
       const text = readText(req.body);
       const previewId = optionalPreviewId(req.body);
@@ -235,7 +291,7 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
    */
   app.post(
     '/app/tasks/save',
-    { config: { rateLimit: { max: 30, timeWindow: 60_000 } } },
+    { config: byAddress(30, 60_000) },
     authed(async (req, reply) => {
       const result = config.capture.save(owner(), readPreviewId(req.body));
       return reply.send({
@@ -247,7 +303,7 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
 
   app.post(
     '/app/tasks/discard',
-    { config: { rateLimit: { max: 30, timeWindow: 60_000 } } },
+    { config: byAddress(30, 60_000) },
     authed(async (req, reply) => {
       config.capture.discard(owner(), readPreviewId(req.body));
       return reply.send({ ok: true });

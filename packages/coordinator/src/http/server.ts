@@ -115,13 +115,25 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
    * an unauthenticated caller controls that header.
    */
   const auditRateLimit = (req: FastifyRequest): void => {
+    const route = req.url.split('?')[0]!;
+    /**
+     * The PHONE surface records no claimed executor id, and that is the whole
+     * point of the branch.
+     *
+     * `x-ducky-executor-id` means something on the executor routes: it names a
+     * credential the request then has to prove. On a phone route it is an
+     * unauthenticated caller's free text, so filing one as the ACTOR of a
+     * refusal would let that caller write a plausible executor id into the
+     * audit trail. A phone refusal records the route and nothing else.
+     */
+    const phone = route === '/app' || route.startsWith('/app/');
     const claimed = String(req.headers[EXECUTOR_HEADERS.executorId] ?? '');
     recordAudit(deps, {
       event: 'rate_limit.exceeded',
-      actorKind: 'executor',
-      actorRef: EXECUTOR_ID_RE.test(claimed) ? claimed : null,
+      actorKind: phone ? 'system' : 'executor',
+      actorRef: phone ? null : EXECUTOR_ID_RE.test(claimed) ? claimed : null,
       subjectKind: 'route',
-      subjectRef: req.url.split('?')[0]!,
+      subjectRef: route,
       outcome: 'refused',
     });
   };
@@ -342,7 +354,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
    * session, its own rate limits -- and the executor routes above are
    * unchanged and still require their signature.
    */
-  if (deps.phone) registerPhoneRoutes(app, deps.phone);
+  if (deps.phone) await registerPhoneRoutes(app, deps.phone);
 
   /** Liveness only: the process is up. Deliberately says nothing else. */
   app.get('/healthz', async () => ({ ok: true }));

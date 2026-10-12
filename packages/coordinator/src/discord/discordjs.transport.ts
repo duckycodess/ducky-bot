@@ -164,38 +164,7 @@ export class DiscordJsTransport implements DiscordTransport {
         }
       })();
 
-      const event: IncomingMessage = {
-        kind: 'message',
-        userId: message.author.id,
-        text: message.content,
-        threadKey: message.channelId,
-        messageId: message.id,
-        authorKind: authorKindOf(message),
-        // The same context a command carries. `guildId` is null in a DM, and
-        // normalizing it to undefined is what lets every policy tell a private
-        // conversation from a guild channel rather than guessing from an id.
-        context: {
-          channelId: message.channelId,
-          guildId: message.guildId ?? undefined,
-          // Present only for a thread. A thread's id is not its parent's, so
-          // without this every configured-channel policy answers "no" for a
-          // thread under that channel.
-          ...(parentChannelIdOf(message) === undefined
-            ? {}
-            : { parentChannelId: parentChannelIdOf(message) }),
-        },
-        ...(referenceOf(message) === undefined ? {} : { reference: referenceOf(message) }),
-        // Metadata only. Nothing is fetched here; the router decides whether
-        // anything may be, and refuses before any download when it may not.
-        attachments: [...message.attachments.values()].map((a) => ({
-          filename: a.name,
-          contentType: a.contentType ?? null,
-          size: a.size,
-          url: a.url,
-        })),
-      };
-
-      void this.deliverMessage(message, event);
+      void this.handleMessageCreate(message);
     });
 
     /**
@@ -220,6 +189,16 @@ export class DiscordJsTransport implements DiscordTransport {
      * how a conversation resumes after a week of quiet, and ageing one out
      * because it went quiet would delete a conversation somebody could still
      * scroll back to.
+     *
+     * **This event is not a perfect signal.** Discord also sends it to a
+     * client that has LOST ACCESS to a thread, which a permission change on
+     * the parent is enough to cause, and nothing in the payload distinguishes
+     * that from a real deletion. A still-live thread would then be marked
+     * closed and its retention clock would start. Bounded rather than
+     * harmless: closing deletes nothing, the window is 14 days by default,
+     * retention ships disabled, and the conversation keeps working if access
+     * returns. See ADR 0025 for the sequence that is still not handled and the
+     * fix that was deliberately not written here.
      */
     client.on(Events.ThreadDelete, (thread) => {
       try {
@@ -267,6 +246,50 @@ export class DiscordJsTransport implements DiscordTransport {
   // --------------------------------------------------------------------------
 
   /**
+   * Builds the incoming event for one message, then routes it.
+   *
+   * Separate and ASYNC because resolving a reply anchor can need one REST
+   * call. It is built here rather than inline in the listener so the
+   * resolution is awaited exactly once per message -- the inline version
+   * called the resolver twice, once to test it and once to use it.
+   */
+  private async handleMessageCreate(message: import('discord.js').Message): Promise<void> {
+    const parentChannelId = parentChannelIdOf(message);
+    const reference = await resolveReference(message);
+
+    const event: IncomingMessage = {
+      kind: 'message',
+      userId: message.author.id,
+      text: message.content,
+      threadKey: message.channelId,
+      messageId: message.id,
+      authorKind: authorKindOf(message),
+      // The same context a command carries. `guildId` is null in a DM, and
+      // normalizing it to undefined is what lets every policy tell a private
+      // conversation from a guild channel rather than guessing from an id.
+      context: {
+        channelId: message.channelId,
+        guildId: message.guildId ?? undefined,
+        // Present only for a thread. A thread's id is not its parent's, so
+        // without this every configured-channel policy answers "no" for a
+        // thread under that channel.
+        ...(parentChannelId === undefined ? {} : { parentChannelId }),
+      },
+      ...(reference === undefined ? {} : { reference }),
+      // Metadata only. Nothing is fetched here; the router decides whether
+      // anything may be, and refuses before any download when it may not.
+      attachments: [...message.attachments.values()].map((a) => ({
+        filename: a.name,
+        contentType: a.contentType ?? null,
+        size: a.size,
+        url: a.url,
+      })),
+    };
+
+    await this.deliverMessage(message, event);
+  }
+
+  /**
    * Routes one message into the conversation it belongs to, and answers THERE.
    *
    * The thread decision runs BEFORE routing, because it decides the
@@ -288,9 +311,7 @@ export class DiscordJsTransport implements DiscordTransport {
     if (this.#enterThread) {
       const outcome = await this.#enterThread(event);
       if (outcome.kind === 'refused') {
-        await message
-          .reply(toDiscordPayload({ content: outcome.message, ephemeral: false }))
-          .catch(() => undefined);
+        await this.replyTo(message, { content: outcome.message, ephemeral: false });
         return;
       }
       if (outcome.kind === 'thread' && outcome.threadId !== event.threadKey) {
@@ -312,29 +333,53 @@ export class DiscordJsTransport implements DiscordTransport {
 
     const reply = await this.route(routed);
     if (!reply) return;
-    const payload = toDiscordPayload({ ...reply, ephemeral: false });
 
     if (threadId !== undefined) {
-      const sent = await this.sendToChannel(threadId, payload);
+      const sent = await this.sendToChannel(threadId, { ...reply, ephemeral: false });
       if (sent) return;
       // The thread exists but we cannot post in it. Say so where the owner is
       // looking, and do NOT publish the answer in the parent instead.
-      await message
-        .reply(
-          toDiscordPayload({
-            content:
-              'I opened a thread for this but could not post in it, so I have not answered. ' +
-              'The bot needs Send Messages in Threads here.',
-            ephemeral: false,
-          }),
-        )
-        .catch(() => undefined);
+      await this.replyTo(message, {
+        content:
+          'I opened a thread for this but could not post in it, so I have not answered. ' +
+          'The bot needs Send Messages in Threads here.',
+        ephemeral: false,
+      });
       return;
     }
+    await this.replyTo(message, { ...reply, ephemeral: false });
+  }
+
+  /**
+   * The ONE door every message reply leaves through, sanitized.
+   *
+   * It exists because three call sites here were building a payload directly
+   * and one of them was the refusal path, which never passed through
+   * `sanitizeOutbound` at all. The strings involved were fixed, so nothing
+   * leaked -- but the guarantee this codebase states is structural ("all
+   * Discord output goes through sanitizeOutbound, called inside the transport
+   * so it cannot be bypassed"), and a guarantee that holds because the current
+   * strings happen to be safe is not that guarantee.
+   *
+   * Sanitizing twice is harmless: `sanitizeOutbound` is idempotent, so a reply
+   * that already came back through `route` is unaffected.
+   */
+  private async replyTo(
+    message: import('discord.js').Message,
+    outbound: OutboundMessage,
+  ): Promise<void> {
+    const payload = toDiscordPayload(sanitizeOutbound(outbound));
     await message.reply(payload).catch(() => undefined);
   }
 
-  private async sendToChannel(channelId: string, payload: unknown): Promise<boolean> {
+  /**
+   * Delivers into a channel by id, through the same sanitizer.
+   *
+   * Takes an `OutboundMessage` rather than a built payload for exactly that
+   * reason: a caller cannot hand it something that skipped the choke point.
+   */
+  private async sendToChannel(channelId: string, outbound: OutboundMessage): Promise<boolean> {
+    const payload = toDiscordPayload(sanitizeOutbound(outbound));
     const client = this.#client as {
       channels?: { fetch(id: string): Promise<unknown> };
     } | undefined;
@@ -641,48 +686,129 @@ function parentChannelIdOf(message: import('discord.js').Message): string | unde
 }
 
 /**
- * The message this one replies to, as metadata.
+ * Discord's `message_reference.type` for a FORWARD rather than a reply.
  *
- * Entirely untrusted and resolved later: the router refuses a reference from
- * another thread and labels an unreadable one unavailable, rather than
- * importing either. `referencedMessage` is populated by discord.js only when
- * it is already cached, which is why the text is optional here.
+ * A forward relays somebody else's message; a reply points at one in this
+ * conversation. They share a field and mean different things, so a forward is
+ * never treated as a reply anchor.
  */
-export function referenceOf(
+const MESSAGE_REFERENCE_TYPE_FORWARD = 1;
+
+/**
+ * The message this one replies to, resolved the way discord.js actually
+ * exposes it.
+ *
+ * **The first version read `message.referencedMessage`, which does not exist.**
+ * Not in the typings and not at runtime: discord.js v14 gives you
+ * `message.reference` (ids only) and `fetchReference()`. So the field was
+ * always `undefined`, every real reply anchor arrived with no text and no
+ * author, and the router dropped all of them with "I could not read the
+ * message you replied to". The feature was dead in production and the tests
+ * did not catch it because they built the fake field themselves.
+ *
+ * Two sources, cheapest first:
+ *
+ * 1. **The channel's message cache.** Discord sends `referenced_message`
+ *    inline on the gateway payload for a reply, and discord.js `_add`s it to
+ *    the channel's cache (`Message.js`: `if (data.referenced_message) ...`).
+ *    So the common case is a synchronous cache hit and NO API call.
+ * 2. **`fetchReference()`**, for an older message that has fallen out of the
+ *    cache. One REST call, failures swallowed.
+ *
+ * **The fetch is guarded to the same channel.** `fetchReference` resolves
+ * `reference.channelId`, which may be somewhere else entirely -- so without
+ * the guard, replying across channels would make Ducky fetch a message out of
+ * a channel this conversation is not in. The router drops a cross-thread
+ * anchor anyway, but it does so AFTER the transport has already read it, and
+ * reading it was the part that should not happen. Cheaper and more private to
+ * refuse here.
+ *
+ * On failure the reference is still returned, carrying its ids and no text,
+ * so the router says "I could not read the message you replied to" rather than
+ * silently acting as though there was no reply at all.
+ */
+export async function resolveReference(
   message: import('discord.js').Message,
-): {
+): Promise<{
   messageId: string;
   channelId?: string;
   text?: string;
   authorId?: string;
   authorIsSelf?: boolean;
-} | undefined {
-  const ref = message.reference as { messageId?: string | null; channelId?: string | null } | null;
+} | undefined> {
+  const ref = message.reference as
+    | { messageId?: string | null; channelId?: string | null; type?: number | null }
+    | null;
   if (!ref?.messageId) return undefined;
-  const cached = (message as unknown as {
-    referencedMessage?: { content?: string; author?: { id?: string } } | null;
-  }).referencedMessage;
+  // A forward is not a reply. It would otherwise arrive carrying text from
+  // wherever it was forwarded out of.
+  if (ref.type === MESSAGE_REFERENCE_TYPE_FORWARD) return undefined;
 
-  /**
-   * Whether DUCKY wrote the referenced message, answered HERE because this is
-   * the only layer that knows the bot's own Discord id.
-   *
-   * The router must never infer it. A native thread is public, so a stranger
-   * can post in one, and treating "not on the whitelist" as "therefore Ducky"
-   * would hand the model a stranger's text labelled as the assistant's own
-   * prior output. `undefined` when the client id is unreadable, which the
-   * router treats as "not Ducky" and drops.
-   */
+  const base = {
+    messageId: ref.messageId,
+    ...(ref.channelId ? { channelId: ref.channelId } : {}),
+  };
+
+  const sameChannel = ref.channelId === undefined
+    || ref.channelId === null
+    || ref.channelId === message.channelId;
+  if (!sameChannel) return base;
+
+  const resolved = await referencedMessageOf(message, ref.messageId);
+  if (!resolved) return base;
+
+  return { ...base, ...describeReferenced(message, resolved) };
+}
+
+/** The cache first, then one bounded fetch. Never throws. */
+async function referencedMessageOf(
+  message: import('discord.js').Message,
+  messageId: string,
+): Promise<{ content?: string; author?: { id?: string } } | undefined> {
+  const cached = (
+    message.channel as unknown as {
+      messages?: { cache?: { get(id: string): unknown } };
+    }
+  )?.messages?.cache?.get(messageId) as
+    | { content?: string; author?: { id?: string } }
+    | undefined;
+  if (cached) return cached;
+
+  try {
+    const fetched = await (
+      message as unknown as { fetchReference?: () => Promise<unknown> }
+    ).fetchReference?.();
+    return (fetched ?? undefined) as { content?: string; author?: { id?: string } } | undefined;
+  } catch {
+    // Deleted, inaccessible, or the channel could not be resolved. The caller
+    // reports it as unreadable rather than as absent.
+    return undefined;
+  }
+}
+
+/**
+ * Whose words the referenced message is, and what it said.
+ *
+ * `authorIsSelf` is decided HERE because this is the only layer that knows the
+ * bot's own Discord id, and it is the ONLY thing that may cause the router to
+ * label an anchor `assistant`. The router must never infer it: a native thread
+ * is public, so treating "not on the whitelist" as "therefore Ducky" would
+ * hand the model a stranger's text presented as the assistant's own prior
+ * output. `undefined` when the client id is unreadable, which the router
+ * treats as "not Ducky" and drops.
+ */
+function describeReferenced(
+  message: import('discord.js').Message,
+  resolved: { content?: string; author?: { id?: string } },
+): { text?: string; authorId?: string; authorIsSelf?: boolean } {
   const selfId = (message as unknown as { client?: { user?: { id?: string } | null } })
     .client?.user?.id;
-  const authorId = cached?.author?.id;
+  const authorId = resolved.author?.id;
   const authorIsSelf =
     selfId !== undefined && authorId !== undefined ? authorId === selfId : undefined;
 
   return {
-    messageId: ref.messageId,
-    ...(ref.channelId ? { channelId: ref.channelId } : {}),
-    ...(cached?.content ? { text: cached.content } : {}),
+    ...(resolved.content ? { text: resolved.content } : {}),
     ...(authorId ? { authorId } : {}),
     ...(authorIsSelf === undefined ? {} : { authorIsSelf }),
   };

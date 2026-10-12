@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  parentChannelIdOfChannel, referenceOf,
+  parentChannelIdOfChannel, resolveReference,
 } from '../src/discord/discordjs.transport.js';
 import { ReplyPersistencePolicy } from '../src/domain/reply-persistence.js';
 import { ChannelRolePolicy } from '../src/domain/channel-roles.js';
@@ -25,53 +25,160 @@ const TRANSPORT_SRC = readFileSync(
 const BOT = '111111111111111111';
 const THREAD = '970000000000000001';
 
-/** A structurally-typed stand-in for the one discord.js shape used here. */
-const messageWith = (over: Record<string, unknown>) =>
-  ({
-    client: { user: { id: BOT } },
-    reference: { messageId: '970000000000000050', channelId: THREAD },
-    ...over,
-  }) as never;
+/**
+ * A stand-in shaped like the discord.js objects this code actually touches.
+ *
+ * It models the REAL mechanism rather than a convenient one, which is the
+ * whole point of rewriting these: the previous version built a
+ * `referencedMessage` field that discord.js has never had, so the tests passed
+ * against a shape production never produces and the feature was dead.
+ *
+ * What discord.js v14 really does: for a reply it ships `referenced_message`
+ * inline on the gateway payload and `_add`s it to the CHANNEL'S MESSAGE CACHE,
+ * leaving `message.reference` as ids only. An older reply misses the cache and
+ * needs `fetchReference()`.
+ */
+const messageLike = (over: {
+  channelId?: string;
+  reference?: { messageId?: string; channelId?: string; type?: number } | null;
+  cached?: Record<string, { content?: string; author?: { id?: string } }>;
+  fetchReference?: () => Promise<unknown>;
+  selfId?: string | null;
+}) => {
+  const cache = over.cached ?? {};
+  return {
+    channelId: over.channelId ?? THREAD,
+    client: { user: over.selfId === null ? null : { id: over.selfId ?? BOT } },
+    reference: over.reference === undefined
+      ? { messageId: ANCHOR, channelId: THREAD, type: 0 }
+      : over.reference,
+    channel: { messages: { cache: { get: (id: string) => cache[id] } } },
+    ...(over.fetchReference ? { fetchReference: over.fetchReference } : {}),
+  } as never;
+};
+
+const ANCHOR = '970000000000000050';
+
+describe('a reply anchor is read the way discord.js actually exposes one', () => {
+  it('reads the referenced message out of the channel cache, with no API call', async () => {
+    let fetched = 0;
+    const ref = await resolveReference(
+      messageLike({
+        cached: { [ANCHOR]: { content: 'the earlier question', author: { id: OWNER } } },
+        fetchReference: async () => {
+          fetched += 1;
+          return undefined;
+        },
+      }),
+    );
+
+    expect(ref?.text).toBe('the earlier question');
+    expect(ref?.authorId).toBe(OWNER);
+    expect(ref?.authorIsSelf).toBe(false);
+    // The cache hit is the common case; it must not cost a REST call.
+    expect(fetched).toBe(0);
+  });
+
+  it('falls back to fetchReference when the cache has aged out', async () => {
+    const ref = await resolveReference(
+      messageLike({
+        cached: {},
+        fetchReference: async () => ({
+          content: 'something said last week',
+          author: { id: OWNER },
+        }),
+      }),
+    );
+
+    expect(ref?.text).toBe('something said last week');
+    expect(ref?.authorId).toBe(OWNER);
+  });
+
+  it('returns the reference WITHOUT text when the fetch fails', async () => {
+    // Deleted, or inaccessible. The router then says "I could not read the
+    // message you replied to" rather than acting as though there was no reply.
+    const ref = await resolveReference(
+      messageLike({
+        cached: {},
+        fetchReference: async () => {
+          throw new Error('Unknown Message');
+        },
+      }),
+    );
+
+    expect(ref?.messageId).toBe(ANCHOR);
+    expect(ref?.text).toBeUndefined();
+    expect(ref?.authorId).toBeUndefined();
+  });
+
+  it('never fetches a message from another channel', async () => {
+    /**
+     * `fetchReference` resolves the REFERENCE's channel, which may be anywhere.
+     * The router drops a cross-thread anchor, but only after the transport has
+     * already read it -- and reading it was the part that should not happen.
+     */
+    let fetched = 0;
+    const ref = await resolveReference(
+      messageLike({
+        channelId: THREAD,
+        reference: { messageId: ANCHOR, channelId: '970000000000009999', type: 0 },
+        cached: {},
+        fetchReference: async () => {
+          fetched += 1;
+          return { content: 'a secret from another channel', author: { id: OWNER } };
+        },
+      }),
+    );
+
+    expect(fetched).toBe(0);
+    expect(ref?.channelId).toBe('970000000000009999');
+    expect(ref?.text).toBeUndefined();
+  });
+
+  it('treats a FORWARD as not a reply at all', async () => {
+    // Shares the `message_reference` field and means something else: a forward
+    // relays somebody else's message rather than pointing at one here.
+    const ref = await resolveReference(
+      messageLike({
+        reference: { messageId: ANCHOR, channelId: THREAD, type: 1 },
+        cached: { [ANCHOR]: { content: 'forwarded text', author: { id: OWNER } } },
+      }),
+    );
+    expect(ref).toBeUndefined();
+  });
+
+  it('is undefined entirely when the message replies to nothing', async () => {
+    expect(await resolveReference(messageLike({ reference: null }))).toBeUndefined();
+  });
+});
 
 describe('only the transport may say a message was Ducky’s own', () => {
-  it('marks Ducky’s own message as self, from the client id', () => {
-    const ref = referenceOf(
-      messageWith({ referencedMessage: { content: 'an earlier reply', author: { id: BOT } } }),
-    );
+  const cachedFrom = (authorId: string) =>
+    messageLike({ cached: { [ANCHOR]: { content: 'an earlier reply', author: { id: authorId } } } });
+
+  it('marks Ducky’s own message as self, from the client id', async () => {
+    const ref = await resolveReference(cachedFrom(BOT));
     expect(ref?.authorIsSelf).toBe(true);
     expect(ref?.authorId).toBe(BOT);
   });
 
-  it('marks a person’s message as NOT self, whoever they are', () => {
+  it('marks a person’s message as NOT self, whoever they are', async () => {
     for (const id of [OWNER, CHAT, STRANGER]) {
-      const ref = referenceOf(
-        messageWith({ referencedMessage: { content: 'something said', author: { id } } }),
-      );
+      const ref = await resolveReference(cachedFrom(id));
       expect(ref?.authorIsSelf, id).toBe(false);
     }
   });
 
-  it('leaves it UNDEFINED when the client id cannot be read', () => {
+  it('leaves it UNDEFINED when the client id cannot be read', async () => {
     // Undefined is treated by the router as "not Ducky", so an unreadable
     // client loses the anchor rather than mislabelling one.
-    const ref = referenceOf(
-      messageWith({
-        client: { user: null },
-        referencedMessage: { content: 'something said', author: { id: OWNER } },
+    const ref = await resolveReference(
+      messageLike({
+        selfId: null,
+        cached: { [ANCHOR]: { content: 'an earlier reply', author: { id: OWNER } } },
       }),
     );
     expect(ref?.authorIsSelf).toBeUndefined();
-  });
-
-  it('carries no text when the referenced message was not cached', () => {
-    const ref = referenceOf(messageWith({ referencedMessage: null }));
-    expect(ref?.messageId).toBe('970000000000000050');
-    expect(ref?.text).toBeUndefined();
-    expect(ref?.authorIsSelf).toBeUndefined();
-  });
-
-  it('is undefined entirely when the message replies to nothing', () => {
-    expect(referenceOf(messageWith({ reference: null }))).toBeUndefined();
   });
 });
 
@@ -108,6 +215,45 @@ describe('a deleted thread is learned from the gateway, not only from a failed s
     expect([...new Set(requested)].sort()).toEqual([
       'DirectMessages', 'GuildMessages', 'Guilds', 'MessageContent',
     ]);
+  });
+});
+
+describe('every message reply leaves through the sanitizer', () => {
+  /**
+   * The thread refusal path built a payload directly and never passed through
+   * `sanitizeOutbound`. The strings were fixed so nothing leaked -- but the
+   * guarantee this codebase states is structural ("all Discord output goes
+   * through sanitizeOutbound, called inside the transport so it cannot be
+   * bypassed"), and a guarantee that holds because today's strings happen to
+   * be safe is not that guarantee.
+   */
+  it('calls message.reply from exactly one place', () => {
+    const calls = [...TRANSPORT_SRC.matchAll(/\bmessage\s*\n?\s*\.reply\(/g)];
+    expect(calls).toHaveLength(1);
+  });
+
+  it('sanitizes in that one place', () => {
+    const replyTo = /private async replyTo\([\s\S]*?\n {2}\}/.exec(TRANSPORT_SRC)?.[0] ?? '';
+    expect(replyTo).toMatch(/sanitizeOutbound\(outbound\)/);
+    expect(replyTo).toMatch(/message\.reply\(payload\)/);
+  });
+
+  it('sanitizes the thread-delivery path too, and takes an OutboundMessage', () => {
+    // Taking an already-built payload would let a caller hand it something
+    // that skipped the choke point.
+    const send = /private async sendToChannel\([\s\S]*?\n {2}\}/.exec(TRANSPORT_SRC)?.[0] ?? '';
+    expect(send).toMatch(/outbound: OutboundMessage/);
+    expect(send).toMatch(/sanitizeOutbound\(outbound\)/);
+  });
+
+  it('builds no payload anywhere without sanitizing first', () => {
+    // Every remaining `toDiscordPayload` takes either a sanitized value or a
+    // reply that came back through `route`, which sanitizes.
+    const unsanitized = [...TRANSPORT_SRC.matchAll(/toDiscordPayload\((?!sanitizeOutbound)/g)]
+      .map((m) => TRANSPORT_SRC.slice(m.index, (m.index ?? 0) + 60));
+    for (const call of unsanitized) {
+      expect(call, call).toMatch(/toDiscordPayload\(reply\)/);
+    }
   });
 });
 

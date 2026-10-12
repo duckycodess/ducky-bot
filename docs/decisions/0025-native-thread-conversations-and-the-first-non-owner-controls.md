@@ -223,6 +223,34 @@ There is no inference left:
 An absent `authorIsSelf` is treated as "not Ducky", so a transport that does not
 populate it loses the anchor rather than mislabelling one.
 
+#### How the referenced message is actually read
+
+The first implementation read `message.referencedMessage`, **which discord.js
+has never had** — not in the v14 typings and not at runtime. So the field was
+always `undefined`, every real reply arrived with no text and no author, and the
+router dropped all of them with "I could not read the message you replied to".
+The feature was dead in production, and the tests did not catch it because they
+constructed the imaginary field themselves. A test that invents the shape it is
+testing against proves only that the test and the code agree.
+
+What discord.js v14 does: `message.reference` carries **ids only**, and for a
+reply Discord ships `referenced_message` inline on the gateway payload, which
+discord.js `_add`s to the **channel's message cache**. So:
+
+1. **The cache first** — the common case, synchronous, no API call;
+2. **`fetchReference()`** for an older message that has aged out — one REST
+   call, every failure swallowed.
+
+The fetch is **guarded to the same channel**. `fetchReference` resolves the
+reference's own `channelId`, which may be anywhere, so without the guard a
+cross-channel reply would make Ducky fetch a message out of a channel this
+conversation is not in. The router drops a cross-thread anchor regardless, but
+only *after* the transport has read it, and reading it was the part that should
+not happen.
+
+A **forward** is not a reply. It shares the `message_reference` field and means
+something else, so `type === Forward` yields no anchor at all.
+
 ## What this does NOT change
 
 - **No new owner-only command.** `OWNER_ONLY_COMMANDS` is byte-for-byte
@@ -263,3 +291,20 @@ outage and then left alone, so its retention clock never starts and its
 transcript stays until `/forget conversation` removes it. Recorded rather than
 solved, because the alternative is a sweep that deletes a conversation on a
 guess about whether it still exists.
+
+**`ThreadDelete` can also mean "no longer visible to this bot".** Discord sends
+the event to a client that has *lost access* to a thread, not only for one that
+was really deleted — a permission change on the parent channel is enough. Ducky
+cannot tell the two apart from the event, so a thread that still exists would be
+marked closed and its retention clock would start.
+
+The blast radius is bounded and the mitigations are real: closing deletes
+nothing, the window is `DUCKY_RETENTION_CLOSED_THREAD_DAYS` (14 days by
+default), retention ships disabled, and the conversation keeps working if access
+returns — `enter` routes a message in a known thread whether or not its mapping
+is closed. What is NOT handled is the full sequence: access lost, access
+restored, nobody writes in the thread for the whole window, and retention is
+on. The obvious fix is to reopen a mapping when a message arrives in it, since
+a message is proof the thread exists; it is deliberately **not** implemented
+here rather than added speculatively on the way past a review, and this
+paragraph is the record that it is the next thing to do if this ever bites.

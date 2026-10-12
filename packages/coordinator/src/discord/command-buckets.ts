@@ -16,9 +16,19 @@ export type BucketExhaustedSink = (info: { bucket: BucketName }) => void;
 /**
  * Per-user token buckets for the Discord surfaces.
  *
- * These surfaces are owner-only, so this is accident containment and
- * self-protection -- not an authorization control. It keeps a stuck client or a
- * fat-fingered loop from doing unbounded work.
+ * **Accident containment, never an authorization control.** Authorization has
+ * already happened by the time anything is charged here; a limit keeps a stuck
+ * client, a fat-fingered loop or a redelivery storm from doing unbounded work.
+ *
+ * Most of these surfaces are owner-only and this comment used to say all of
+ * them were. That stopped being true: `interaction` is shared with the
+ * conversational controls and `threadCreate` is charged for whoever's message
+ * opened the thread, so the configured chat user reaches both. Each bucket now
+ * declares `ownerOnly` in `COMMAND_BUCKETS`, and the audit sink reads it rather
+ * than assuming.
+ *
+ * Buckets are keyed per USER, so one person exhausting a shared bucket never
+ * refuses anybody else.
  */
 export class CommandBuckets {
   readonly #windows = new Map<string, Window>();
@@ -47,8 +57,17 @@ export class CommandBuckets {
     }
     if (w.count >= spec.max) {
       const seconds = Math.ceil((w.resetAt - t) / 1000);
-      // The BUCKET is recorded, never the user id: these surfaces are
-      // owner-only, so the id adds nothing an auditor could use.
+      /**
+       * The BUCKET is recorded, never the user id.
+       *
+       * The old reason was "these surfaces are owner-only, so the id adds
+       * nothing", and that reason has expired for the two shared buckets. The
+       * decision has not: a Discord id in a long-lived table is personal data,
+       * the audit log records ROLES and ROUTES everywhere else for exactly
+       * that reason, and "somebody hit the thread limit" is the fact an
+       * operator acts on. What changed is the attribution -- a shared bucket
+       * is no longer recorded as the owner's doing. See `ownerOnly`.
+       */
       try {
         this.#onExhausted?.({ bucket });
       } catch {

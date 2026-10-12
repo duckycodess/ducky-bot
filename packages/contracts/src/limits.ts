@@ -117,14 +117,32 @@ export const RATE_LIMITS = {
   unauthenticated: { max: 600, windowMs: 60_000 },
 } as const;
 
+/**
+ * `ownerOnly` says whether a bucket can be charged by anyone but the owner.
+ *
+ * It is declared rather than assumed, because the assumption stopped being
+ * true. Every bucket was owner-only once, and the audit sink relied on that to
+ * record a rate limit as the OWNER's without being told who hit it. Issue #4
+ * gave a conversation participant two controls and a thread, so `interaction`
+ * and `threadCreate` are now reachable by the configured chat user -- and an
+ * audit row attributing their rate limit to the owner would be a false record.
+ *
+ * A new bucket therefore has to state its position. None of this is an
+ * authorization control: authorization has already happened by the time a
+ * bucket is charged, and a limit contains accidents.
+ */
 export const COMMAND_BUCKETS = {
-  capture: { max: 30, windowMs: 60_000 },
-  schedule: { max: 10, windowMs: 60_000 },
-  jobSubmit: { max: 5, windowMs: 60_000 },
-  jobRead: { max: 20, windowMs: 60_000 },
-  interaction: { max: 60, windowMs: 60_000 },
+  capture: { max: 30, windowMs: 60_000, ownerOnly: true },
+  schedule: { max: 10, windowMs: 60_000, ownerOnly: true },
+  jobSubmit: { max: 5, windowMs: 60_000, ownerOnly: true },
+  jobRead: { max: 20, windowMs: 60_000, ownerOnly: true },
+  /**
+   * Every component press. NOT owner-only any more: the conversational
+   * controls (Branch, Compact) share it with every owner control.
+   */
+  interaction: { max: 60, windowMs: 60_000, ownerOnly: false },
   /** /task, /reminder and /briefing. Owner-only, so this is self-protection. */
-  assistant: { max: 30, windowMs: 60_000 },
+  assistant: { max: 30, windowMs: 60_000, ownerOnly: true },
   /**
    * Opening a native conversation thread.
    *
@@ -139,8 +157,11 @@ export const COMMAND_BUCKETS = {
    * channel is already unusual; a hundred is a loop, a raid or a
    * misconfiguration, and none of those should be allowed to carpet a channel
    * with threads before anybody notices.
+   *
+   * NOT owner-only: a configured chat user's message opens a thread exactly as
+   * the owner's does, which is the whole point of a shared conversation.
    */
-  threadCreate: { max: 10, windowMs: 60_000 },
+  threadCreate: { max: 10, windowMs: 60_000, ownerOnly: false },
 } as const;
 
 // ---- subprocess -------------------------------------------------------------

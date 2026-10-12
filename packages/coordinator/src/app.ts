@@ -7,7 +7,7 @@ import {
   type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
 import {
-  AUDIT_OWNER_REF, DuckyError,
+  AUDIT_OWNER_REF, COMMAND_BUCKETS, CONVERSATIONAL_ROUTE, DuckyError,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
@@ -210,14 +210,32 @@ export function createApp(
   // attached to the SAME instance the router uses.
   const buckets = new CommandBuckets();
   buckets.onExhausted(({ bucket }) => {
+    /**
+     * WHO is attributed, and why it is not always the owner any more.
+     *
+     * Every bucket was owner-only once, so recording a rate limit as the
+     * owner's doing was true without anybody having to be told. Issue #4 gave
+     * a conversation participant two controls and a thread, so `interaction`
+     * and `threadCreate` are reachable by the configured chat user -- and
+     * attributing their limit to the owner would put a false statement in a
+     * long-lived record.
+     *
+     * A shared bucket is therefore recorded as `system` against the
+     * conversation route: the honest answer is "a limit fired on a surface
+     * more than one person can reach", because the sink is handed the BUCKET
+     * and nothing else. It deliberately stays that way -- the fix for a vague
+     * audit row is not to start logging Discord ids.
+     */
+    const ownerOnly = COMMAND_BUCKETS[bucket].ownerOnly;
     try {
       store.auditLog.record({
         event: 'rate_limit.exceeded',
-        actorKind: 'owner',
-        actorRef: AUDIT_OWNER_REF,
+        actorKind: ownerOnly ? 'owner' : 'system',
+        actorRef: ownerOnly ? AUDIT_OWNER_REF : CONVERSATIONAL_ROUTE,
         subjectKind: 'route',
         subjectRef: bucket,
         outcome: 'refused',
+        ...(ownerOnly ? {} : { detail: 'shared surface; the actor is not recorded' }),
       });
     } catch {
       /* a record is never worth failing the limit */

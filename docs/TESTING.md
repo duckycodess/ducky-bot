@@ -503,15 +503,22 @@ replace it; no source file in any package names `$grill-me`, `$ticket` or
 task; task lists, reminder lists and briefings carry no timezone suffix and no
 reminder-lead line while the configured zone still drives scheduling.
 
-**coordinator / thread transport** — the three things that live only in the
-transport: only it may say a referenced message was Ducky's own, by comparing
-the author against the bot's client id, and an unreadable client id yields
-undefined rather than a guess; `Events.ThreadDelete` is registered and routed to
+**coordinator / thread transport** — what lives only in the transport, tested
+against the shapes discord.js really produces rather than invented ones. A
+reply anchor comes from the channel's message cache with no API call, falls back
+to `fetchReference` when it has aged out, returns the reference without text
+when that fails, is never fetched across channels, and treats a forward as not a
+reply. Only the transport may say a referenced message was Ducky's own, by
+comparing the author against the bot's client id; an unreadable client id yields
+undefined rather than a guess. `Events.ThreadDelete` is registered and routed to
 the thread-gone hook while `ThreadUpdate` deliberately is not, and the requested
 gateway intents are still exactly the four they were, which is the whole reason
-that event was chosen; a slash command resolves its thread's parent through the
-same helper a message does, so a command in a thread under a role channel
-persists while a non-owner's reply there still does not.
+that event was chosen. `message.reply` is called from exactly one place, that
+place sanitizes, the thread-delivery path takes an `OutboundMessage` rather than
+a built payload, and no payload is constructed anywhere without sanitizing
+first. A slash command resolves its thread's parent through the same helper a
+message does, so a command in a thread under a role channel persists while a
+non-owner's reply there still does not.
 
 **adapters / probe deletion surface** — the probe's session-deletion
 classification returns a NOTE in every case and never a blocker, distinguishes

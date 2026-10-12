@@ -3,7 +3,10 @@ import {
   BULK_CAPTURE_MAX_INPUT, BULK_PROBLEM_MESSAGE, DuckyError, formatDeadline, isDuckyError,
 } from '@ducky/contracts';
 import type { TaskRow } from '@ducky/persistence';
-import type { TaskCaptureService } from '../domain/task-capture.service.js';
+import {
+  editableListText,
+  type TaskCaptureOutcome, type TaskCaptureService,
+} from '../domain/task-capture.service.js';
 import type { Authorizer } from '../security/authz.js';
 import {
   PHONE_CSRF_HEADER, PHONE_SESSION_COOKIE, PHONE_SESSION_TTL_MS,
@@ -159,13 +162,38 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
     reply.header('set-cookie', clearedPhoneSessionCookie()).send({ ok: true }),
   ));
 
-  /** Reads a paste back. Writes a short-lived preview row and no task at all. */
+  /**
+   * Reads a paste back. Writes a short-lived preview row and no task at all.
+   *
+   * With a `previewId` it is the EDIT path: the corrected text is re-parsed
+   * into the SAME preview rather than creating a second one, which is both
+   * what the Discord modal does and what stops a few rounds of correction
+   * leaving a trail of abandoned drafts holding the owner's text.
+   *
+   * A `previewId` that has expired or already settled falls back to a fresh
+   * preview rather than refusing. Nothing was saved either way, the text in
+   * the box is what the owner just typed, and "your draft expired while you
+   * were editing it" is a dead end on a phone.
+   */
   app.post(
     '/app/tasks/preview',
     { config: { rateLimit: { max: 30, timeWindow: 60_000 } } },
     authed(async (req, reply) => {
       const text = readText(req.body);
-      const outcome = config.capture.preview(owner(), text, 'phone');
+      const previewId = optionalPreviewId(req.body);
+
+      let outcome: TaskCaptureOutcome;
+      if (previewId === undefined) {
+        outcome = config.capture.preview(owner(), text, 'phone');
+      } else {
+        try {
+          outcome = config.capture.correct(owner(), previewId, text);
+        } catch (err) {
+          if (!isDuckyError(err) || err.code !== 'extraction_expired') throw err;
+          outcome = config.capture.preview(owner(), text, 'phone');
+        }
+      }
+
       if (outcome.kind === 'needs_clarification') {
         return reply.send({
           problems: outcome.problems.map((p) => ({
@@ -179,6 +207,10 @@ export function registerPhoneRoutes(app: FastifyInstance, config: PhoneCaptureCo
         previewId: outcome.preview.previewId,
         expiresAt: outcome.preview.expiresAt,
         ignoredLeadingLines: outcome.preview.ignoredLeadingLines,
+        // What Edit puts back in the box: the same list, in the form the
+        // parser reads. The client never reconstructs this itself, so the
+        // round trip cannot drift from what the parser accepts.
+        editable: editableListText(outcome.preview.items, config.capture.timeZone, now()),
         items: outcome.preview.items.map((item) => ({
           title: item.title,
           deadline: item.dueAt
@@ -245,6 +277,22 @@ function readText(body: unknown): string {
       'invalid_input',
       `That is longer than ${BULK_CAPTURE_MAX_INPUT} characters. Send it in smaller lists.`,
     );
+  }
+  return value;
+}
+
+/**
+ * The preview a correction belongs to, when the client sent one.
+ *
+ * Absent and malformed are NOT the same: an absent id means "this is a fresh
+ * paste", while a malformed one is a client bug and is refused rather than
+ * quietly treated as a new preview.
+ */
+function optionalPreviewId(body: unknown): string | undefined {
+  const value = (body as Record<string, unknown> | null)?.['previewId'];
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > 64) {
+    throw new DuckyError('invalid_input', 'That list is no longer waiting to be saved.');
   }
   return value;
 }

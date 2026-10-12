@@ -77,11 +77,24 @@ ${failed ? '<p class="err">That did not match.</p>' : ''}
 /**
  * The capture page.
  *
- * Two buttons and a box, because that is the whole job: paste, check what it
- * read, keep it. Save is disabled the moment it is pressed and re-enabled only
- * on a failure, and it always sends the SAME preview id -- so a double tap on
- * a slow connection cannot ask for two sets of tasks, and the server would
- * replay rather than duplicate even if it did.
+ * A box and three controls, because that is the whole job: paste, check what
+ * it read, then Save it, Edit it or Discard it.
+ *
+ * Two rules about identity run through the script, and both exist because a
+ * phone is a device people double-tap on a bad connection:
+ *
+ * 1. **Each rendered preview's buttons close over THEIR OWN id**, captured
+ *    when they are built, never read from a shared variable at click time. A
+ *    reply that arrives while a thumb is moving cannot make Save act on a
+ *    different list from the one on screen.
+ * 2. **Only the newest read is allowed to render.** Every "Read it back"
+ *    takes a sequence number and a late reply from a superseded request is
+ *    dropped, so two taps cannot leave the screen describing one preview
+ *    while the buttons belong to another.
+ *
+ * Save is disabled the moment it is pressed and re-enabled only on failure,
+ * and the server replays rather than duplicating even if a second press got
+ * through.
  */
 export const phoneCapturePage = (csrfToken: string): string =>
   SHELL(
@@ -99,7 +112,13 @@ export const phoneCapturePage = (csrfToken: string): string =>
 const CSRF = ${JSON.stringify(csrfToken)};
 const out = document.getElementById('out');
 const text = document.getElementById('text');
-let previewId = null;
+const read = document.getElementById('read');
+// The preview currently on screen. Used ONLY to tell the server that the next
+// read is a correction of this one rather than a new list; the buttons never
+// read it, because they carry their own.
+let editingId = null;
+// Monotonic: a reply whose sequence is not the newest is dropped on arrival.
+let readSeq = 0;
 
 const el = (tag, cls, content) => {
   const n = document.createElement(tag);
@@ -123,20 +142,33 @@ async function post(path, body) {
   return data;
 }
 
-document.getElementById('read').addEventListener('click', async () => {
+read.addEventListener('click', async () => {
+  const seq = ++readSeq;
   clear();
-  previewId = null;
+  read.disabled = true;
   try {
-    const data = await post('/app/tasks/preview', { text: text.value });
+    const body = { text: text.value };
+    // A correction of the list already on screen, so the server re-parses into
+    // the SAME preview instead of leaving the old draft behind.
+    if (editingId) body.previewId = editingId;
+    const data = await post('/app/tasks/preview', body);
+    if (seq !== readSeq) return; // superseded by a later tap; this reply is stale
     if (data.problems) {
       say('err', 'Nothing was saved. I will not guess at these:');
       const list = el('ul');
       for (const p of data.problems) list.appendChild(el('li', null, 'Line ' + p.lineNo + ' ' + p.message));
       out.appendChild(list);
+      // The text in the box is still the owner's to fix, and the preview it
+      // came from (if any) is untouched: a correction that did not parse
+      // changed nothing on the server either.
       return;
     }
     if (!data.items || data.items.length === 0) { say('note', 'I found no tasks in that.'); return; }
-    previewId = data.previewId;
+    // Captured HERE, so every control built below acts on this exact list
+    // whatever happens afterwards.
+    const id = data.previewId;
+    const editable = data.editable || text.value;
+    editingId = id;
     say('note', 'Nothing is saved yet.');
     const list = el('ol');
     for (const item of data.items) {
@@ -146,12 +178,14 @@ document.getElementById('read').addEventListener('click', async () => {
     }
     out.appendChild(list);
     const save = el('button', 'primary', 'Save ' + data.items.length + ' task(s)');
+    const edit = el('button', null, 'Edit');
     const discard = el('button', null, 'Discard');
     save.addEventListener('click', async () => {
       save.disabled = true;
+      edit.disabled = true;
       discard.disabled = true;
       try {
-        const saved = await post('/app/tasks/save', { previewId });
+        const saved = await post('/app/tasks/save', { previewId: id });
         clear();
         say('ok', (saved.replayed ? 'Already saved — the same ' : 'Saved ') + saved.tasks.length + ' task(s).');
         const done = el('ol');
@@ -162,23 +196,40 @@ document.getElementById('read').addEventListener('click', async () => {
         }
         out.appendChild(done);
         text.value = '';
-        previewId = null;
+        editingId = null;
       } catch (err) {
         save.disabled = false;
+        edit.disabled = false;
         discard.disabled = false;
         say('err', err.message);
       }
     });
+    /**
+     * Edit puts the list BACK in the box, in the form the parser reads, and
+     * says plainly that nothing has been saved. The next read corrects this
+     * same preview rather than starting another one.
+     */
+    edit.addEventListener('click', () => {
+      text.value = editable;
+      editingId = id;
+      clear();
+      say('note', 'Edit the list, then read it back again. Nothing was saved.');
+      text.focus();
+    });
     discard.addEventListener('click', async () => {
-      try { await post('/app/tasks/discard', { previewId }); } catch (err) { /* already gone */ }
+      try { await post('/app/tasks/discard', { previewId: id }); } catch (err) { /* already gone */ }
       clear();
       say('note', 'Discarded. Nothing was saved.');
-      previewId = null;
+      text.value = '';
+      editingId = null;
     });
     out.appendChild(save);
+    out.appendChild(edit);
     out.appendChild(discard);
   } catch (err) {
-    say('err', err.message);
+    if (seq === readSeq) say('err', err.message);
+  } finally {
+    if (seq === readSeq) read.disabled = false;
   }
 });
 

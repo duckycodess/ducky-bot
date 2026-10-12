@@ -145,19 +145,3 @@ export function bulkPreview(
     ephemeral: false,
   };
 }
-
-/** The list as plain text, for the Edit modal to pre-fill. */
-export const bulkPreviewText = (
-  items: readonly TaskPreviewItem[],
-  timeZone: string,
-  nowMs: number,
-): string =>
-  items
-    .map(
-      (item, i) =>
-        `${i + 1}. ${item.title}` +
-        (item.dueAt
-          ? ` (${formatDeadline(item.dueAt, { timeZone, allDay: item.dueAllDay, nowMs })})`
-          : ''),
-    )
-    .join('\n');

@@ -83,11 +83,15 @@ Enabled, on a tailnet (see `deploy/tailscale/README.md`), from the phone:
     start standalone rather than as a browser tab.
 16. **Paste a numbered list** and press *Read it back*. Check the deadlines it
     shows against what you typed. Nothing is saved at this point — the footer
-    says so.
-17. **Press Save once.** Then press it again if you can: the second press must
-    report *Already saved*, with the same tasks. In Discord, `/task list` shows
-    exactly that many new tasks and no duplicates.
-18. **Paste a list with an ambiguous date** such as `1. Thing (10/13)`. It must
+    says so. Three controls appear: *Save*, *Edit*, *Discard*.
+17. **Press Edit.** The list comes back into the box in the form Ducky reads
+    (`1. Title (October 13, 11:59 PM)`). Change one deadline, press *Read it
+    back* again, and check it shows the change. Still nothing saved.
+18. **Press Save once.** Then press it again if you can: the second press must
+    report *Already saved*, with the same tasks — and the saved deadline must
+    be the EDITED one. In Discord, `/task list` shows exactly that many new
+    tasks and no duplicates.
+19. **Paste a list with an ambiguous date** such as `1. Thing (10/13)`. It must
     refuse the whole list, name the line, and save nothing.
 
 What this does **not** prove: that the page is unreachable from outside the
@@ -154,7 +158,7 @@ happens without an explicit flag, and none is implied by any step above.
   real DM.
 - **Not that a reminder or briefing has reached a real DM.** That needs step 3
   of "External writes".
-- **Not that the phone page has ever been opened from a phone.** Steps 14–18
+- **Not that the phone page has ever been opened from a phone.** Steps 14–19
   are the manual flow, and they need a tailnet this host does not have. Until
   somebody walks them, the page is covered by tests only and
   `docs/CURRENT_STATE.md` says exactly that.

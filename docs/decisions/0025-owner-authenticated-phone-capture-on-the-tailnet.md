@@ -80,6 +80,27 @@ token covers what `SameSite` cannot: the browser sends a cookie automatically,
 but a cross-site page cannot read the page that holds the token and so cannot
 set the header.
 
+### The same three choices as Discord, and one draft
+
+Save, Edit and Discard. Edit is not a client-side convenience: it sends the
+corrected text back with the preview id, so the correction is **re-parsed into
+the same preview row** exactly as the Discord modal does. Two consequences,
+both deliberate:
+
+- a few rounds of correction leave ONE draft holding the owner's text, not a
+  trail of abandoned ones waiting out their TTL;
+- an edit cannot introduce a deadline the parser would never have produced,
+  because it goes through the identical parse.
+
+A preview that expired while the owner was editing falls back to a fresh one
+rather than refusing: nothing was saved either way, the text in the box is what
+they just typed, and "your draft expired" is a dead end on a phone.
+
+Every rendered preview's buttons close over the id they were built with, and a
+late reply from a superseded read is dropped — a phone is a device people
+double-tap on a bad connection, and a shared mutable id read at click time is
+how Save ends up acting on a different list from the one on screen.
+
 ### It is a transport, not a second assistant
 
 Every route calls the same `TaskCaptureService` the Discord path calls. There

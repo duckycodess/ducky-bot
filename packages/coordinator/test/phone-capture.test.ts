@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../src/http/server.js';
 import { phonePasscodeVerifier, PHONE_SESSION_COOKIE } from '../src/http/phone-auth.js';
 import { createApp } from '../src/app.js';
+import { TASK_PREVIEW_TTL_MS } from '@ducky/contracts';
 import { OWNER, TestClock, makeHarness, secret } from './helpers.js';
 
 const MANILA = 'Asia/Manila';
@@ -289,6 +290,144 @@ describe('capturing from the phone', () => {
     // A date-only deadline two days out earns exactly one: 08:00 that morning.
     expect(rows).toHaveLength(1);
     expect(rows[0]?.firstFireAt).toBe('2026-10-15T00:00:00.000Z');
+    h.close();
+  });
+
+  it('offers Save, Edit and Discard — three controls, not two', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const page = await app.inject({ method: 'GET', url: '/app', headers: { cookie: auth.cookie } });
+
+    // The Edit control must EXIST and be wired, not merely be a word on the
+    // page: the issue asks for the same three choices the Discord preview has.
+    expect(page.body).toContain("const edit = el('button', null, 'Edit');");
+    expect(page.body).toContain('edit.addEventListener');
+    expect(page.body).toContain('out.appendChild(edit)');
+    h.close();
+  });
+
+  it('hands back an editable rendering that parses to the same list', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const first = (await post(app, '/app/tasks/preview', { text: PASTE }, auth)).json() as {
+      previewId: string; editable: string; items: { title: string; deadline: string }[];
+    };
+    expect(first.editable).toBe(
+      '1. ENG 30 Letters (October 13, 11:59 PM)\n2. Speech 30 Letters (October 15)',
+    );
+
+    // Exactly what Edit puts back in the box, read straight back: same items,
+    // same deadlines, and the SAME preview rather than a second one.
+    const again = (await post(
+      app, '/app/tasks/preview', { text: first.editable, previewId: first.previewId }, auth,
+    )).json() as { previewId: string; items: { title: string; deadline: string }[] };
+    expect(again.previewId).toBe(first.previewId);
+    expect(again.items).toEqual(first.items);
+    expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(0);
+    h.close();
+  });
+
+  it('corrects in place: one preview row, and the saved task is the corrected one', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const first = (await post(app, '/app/tasks/preview', { text: PASTE }, auth)).json() as {
+      previewId: string;
+    };
+    const corrected = (await post(
+      app,
+      '/app/tasks/preview',
+      { text: '1. ENG 30 Letters (October 14 11:59 PM)', previewId: first.previewId },
+      auth,
+    )).json() as { previewId: string; items: { deadline: string }[] };
+
+    expect(corrected.previewId).toBe(first.previewId);
+    expect(corrected.items).toHaveLength(1);
+    expect(corrected.items[0]?.deadline).toBe('October 14, 11:59 PM');
+    // Editing does not litter: still ONE preview row, not a trail of drafts
+    // each holding a copy of what the owner wrote.
+    expect(h.store.db.prepare('SELECT COUNT(*) AS n FROM task_previews').get()).toEqual({ n: 1 });
+
+    await post(app, '/app/tasks/save', { previewId: first.previewId }, auth);
+    const tasks = h.app.tasks.list(h.owner, 'all');
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.dueAt).toBe('2026-10-14T15:59:00.000Z');
+    h.close();
+  });
+
+  it('refuses a correction that does not parse, and changes nothing', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const first = (await post(app, '/app/tasks/preview', { text: PASTE }, auth)).json() as {
+      previewId: string;
+    };
+    const refused = (await post(
+      app, '/app/tasks/preview', { text: '1. Thing (10/13)', previewId: first.previewId }, auth,
+    )).json() as { problems?: { lineNo: number }[] };
+    expect(refused.problems?.map((p) => p.lineNo)).toEqual([1]);
+
+    // The preview it was correcting is untouched, so the owner can fix the
+    // line and read it back again.
+    const pending = h.app.taskCapture.pendingPreview(h.owner, first.previewId);
+    expect(pending?.items).toHaveLength(2);
+    h.close();
+  });
+
+  it('starts a fresh preview rather than failing when the one being edited expired', async () => {
+    const { h, app, clock } = await boot();
+    const auth = await signIn(app);
+    const first = (await post(app, '/app/tasks/preview', { text: PASTE }, auth)).json() as {
+      previewId: string; editable: string;
+    };
+
+    clock.advance(TASK_PREVIEW_TTL_MS + 1000);
+    const after = await post(
+      app, '/app/tasks/preview', { text: first.editable, previewId: first.previewId }, auth,
+    );
+    expect(after.statusCode).toBe(200);
+    const body = after.json() as { previewId: string; items: unknown[] };
+    expect(body.previewId).not.toBe(first.previewId);
+    expect(body.items).toHaveLength(2);
+
+    // And saving the NEW one is what writes the tasks; the expired id does not.
+    const stale = await post(app, '/app/tasks/save', { previewId: first.previewId }, auth);
+    expect(stale.statusCode).toBe(400);
+    await post(app, '/app/tasks/save', { previewId: body.previewId }, auth);
+    expect(h.app.tasks.list(h.owner, 'all')).toHaveLength(2);
+    h.close();
+  });
+
+  it('keeps two previews independent, so a stale id cannot save the wrong list', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const a = (await post(app, '/app/tasks/preview', { text: '1. First one (October 20)\n2. Second (October 21)' }, auth)).json() as {
+      previewId: string;
+    };
+    const b = (await post(app, '/app/tasks/preview', { text: '1. Different (October 22)\n2. Also different (October 23)' }, auth)).json() as {
+      previewId: string;
+    };
+    expect(b.previewId).not.toBe(a.previewId);
+
+    // Saving the OLDER id saves the older list, whatever happened since: the
+    // server keys everything off the id the client sends, and the page binds
+    // each button to the id it was rendered with.
+    const saved = (await post(app, '/app/tasks/save', { previewId: a.previewId }, auth)).json() as {
+      tasks: { title: string }[];
+    };
+    expect(saved.tasks.map((t) => t.title)).toEqual(['First one', 'Second']);
+
+    // Discarding the older one afterwards leaves the newer one usable.
+    await post(app, '/app/tasks/discard', { previewId: b.previewId }, auth);
+    expect(h.app.tasks.list(h.owner, 'all').map((t) => t.title).sort())
+      .toEqual(['First one', 'Second']);
+    h.close();
+  });
+
+  it('refuses a malformed preview id rather than treating it as a new paste', async () => {
+    const { h, app } = await boot();
+    const auth = await signIn(app);
+    const res = await post(app, '/app/tasks/preview', { text: PASTE, previewId: 'x'.repeat(200) }, auth);
+    expect(res.statusCode).toBe(400);
+    expect(h.store.db.prepare('SELECT COUNT(*) AS n FROM task_previews').get()).toEqual({ n: 0 });
     h.close();
   });
 

@@ -23,11 +23,11 @@ import type { IntentsService } from '../domain/intents.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { TaskCaptureService, TaskCaptureOutcome } from '../domain/task-capture.service.js';
-import { clarificationMessage } from '../domain/task-capture.service.js';
+import { clarificationMessage, editableListText } from '../domain/task-capture.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { conversationReply } from './assistant-presenters.js';
-import { bulkPreview, bulkPreviewText, deadlineLine, taskCard, taskCardRow } from './task-cards.js';
+import { bulkPreview, deadlineLine, taskCard, taskCardRow } from './task-cards.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import { ChannelRolePolicy } from '../domain/channel-roles.js';
 import { ReplyPersistencePolicy } from '../domain/reply-persistence.js';
@@ -1395,7 +1395,7 @@ export class DuckyRouter {
         return {
           content:
             'Edit the list and send it again, one numbered item per line:\n```\n' +
-            bulkPreviewText(pending.items, capture.timeZone, d.tasks.nowMs()) +
+            editableListText(pending.items, capture.timeZone, d.tasks.nowMs()) +
             '\n```',
           ephemeral: true,
         };

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  BULK_CAPTURE_MAX_INPUT, BULK_CAPTURE_MAX_ITEMS, BULK_PROBLEM_MESSAGE,
+  BULK_CAPTURE_MAX_INPUT, BULK_CAPTURE_MAX_ITEMS, BULK_PROBLEM_MESSAGE, formatDeadline,
   DuckyError, MAX_OPEN_TASKS_PER_OWNER, MAX_PENDING_TASK_PREVIEWS_PER_OWNER,
   MAX_SCHEDULED_REMINDERS_PER_OWNER, REMINDER_MAX_HORIZON_MS,
   TASK_PREVIEW_TTL_MS, TaskAddInputSchema,
@@ -357,6 +357,31 @@ const toItem = (draft: {
   dueAllDay: draft.deadline?.allDay ?? false,
   priority: 'normal',
 });
+
+/**
+ * The preview as text the owner can edit, in the form the parser reads back.
+ *
+ * It lives HERE, beside the parser's caller, rather than with the presenters,
+ * because its one hard requirement is a PARSING one: what this emits must
+ * parse to exactly the items it was given. Both Edit paths -- the Discord
+ * modal and the phone textarea -- pre-fill from this, so a correction is a
+ * re-parse of a familiar shape rather than a free-form edit that could
+ * introduce a deadline the parser would never have produced.
+ */
+export const editableListText = (
+  items: readonly TaskPreviewItem[],
+  timeZone: string,
+  nowMs: number,
+): string =>
+  items
+    .map(
+      (item, i) =>
+        `${i + 1}. ${item.title}` +
+        (item.dueAt
+          ? ` (${formatDeadline(item.dueAt, { timeZone, allDay: item.dueAllDay, nowMs })})`
+          : ''),
+    )
+    .join('\n');
 
 /** The clarification a refused paste answers with. Lists lines, never guesses. */
 export function clarificationMessage(problems: readonly BulkProblem[]): string {

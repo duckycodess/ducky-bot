@@ -179,7 +179,11 @@ exercised; this says what it does.
 - **The phone capture page, off by default.** `/app` on the coordinator's
   existing listener, behind the owner's own passcode, reachable only when the
   listener is bound to loopback, RFC1918 or a tailnet range. It refuses to
-  start otherwise. It is a transport in front of the same service Discord uses.
+  start otherwise. It is a transport in front of the same service Discord
+  uses, and it offers the same three choices: Save, Edit and Discard. Edit puts
+  the list back in the box in the form the parser reads and corrects the SAME
+  preview, so a few rounds of correction leave one draft rather than a trail of
+  them.
   See
   [decisions/0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md).
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`

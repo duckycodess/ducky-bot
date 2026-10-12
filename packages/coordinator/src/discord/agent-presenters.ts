@@ -1,5 +1,5 @@
 import {
-  AGENT_CARD_LABEL, AGENT_CARD_NEXT, AGENT_CARD_CHANGED_FILES_MAX, DUCKY_COLORS,
+  AGENT_CARD_INTENT_LINES_MAX, AGENT_CARD_LABEL, AGENT_CARD_NEXT, DUCKY_COLORS,
   type AgentCardStatus,
 } from '@ducky/contracts';
 import type { AgentThreadRow } from '@ducky/persistence';
@@ -131,7 +131,7 @@ export function agentDetails(row: AgentThreadRow): OutboundMessage {
     fields.push({
       name: `Settled intent (${row.intentNotes.length} line(s) you typed)`,
       value: row.intentNotes
-        .slice(-AGENT_CARD_CHANGED_FILES_MAX)
+        .slice(-AGENT_CARD_INTENT_LINES_MAX)
         .map((n) => `- ${n}`)
         .join('\n'),
     });

@@ -213,12 +213,22 @@ export class AgentThreadsRepo {
     return this.get(ownerId, threadKey)!;
   }
 
+  /**
+   * Moves the named run forward.
+   *
+   * An OMITTED field means unchanged, including `detail`: a status change that
+   * has nothing new to say keeps what the last one said, which is why a card
+   * that moves from scanning to publishing still shows what the scan found.
+   * There is deliberately no way to blank a detail -- nothing needs one, and a
+   * second meaning for `null` would be a trap.
+   */
   updateRun(
     ownerId: string,
     threadKey: string,
     runId: string,
     patch: {
       status: AgentCardStatus;
+      /** Omitted or null: unchanged. */
       detail?: string | null;
       queued?: boolean;
       finished?: boolean;

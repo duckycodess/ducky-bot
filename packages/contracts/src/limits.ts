@@ -332,8 +332,9 @@ export const FRONTDOOR_PUBLISH_TIMEOUT_MS = 180_000;
 export const FRONTDOOR_MAX_OUTPUT_BYTES = 512 * 1024;
 /** How long a thread's grill stays active without a message. */
 export const GRILL_SESSION_TTL_MS = 12 * 60 * 60_000;
-/** Bounds on what a card ever shows about a completed implementation. */
-export const AGENT_CARD_CHANGED_FILES_MAX = 10;
+/** How many of the owner's own settled-intent lines a Details view shows. */
+export const AGENT_CARD_INTENT_LINES_MAX = 10;
+/** Every free-text card field is clamped to this, after it is derived. */
 export const AGENT_CARD_DETAIL_MAX = 1_200;
 
 // ---- audit log --------------------------------------------------------------

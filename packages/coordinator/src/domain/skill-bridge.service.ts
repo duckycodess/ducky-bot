@@ -372,9 +372,11 @@ export class SkillBridgeService {
     const problem = preflightTicketSpec(spec);
     if (problem) return this.failRun(actor, event, run, new DuckyError('invalid_input', problem));
 
+    // No new detail: what the scan found still reads true, and `updateRun`
+    // treats an omitted detail as unchanged.
     const publishing = this.deps.store.agentThreads.updateRun(
       actor.discordUserId, event.threadKey, run.runId,
-      { status: 'publishing', detail: null },
+      { status: 'publishing' },
       this.now(),
     ) ?? run;
     await this.showCard(actor, event, publishing);

@@ -4,7 +4,7 @@ import { NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION } from '@ducky/adapters';
 import type {
   ConversationInput, ConversationProvider, ConversationReply,
 } from '@ducky/adapters';
-import { CHAT, OWNER, makeHarness, type Harness } from './helpers.js';
+import { CHAT, OWNER, STRANGER, makeHarness, type Harness } from './helpers.js';
 import type { Incoming } from '../src/discord/transport.js';
 
 /**
@@ -309,6 +309,115 @@ describe('retention is lifecycle-aware, not age-only', () => {
 
     expect(result.counts.conversationThreadsDeleted).toBe(0);
     expect(h.store.conversationThreads.byThreadId(threadId)).toBeDefined();
+    h.close();
+  });
+
+  /**
+   * The sequence that nearly deleted a live conversation.
+   *
+   * `ThreadDelete` is not a certain signal: Discord sends it to a client that
+   * has merely LOST ACCESS to a thread, which a permission change on the
+   * parent is enough to cause. The mapping closed, nothing ever contradicted
+   * it, and a conversation that was still being had sat on the purge clock.
+   */
+  it('reopens a falsely closed thread when the conversation resumes', async () => {
+    const { h } = harness();
+    await start(h);
+    const threadId = await openThread(h);
+
+    // A permission flap, indistinguishable from a deletion at the event.
+    h.transport.markThreadGone(threadId);
+    expect(h.store.conversationThreads.byThreadId(threadId)!.closedAt).not.toBeNull();
+
+    // Access returns and the conversation carries on. The message is better
+    // evidence than the event that closed the mapping.
+    await h.transport.dispatch(
+      inThread(threadId, { text: 'still here', messageId: '970000000000007001' }),
+    );
+
+    expect(h.store.conversationThreads.byThreadId(threadId)!.closedAt).toBeNull();
+    h.close();
+  });
+
+  it('keeps the full transcript and the mapping across the purge window', async () => {
+    const { h } = harness();
+    await start(h);
+    const threadId = await openThread(h);
+    await h.transport.dispatch(
+      inThread(threadId, { text: 'an early turn', messageId: '970000000000007002' }),
+    );
+
+    h.transport.markThreadGone(threadId);
+    await h.transport.dispatch(
+      inThread(threadId, { text: 'and it resumes', messageId: '970000000000007003' }),
+    );
+
+    // Age everything well past BOTH the 14-day purge window and the ordinary
+    // 7/30-day turn windows, then run retention.
+    h.store.db
+      .prepare('UPDATE conversation_turns SET created_at = ? WHERE thread_key = ?')
+      .run(new Date(Date.now() - 400 * 86_400_000).toISOString(), threadId);
+
+    const result = await retention(h).run('manual');
+
+    expect(result.counts.conversationThreadsDeleted).toBe(0);
+    expect(result.counts.conversationTurnsDeleted).toBe(0);
+    expect(result.counts.conversationThreadsSkipped).toBe(1);
+    expect(h.store.conversationThreads.byThreadId(threadId)).toBeDefined();
+    expect(h.store.conversations.countForThread(OWNER, threadId)).toBe(6);
+    h.close();
+  });
+
+  it('does not let an unauthorized poster keep somebody else’s transcript alive', async () => {
+    /**
+     * Without the authorization check, a stranger posting in a public thread
+     * could hold the owner's words off the retention clock indefinitely --
+     * turning a conversation feature into a way for a third party to extend
+     * how long somebody else's data is stored. A thread where only
+     * unauthorized people talk also gets no replies, so nothing about it is
+     * live.
+     */
+    const { h } = harness();
+    await start(h);
+    const threadId = await openThread(h);
+    h.transport.markThreadGone(threadId);
+
+    await h.transport.dispatch(
+      inThread(threadId, {
+        userId: STRANGER,
+        text: 'posting in a public thread',
+        messageId: '970000000000007004',
+      }),
+    );
+
+    expect(h.store.conversationThreads.byThreadId(threadId)!.closedAt).not.toBeNull();
+    h.close();
+  });
+
+  it('never ages a native thread’s turns out through the ordinary windows', async () => {
+    /**
+     * A native thread is governed by its own lifecycle, open or closed. Scoping
+     * the exclusion to OPEN threads made the windows incoherent -- a closed
+     * thread would shed a guest's turns at 7 days and the owner's at 30 while
+     * the whole thread was due for purge at 14 -- and it meant a falsely
+     * closed thread lost history piecemeal before anybody could notice.
+     */
+    const { h } = harness();
+    await start(h);
+    const threadId = await openThread(h);
+    h.transport.markThreadGone(threadId);
+
+    h.store.db
+      .prepare('UPDATE conversation_turns SET created_at = ? WHERE thread_key = ?')
+      .run(new Date(Date.now() - 400 * 86_400_000).toISOString(), threadId);
+
+    // Closed, but still INSIDE its own purge window: the age windows must not
+    // reach it, so nothing is deleted at all.
+    const result = await retention(h).run('manual');
+
+    expect(result.counts.conversationTurnsDeleted).toBe(0);
+    expect(result.counts.conversationThreadsDeleted).toBe(0);
+    expect(h.store.conversations.countForThread(OWNER, threadId)).toBe(2);
     h.close();
   });
 

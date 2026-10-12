@@ -131,6 +131,34 @@ export class ConversationThreadsRepo {
   }
 
   /**
+   * Un-marks a thread as gone, because a message just arrived in it.
+   *
+   * The counterpart to `close`, and it exists because `close`'s signal is not
+   * certain: Discord sends `ThreadDelete` to a client that has merely LOST
+   * ACCESS to a thread, which a permission change is enough to cause. A live
+   * conversation could therefore be marked closed, and a closed mapping is
+   * what takes a thread out of "keep everything while it lives" and puts it on
+   * the purge clock.
+   *
+   * A message arriving in the thread is PROOF that the thread exists and that
+   * the bot can see it -- better evidence than the event that closed it. So
+   * the mapping reopens, and `closed_at` goes back to NULL rather than being
+   * left as a stale fact nothing ever contradicts.
+   *
+   * Idempotent and cheap: the WHERE clause matches only a thread that is
+   * actually closed, so the common case (an open thread, every message) does
+   * no write at all.
+   */
+  reopen(threadId: string): boolean {
+    const r = this.db
+      .prepare(
+        'UPDATE conversation_threads SET closed_at = NULL WHERE thread_id = ? AND closed_at IS NOT NULL',
+      )
+      .run(threadId);
+    return Number(r.changes ?? 0) > 0;
+  }
+
+  /**
    * Closed threads old enough to remove, oldest first.
    *
    * Only ever returns a thread with a `closed_at`, so a live conversation

@@ -493,7 +493,12 @@ SHARED thread is rotated without a row of theirs being deleted; the audit carrie
 the deletion and rotation counts and no content; a checkpoint goes with the turns
 it summarized; retention keeps a LIVE thread however old, ages an ordinary
 channel out normally, removes a CLOSED thread whole once past its own window, and
-refuses to purge a live thread even when asked directly.
+refuses to purge a live thread even when asked directly. It also reopens a
+falsely closed mapping when an authorized message resumes the conversation and
+does NOT reopen for an unauthorized poster, keeps the full transcript and the
+mapping across the purge window after such a resumption, and never ages a native
+thread's turns out through the ordinary 7/30-day windows whether the thread is
+open or closed.
 
 **coordinator / conversation presentation** — the style contract asks for short
 plain paragraphs and forbids headings, em dashes, middle dots, heavy bold and
@@ -508,7 +513,9 @@ against the shapes discord.js really produces rather than invented ones. A
 reply anchor comes from the channel's message cache with no API call, falls back
 to `fetchReference` when it has aged out, returns the reference without text
 when that fails, is never fetched across channels, and treats a forward as not a
-reply. Only the transport may say a referenced message was Ducky's own, by
+reply. The fetch -- and only the fetch, never the free cache read -- is gated on
+the sender being somebody Ducky would answer, so an unauthorized cache miss
+costs no REST call, and a transport given no predicate fetches for nobody. Only the transport may say a referenced message was Ducky's own, by
 comparing the author against the bot's client id; an unreadable client id yields
 undefined rather than a guess. `Events.ThreadDelete` is registered and routed to
 the thread-gone hook while `ThreadUpdate` deliberately is not, and the requested

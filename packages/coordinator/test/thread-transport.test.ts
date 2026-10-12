@@ -70,6 +70,7 @@ describe('a reply anchor is read the way discord.js actually exposes one', () =>
           return undefined;
         },
       }),
+      { mayFetch: true },
     );
 
     expect(ref?.text).toBe('the earlier question');
@@ -88,10 +89,65 @@ describe('a reply anchor is read the way discord.js actually exposes one', () =>
           author: { id: OWNER },
         }),
       }),
+      { mayFetch: true },
     );
 
     expect(ref?.text).toBe('something said last week');
     expect(ref?.authorId).toBe(OWNER);
+  });
+
+  /**
+   * The REST call is the expensive half, so it is gated on the sender being
+   * somebody Ducky would answer. The router refuses an unauthorized sender a
+   * moment later -- but the call would already have happened by then, spending
+   * the bot's shared rate budget on a stranger replying to old messages.
+   */
+  it('does NOT fetch on a cache miss when the sender may not converse', async () => {
+    let fetched = 0;
+    const ref = await resolveReference(
+      messageLike({
+        cached: {},
+        fetchReference: async () => {
+          fetched += 1;
+          return { content: 'an older message', author: { id: OWNER } };
+        },
+      }),
+      { mayFetch: false },
+    );
+
+    expect(fetched).toBe(0);
+    // The reference still exists, carrying ids and no text, so the router says
+    // the message was unreadable rather than that there was no reply.
+    expect(ref?.messageId).toBe(ANCHOR);
+    expect(ref?.text).toBeUndefined();
+  });
+
+  it('still reads the FREE half of the cache for anybody', async () => {
+    // A cache hit costs nothing, so gating it would lose the feature for no
+    // saving. Only the call that leaves the process is gated.
+    const ref = await resolveReference(
+      messageLike({
+        cached: { [ANCHOR]: { content: 'already in the cache', author: { id: OWNER } } },
+      }),
+      { mayFetch: false },
+    );
+    expect(ref?.text).toBe('already in the cache');
+  });
+
+  it('fetches for nobody when the transport was given no predicate', async () => {
+    // Fail closed: an unwired transport loses the uncached half rather than
+    // making API calls on behalf of strangers.
+    let fetched = 0;
+    await resolveReference(
+      messageLike({
+        cached: {},
+        fetchReference: async () => {
+          fetched += 1;
+          return undefined;
+        },
+      }),
+    );
+    expect(fetched).toBe(0);
   });
 
   it('returns the reference WITHOUT text when the fetch fails', async () => {
@@ -104,6 +160,7 @@ describe('a reply anchor is read the way discord.js actually exposes one', () =>
           throw new Error('Unknown Message');
         },
       }),
+      { mayFetch: true },
     );
 
     expect(ref?.messageId).toBe(ANCHOR);
@@ -128,6 +185,7 @@ describe('a reply anchor is read the way discord.js actually exposes one', () =>
           return { content: 'a secret from another channel', author: { id: OWNER } };
         },
       }),
+      { mayFetch: true },
     );
 
     expect(fetched).toBe(0);
@@ -227,6 +285,12 @@ describe('every message reply leaves through the sanitizer', () => {
    * bypassed"), and a guarantee that holds because today's strings happen to
    * be safe is not that guarantee.
    */
+  it('gates the anchor fetch on the injected authorization predicate', () => {
+    // The transport holds no authorization rule of its own: it asks and obeys,
+    // the same way it does for reply persistence.
+    expect(TRANSPORT_SRC).toMatch(/mayFetch: this\.mayConverse\?\.\(message\.author\.id\) \?\? false/);
+  });
+
   it('calls message.reply from exactly one place', () => {
     const calls = [...TRANSPORT_SRC.matchAll(/\bmessage\s*\n?\s*\.reply\(/g)];
     expect(calls).toHaveLength(1);

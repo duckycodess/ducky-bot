@@ -225,6 +225,14 @@ export interface ConversationThreadServiceDeps {
   readonly store: Store;
   readonly policy: ConversationThreadPolicy;
   /**
+   * The frozen authorizer, consulted for ONE question: may this person
+   * converse at all?
+   *
+   * Used to decide whether an incoming message counts as evidence that a
+   * thread is still live. It grants nothing and decides nothing else here.
+   */
+  readonly authz: Authorizer;
+  /**
    * OMITTING IT DISABLES THREAD CREATION ENTIRELY, which is the same
    * fail-closed posture every other optional wiring here takes: an unwired
    * instance opens no thread and routes exactly as it did before.
@@ -279,6 +287,7 @@ export class ConversationThreadService {
     // same conversation from here on, and the mapping row is only needed for
     // the ones Ducky is responsible for.
     if (this.deps.policy.isChildOfParent(event)) {
+      this.resumeIfClosed(event.threadKey, event.userId);
       return { kind: 'thread', threadId: event.threadKey, created: false };
     }
 
@@ -291,7 +300,10 @@ export class ConversationThreadService {
     // A mapping that already exists wins without calling Discord at all: the
     // starter message id is unique, so a retry is free.
     const existing = threads.byStarterMessage(messageId);
-    if (existing) return { kind: 'thread', threadId: existing.threadId, created: false };
+    if (existing) {
+      this.resumeIfClosed(existing.threadId, event.userId);
+      return { kind: 'thread', threadId: existing.threadId, created: false };
+    }
 
     /**
      * Charged HERE: after the mapping check, before Discord.
@@ -344,6 +356,40 @@ export class ConversationThreadService {
     });
 
     return { kind: 'thread', threadId, created: outcome.ok };
+  }
+
+  /**
+   * A message just arrived in a thread Ducky had marked GONE, so it is not.
+   *
+   * `close` fires on `ThreadDelete`, and that event is not a certain signal:
+   * Discord sends it to a client that has merely LOST ACCESS to a thread,
+   * which a permission change on the parent is enough to cause. A live
+   * conversation could therefore be marked closed, and a closed mapping is the
+   * only thing standing between a thread and the purge clock.
+   *
+   * An incoming message is BETTER EVIDENCE than the event that closed it: it
+   * proves both that the thread exists and that the bot can see it. So the
+   * mapping reopens, and it reopens HERE -- inside `enter`, before anything is
+   * replayed or appended and before the router has seen the message -- so no
+   * turn is ever written against a mapping that still claims to be closed.
+   *
+   * **Authorization is required**, and not as ceremony. Without it, a stranger
+   * posting in a public thread could keep somebody else's transcript off the
+   * retention clock indefinitely, which would turn a conversation feature into
+   * a way for a third party to extend how long the owner's words are stored. A
+   * thread where only unauthorized people talk also gets no replies, so there
+   * is nothing live about it to preserve.
+   *
+   * The common case -- an open mapping, every message -- does no write: the
+   * UPDATE matches only a row that is actually closed.
+   */
+  private resumeIfClosed(threadId: string, userId: string): void {
+    if (this.deps.authz.roleOf(userId) === 'none') return;
+    try {
+      this.deps.store.conversationThreads.reopen(threadId);
+    } catch {
+      /* a mapping that could not be reopened must not fail the reply */
+    }
   }
 
   /** The recorded mapping for a thread, or undefined. */

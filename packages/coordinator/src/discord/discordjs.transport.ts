@@ -102,6 +102,19 @@ export class DiscordJsTransport implements DiscordTransport {
      * instance with no role channel configured gets.
      */
     private readonly persists?: (event: Incoming) => boolean,
+    /**
+     * Whether this person may converse at all, from the frozen `Authorizer`.
+     *
+     * Injected as a predicate for the same reason `persists` is: the transport
+     * holds no authorization rule of its own, it asks and obeys. It is used
+     * for ONE decision -- whether a reply anchor that missed the message cache
+     * may cost a REST call -- and it grants nothing.
+     *
+     * Absent means NO fetch for anybody, which is the fail-closed direction: a
+     * transport nobody wired loses the uncached half of the anchor feature
+     * rather than making API calls on behalf of strangers.
+     */
+    private readonly mayConverse?: (userId: string) => boolean,
   ) {}
 
   useConversationThreads(enter: ConversationThreadEntry, onGone?: (threadId: string) => void): void {
@@ -193,12 +206,15 @@ export class DiscordJsTransport implements DiscordTransport {
      * **This event is not a perfect signal.** Discord also sends it to a
      * client that has LOST ACCESS to a thread, which a permission change on
      * the parent is enough to cause, and nothing in the payload distinguishes
-     * that from a real deletion. A still-live thread would then be marked
-     * closed and its retention clock would start. Bounded rather than
-     * harmless: closing deletes nothing, the window is 14 days by default,
-     * retention ships disabled, and the conversation keeps working if access
-     * returns. See ADR 0025 for the sequence that is still not handled and the
-     * fix that was deliberately not written here.
+     * that from a real deletion.
+     *
+     * So closing is REVERSIBLE: the next message from an authorized sender
+     * reopens the mapping (`ConversationThreadService.resumeIfClosed`), before
+     * anything is replayed or appended, because a message is better evidence
+     * than this event. A native thread's turns are also outside the ordinary
+     * age windows entirely, so a falsely closed thread sheds nothing
+     * piecemeal. What remains is a thread falsely closed and then left silent
+     * for the whole purge window; ADR 0025 states that limit exactly.
      */
     client.on(Events.ThreadDelete, (thread) => {
       try {
@@ -255,7 +271,20 @@ export class DiscordJsTransport implements DiscordTransport {
    */
   private async handleMessageCreate(message: import('discord.js').Message): Promise<void> {
     const parentChannelId = parentChannelIdOf(message);
-    const reference = await resolveReference(message);
+    /**
+     * An unauthorized sender gets the free half of anchor resolution and not
+     * the expensive half.
+     *
+     * Reading the channel's message cache costs nothing and happens either
+     * way. A cache MISS would otherwise fall through to `fetchReference`, a
+     * REST call -- so a stranger replying to old messages in a public thread
+     * could make Ducky issue one API call per reply, spending the bot's shared
+     * rate budget on somebody who will be refused a moment later. The router
+     * refuses them after this point; the call has already happened by then.
+     */
+    const reference = await resolveReference(message, {
+      mayFetch: this.mayConverse?.(message.author.id) ?? false,
+    });
 
     const event: IncomingMessage = {
       kind: 'message',
@@ -729,6 +758,7 @@ const MESSAGE_REFERENCE_TYPE_FORWARD = 1;
  */
 export async function resolveReference(
   message: import('discord.js').Message,
+  opts: { readonly mayFetch: boolean } = { mayFetch: false },
 ): Promise<{
   messageId: string;
   channelId?: string;
@@ -754,16 +784,24 @@ export async function resolveReference(
     || ref.channelId === message.channelId;
   if (!sameChannel) return base;
 
-  const resolved = await referencedMessageOf(message, ref.messageId);
+  const resolved = await referencedMessageOf(message, ref.messageId, opts.mayFetch);
   if (!resolved) return base;
 
   return { ...base, ...describeReferenced(message, resolved) };
 }
 
-/** The cache first, then one bounded fetch. Never throws. */
+/**
+ * The cache first, then one bounded fetch -- and only when it is allowed.
+ *
+ * The cache read is free and unconditional. The FETCH is a REST call, so it is
+ * gated on the sender being somebody Ducky would answer; a cache miss for
+ * anybody else resolves to nothing, and the router reports the anchor
+ * unreadable. Never throws.
+ */
 async function referencedMessageOf(
   message: import('discord.js').Message,
   messageId: string,
+  mayFetch: boolean,
 ): Promise<{ content?: string; author?: { id?: string } } | undefined> {
   const cached = (
     message.channel as unknown as {
@@ -773,6 +811,7 @@ async function referencedMessageOf(
     | { content?: string; author?: { id?: string } }
     | undefined;
   if (cached) return cached;
+  if (!mayFetch) return undefined;
 
   try {
     const fetched = await (

@@ -261,15 +261,26 @@ export class ConversationsRepo {
             SELECT id FROM conversation_turns
              WHERE ((discord_user_id = ?  AND created_at < ?)
                 OR (discord_user_id <> ? AND created_at < ?))
-               -- A LIVE native thread keeps its full transcript, whatever the
-               -- age windows say. Issue #4 asks for exactly that, and the
-               -- bound moved to closedThreadDays: once Ducky has observed
-               -- that the thread is gone from Discord, the whole conversation
-               -- ages out together through purgeThread. A conversation you
-               -- can still scroll back to is one Ducky can still answer about.
-               AND thread_key NOT IN (
-                 SELECT thread_id FROM conversation_threads WHERE closed_at IS NULL
-               )
+               -- A NATIVE THREAD is governed by its own lifecycle, never by
+               -- these age windows. Issue #4 asks for the full transcript
+               -- while a thread lives, and closedThreadDays plus
+               -- purgeThread is what bounds one once it is gone.
+               --
+               -- The exclusion covers CLOSED threads too, and that is the
+               -- point rather than an oversight. Scoping it to open threads
+               -- made the windows incoherent: a closed thread would shed a
+               -- guest's turns at 7 days and the owner's at 30 while the
+               -- whole thread was due for purge at 14, so a conversation
+               -- would be deleted piecemeal in an order nobody chose. Worse,
+               -- closed_at is set from a signal that can be WRONG --
+               -- ThreadDelete also fires when the bot merely loses access --
+               -- so a live conversation could silently lose its history to a
+               -- window that was never meant to govern it.
+               --
+               -- One path removes a native thread's turns: purgeThread, which
+               -- refuses a thread that is not closed and takes the whole
+               -- conversation at once.
+               AND thread_key NOT IN (SELECT thread_id FROM conversation_threads)
              LIMIT ?
           )`,
       )

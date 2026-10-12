@@ -332,13 +332,19 @@ export function createApp(
   const replyPersistence = new ReplyPersistencePolicy(channelRoles, authz.ownerId);
   const transport =
     overrides.transport ??
-    transportForProfile(discordProfile, (event) =>
-      replyPersistence.persists({
-        userId: event.userId,
-        kind: event.kind,
-        context: event.kind === 'component' ? undefined : event.context,
-        ...(event.kind === 'command' ? { commandName: event.name } : {}),
-      }),
+    transportForProfile(
+      discordProfile,
+      (event) =>
+        replyPersistence.persists({
+          userId: event.userId,
+          kind: event.kind,
+          context: event.kind === 'component' ? undefined : event.context,
+          ...(event.kind === 'command' ? { commandName: event.name } : {}),
+        }),
+      // One question only: may this person converse? It decides whether a
+      // reply anchor that missed the message cache may cost a REST call, and
+      // it grants nothing.
+      (userId) => authz.roleOf(userId) !== 'none',
     );
 
   /**
@@ -361,6 +367,7 @@ export function createApp(
       authz,
       sharedPolicy,
     ),
+    authz,
     startThread: transport.startThread ? (req) => transport.startThread!(req) : undefined,
     // The SAME buckets instance every other surface uses, so a thread opened
     // here counts against one budget rather than a second private one.
@@ -550,9 +557,12 @@ function credentialStoreFor(
 function transportForProfile(
   config: DiscordProfileConfig,
   persists?: (event: Incoming) => boolean,
+  mayConverse?: (userId: string) => boolean,
 ): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
-  return new DiscordJsTransport(config.token, channelAwareSink, undefined, persists);
+  return new DiscordJsTransport(
+    config.token, channelAwareSink, undefined, persists, mayConverse,
+  );
 }
 
 /**

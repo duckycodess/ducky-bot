@@ -294,17 +294,42 @@ guess about whether it still exists.
 
 **`ThreadDelete` can also mean "no longer visible to this bot".** Discord sends
 the event to a client that has *lost access* to a thread, not only for one that
-was really deleted — a permission change on the parent channel is enough. Ducky
-cannot tell the two apart from the event, so a thread that still exists would be
-marked closed and its retention clock would start.
+was really deleted. Ducky cannot tell the two apart from the event, so a thread
+that still exists can be marked closed.
 
-The blast radius is bounded and the mitigations are real: closing deletes
-nothing, the window is `DUCKY_RETENTION_CLOSED_THREAD_DAYS` (14 days by
-default), retention ships disabled, and the conversation keeps working if access
-returns — `enter` routes a message in a known thread whether or not its mapping
-is closed. What is NOT handled is the full sequence: access lost, access
-restored, nobody writes in the thread for the whole window, and retention is
-on. The obvious fix is to reopen a mapping when a message arrives in it, since
-a message is proof the thread exists; it is deliberately **not** implemented
-here rather than added speculatively on the way past a review, and this
-paragraph is the record that it is the next thing to do if this ever bites.
+That was left as a documented risk once, and it was the wrong call: a closed
+mapping is the only thing between a thread and the purge clock, so a permission
+flap could silently delete a conversation that was still being had. Two changes
+fix it, and the risk statement now describes what the code does rather than
+what a reader might hope:
+
+1. **An incoming message reopens the mapping.** A message in the thread proves
+   both that it exists and that the bot can see it, which is better evidence
+   than the event that closed it. `closed_at` goes back to NULL inside `enter`,
+   **before anything is replayed or appended**, so no turn is ever written
+   against a mapping that still claims to be closed. The common case does no
+   write at all: the UPDATE matches only a row that is actually closed.
+
+   Reopening requires the sender to be **conversationally authorized**. Without
+   that, a stranger posting in a public thread could hold the owner's words off
+   the retention clock indefinitely, which would turn a conversation feature
+   into a way for a third party to extend how long somebody else's data is
+   stored. A thread where only unauthorized people talk also receives no
+   replies, so nothing about it is live.
+
+2. **A native thread's turns are never touched by the ordinary age windows**,
+   open or closed. Scoping that exclusion to open threads made the windows
+   incoherent -- a closed thread would shed a guest's turns at 7 days and the
+   owner's at 30 while the whole thread was due for purge at 14, so a
+   conversation would be deleted piecemeal in an order nobody chose -- and it
+   meant a falsely closed thread lost history before anything could contradict
+   the signal. One path removes a native thread's turns now: `purgeThread`,
+   which refuses a thread that is not closed and takes the conversation whole.
+
+**What remains, stated exactly.** A thread falsely closed, left completely
+untouched for the whole `DUCKY_RETENTION_CLOSED_THREAD_DAYS` window (14 days by
+default), on an instance with retention ENABLED, is still purged. Nothing
+reopens a mapping except a message, so silence for the whole window is
+indistinguishable from the thread being gone. Retention ships disabled, which
+is what makes this narrow rather than likely, and it is a real limit rather
+than one writing alone protects against.

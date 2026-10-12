@@ -549,16 +549,25 @@ shared state if it were ever scaled out.
   (`DUCKY_RETENTION_CLOSED_THREAD_DAYS`); and `/forget conversation` deletes
   every turn at any time. None of that makes the live thread small. See
   [decisions/0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md).
-- **A thread deleted during an outage, and never written to again, is never
-  observed as closed.** Ducky learns about a deletion from
-  `Events.ThreadDelete`, which rides the `Guilds` intent the client already
-  requests, so no new intent was needed and the common case is covered live. A
-  send that fails with `Unknown Channel` is the fallback and catches a thread
-  somebody writes to after the fact. Neither reaches a thread deleted while the
-  coordinator was down and then left alone: its retention clock never starts
-  and its transcript stays until `/forget conversation` removes it. Recorded
-  rather than solved, because the alternative is a sweep that deletes a
-  conversation on a guess about whether it still exists.
+- **Thread closure is inferred from a signal that can be wrong in both
+  directions.** Ducky learns about a deletion from `Events.ThreadDelete`, which
+  rides the `Guilds` intent the client already requests; a send failing with
+  `Unknown Channel` is the fallback.
+
+  *Missed closure:* a thread deleted while the coordinator was down and never
+  written to again is never observed, so its retention clock never starts and
+  its transcript stays until `/forget conversation` removes it.
+
+  *False closure:* Discord sends `ThreadDelete` to a client that has merely
+  **lost access**, which a permission change is enough to cause. An incoming
+  message from an authorized sender now reopens the mapping, before any turn is
+  replayed or appended, and a native thread's turns are never reachable by the
+  ordinary 7/30-day windows in any case — so a conversation that resumes keeps
+  its full history. What is NOT covered is a falsely closed thread that nobody
+  writes in for the whole `DUCKY_RETENTION_CLOSED_THREAD_DAYS` window (14 days
+  by default) on an instance with retention enabled: silence for that long is
+  indistinguishable from the thread being gone, and it is purged. Retention
+  ships disabled, which makes this narrow rather than unlikely by design.
 - **A guest cannot delete their own conversation.** `/forget` is a write and
   stays owner-only; widening it would widen the owner-only surface for the sake
   of a non-owner deletion path. A chat-whitelist user who wants their turns

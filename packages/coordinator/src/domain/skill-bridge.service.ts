@@ -419,6 +419,14 @@ export class SkillBridgeService {
         // Reusing the issue number is what makes a retry enrich rather than
         // duplicate. The canonical id does the same job on the helper's side.
         ...(row?.issueNumber ? { issue: row.issueNumber } : {}),
+        /**
+         * Classification labels the OWNER named, and never one Ducky chose.
+         *
+         * The helper applies them and reads them back; the adapter refuses
+         * `agent:*` before a spawn, so a classification can never become the
+         * label that authorizes implementation.
+         */
+        ...(parsed.labels.length > 0 ? { labels: parsed.labels } : {}),
       });
 
       if (!published.ok) {
@@ -443,6 +451,20 @@ export class SkillBridgeService {
       const status: AgentCardStatus =
         parsed.ready && published.queued && published.queueVerified ? 'queued' : 'published';
       const detail = publicationDetail(published, parsed.ready, found.completionPolicy);
+      // A label the owner asked for that did not land is a failure, not a
+      // detail: the publisher verifies its own read-back, and reporting the
+      // ticket as published while a requested classification is missing would
+      // be a partial success dressed as a whole one.
+      if (parsed.labels.length > 0 && !published.classificationVerified) {
+        return this.failRun(
+          actor, event, publishing,
+          new DuckyError(
+            'invalid_input',
+            'the issue exists but a classification label you asked for was not verified on it',
+          ),
+          published.url ?? undefined,
+        );
+      }
       const done = this.deps.store.agentThreads.updateRun(
         actor.discordUserId, event.threadKey, run.runId,
         { status, detail, queued: status === 'queued', finished: true },
@@ -876,7 +898,13 @@ function describeScan(found: FrontDoorInspection): string {
 }
 
 function publicationDetail(
-  published: { issue?: number | undefined; created: boolean; queued: boolean; alreadyAuthorized: boolean },
+  published: {
+    issue?: number | undefined;
+    created: boolean;
+    queued: boolean;
+    alreadyAuthorized: boolean;
+    classificationLabels: readonly string[];
+  },
   ready: boolean,
   completionPolicy: string | undefined,
 ): string {
@@ -890,6 +918,12 @@ function publicationDetail(
   ];
   if (!ready && published.alreadyAuthorized) {
     parts.push('This issue already carried agent:ready before this run.');
+  }
+  if (published.classificationLabels.length > 0) {
+    parts.push(
+      `Classified ${published.classificationLabels.join(', ')}, verified on the issue. ` +
+        'A classification authorizes nothing.',
+    );
   }
   /**
    * What queueing can END in, stated at the moment it is queued.

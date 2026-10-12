@@ -76,6 +76,11 @@ Fill in the env file:
     into this repository. `$grill-me` also needs a provider that reports itself
     `verified`, and refuses rather than faking an interview without one.
 
+  `$ticket` takes two flags and only two: `--ready`, which is what authorizes
+  queueing, and `--label <name>`, repeatable, which names a classification the
+  installed publisher applies and reads back. Ducky chooses no label of its
+  own.
+
   All four have `DUCKY_PROD_*` counterparts, and production reads only its own:
   a development helper path points at a development dispatcher. Paths must be
   absolute, and a relative one is refused at boot rather than resolved against

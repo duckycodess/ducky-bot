@@ -209,6 +209,10 @@ exercised; this says what it does.
     interview, and they are read BEFORE the coding channel's ordinary
     conversation silence so configuring a channel for the workflow does not
     make the workflow unusable in it.
+  - **Classification is named, never chosen.** `$ticket --label <name>` is
+    repeatable and bounded; with none, nothing is classified. `agent:*` is
+    refused before a spawn, and a requested label the publisher did not read
+    back fails the run rather than reading as a published ticket.
   - **The ticket is the owner's own words.** Acceptance criteria are the lines
     they typed, in the command and during the grill, bounded at 24 lines per
     thread. Nothing is generated: a requirement Ducky invented would be the
@@ -931,7 +935,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**95 files, 1309 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**95 files, 1317 tests**) and `pnpm build` all
 pass on this host, with one standing caveat recorded honestly: seven tests fail
 in a FRESH worktree and fail identically at the previous commit. Four in
 `outbound.test.ts` and one in `result-intake.test.ts` assert on the literal

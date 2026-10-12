@@ -47,6 +47,14 @@ stripped from the argument text. The flag is passed to the installed publisher,
 which applies the exact label and then reads it back; Ducky reports `queued`
 only when BOTH the owner asked and the helper verified.
 
+**Classification is named, never chosen.** `$ticket --label <name>` is
+repeatable and bounded at four; without one, nothing is classified. Deciding
+whether a piece of work is a bug or an enhancement from a sentence would be
+exactly the guess every other rule here refuses to make. `agent:*` is refused
+before a spawn, so a classification can never become the label that authorizes
+implementation, and a label the owner asked for that the publisher did not read
+back fails the run rather than being reported as a published ticket.
+
 **Ducky publishes nothing itself.** No `gh issue create`, no label API, no
 Beads edge. The bridge calls the installed front door through a typed port and
 reads structured fields back. A test asserts the service and its presenters

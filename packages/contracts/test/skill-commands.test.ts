@@ -118,3 +118,35 @@ describe('a card status says one thing and not another', () => {
     expect(isTerminalAgentCardStatus('publishing')).toBe(false);
   });
 });
+
+describe('classification is named by the owner, never chosen', () => {
+  it('reads repeatable --label values and keeps them out of the intent', () => {
+    const parsed = parseSkillCommand('$ticket --label bug --label documentation fix the parser');
+    expect(parsed?.labels).toEqual(['bug', 'documentation']);
+    // The flag AND its value are gone from the text the ticket is built from.
+    expect(parsed?.args).toBe('fix the parser');
+  });
+
+  it('de-duplicates and bounds them', () => {
+    const parsed = parseSkillCommand(
+      '$ticket --label bug --label bug --label a --label b --label c --label d work',
+    );
+    expect(parsed?.labels).toEqual(['bug', 'a', 'b', 'c']);
+  });
+
+  it('names nothing for a trailing flag or a flag-shaped value', () => {
+    expect(parseSkillCommand('$ticket fix the parser --label')?.labels).toEqual([]);
+    expect(parseSkillCommand('$ticket --label --ready fix it')?.labels).toEqual([]);
+    // ...and --ready is still read, because it is a bare token of its own.
+    expect(parseSkillCommand('$ticket --label --ready fix it')?.ready).toBe(true);
+  });
+
+  it('ignores a --label inside code, like every other flag', () => {
+    expect(parseSkillCommand('$ticket run `--label bug` later')?.labels).toEqual([]);
+  });
+
+  it('reads no label for the other two commands', () => {
+    expect(parseSkillCommand('$agentize --label bug')?.labels).toEqual([]);
+    expect(parseSkillCommand('$grill-me --label bug')?.labels).toEqual([]);
+  });
+});

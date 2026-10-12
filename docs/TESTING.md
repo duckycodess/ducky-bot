@@ -53,8 +53,11 @@ in FIRST position; a fenced block, a quote prefix, an inline code span, a
 mid-sentence mention and a near-miss token (`$ticketing`, `$ticket:`) all mean
 nothing; `ticket it`, `queue it`, `implement this` and `make this agent ready`
 are ordinary English; `--ready` is read only as a bare token, only on
-`$ticket`, and never from inside a code span; and the card vocabulary never
-labels a queued ticket as running or a published one as queued.
+`$ticket`, and never from inside a code span; `--label` is repeatable,
+de-duplicated, bounded, removed from the intent text along with its value, and
+names nothing for a trailing flag or a flag-shaped value; and the card
+vocabulary never labels a queued ticket as running or a published one as
+queued.
 
 **adapters / front door** — every operation the adapter can construct is
 classified, and `ticket` / `agentize` are refused by the ordinary local-only

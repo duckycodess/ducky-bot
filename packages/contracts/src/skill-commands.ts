@@ -32,6 +32,21 @@ export const isSkillCommand = (s: string): s is SkillCommand =>
  * the exact `agent:ready` label only when it is passed through.
  */
 export const READY_FLAG = '--ready';
+/**
+ * A classification label for the issue, repeatable.
+ *
+ * It exists because the alternative is worse. The installed publisher can
+ * apply and verify classification labels, but CHOOSING one means deciding
+ * whether a piece of work is a bug or an enhancement -- and Ducky inferring
+ * that from a sentence would be exactly the guess every other rule here
+ * refuses to make. So the owner names it or nothing is classified, and
+ * `agent:*` is refused outright because that namespace belongs to the
+ * dispatcher and `agent:ready` is the one thing a classification must never
+ * be able to apply.
+ */
+export const LABEL_FLAG = '--label';
+/** Bounded: a ticket with a dozen classifications is not classified. */
+export const SKILL_COMMAND_MAX_LABELS = 4;
 
 /** How much of a message is ever read as a command. Bounds the parser's work. */
 export const SKILL_COMMAND_INPUT_MAX = 4_000;
@@ -45,12 +60,19 @@ export interface ParsedSkillCommand {
   /**
    * True only when `--ready` was typed as a bare token by the owner.
    *
-   * It is the ONLY flag this parser recognises. Anything else is argument
-   * text: the owner selected three commands and one authorization flag, and
-   * inventing a fourth option here would be the new command name the ticket's
-   * non-goals rule out.
+   * Never derived from text, and never from a `--ready` inside a code span.
    */
   readonly ready: boolean;
+  /**
+   * Classification labels the owner named, in order, de-duplicated.
+   *
+   * Empty is the common case and means nothing is classified. `--ready` and
+   * `--label` are the only two flags this parser recognises; anything else is
+   * argument text, because the owner selected three commands and inventing
+   * further options would be the new command surface the ticket's non-goals
+   * rule out.
+   */
+  readonly labels: readonly string[];
 }
 
 /**
@@ -106,16 +128,49 @@ export function parseSkillCommand(text: string): ParsedSkillCommand | undefined 
   const scannable = stripCode(rest);
   const tokens = scannable.split(/\s+/).filter(Boolean);
 
-  // Recognised only for the command that defines it, and only as a bare token.
+  // Recognised only for the command that defines them, and only as bare
+  // tokens outside code.
   const ready = token === '$ticket' && tokens.includes(READY_FLAG);
+  const labels = token === '$ticket' ? labelsIn(tokens) : [];
 
-  const args = rest
-    .split(/\s+/)
-    .filter((t) => t !== READY_FLAG)
-    .join(' ')
-    .trim();
+  /**
+   * Flags and their values are removed from the argument text.
+   *
+   * `--label` takes the NEXT token, so that token must not also survive as
+   * part of the intent -- a ticket whose goal began "bug" because the owner
+   * classified it would be a sentence they did not write.
+   */
+  const words = rest.split(/\s+/);
+  const args: string[] = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i]!;
+    if (word === READY_FLAG) continue;
+    if (word === LABEL_FLAG) {
+      i += 1;
+      continue;
+    }
+    args.push(word);
+  }
 
-  return { command: token, args, ready };
+  return { command: token, args: args.join(' ').trim(), ready, labels };
+}
+
+/**
+ * The labels named by `--label <name>` tokens, bounded and de-duplicated.
+ *
+ * A trailing `--label` with nothing after it names nothing, and a value that
+ * is itself a flag is not a label: both produce no classification rather than
+ * a guess at what was meant.
+ */
+function labelsIn(tokens: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length && out.length < SKILL_COMMAND_MAX_LABELS; i += 1) {
+    if (tokens[i] !== LABEL_FLAG) continue;
+    const value = tokens[i + 1];
+    if (value === undefined || value.startsWith('-')) continue;
+    if (!out.includes(value)) out.push(value);
+  }
+  return out;
 }
 
 /**

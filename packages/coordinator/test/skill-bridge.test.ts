@@ -641,3 +641,36 @@ describe('the card says what queueing can end in', () => {
     h.close();
   });
 });
+
+describe('classification labels', () => {
+  it('passes only the labels the owner named, and reports them verified', async () => {
+    const { h, door } = await boot();
+    await say(h, '$ticket --label enhancement add a health endpoint');
+
+    const publish = door.calls.find((c) => c.kind === 'publish')!;
+    expect(publish.input['labels']).toEqual(['enhancement']);
+    expect(cardText(cards(h).at(-1))).toMatch(/Classified enhancement, verified on the issue/);
+    expect(cardText(cards(h).at(-1))).toMatch(/A classification authorizes nothing/);
+    h.close();
+  });
+
+  it('passes none when the owner named none', async () => {
+    const { h, door } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    expect(door.calls.find((c) => c.kind === 'publish')!.input['labels']).toEqual([]);
+    h.close();
+  });
+
+  it('fails the run when a requested label was not verified', async () => {
+    // The publisher reads its own labels back. A ticket reported as published
+    // while a classification the owner asked for is missing would be a partial
+    // success dressed as a whole one.
+    const door = new MockFrontDoor({ publish: { classificationVerified: false } });
+    const { h } = await boot({ door });
+    const reply = await say(h, '$ticket --label enhancement add a health endpoint');
+
+    expect(replyText(reply)).toMatch(/classification label you asked for was not verified/i);
+    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.runStatus).toBe('failed');
+    h.close();
+  });
+});

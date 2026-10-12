@@ -125,6 +125,22 @@ export const COMMAND_BUCKETS = {
   interaction: { max: 60, windowMs: 60_000 },
   /** /task, /reminder and /briefing. Owner-only, so this is self-protection. */
   assistant: { max: 30, windowMs: 60_000 },
+  /**
+   * Opening a native conversation thread.
+   *
+   * The only bucket here that guards a WRITE INTO SOMEBODY ELSE'S SYSTEM
+   * rather than this one's own work: every thread is an object created in the
+   * owner's guild. Discord rate-limits thread creation itself, and being
+   * refused by it is a worse outcome than refusing ourselves -- a 429 arrives
+   * after the request, costs the bot's shared rate budget, and affects every
+   * other call the client is making.
+   *
+   * Small on purpose. Ten top-level messages a minute in one conversation
+   * channel is already unusual; a hundred is a loop, a raid or a
+   * misconfiguration, and none of those should be allowed to carpet a channel
+   * with threads before anybody notices.
+   */
+  threadCreate: { max: 10, windowMs: 60_000 },
 } as const;
 
 // ---- subprocess -------------------------------------------------------------

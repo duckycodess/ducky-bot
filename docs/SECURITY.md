@@ -549,13 +549,16 @@ shared state if it were ever scaled out.
   (`DUCKY_RETENTION_CLOSED_THREAD_DAYS`); and `/forget conversation` deletes
   every turn at any time. None of that makes the live thread small. See
   [decisions/0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md).
-- **Ducky only learns a thread was deleted by trying to use it.** There is no
-  channel-delete event wired, and adding one would mean asking for another
-  gateway intent. A thread that is deleted and never written to again is never
-  observed as closed, so its retention clock never starts and its transcript
-  stays until `/forget conversation` removes it. Stated rather than worked
-  around, because the alternative is a timer that deletes a conversation on a
-  guess about whether it still exists.
+- **A thread deleted during an outage, and never written to again, is never
+  observed as closed.** Ducky learns about a deletion from
+  `Events.ThreadDelete`, which rides the `Guilds` intent the client already
+  requests, so no new intent was needed and the common case is covered live. A
+  send that fails with `Unknown Channel` is the fallback and catches a thread
+  somebody writes to after the fact. Neither reaches a thread deleted while the
+  coordinator was down and then left alone: its retention clock never starts
+  and its transcript stays until `/forget conversation` removes it. Recorded
+  rather than solved, because the alternative is a sweep that deletes a
+  conversation on a guess about whether it still exists.
 - **A guest cannot delete their own conversation.** `/forget` is a write and
   stays owner-only; widening it would widen the owner-only surface for the sake
   of a non-owner deletion path. A chat-whitelist user who wants their turns

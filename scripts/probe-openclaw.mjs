@@ -46,8 +46,28 @@ const HOME = os.homedir();
 /** The pinned local install, preferred over anything on PATH. */
 const PINNED = path.join(HOME, '.local/opt/ducky-openclaw/node_modules/.bin/openclaw');
 
-/** Everything that makes this run NOT a complete recording. */
+/**
+ * BLOCKERS. Everything that makes this run not a complete recording of the
+ * contract Ducky depends on, and the only thing that decides the exit code.
+ */
 const gaps = [];
+
+/**
+ * OBSERVATIONS that are not blockers.
+ *
+ * The distinction is load-bearing and it was wrong once. The session-deletion
+ * surface pushed a line here on BOTH branches -- found and not found -- which
+ * made `gaps.length === 0` unreachable and so made exit 0 impossible. The
+ * probe would have reported "RECORDED, PARTIAL" with the full contract
+ * recorded, and the consequences it then printed (provider unverified,
+ * conversation refuses) would have been false.
+ *
+ * A probe that cannot succeed is not a certifier, and one that prints
+ * consequences that are not true is worse than one that prints nothing. So:
+ * deletion findings are notes, they never touch the exit code, and they carry
+ * their own precise consequence.
+ */
+const notes = [];
 
 const run = (cmd, args, opts = {}) =>
   new Promise((resolve) => {
@@ -100,6 +120,64 @@ function shapeOf(v) {
 /** Flag names only, from a `--help` block. Never an example value. */
 const flagsOf = (help) =>
   [...new Set((redact(help).match(/(?:^|\s)(--[a-z][a-z0-9-]*)/g) ?? []).map((f) => f.trim()))].sort();
+
+/** Subcommand names that would, in principle, remove something. */
+export const DELETION_VERBS = Object.freeze([
+  'delete', 'remove', 'clear', 'forget', 'reset', 'purge', 'rm',
+]);
+
+/**
+ * Verbs this repository refuses to construct in ANY argv, whatever a CLI
+ * offers.
+ *
+ * Mirrors `ALWAYS_FORBIDDEN_COMMAND_VERBS` in `@ducky/contracts`. The list is
+ * not going to be relaxed to make a deletion possible, so a surface that needs
+ * one of these is unusable here by POLICY rather than by capability, and
+ * saying which of the two it is matters to whoever reads the report.
+ */
+export const ARGV_FORBIDDEN_VERBS = Object.freeze([
+  'reset', 'purge', 'rm', 'destroy', 'drop',
+]);
+
+/**
+ * What the recorded deletion surface means, as a NOTE rather than a blocker.
+ *
+ * Pure, exported and unit-tested, because the classification is the part that
+ * was wrong: both branches used to push a BLOCKER, which made a clean run
+ * impossible and made the probe print consequences that were not true.
+ *
+ * Every outcome here leaves `RECORDED_SESSION_DELETION` null, because none of
+ * them is evidence that a deletion WORKS -- a command name is not a command
+ * that was run, and a command that was run is not a readback proving the
+ * session is gone. The three cases differ in what the owner would have to do
+ * next, which is the only reason to tell them apart at all.
+ */
+export function classifyDeletionSurface({ named, usable }) {
+  if (named.length === 0) {
+    return (
+      'session deletion: OpenClaw names no deletion subcommand under `sessions`, ' +
+      '`transcripts` or `memory`. Nothing to verify, and nothing to do about it. ' +
+      'RECORDED_SESSION_DELETION stays null and `/forget conversation` reports provider ' +
+      'deletion as PARTIAL, rotating the session epoch so stale context cannot return.'
+    );
+  }
+  if (usable.length === 0) {
+    return (
+      `session deletion: the only candidates (${named.join(', ')}) use verbs this ` +
+      'repository never builds an argv from, so they are unusable by POLICY rather than ' +
+      'by capability. Relaxing ALWAYS_FORBIDDEN_COMMAND_VERBS is not on the table. ' +
+      'RECORDED_SESSION_DELETION stays null and `/forget conversation` reports PARTIAL.'
+    );
+  }
+  return (
+    `session deletion: a usable candidate exists (${usable.join(', ')}) and has NOT been ` +
+    'exercised. Recording a command NAME is not evidence it works, so this changes nothing ' +
+    'on its own: RECORDED_SESSION_DELETION stays null until a narrow deletion AND an ' +
+    'independent readback proving the session is gone have both been observed, against a ' +
+    'session this probe created for the purpose. Until then `/forget conversation` reports ' +
+    'PARTIAL and rotates the session epoch.'
+  );
+}
 
 async function main() {
   const bin = existsSync(PINNED)
@@ -403,16 +481,10 @@ async function main() {
     };
   }
 
-  const deletionVerbs = ['delete', 'remove', 'clear', 'forget', 'reset', 'purge', 'rm'];
   const named = Object.entries(deletionSurfaces).flatMap(([surface, info]) =>
-    info.subcommands.filter((c) => deletionVerbs.includes(c)).map((c) => `${surface} ${c}`),
+    info.subcommands.filter((c) => DELETION_VERBS.includes(c)).map((c) => `${surface} ${c}`),
   );
-  // Verbs this repository refuses to construct in ANY argv, whatever a CLI
-  // offers. See ALWAYS_FORBIDDEN_COMMAND_VERBS in @ducky/contracts: the list is
-  // not going to be relaxed to make a deletion possible, so a surface that
-  // needs one of them is unusable here by policy rather than by capability.
-  const alwaysForbidden = ['reset', 'purge', 'rm', 'destroy', 'drop'];
-  const usable = named.filter((n) => !alwaysForbidden.includes(n.split(' ')[1]));
+  const usable = named.filter((n) => !ARGV_FORBIDDEN_VERBS.includes(n.split(' ')[1]));
 
   record('session-deletion-surface', {
     _note:
@@ -430,21 +502,7 @@ async function main() {
     verifiedReadback: false,
   });
 
-  if (usable.length === 0) {
-    gaps.push(
-      'no OpenClaw session-deletion command is usable: ' +
-        (named.length === 0
-          ? 'none of `sessions`, `transcripts` or `memory` names a deletion subcommand'
-          : `the only candidates (${named.join(', ')}) use verbs this repository never ` +
-            'builds an argv from'),
-    );
-  } else {
-    gaps.push(
-      `an OpenClaw session-deletion command exists (${usable.join(', ')}) but has NOT been ` +
-        'exercised: deletion stays unsupported until it and an independent readback have both ' +
-        'been observed. RECORDED_SESSION_DELETION stays null until then.',
-    );
-  }
+  notes.push(classifyDeletionSurface({ named, usable }));
 
   // ---- configuration locations, names only --------------------------------
   const configDirs = ['.openclaw', '.openclaw-dev', '.config/openclaw'].map((d) => path.join(HOME, d));
@@ -454,6 +512,22 @@ async function main() {
   });
 
   process.stdout.write('\n');
+
+  /**
+   * Notes print on BOTH paths and never decide the exit code.
+   *
+   * They describe things worth knowing that are not blockers -- the
+   * session-deletion surface is the only one today. Folding them into `gaps`
+   * is precisely the bug this separation fixes: it made exit 0 unreachable and
+   * made the blocker consequences below print when they were false.
+   */
+  if (notes.length > 0) {
+    process.stdout.write(
+      ['Observations (NOT blockers; the exit code ignores these):',
+        ...notes.map((n) => `  * ${n}`), ''].join('\n') + '\n',
+    );
+  }
+
   if (gaps.length === 0) {
     process.stdout.write('Full contract recorded. Pin schemas against these fixtures next.\n');
     process.exit(0);
@@ -469,9 +543,11 @@ async function main() {
       '  * the conversation provider stays unverified and refuses to answer;',
       '  * DUCKY_CONVERSATION_PROVIDER=disabled remains the honest production mode;',
       '  * the 2C attachment gate stays closed -- and an agent turn takes TEXT ONLY,',
-      '    so it would stay closed for this provider even with credentials;',
-      '  * RECORDED_SESSION_DELETION stays null, so /forget reports provider deletion',
-      '    as PARTIAL and rotates the session epoch instead of claiming an erasure.',
+      '    so it would stay closed for this provider even with credentials.',
+      '',
+      'Session deletion is NOT one of these consequences. It is reported above as an',
+      'observation, it stays unsupported whether or not this run is complete, and it',
+      'has never affected the exit code.',
       '',
       'The owner action that would close the gap: configure a model provider for an',
       'OpenClaw agent (`openclaw agents add <id>`), then run this probe again.',
@@ -483,7 +559,20 @@ async function main() {
   process.exit(2);
 }
 
-main().catch((err) => {
-  process.stderr.write(`openclaw probe failed: ${redact(err.message)}\n`);
-  process.exit(1);
-});
+/**
+ * Only run when invoked directly.
+ *
+ * Without this, importing the module to unit-test `classifyDeletionSurface`
+ * would start a real probe as a side effect of loading the file -- which is
+ * the same trap `probe-live-job.ts` guards against, for the same reason.
+ */
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    process.stderr.write(`openclaw probe failed: ${redact(err.message)}\n`);
+    process.exit(1);
+  });
+}

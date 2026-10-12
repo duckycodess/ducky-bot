@@ -198,10 +198,30 @@ labelled unavailable in the reply's footer and dropped — importing it would pu
 another conversation into this one. Either way a reference never changes which
 conversation the message belongs to.
 
-Whose words the anchor is comes from the frozen authorizer, not from anything
-Discord said: a conversational actor's message is a `user` turn, anything else
-in the thread is Ducky's own and is an `assistant` turn. Mislabelling would hand
-the model an answer as though somebody had asked it.
+### An anchor's author is identified positively, or the anchor is dropped
+
+The first version of this inferred the `assistant` label: anything whose author
+was not on the frozen whitelist was treated as Ducky's own output. **In a public
+thread that is exactly backwards.** Anybody who can see the parent channel can
+post in the thread, so a stranger's text would reach the model presented as
+something the assistant had already said -- a misattribution and an injection
+path at once, because text offered as the model's own prior output is the most
+persuasive thing a prompt can contain.
+
+There is no inference left:
+
+- `assistant` requires the **transport** to say the message was Ducky's, by
+  comparing the author against the bot's own client id. The transport is the
+  only layer that knows that id, so it is the only layer that may make the
+  claim;
+- `user` requires the frozen `Authorizer` to recognise the author as a
+  conversational actor;
+- anything else -- an unknown author, an unreadable one, a stranger in a public
+  thread -- is **dropped** and labelled unavailable, the same fail-closed
+  direction a cross-thread reference takes.
+
+An absent `authorIsSelf` is treated as "not Ducky", so a transport that does not
+populate it loses the anchor rather than mislabelling one.
 
 ## What this does NOT change
 
@@ -233,3 +253,13 @@ the alternative is a non-owner deletion path.
 **Ducky cannot verify that a configured parent channel is private**, exactly as
 ADR 0023 says of role channels. Naming a channel here is the owner asserting
 that a conversation belongs in it.
+
+**A thread deleted while the coordinator is down, and never written to again,
+is never observed as closed.** `Events.ThreadDelete` is the primary signal and
+rides the `Guilds` intent the client already requests, so the common case is
+covered live; a failed send with `Unknown Channel` catches a thread somebody
+writes to afterwards. Neither reaches a thread that was deleted during an
+outage and then left alone, so its retention clock never starts and its
+transcript stays until `/forget conversation` removes it. Recorded rather than
+solved, because the alternative is a sweep that deletes a conversation on a
+guess about whether it still exists.

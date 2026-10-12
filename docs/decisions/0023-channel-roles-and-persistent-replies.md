@@ -193,7 +193,10 @@ outright — a thread under the channel designated *for* conversation was the on
 place conversation did not happen.
 
 A thread now **inherits its parent's role**, through `parentChannelId` on the
-incoming context. Everything this ADR says about what a role means is unchanged
+incoming context. Both a plain message and a SLASH COMMAND resolve it, through
+one shared helper: they did not at first, and the two then disagreed about the
+same channel, so `/task list` typed in a thread under the task channel fell back
+to ephemeral while a message in that same thread persisted. Everything this ADR says about what a role means is unchanged
 by that: it still answers *where does this output belong, and does it persist*,
 and it still grants nobody anything. A non-owner in an inherited role channel is
 refused exactly as they are in the parent.

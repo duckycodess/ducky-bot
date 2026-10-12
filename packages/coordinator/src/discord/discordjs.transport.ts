@@ -198,6 +198,37 @@ export class DiscordJsTransport implements DiscordTransport {
       void this.deliverMessage(message, event);
     });
 
+    /**
+     * A thread was DELETED, which is the only durable signal that a
+     * conversation is over.
+     *
+     * `Events.ThreadDelete` rides the `Guilds` intent, which this client
+     * already requests, so wiring it asks for no new permission and no portal
+     * toggle. That matters: the alternative under consideration was inferring
+     * deletion from a failed send, and a deleted thread emits no
+     * `MessageCreate` and is replied to through `message.reply` -- so the
+     * failed-send path alone could go years without firing and the retention
+     * clock would never start.
+     *
+     * Closing a mapping DELETES NOTHING. It records `closed_at`, which is what
+     * takes the conversation out of "live, keep everything" and into the
+     * `DUCKY_RETENTION_CLOSED_THREAD_DAYS` window. A thread Ducky never
+     * recorded is a no-op, because `close` updates by id.
+     *
+     * Deliberately NOT `ThreadUpdate`: an archived thread is not a deleted
+     * one. Posting in an archived-but-unlocked thread unarchives it, which is
+     * how a conversation resumes after a week of quiet, and ageing one out
+     * because it went quiet would delete a conversation somebody could still
+     * scroll back to.
+     */
+    client.on(Events.ThreadDelete, (thread) => {
+      try {
+        this.#threadGone?.(thread.id);
+      } catch {
+        /* recording a deletion is never worth taking the gateway down */
+      }
+    });
+
     client.on(Events.InteractionCreate, (interaction) => {
       if (interaction.isChatInputCommand()) {
         void this.handleDeferred(interaction, this.fromCommand(interaction));
@@ -415,6 +446,19 @@ export class DiscordJsTransport implements DiscordTransport {
       context: {
         channelId: interaction.channelId ?? undefined,
         guildId: interaction.guildId ?? undefined,
+        /**
+         * The parent of a thread a command was typed in.
+         *
+         * A message carried this from the start and a command did not, which
+         * made the two disagree about the same channel: `/task list` typed in
+         * a thread under the configured task channel had no role, so its reply
+         * fell back to ephemeral while a plain message in the same thread
+         * persisted. A role is presentation, so this changes WHERE output
+         * lives and nothing about who may act.
+         */
+        ...(parentChannelIdOfChannel(interaction.channel) === undefined
+          ? {}
+          : { parentChannelId: parentChannelIdOfChannel(interaction.channel) }),
       },
       options,
       attachment: file
@@ -579,14 +623,21 @@ function authorKindOf(message: import('discord.js').Message): IncomingAuthorKind
   return 'unknown';
 }
 
-/** The channel a thread hangs under, or undefined for a top-level channel. */
+/**
+ * The channel a thread hangs under, or undefined for a top-level channel.
+ *
+ * Takes the CHANNEL rather than the message, so a slash command and a plain
+ * message resolve it the same way. They did not, once, and the result was two
+ * answers about one channel.
+ */
+export function parentChannelIdOfChannel(channel: unknown): string | undefined {
+  const c = channel as { isThread?: () => boolean; parentId?: string | null } | null;
+  if (!c || typeof c.isThread !== 'function' || !c.isThread()) return undefined;
+  return c.parentId ?? undefined;
+}
+
 function parentChannelIdOf(message: import('discord.js').Message): string | undefined {
-  const channel = message.channel as unknown as {
-    isThread?: () => boolean;
-    parentId?: string | null;
-  };
-  if (typeof channel?.isThread !== 'function' || !channel.isThread()) return undefined;
-  return channel.parentId ?? undefined;
+  return parentChannelIdOfChannel(message.channel);
 }
 
 /**
@@ -597,19 +648,43 @@ function parentChannelIdOf(message: import('discord.js').Message): string | unde
  * importing either. `referencedMessage` is populated by discord.js only when
  * it is already cached, which is why the text is optional here.
  */
-function referenceOf(
+export function referenceOf(
   message: import('discord.js').Message,
-): { messageId: string; channelId?: string; text?: string; authorId?: string } | undefined {
+): {
+  messageId: string;
+  channelId?: string;
+  text?: string;
+  authorId?: string;
+  authorIsSelf?: boolean;
+} | undefined {
   const ref = message.reference as { messageId?: string | null; channelId?: string | null } | null;
   if (!ref?.messageId) return undefined;
   const cached = (message as unknown as {
     referencedMessage?: { content?: string; author?: { id?: string } } | null;
   }).referencedMessage;
+
+  /**
+   * Whether DUCKY wrote the referenced message, answered HERE because this is
+   * the only layer that knows the bot's own Discord id.
+   *
+   * The router must never infer it. A native thread is public, so a stranger
+   * can post in one, and treating "not on the whitelist" as "therefore Ducky"
+   * would hand the model a stranger's text labelled as the assistant's own
+   * prior output. `undefined` when the client id is unreadable, which the
+   * router treats as "not Ducky" and drops.
+   */
+  const selfId = (message as unknown as { client?: { user?: { id?: string } | null } })
+    .client?.user?.id;
+  const authorId = cached?.author?.id;
+  const authorIsSelf =
+    selfId !== undefined && authorId !== undefined ? authorId === selfId : undefined;
+
   return {
     messageId: ref.messageId,
     ...(ref.channelId ? { channelId: ref.channelId } : {}),
     ...(cached?.content ? { text: cached.content } : {}),
-    ...(cached?.author?.id ? { authorId: cached.author.id } : {}),
+    ...(authorId ? { authorId } : {}),
+    ...(authorIsSelf === undefined ? {} : { authorIsSelf }),
   };
 }
 

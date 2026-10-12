@@ -818,18 +818,40 @@ export class DuckyRouter {
       ? `${text.slice(0, CONVERSATION_ANCHOR_TEXT_MAX - 1)}\u2026`
       : text;
     /**
-     * Whose words these are, decided from the frozen authorizer rather than
-     * from anything Discord said about the message.
+     * Whose words these are, POSITIVELY identified, or the anchor is dropped.
      *
-     * A conversational actor's message is a `user` turn; anything else in the
-     * thread is Ducky's own, which is an `assistant` turn. Mislabelling here
-     * would hand the model an answer as if somebody had asked it.
+     * The first version of this inferred the `assistant` label: anything whose
+     * author was not on the frozen whitelist was treated as Ducky's own
+     * output. A native thread is PUBLIC, so that is exactly backwards -- a
+     * stranger who can see the channel can post in the thread, the owner can
+     * reply to them, and the stranger's text would then reach the model
+     * labelled as something the assistant had said. That is both a
+     * misattribution and an injection path: text presented as the assistant's
+     * own prior output is the most persuasive thing a prompt can contain.
+     *
+     * So there is no inference left. `assistant` requires the TRANSPORT to say
+     * the message was Ducky's, because the transport is the only layer that
+     * knows the bot's own id. `user` requires the frozen `Authorizer` to
+     * recognise the author as a conversational actor. Anything else -- an
+     * unknown author, an unreadable one, a stranger in a public thread -- is
+     * dropped and labelled unavailable, which is the same fail-closed
+     * direction a cross-thread reference takes.
      */
-    const role = reference.authorId !== undefined
-      && this.deps.authz.roleOf(reference.authorId) !== 'none'
-      ? 'user' as const
-      : 'assistant' as const;
-    return { turn: { role, text: clipped } };
+    if (reference.authorIsSelf === true) {
+      return { turn: { role: 'assistant', text: clipped } };
+    }
+    if (
+      reference.authorId !== undefined &&
+      this.deps.authz.roleOf(reference.authorId) !== 'none'
+    ) {
+      return { turn: { role: 'user', text: clipped } };
+    }
+    return {
+      note:
+        reference.authorId === undefined
+          ? 'I could not tell who wrote the message you replied to, so I did not use it.'
+          : 'The message you replied to was not written by you or by me, so I did not use it.',
+    };
   }
 
   /**

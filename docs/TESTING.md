@@ -481,7 +481,10 @@ and a stranger are each refused differently and correctly; a branch is a
 separate thread with a separate provider session, seeded with only the selected
 anchor, leaving the source untouched; an unknown anchor is refused; a reply
 anchors inside its own thread, a cross-thread or unreadable reference is labelled
-and dropped, and Ducky's own earlier message is labelled assistant.
+and dropped, Ducky's own earlier message is labelled assistant on the
+transport's word, a stranger's is never presented as something Ducky said, an
+unidentifiable author drops the anchor, and opening a thread is rate limited
+while a replayed starter is not charged.
 
 **coordinator / conversation deletion** — `/forget conversation` reports PARTIAL
 and names why the provider cannot be reached; the session epoch rotates so the
@@ -499,6 +502,22 @@ replace it; no source file in any package names `$grill-me`, `$ticket` or
 `$agentize`, and a quoted one is ordinary conversation that creates no job and no
 task; task lists, reminder lists and briefings carry no timezone suffix and no
 reminder-lead line while the configured zone still drives scheduling.
+
+**coordinator / thread transport** — the three things that live only in the
+transport: only it may say a referenced message was Ducky's own, by comparing
+the author against the bot's client id, and an unreadable client id yields
+undefined rather than a guess; `Events.ThreadDelete` is registered and routed to
+the thread-gone hook while `ThreadUpdate` deliberately is not, and the requested
+gateway intents are still exactly the four they were, which is the whole reason
+that event was chosen; a slash command resolves its thread's parent through the
+same helper a message does, so a command in a thread under a role channel
+persists while a non-owner's reply there still does not.
+
+**adapters / probe deletion surface** — the probe's session-deletion
+classification returns a NOTE in every case and never a blocker, distinguishes
+"OpenClaw names no deletion command" from "the candidates use verbs this
+repository will not build an argv from" from "a usable candidate exists and has
+not been exercised", and leaves `RECORDED_SESSION_DELETION` null in all three.
 
 **persistence / backup** — the real scripts, run as subprocesses against a real
 temporary database: the copy verifies, is written `0600`, and excludes the

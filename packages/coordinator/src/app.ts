@@ -344,6 +344,9 @@ export function createApp(
       sharedPolicy,
     ),
     startThread: transport.startThread ? (req) => transport.startThread!(req) : undefined,
+    // The SAME buckets instance every other surface uses, so a thread opened
+    // here counts against one budget rather than a second private one.
+    chargeThreadCreate: (userId) => buckets.check('threadCreate', userId),
   });
   // The decision lives in the domain; the transport only performs it. Absent
   // on a transport that does not support threads, which leaves routing exactly

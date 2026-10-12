@@ -1,6 +1,6 @@
 import {
   DISCORD_SNOWFLAKE, THREAD_AUTO_ARCHIVE_MINUTES, THREAD_NAME_EXCERPT_MAX, THREAD_NAME_MAX,
-  cleanUntrusted,
+  cleanUntrusted, isDuckyError,
 } from '@ducky/contracts';
 import { redact } from '@ducky/adapters';
 import type { Store } from '@ducky/persistence';
@@ -230,6 +230,19 @@ export interface ConversationThreadServiceDeps {
    * instance opens no thread and routes exactly as it did before.
    */
   readonly startThread?: ThreadStarter | undefined;
+  /**
+   * Charged once per thread Ducky is about to CREATE, and never for one it
+   * already has.
+   *
+   * Injected as a function so the service shares the coordinator's single
+   * `CommandBuckets` instance rather than keeping a second limiter that could
+   * disagree with it. Throwing is the contract: a `DuckyError` here becomes a
+   * visible refusal, exactly like a Discord failure, and no thread is created.
+   *
+   * Omitting it leaves creation unbucketed, which is what every caller that
+   * does not wire one (a focused unit test) wants.
+   */
+  readonly chargeThreadCreate?: ((userId: string) => void) | undefined;
 }
 
 /**
@@ -280,6 +293,26 @@ export class ConversationThreadService {
     const existing = threads.byStarterMessage(messageId);
     if (existing) return { kind: 'thread', threadId: existing.threadId, created: false };
 
+    /**
+     * Charged HERE: after the mapping check, before Discord.
+     *
+     * After, so a replayed or retried event for a thread that already exists
+     * costs nothing -- otherwise a gateway redelivery could exhaust the budget
+     * for a thread nobody was creating. Before, because the thing being
+     * bounded is the WRITE, and a limiter that charges afterwards has already
+     * let it happen.
+     */
+    try {
+      this.deps.chargeThreadCreate?.(event.userId);
+    } catch (err) {
+      return {
+        kind: 'refused',
+        message: isDuckyError(err)
+          ? `${err.ownerMessage} No thread was opened and nothing was answered in the channel.`
+          : REFUSALS.unavailable,
+      };
+    }
+
     let outcome: ThreadStartOutcome;
     try {
       outcome = await start({
@@ -326,11 +359,21 @@ export class ConversationThreadService {
    * whole -- so this is the single moment a conversation becomes eligible to
    * be forgotten by the passage of time.
    *
-   * Ducky learns this the next time it tries to use the thread, because it has
-   * no channel-delete event wired and inventing one would mean asking for
-   * another gateway intent. The honest consequence is stated in ADR 0025: a
-   * deleted thread nobody writes to again is never observed as deleted, and
-   * its transcript stays until `/forget` removes it.
+   * Two things call it, and the first is the one that actually fires:
+   *
+   * 1. **`Events.ThreadDelete`**, which rides the `Guilds` intent the client
+   *    already requests. No new intent, no portal toggle.
+   * 2. A send that fails with `Unknown Channel`, which covers a thread deleted
+   *    while the coordinator was down and the gateway event was missed.
+   *
+   * The second was briefly the only one, and that was close to useless: a
+   * deleted thread emits no `MessageCreate`, and a reply inside a live thread
+   * goes through `message.reply`, so the failing path was reached only for a
+   * thread Ducky had just created. The clock would effectively never have
+   * started.
+   *
+   * Idempotent and safe for a thread Ducky never recorded: `close` updates by
+   * id and matches nothing.
    */
   observeGone(threadId: string): void {
     this.deps.store.conversationThreads.close(threadId);
@@ -362,6 +405,17 @@ export class ConversationThreadService {
 
     const existing = this.deps.store.conversationThreads.byStarterMessage(input.anchorMessageId);
     if (existing) return { kind: 'thread', threadId: existing.threadId, created: false };
+
+    // A branch is a guild write like any other thread, and the control that
+    // triggers it can be pressed repeatedly. Same bucket, same reasoning.
+    try {
+      this.deps.chargeThreadCreate?.(input.startedBy);
+    } catch (err) {
+      return {
+        kind: 'refused',
+        message: isDuckyError(err) ? err.ownerMessage : REFUSALS.unavailable,
+      };
+    }
 
     let outcome: ThreadStartOutcome;
     try {

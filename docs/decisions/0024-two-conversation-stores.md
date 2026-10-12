@@ -95,6 +95,14 @@ That constant is **null**, and the reason is recorded rather than implied:
   `verifiedDeletion: false` and `verifiedReadback: false` for exactly that
   reason, and deletion stays unsupported until a **narrow command** and an
   **independent readback** have both been observed;
+- the finding is reported as an **observation, not a blocker**, and never
+  touches the probe's exit code. It was briefly both -- the classification
+  pushed a blocker whether a deletion command was found or not, which made a
+  clean run impossible and made the probe print blocker consequences ("the
+  provider stays unverified", "conversation refuses to answer") that were
+  false of a run whose contract had been fully recorded. A probe that cannot
+  succeed is not a certifier. The classification is now a pure function with
+  its own unit tests;
 - `ALWAYS_FORBIDDEN_COMMAND_VERBS` refuses `rm`, `destroy`, `purge`, `drop`,
   `reset` in any argv this system builds, and that list will not be relaxed to
   make a deletion possible. If the supported surface needs one of them, the

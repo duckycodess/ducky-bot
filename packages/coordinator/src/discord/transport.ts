@@ -54,6 +54,21 @@ export interface IncomingReference {
   readonly text?: string | undefined;
   /** Who wrote it, when known. */
   readonly authorId?: string | undefined;
+  /**
+   * Whether DUCKY ITSELF wrote the referenced message.
+   *
+   * Populated by the transport, which is the only layer that knows the bot's
+   * own Discord id, and the ONLY thing that may cause an anchor to be labelled
+   * `assistant`. Everything else is somebody else's words.
+   *
+   * This exists because the first version inferred it: anything not on the
+   * frozen whitelist was treated as Ducky's own output. In a public thread
+   * that is wrong and dangerous -- a stranger can post, the owner can reply to
+   * them, and their text would then reach the model labelled as something the
+   * assistant had said. Absent is treated as "not Ducky", so a transport that
+   * does not populate it loses the anchor rather than mislabelling one.
+   */
+  readonly authorIsSelf?: boolean | undefined;
 }
 
 /**

@@ -368,3 +368,22 @@ describe('deleting a task takes its notifications with it', () => {
     h.close();
   });
 });
+
+describe('the retention report counts what really went', () => {
+  it('adds a closed task’s reminders to the reminder count rather than overwriting it', async () => {
+    const { h } = await boot({ DUCKY_RETENTION_ENABLED: '1', DUCKY_RETENTION_CLOSED_TASK_DAYS: '1' });
+    const task = h.app.tasks.add(h.owner, { title: 'ENG 30 Letters', due: '2026-10-20 23:59' });
+    h.app.tasks.complete(h.owner, task.publicId);
+    // Age the task and the reminders it owned past every window.
+    const old = '2020-01-01T00:00:00.000Z';
+    h.store.db.prepare('UPDATE tasks SET closed_at = ?').run(old);
+    h.store.db.prepare('UPDATE reminders SET closed_at = ?').run(old);
+
+    const report = await h.app.retention.run('manual');
+    expect(report.counts.tasksDeleted).toBe(1);
+    // Two linked reminders went WITH the task. Reported, not swallowed by the
+    // reminder pass that runs immediately afterwards.
+    expect(report.counts.remindersDeleted).toBe(2);
+    h.close();
+  });
+});

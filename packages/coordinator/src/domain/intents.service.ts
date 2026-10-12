@@ -42,6 +42,13 @@ function allowedInRole(kind: IntentKind, role: ChannelRole | undefined): boolean
       return !isWriteIntent(kind);
     case 'gpt':
       return false;
+    /**
+     * Where reminders are DELIVERED. Reads are fine; a write typed into the
+     * channel Ducky posts in would be a surprise, and a pasted list there
+     * would quietly become more of what that channel already shows.
+     */
+    case 'reminder':
+      return !isWriteIntent(kind);
   }
 }
 

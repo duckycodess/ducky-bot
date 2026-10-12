@@ -233,6 +233,47 @@ export const REMINDER_DELIVERY_BATCH = 25;
  */
 export const REMINDER_MAX_DELIVERY_ATTEMPTS = 8;
 
+// ---- daily assistant: bulk capture and linked reminders --------------------
+/**
+ * A bulk preview is durable, so it survives the restart that an in-memory
+ * draft does not -- which is the whole reason the phone can parse on one
+ * request and save on the next. It is still SHORT-lived: it holds the owner's
+ * own task text before they have agreed to keep it.
+ */
+export const TASK_PREVIEW_TTL_MS = 30 * 60_000;
+/** Pending previews per owner. A queue of drafts would be a trap, not a feature. */
+export const MAX_PENDING_TASK_PREVIEWS_PER_OWNER = 5;
+/**
+ * How long a SETTLED preview (saved or discarded) is kept.
+ *
+ * It carries no item text by then -- saving clears it -- only the public ids
+ * it produced, which is what makes a double press idempotent instead of a
+ * second set of tasks.
+ */
+export const TASK_PREVIEW_SETTLED_TTL_MS = 24 * 60 * 60_000;
+/** Expired previews removed per reconcile pass, so a sweep is never long. */
+export const TASK_PREVIEW_SWEEP_BATCH = 100;
+
+/**
+ * The default reminders a DEADLINE earns, as offsets before it.
+ *
+ * Two for a timed deadline, because a day's notice and an hour's notice answer
+ * different questions. An offset already in the past is skipped rather than
+ * fired immediately: a task saved an hour before it is due must not produce an
+ * instant "due in 24 hours" message.
+ */
+export const TASK_REMINDER_OFFSETS_MS = [24 * 60 * 60_000, 60 * 60_000] as const;
+/**
+ * When a DATE-ONLY deadline is announced: 08:00 on the day itself, in the
+ * owner's zone. A date carries no time, so there is no offset to subtract --
+ * and midnight would be a notification nobody reads.
+ */
+export const TASK_ALL_DAY_REMINDER_HOUR = 8;
+/** How long Snooze postpones a notification. The task's own deadline never moves. */
+export const TASK_SNOOZE_MINUTES = 60;
+/** Cards attached to one bulk save. Discord allows five action rows at most. */
+export const TASK_CARDS_PER_MESSAGE = 4;
+
 // ---- daily assistant: briefing ---------------------------------------------
 /**
  * Per section, so a briefing cannot outgrow one Discord embed. Anything beyond

@@ -303,6 +303,10 @@ export interface ProviderStatus {
   readonly conversationMemory: string;
   /** Whether briefings are pushed, and at what local times. */
   readonly proactiveBriefings: string;
+  /** Where a task-linked reminder is posted. A DM unless a channel is configured. */
+  readonly reminderDelivery: string;
+  /** Whether the phone capture page is reachable, and why not. */
+  readonly phoneCapture: string;
   readonly orchestrator: string;
   readonly scheduleExtraction: string;
   readonly actions: string;
@@ -335,6 +339,8 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Chat attachments', value: p.conversationAttachments, inline: true },
           { name: 'Chat memory', value: p.conversationMemory, inline: true },
           { name: 'Proactive briefings', value: p.proactiveBriefings },
+          { name: 'Reminder delivery', value: p.reminderDelivery },
+          { name: 'Phone capture', value: p.phoneCapture },
           { name: 'Orchestrator', value: p.orchestrator, inline: true },
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },
           { name: 'Approved actions', value: p.actions, inline: true },

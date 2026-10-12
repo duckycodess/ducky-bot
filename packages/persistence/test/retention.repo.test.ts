@@ -197,7 +197,7 @@ describe('selection windows', () => {
       .run('t1', 'pt1', '1', 'do it', 'normal', 'open', iso(900), iso(900));
 
     expect(store.retention.deleteClosedCaptures(iso(365), 100)).toBe(0);
-    expect(store.retention.deleteClosedTasks(iso(365), 100)).toBe(0);
+    expect(store.retention.deleteClosedTasks(iso(365), 100).tasks).toBe(0);
   });
 
   it('removes a closed capture and a closed task past the window', () => {
@@ -207,7 +207,7 @@ describe('selection windows', () => {
       .run('t1', 'pt1', '1', 'do it', 'normal', 'done', iso(900), iso(900), iso(900));
 
     expect(store.retention.deleteClosedCaptures(iso(365), 100)).toBe(1);
-    expect(store.retention.deleteClosedTasks(iso(365), 100)).toBe(1);
+    expect(store.retention.deleteClosedTasks(iso(365), 100).tasks).toBe(1);
   });
 
   it('keeps an undelivered reminder occurrence', () => {

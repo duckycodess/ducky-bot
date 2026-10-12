@@ -381,4 +381,28 @@ const MODAL_BUTTONS = [
       },
     ],
   },
+  {
+    kind: 'task_edit',
+    title: 'Change the deadline',
+    fields: [
+      {
+        customId: 'deadline',
+        label: 'e.g. October 15 11:59 PM, or none',
+        paragraph: false,
+        maxLength: 64,
+      },
+    ],
+  },
+  {
+    kind: 'bulk_edit',
+    title: 'Correct the list',
+    fields: [
+      {
+        customId: 'items',
+        label: 'One numbered task per line',
+        paragraph: true,
+        maxLength: 4000,
+      },
+    ],
+  },
 ] as const;

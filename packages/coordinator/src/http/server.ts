@@ -13,6 +13,7 @@ import type { ExecutorCredentialStore } from '@ducky/adapters';
 import { isUpToDate, type Store } from '@ducky/persistence';
 import type { AuditRecordInput } from '@ducky/persistence';
 import { verifyExecutorRequest } from '../security/executor-auth.js';
+import { registerPhoneRoutes, type PhoneCaptureConfig } from './phone.js';
 import type { JobsService } from '../domain/jobs.service.js';
 
 declare module 'fastify' {
@@ -48,6 +49,17 @@ export interface ServerDeps {
   readonly jobs: JobsService;
   readonly credentials: ExecutorCredentialStore;
   readonly logger?: boolean | object;
+  /**
+   * The owner's phone capture surface. OMITTING IT MEANS THE ROUTES DO NOT
+   * EXIST -- not that they answer 404 from a handler, but that nothing is
+   * registered at all.
+   *
+   * That is the fail-closed direction and it is decided in the composition
+   * root: an instance with no human credential configured, or one bound to an
+   * address that is not private, never reaches this. See
+   * `resolvePhoneCapture`.
+   */
+  readonly phone?: PhoneCaptureConfig;
 }
 
 /** One in-flight long poll per executor; a second gets 429 instead of a socket. */
@@ -321,6 +333,16 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       return deps.jobs.markWorkspaceClosed(executorId, id, body.workspaceId);
     }),
   );
+
+  /**
+   * The owner's phone, when it is configured.
+   *
+   * It shares this listener on purpose: one process, one port, one thing to
+   * put on the tailnet. It shares NOTHING else -- its own credential, its own
+   * session, its own rate limits -- and the executor routes above are
+   * unchanged and still require their signature.
+   */
+  if (deps.phone) registerPhoneRoutes(app, deps.phone);
 
   /** Liveness only: the process is up. Deliberately says nothing else. */
   app.get('/healthz', async () => ({ ok: true }));

@@ -163,7 +163,12 @@ export class RetentionService {
     // so a failure in one table cannot roll back another's progress.
     withTransaction(this.store.db, () => {
       c.capturesDeleted = r.deleteClosedCaptures(cutoff(p.doneCaptureDays), p.batch);
-      c.tasksDeleted = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      // A closed task takes its own linked reminders with it, counted rather
+      // than cascaded silently: the report says how many records really went.
+      const closedTasks = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      c.tasksDeleted = closedTasks.tasks;
+      c.remindersDeleted += closedTasks.reminders;
+      c.reminderOccurrencesDeleted += closedTasks.occurrences;
       const rem = r.deleteClosedReminders(cutoff(p.closedReminderDays), p.batch);
       c.remindersDeleted = rem.reminders;
       c.reminderOccurrencesDeleted = rem.occurrences;

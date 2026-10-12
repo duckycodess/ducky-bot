@@ -1,5 +1,6 @@
 import {
   AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
+  TASK_PREVIEW_SETTLED_TTL_MS, TASK_PREVIEW_SWEEP_BATCH,
   isTerminal,
 } from '@ducky/contracts';
 import { isoPlus, withTransaction, type Store } from '@ducky/persistence';
@@ -12,6 +13,14 @@ export interface ReconcileReport {
   approvalsExpired: number;
   noncesPruned: number;
   draftsSwept: number;
+  /**
+   * Pasted-list previews removed: expired ones, and settled ones past their
+   * short keep window. Swept HERE rather than by retention because a preview
+   * is a draft with a deadline on it, not a record the owner chose to keep --
+   * so it must be bounded on every instance, including one that has retention
+   * switched off.
+   */
+  previewsSwept: number;
   executorsOffline: number;
   /** Audit rows past the retention window, removed so the table stays bounded. */
   auditPruned: number;
@@ -49,9 +58,20 @@ export class Reconciler {
       approvalsExpired: this.expireApprovals(),
       noncesPruned: this.store.executors.pruneNonces(this.now().toISOString()),
       draftsSwept: this.pending.sweep(),
+      previewsSwept: this.sweepTaskPreviews(),
       executorsOffline: this.markOfflineExecutors(),
       auditPruned: this.pruneAudit(),
     };
+  }
+
+  /** Bounded per pass, so a sweep is never long whatever has accumulated. */
+  private sweepTaskPreviews(): number {
+    const now = this.now().getTime();
+    return this.store.taskPreviews.deleteExpired(
+      new Date(now).toISOString(),
+      new Date(now - TASK_PREVIEW_SETTLED_TTL_MS).toISOString(),
+      TASK_PREVIEW_SWEEP_BATCH,
+    );
   }
 
   /**

@@ -5,7 +5,7 @@ import {
 import type {
   ConversationInput, ConversationProvider, ConversationReply,
 } from '@ducky/adapters';
-import { NO_ATTACHMENT_CAPABILITY } from '@ducky/adapters';
+import { NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION } from '@ducky/adapters';
 import { CHAT, OWNER, makeHarness, type Harness } from './helpers.js';
 
 /**
@@ -20,7 +20,10 @@ import { CHAT, OWNER, makeHarness, type Harness } from './helpers.js';
 class RecordingProvider implements ConversationProvider {
   readonly name = 'recording';
   readonly verified = false;
-  readonly capabilities = { attachments: NO_ATTACHMENT_CAPABILITY };
+  readonly capabilities = {
+    attachments: NO_ATTACHMENT_CAPABILITY,
+    sessionDeletion: NO_SESSION_DELETION('test stand-in keeps no session'),
+  };
   readonly seen: { text: string; history: readonly { role: string; text: string }[] }[] = [];
 
   async reply(input: ConversationInput): Promise<ConversationReply> {

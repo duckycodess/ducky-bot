@@ -55,6 +55,23 @@ Fill in the env file:
   host is either. Attachments are owner-only even though plain chat is not.
   `CONVERSATION_MAX_ATTACHMENT_BYTES` and `CONVERSATION_ATTACHMENTS_PER_HOUR`
   bound it; downloads reuse `DISCORD_CDN_HOSTS`.
+- `DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS` — optional, default empty. Comma-separated
+  channel ids that may **open a Discord thread per conversation**. Empty is the
+  whole feature off, and that is the default: creating a thread is Ducky
+  writing into your guild, so it is a list of channels rather than a switch.
+  Each listed channel needs the bot to hold **Create Public Threads** and **Send
+  Messages in Threads** there; without either, Ducky refuses visibly and answers
+  nowhere rather than replying in the parent. A channel that is also a shared
+  channel, the briefing channel or the task channel is refused at boot.
+  Production reads only `DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS`. See
+  [ADR 0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md).
+- `DUCKY_CONVERSATION_MEMORY_ENABLED` — optional, default off. Off means nothing
+  you say in conversation is stored. On, a native thread keeps its full
+  transcript while the thread exists and the people who have **spoken** in it
+  share that context; an ordinary channel or DM keeps the small per-user cap
+  ADR 0021 shipped. `DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES` (default 24000)
+  bounds what reaches the model: past it Ducky compacts, and past that it
+  refuses the turn. Compacting never deletes a stored turn or a Discord message.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
 

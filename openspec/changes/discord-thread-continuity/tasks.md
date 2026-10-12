@@ -4,8 +4,8 @@
 
 - [x] 1.1 Extend incoming transport contracts and mock parity for message ID, parent ID and reply reference; add testable starter policy plus injected ThreadStarter port, idempotent starter mapping and `160004` recovery, sanitized fixed thread name, 429/permission failure without parent fallback, seven-day auto-archive and archived-unlocked recovery; verify with transport/router tests for parent, child, bot/webhook, non-chat, locked and missing cases.
 - [x] 1.2 Inherit parent role/routing on native children without widening auth or shared reads; source authorization from the existing Authorizer only, exclude parent shared channels from memory, profile-scope new config with boot conflicts/status; verify router/authz tests for owner and additional chat user.
-- [ ] 1.3 Add same-thread bounded reply anchors and isolated Branch/Compact controls with signed actor/thread/anchor checks, explicit conversational-kind manifest and positive dispatch while retaining owner-only manifest; write an ADR for this narrow surface; verify old-reference, unavailable/cross-thread, copied control and branching tests.
-- [ ] 1.4 Document channel setup, permission requirements and recovery in ADR 0023/operator docs; verify with targeted docs/test assertions.
+- [x] 1.3 Add same-thread bounded reply anchors and isolated Branch/Compact controls with signed actor/thread/anchor checks, explicit conversational-kind manifest and positive dispatch while retaining owner-only manifest; write an ADR for this narrow surface; verify old-reference, unavailable/cross-thread, copied control and branching tests.
+- [x] 1.4 Document channel setup, permission requirements and recovery in ADR 0023/operator docs; verify with targeted docs/test assertions.
 
 ## 2. Durable bounded conversation
 

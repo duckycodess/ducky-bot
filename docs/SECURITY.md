@@ -337,6 +337,7 @@ was turned away. It now records:
 | `approval.expired` | the reconciler | how many lapsed unanswered |
 | `provider.failed` | the conversation boundary | the provider name and the error CODE, never the owner's message |
 | `config.rejected` | credential-file reload | the variable NAME, never a path or a value |
+| `workflow.requested` | a `$grill-me` / `$ticket` / `$agentize` run reaching a terminal status | the command TOKEN and the status word, never the repository, the issue or anything the owner typed |
 
 **Local commit / push / PR outcomes** are covered by the existing
 `approval.execution_started` / `_succeeded` / `_failed` events, whose `detail`
@@ -482,6 +483,43 @@ recorded-only. The command policy classifies every argv and rejects force or
 hook-bypass flags.
 
 Read-only inspection needs no approval.
+
+## The installed workflow front door
+
+`$grill-me`, `$ticket` and `$agentize` reach a USER-INSTALLED program
+(`workflow.py`) that creates GitHub issues, applies labels and registers
+repositories with a dispatcher. That is an external write, and it is contained
+the same way the approved-action performer is rather than by a different set of
+rules:
+
+- **Owner-only, checked twice.** The bridge returns silently for anybody else,
+  and `requireOwner` is the first statement of every command inside it. A
+  non-owner's `$ticket` is ordinary conversation, including in a channel where
+  they can see the owner's cards.
+- **Off by default, behind three separate settings.** The bridge, the absolute
+  helper path (no default, no search) and publication are three decisions. With
+  publication off the bridge reads and validates and creates nothing. All are
+  profile-scoped and production inherits none of them.
+- **argv only.** Every call is `runArgv` with a mandatory timeout and a bounded
+  buffer, and each asserts `checkCommandAllowed` with the caller's own ceiling
+  first -- so a read path cannot physically run the publisher. The two external
+  entries (`agent-workflow ticket`, `agent-workflow agentize`) are classified
+  `external_mutation` and refused by the ordinary local-only ceiling.
+- **Nothing raw escapes.** Helper stdout is parsed into typed fields and
+  discarded; stderr is never returned, stored or logged; unparseable output is
+  refused without being quoted, because a traceback carries host paths. The
+  TicketSpec is written to a `0600` file in a `0700` directory removed in a
+  `finally`.
+- **Queue authorization is typed.** `--ready` is read only as a bare token the
+  owner wrote, after code spans are stripped, so a pasted command line cannot
+  authorize implementation. Ducky reports a ticket queued only when the helper
+  has applied AND read back the exact label.
+- **Ducky never starts a worker or a service**, and has no code path that
+  could. What queueing can end in is the dispatcher's own configured merge
+  policy; the card reports which policy the registration carries rather than
+  implying Ducky controls it.
+
+See [decisions/0025](decisions/0025-exclusive-skill-command-entry-points.md).
 
 ## Rate limiting
 

@@ -58,6 +58,7 @@ export class MockFrontDoor implements FrontDoorPort {
       dirty: false,
       registered: true,
       registrationEnabled: true,
+      completionPolicy: undefined,
       activeJobs: 0,
       signalCount: 3,
       hasWorkflowContract: true,

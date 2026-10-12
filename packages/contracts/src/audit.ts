@@ -138,6 +138,19 @@ export const AUDIT_EVENTS = [
    * logged, not audited. See docs/SECURITY.md.
    */
   'config.rejected',
+  /**
+   * The owner ran a repository-workflow command (`$grill-me`, `$ticket`,
+   * `$agentize`) and it reached a terminal status.
+   *
+   * It is NOT `job.created`: nothing Ducky calls a job is created by any of
+   * these, and filing them under the lifecycle events would make a search for
+   * "what jobs ran" return things that were never jobs. The detail is the
+   * command token and the resulting status word -- never the repository, the
+   * issue, or anything the owner typed. `event` carries no CHECK constraint,
+   * so this needs no migration; `subject_kind` does, and `route` already
+   * covers a Discord surface.
+   */
+  'workflow.requested',
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

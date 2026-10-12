@@ -57,6 +57,29 @@ Fill in the env file:
   bound it; downloads reuse `DISCORD_CDN_HOSTS`.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
+- **The repository workflow bridge** (`$grill-me`, `$ticket`, `$agentize`), off
+  by default and deliberately split into three decisions rather than one flag:
+  - `DUCKY_DEV_SKILL_BRIDGE_ENABLED` — whether those three tokens mean anything
+    at all. With it unset they are ordinary text.
+  - `DUCKY_DEV_WORKFLOW_HELPER` — the ABSOLUTE path to the installed Agent Flow
+    front door (`workflow.py`). There is no default and no search: a helper
+    Ducky located on its own would be a program nobody chose to run. Enabling
+    the bridge without this fails at boot. `DUCKY_WORKFLOW_PYTHON` selects the
+    interpreter and defaults to `python3`.
+  - `DUCKY_DEV_WORKFLOW_MUTATION_ENABLED` — whether publishing and onboarding
+    may run. Separate on exactly the terms `DUCKY_APPROVED_ACTIONS_ENABLED` is
+    separate: creating a GitHub issue is an external write. With it off,
+    `$ticket` scans and validates and creates nothing, and `$agentize` refuses.
+  - `DUCKY_DEV_WORKFLOW_GRILL_SKILL` — the ABSOLUTE path to the installed
+    upstream grilling skill. It is read at call time and handed to the
+    conversation provider as instructions for that turn; it is never copied
+    into this repository. `$grill-me` also needs a provider that reports itself
+    `verified`, and refuses rather than faking an interview without one.
+
+  All four have `DUCKY_PROD_*` counterparts, and production reads only its own:
+  a development helper path points at a development dispatcher. Paths must be
+  absolute, and a relative one is refused at boot rather than resolved against
+  whatever directory the process happens to be in.
 
 Edit `config/repos.json` so each slug points at a real checkout. Discord only
 ever supplies a slug; the mapping to an absolute path is operator-controlled.

@@ -153,18 +153,47 @@ export class ForgetService {
 
     const memory = this.deps.memory;
     if (!memory) {
+      // Workflow threads are still removable: they are stored whether or not
+      // continuity is configured, so an unwired memory service must not leave
+      // them behind.
+      const orphaned = this.deps.store.agentThreads.deleteForOwner(actor.discordUserId);
+      if (orphaned > 0) this.record('conversation', 'all', orphaned);
       return {
         turnsDeleted: 0,
         message:
-          'There is nothing to forget: conversation continuity is not configured on this ' +
-          'instance, so no turn is stored. No attachment byte has ever been kept either.',
+          'Conversation continuity is not configured on this instance, so no turn is stored. ' +
+          (orphaned > 0
+            ? `Removed ${orphaned} repository-workflow thread record(s). `
+            : '') +
+          'No attachment byte has ever been kept either.',
       };
     }
 
     const { turnsDeleted, enabled } = memory.forgetConversationFor(actor);
-    this.record('conversation', 'all', turnsDeleted);
+    /**
+     * The repository-workflow threads go with the conversation.
+     *
+     * A thread's stored grill lines are the owner's own words, written in a
+     * conversation, so "forget my conversation" has to mean them too --
+     * leaving them behind would make the reply a half-truth. The binding and
+     * the card state go with them: they describe that same conversation and
+     * none of it is live work.
+     *
+     * Counted and audited exactly like a turn, and by COUNT only.
+     */
+    const workflowThreadsDeleted = this.deps.store.agentThreads.deleteForOwner(
+      actor.discordUserId,
+    );
+    this.record('conversation', 'all', turnsDeleted + workflowThreadsDeleted);
 
-    if (turnsDeleted === 0) {
+    const workflowNote =
+      workflowThreadsDeleted > 0
+        ? ` Also removed ${workflowThreadsDeleted} repository-workflow thread record(s), ` +
+          'including the notes you typed during a grill. Any GitHub issue that was already ' +
+          'created still exists; deleting a record here does not delete published work.'
+        : '';
+
+    if (turnsDeleted === 0 && workflowThreadsDeleted === 0) {
       return {
         turnsDeleted,
         message: enabled
@@ -174,11 +203,20 @@ export class ForgetService {
             'The assistant provider keeps its own session transcript, which this does not reach.',
       };
     }
+    if (turnsDeleted === 0) {
+      return {
+        turnsDeleted,
+        message:
+          'Ducky had stored no conversation turn for you.' + workflowNote +
+          ' This cannot be undone.',
+      };
+    }
     return {
       turnsDeleted,
       message:
-        `Deleted ${turnsDeleted} stored conversation turn(s) across every thread. ` +
-        'This cannot be undone. No attachment byte was ever kept.',
+        `Deleted ${turnsDeleted} stored conversation turn(s) across every thread.` +
+        workflowNote +
+        ' This cannot be undone. No attachment byte was ever kept.',
     };
   }
 

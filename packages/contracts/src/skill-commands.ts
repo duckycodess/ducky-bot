@@ -32,8 +32,6 @@ export const isSkillCommand = (s: string): s is SkillCommand =>
  * the exact `agent:ready` label only when it is passed through.
  */
 export const READY_FLAG = '--ready';
-/** Validate and render without any GitHub mutation. */
-export const DRAFT_FLAG = '--draft';
 
 /** How much of a message is ever read as a command. Bounds the parser's work. */
 export const SKILL_COMMAND_INPUT_MAX = 4_000;
@@ -44,10 +42,15 @@ export interface ParsedSkillCommand {
   readonly command: SkillCommand;
   /** Everything after the token, with recognised flags removed. */
   readonly args: string;
-  /** True only when `--ready` was typed as a bare token by the owner. */
+  /**
+   * True only when `--ready` was typed as a bare token by the owner.
+   *
+   * It is the ONLY flag this parser recognises. Anything else is argument
+   * text: the owner selected three commands and one authorization flag, and
+   * inventing a fourth option here would be the new command name the ticket's
+   * non-goals rule out.
+   */
   readonly ready: boolean;
-  /** True only when `--draft` was typed as a bare token by the owner. */
-  readonly draft: boolean;
 }
 
 /**
@@ -103,18 +106,16 @@ export function parseSkillCommand(text: string): ParsedSkillCommand | undefined 
   const scannable = stripCode(rest);
   const tokens = scannable.split(/\s+/).filter(Boolean);
 
-  // Flags are only ever recognised for the command that defines them, and
-  // only as bare tokens.
+  // Recognised only for the command that defines it, and only as a bare token.
   const ready = token === '$ticket' && tokens.includes(READY_FLAG);
-  const draft = token === '$ticket' && tokens.includes(DRAFT_FLAG);
 
   const args = rest
     .split(/\s+/)
-    .filter((t) => t !== READY_FLAG && t !== DRAFT_FLAG)
+    .filter((t) => t !== READY_FLAG)
     .join(' ')
     .trim();
 
-  return { command: token, args, ready, draft };
+  return { command: token, args, ready };
 }
 
 /**

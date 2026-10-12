@@ -392,6 +392,40 @@ Still open:
 
 ---
 
+## 2F — The repository workflow bridge ✅ delivered (integration NOT certified)
+
+`$grill-me`, `$ticket` and `$agentize`, recognised only as the first unquoted
+token of an owner's message, bridging a Discord thread to the installed Agent
+Flow front door. See
+[ADR 0025](decisions/0025-exclusive-skill-command-entry-points.md).
+
+Delivered: a closed three-token parser that reads quotes, fences and inline
+code as data and never infers `--ready`; a typed port onto the installed
+helper, driven through `runArgv` with a mandatory timeout, a bounded buffer and
+a command-policy assertion per call; a durable per-thread repository binding
+with one canonical TicketSpec id reused on retries; one status card edited in
+place with real Details / View issue / Cancel controls; and honest status words
+that keep `published`, `queued` and "a worker started" three different things.
+
+Removed in the same milestone: the `implement in <repo>: <task>` natural-
+language job path, because two engineering entry points means one of them is
+the one nobody checks.
+
+**What is NOT delivered is the certification.** Every test drives a recording
+stand-in, because invoking the real publisher creates a GitHub issue. The
+blocker and exactly what would clear it are in
+[CURRENT_STATE](CURRENT_STATE.md#detail-the-blockers-and-what-would-clear-each).
+
+🔶 **Open: the dispatcher's merge policy for this repository.**
+`duckycodess/ducky-bot` is registered without `completion: pr_only`, so the
+installed dispatcher may merge an agent pull request automatically once its
+worker signs off. Ducky reports that on the card when a ticket is queued and
+can do nothing else about it: the registration lives outside this repository
+and changing it is the owner's decision. See
+[CURRENT_STATE](CURRENT_STATE.md#detail-what-queueing-a-ticket-can-actually-end-in).
+
+---
+
 ## 🔶 Open: "public output" — which of three different things?
 
 The owner has said public output is acceptable and that they dislike ephemeral

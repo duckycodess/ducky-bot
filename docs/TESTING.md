@@ -39,12 +39,56 @@ phase as a no-op, and every edge names a known phase; and the detailed owner
 label refines only a running job, never rendering a stale phase on a paused or
 finished one.
 
-**contracts / command policy** — nothing in the table is classified above a
-local mutation; no forbidden verb appears anywhere in the table itself; an
+**contracts / command policy** — nothing reachable by an ordinary caller is
+classified above a local mutation, and the entries that ARE external mutations
+(`git push`, `gh pr create`, and the installed front door's `ticket` and
+`agentize`) are refused unless the caller explicitly raises its own ceiling; no forbidden verb appears anywhere in the table itself; an
 unclassified command and an unknown subcommand are REFUSED rather than allowed
 by default; a forbidden verb is caught before the table is consulted and even
 when buried mid-argv; a `--flag` is not mistaken for a verb; the longest verb
 match wins; and every argv the frozen `gh` table can actually produce passes.
+
+**contracts / skill commands** — the three workflow tokens are recognised only
+in FIRST position; a fenced block, a quote prefix, an inline code span, a
+mid-sentence mention and a near-miss token (`$ticketing`, `$ticket:`) all mean
+nothing; `ticket it`, `queue it`, `implement this` and `make this agent ready`
+are ordinary English; `--ready` is read only as a bare token, only on
+`$ticket`, and never from inside a code span; and the card vocabulary never
+labels a queued ticket as running or a published one as queued.
+
+**adapters / front door** — every operation the adapter can construct is
+classified, and `ticket` / `agentize` are refused by the ordinary local-only
+ceiling; the argv is an array with the interpreter, the script path and the
+verb, with a timeout and a bounded buffer; only narrow fields cross the port,
+so the inventory's file LIST never leaves it; publishing and onboarding refuse
+without their own opt-in and spawn nothing when they do; `--ready` appears only
+when asked for; an `agent:*` label and a malformed repository are refused
+before a spawn; the spec file is written `0600` and removed afterwards; a
+structured `ok: false` keeps its reason and never carries stderr; and
+unparseable or empty output is refused WITHOUT being quoted back.
+
+**coordinator / skill bridge** — the end-to-end behaviour of `$grill-me`,
+`$ticket` and `$agentize` against a recording stand-in: a friend's `$ticket` is
+ordinary conversation and reaches no helper; a shared channel never reaches the
+bridge; a single configured repository binds and a second one makes it ASK; an
+explicit rebind clears the canonical id so the retry creates rather than
+enriching the wrong issue; a bare `$ticket` publishes unqueued and `--ready`
+queues and says what that does not prove; a retry reuses the canonical id and
+the issue number; a publisher failure is never reported as queued or started; a
+queue the helper did not verify stays `published`; grilling refuses without a
+verified provider, uses the INSTALLED skill text read from its configured path,
+continues on plain replies even in a channel where conversation is otherwise
+silent, and feeds those lines into the ticket; the card edits one message and
+sends a fresh one at the end, reposts when the owner deleted it, carries
+Details / View issue / Cancel, and renders no host path.
+
+**coordinator / workflow invariants** — the bridge and its presenters name no
+`gh` surface, no issue or label API, and no `JobsService`, and spawn nothing
+themselves; `OWNER_ONLY_COMMANDS` is still exactly twelve and no shared route
+names a card control; a link button admits only an exact https GitHub URL and
+renders with a url and no custom id; and the configuration fails closed -- off
+by default, refusing a relative or missing helper path, refusing publication
+without the bridge, and never letting production inherit a development helper.
 
 **contracts / time** — a timezone is validated against the runtime's own ICU
 data and a bad one throws at startup; a civil day starts at local midnight, not

@@ -52,6 +52,22 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'watch_cancel',
   /** The confirm step of `/forget job`. Signed and bound to the owner. */
   'forget_confirm',
+  /**
+   * The two controls on a repository-workflow card (`$grill-me`, `$ticket`,
+   * `$agentize`).
+   *
+   * No COMMAND is added by the skill bridge: `OWNER_ONLY_COMMANDS` is still
+   * the same twelve, and the bridge rides the existing conversation route
+   * rather than registering a thirteenth. These are interaction kinds, signed
+   * and bound to the owner exactly as every other control is, and they exist
+   * because the ticket requires real buttons rather than action words printed
+   * in message text.
+   *
+   * A card's third control, "View issue", is a LINK. It carries no custom id,
+   * so it cannot act, cannot be replayed, and needs no entry here.
+   */
+  'agent_details',
+  'agent_cancel',
 ] as const;
 export type OwnerOnlyInteractionKind = (typeof OWNER_ONLY_INTERACTION_KINDS)[number];
 

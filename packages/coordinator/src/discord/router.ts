@@ -19,6 +19,7 @@ import type { GitHubWatchService } from '../domain/github-watches.service.js';
 import type { ForgetService } from '../domain/forget.service.js';
 import type { ConversationMemoryService } from '../domain/conversation-memory.service.js';
 import type { IntentsService } from '../domain/intents.service.js';
+import type { SkillBridgeService } from '../domain/skill-bridge.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
@@ -71,6 +72,15 @@ export interface RouterDeps {
    * IT means every message goes straight to the provider, exactly as before.
    */
   readonly intents?: IntentsService;
+  /**
+   * The owner's repository workflow: `$grill-me`, `$ticket`, `$agentize`.
+   *
+   * OMITTING IT DISABLES THE WHOLE BRIDGE, which is the same fail-closed
+   * posture `forget`, `memory` and the attachment config take: an
+   * incompletely wired router must lose a feature, never gain a way to
+   * publish. With it absent, those three tokens are ordinary text.
+   */
+  readonly skillBridge?: SkillBridgeService;
   /**
    * Notified when a provider refuses or fails at the boundary. Fire-and-forget:
    * the owner's reply must not depend on the audit log being writable.
@@ -388,6 +398,40 @@ export class DuckyRouter {
     const attachments = event.attachments ?? [];
 
     if (attachments.length === 0) {
+      /**
+       * The repository workflow comes FIRST, and before the containment rule
+       * below.
+       *
+       * Order is the behaviour here. `$grill-me` opens an interview and the
+       * owner's plain replies continue it, so those replies must be read as
+       * part of the grill before a coding channel's ordinary silence applies
+       * to them -- otherwise configuring a channel for the workflow would make
+       * the workflow unusable in it.
+       *
+       * A configured SHARED channel never reaches the bridge at all. A channel
+       * other people can read is a place to show information, never a place
+       * from which to publish, and a message there stays ordinary
+       * conversation.
+       */
+      if (!this.sharedPolicy.isSharedRequest(event.context)) {
+        const workflow = await this.deps.skillBridge?.handle(actor, {
+          threadKey: event.threadKey,
+          text: event.text,
+          ...(event.context ? { context: event.context } : {}),
+        });
+        if (workflow) {
+          // Recorded like any other exchange, so a follow-up has the context
+          // of what was just asked.
+          this.deps.memory?.record(
+            actor,
+            event.threadKey,
+            { userText: event.text, assistantText: workflow.content ?? '' },
+            event.context,
+          );
+          return workflow;
+        }
+      }
+
       // Deterministic rules FIRST, and only for the owner. A matched intent is
       // answered from stored records or a fixed local table; a matched WRITE is
       // proposed and never applied until the owner confirms in their own words.
@@ -1179,6 +1223,23 @@ export class DuckyRouter {
     this.components.set('watch_cancel', async (actor, entityId) =>
       assistant.watchCancelled(d.githubWatches.cancel(actor, entityId)),
     );
+    /**
+     * The repository-workflow card controls.
+     *
+     * Both are owner-signed and both re-check ownership in the service, like
+     * every other control. An unwired bridge answers the same way a revoked
+     * control does, so a card left in scrollback by a previous configuration
+     * cannot act.
+     */
+    this.components.set('agent_details', async (actor, entityId) => {
+      if (!d.skillBridge) return { content: 'That control is no longer valid.', ephemeral: true };
+      return d.skillBridge.details(actor, entityId);
+    });
+    this.components.set('agent_cancel', async (actor, entityId) => {
+      if (!d.skillBridge) return { content: 'That control is no longer valid.', ephemeral: true };
+      return d.skillBridge.cancel(actor, entityId);
+    });
+
     // The signature is already verified and bound to the owner before this
     // runs; the service re-checks ownership anyway.
     this.components.set('forget_confirm', async (actor, entityId) => {

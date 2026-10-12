@@ -48,6 +48,7 @@ registered.
 | Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
+| Repository workflow bridge (`$grill-me` / `$ticket` / `$agentize`) | **Unit-tested** | Off by default. 39 behaviour tests plus invariants drive a recording stand-in for the installed helper. **The real `workflow.py` has never been called from Ducky on this host**, because calling it creates GitHub issues |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
 ## The development profile is configured and the current process loaded it
@@ -164,13 +165,65 @@ exercised; this says what it does.
   coding jobs and nothing else; `task` takes the personal-record writes;
   `briefing` is reads only; `gpt` is left entirely to the provider, so
   deterministic rules never intercept a sentence meant for the model.
-- **Coding jobs by proposal.** `implement in <repo>: <task>` proposes; an
-  explicit `yes` submits through `JobsService.submit`, the same call
-  `/job submit` makes, so the owner check, allowlist, `allowJobs`, placements,
-  reservation and approval gate all stay where they are. The repository is part
-  of the GRAMMAR rather than inferred: a message that names none matches
-  nothing, because guessing would eventually point a real agent with edit
-  capability at the wrong working tree.
+- **Coding jobs by proposal: REMOVED.** `implement in <repo>: <task>` used to
+  propose a coding job that an explicit `yes` submitted through
+  `JobsService.submit`. That rule is gone -- deleted, not disabled -- because
+  the owner's workflow contract is that engineering work starts at
+  `$grill-me`, `$ticket` and `$agentize` and nowhere else, and a sentence that
+  can start a coding agent is one a paste or a quote can start by accident.
+  `IntentsService` is now handed no job capability at all, so there is nothing
+  for a later edit to switch back on. `/job submit` is unchanged: it is
+  owner-only and it is the path `pnpm probe:live-job` certifies.
+- **The repository workflow bridge, OFF by default.** Three commands, each
+  recognised ONLY as the first unquoted token of a message: `$grill-me`,
+  `$ticket`, `$agentize`. A fenced block, a quote prefix, an inline code span
+  and every other first token are data, and no phrase triggers anything --
+  "implement this", "ticket it" and "queue it" are ordinary English. See
+  [decisions/0025](decisions/0025-exclusive-skill-command-entry-points.md).
+  - **Ducky publishes nothing itself.** The installed, user-owned Agent Flow
+    front door keeps the canonical schema, the issue body, the label policy,
+    the Beads graph and the dispatcher registration. Ducky calls it through a
+    typed port and reads structured fields back: no `gh issue create`, no
+    label API, no second pipeline. A test scans the service's source and
+    asserts it names no GitHub surface and spawns nothing.
+  - **Queueing is typed, never inferred.** `--ready` is read only as a bare
+    token on `$ticket`, after code spans are stripped. Ducky reports `queued`
+    only when the owner asked AND the helper verified the exact `agent:ready`
+    label on the issue. The card says in words that this authorizes
+    implementation and is not evidence a worker started, because Ducky never
+    observes a worker.
+  - **Three switches, not one.** The bridge, the helper path, and publication.
+    The third is separate on exactly the terms
+    `DUCKY_APPROVED_ACTIONS_ENABLED` is separate. With publication off,
+    `$ticket` scans and validates and creates nothing. All are profile-scoped
+    and production inherits none of them.
+  - **One repository per thread, bound once.** Explicit beats bound, bound
+    beats a single candidate, and anything else ASKS rather than guessing. A
+    rebind clears the canonical id and the issue, so a retry cannot enrich an
+    issue in a different repository. Host paths are never rendered.
+  - **The grill is the installed skill's own text**, read from a configured
+    absolute path at call time and handed to the provider as instructions for
+    that turn. Nothing is copied into this repository. Without a `verified`
+    provider, `$grill-me` refuses rather than printing a fixed list of
+    questions and calling it an interview. Plain replies continue an open
+    interview, and they are read BEFORE the coding channel's ordinary
+    conversation silence so configuring a channel for the workflow does not
+    make the workflow unusable in it.
+  - **The ticket is the owner's own words.** Acceptance criteria are the lines
+    they typed, in the command and during the grill, bounded at 24 lines per
+    thread. Nothing is generated: a requirement Ducky invented would be the
+    one part of a contract nobody wrote.
+  - **One card, edited in place**, with real controls -- a signed Details, a
+    signed Cancel while the run is live, and a "View issue" LINK that carries
+    no custom id and whose URL the sanitizer admits only as an exact https
+    GitHub URL. A terminal outcome sends a fresh card rather than an edit
+    somebody has to scroll back for. `OWNER_ONLY_COMMANDS` is unchanged at
+    twelve; two owner-only interaction kinds were added.
+  - **A shared channel never reaches it.** A message there is ordinary
+    conversation, and a non-owner's `$ticket` is ordinary conversation
+    anywhere.
+  - **`/forget conversation` removes the thread records**, grill notes
+    included, and says plainly that it cannot remove a published GitHub issue.
 - **Briefings to the DM, the briefing channel, or both.**
   `DUCKY_BRIEFING_DELIVERY`, default `dm`. Each target is its own ledger row,
   so the two copies succeed, fail and retry independently; `channel` or `both`
@@ -636,9 +689,10 @@ away. It now also records `auth.failed`, `auth.replay_detected`,
 `authz.refused` (the **role**, never a Discord id), `rate_limit.exceeded` — for
 both the Discord buckets (the **bucket**) and the HTTP routes (the **route**) —
 `credential.reloaded`, `retention.pruned`, `data.deleted`,
-`approval.requested`, `approval.expired`, `provider.failed` and
-`config.rejected`. None says why authentication failed, and none records the
-material that failed.
+`approval.requested`, `approval.expired`, `provider.failed`,
+`config.rejected` and `workflow.requested` (the command token and the status
+word, never the repository or anything the owner typed). None says why
+authentication failed, and none records the material that failed.
 
 Local commit/push/PR outcomes map onto the existing `approval.execution_*`
 events, whose detail carries the action kind and, on failure, the redacted
@@ -651,6 +705,43 @@ table's CHECK constraint does not allow is dropped **silently**. That happened;
 migration 13 widens the constraint, migration 15 widens it again for the
 approval, provider and configuration subject kinds, and a test now asserts every
 declared event, actor kind and subject kind is actually persistable.
+
+## Detail: what queueing a ticket can actually end in
+
+This was inspected rather than assumed, because the ticket that asked for the
+workflow bridge named it as a risk: **ticket prose cannot enforce a merge
+policy.**
+
+What the installed dispatcher does, read from its own source and its own
+configuration on this host:
+
+- `~/.config/agent-flow/config.json` registers **`duckycodess/ducky-bot` as
+  `enabled: true` with no `completion` key.** Two other registrations on this
+  host DO set `completion: pr_only`; this repository is not one of them.
+- `agentflow.py`'s `auto_merge` returns early **only** when the registration
+  says `completion == "pr_only"`. Otherwise, once its own `merge_ready` gate
+  passes -- an explicit worker signoff (`ready_to_merge: true`, empty
+  `merge_blockers`, a `pr_url` matching the open PR), GitHub reporting
+  `mergeStateStatus == "CLEAN"`, and the required checks green -- it runs
+  `gh pr merge … --merge` or `--rebase` with `--match-head-commit`. It refuses
+  when the repository permits only squash, because that would lose the commit
+  history.
+
+**So an `agent:ready` label on a ducky-bot issue can end in an automatic merge
+to the default branch.** That is the dispatcher's configured behaviour, it is
+not new, and nothing in Ducky changes it: Ducky applies no label itself, and
+the only thing it can do about this is say so.
+
+It does say so. When `$ticket --ready` succeeds, the card states which policy
+the registration carries -- `pr_only` and the dispatcher stops at a pull
+request, or not `pr_only` and the dispatcher may merge once its worker signs
+off. The fact is read from the registration the installed helper reports, so
+the card cannot drift from the configuration.
+
+**Changing it is an operator decision and was deliberately not made here.**
+Setting `completion: pr_only` for `duckycodess/ducky-bot` is a change to the
+dispatcher's own configuration, outside this repository, and the owner makes
+it or does not.
 
 ## Detail: the certified production code path
 
@@ -808,6 +899,7 @@ stays `false` and `/status` reports `experimental`.
 | GitHub repository watches | **Now observed against a real repository, in part.** `pnpm probe:gh-live` drives the shipped `GhCliReader` and the watch loop against `duckycodess/ducky-bot` (watch-only, `allowJobs: false`). Five read surfaces — `repoView`, `prList`, `prListAll`, `runList`, `issueList` — returned live responses that the production schemas accepted; the watch loop observed the repository and then produced NOTHING on an identical second pass, which is the deduplication property a watch lives or dies by and which had only ever been tested against a mock. `prView` / `prChecks` / `prReviews` remain **unexercised**: that repository has no pull request, open or closed, and opening one is a GitHub write. Nothing reached Discord — the loop ran through the real composition root with an in-memory database and the mock transport. Previously, and still true of the unexercised surfaces: |
 | GitHub repository watches (the rest) | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
 | Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
+| Repository workflow bridge | **Unit-tested against a stand-in, and that is the whole of it.** 39 behaviour tests plus invariant tests drive `MockFrontDoor`, which records every call: the `--ready` flag, the canonical id reuse, the issue number on a retry. **The installed `workflow.py` has never been invoked by Ducky on this host.** It could not be without creating a GitHub issue on a real repository, and no disposable registered repository exists here to point it at. So: the argv the adapter builds is tested, the policy refusals are tested, the temp-file lifetime is tested, and the end-to-end integration is NOT certified. |
 | Azure deployment | Documented only; nothing provisioned. |
 
 ## Detail: the blockers, and what would clear each
@@ -826,6 +918,7 @@ would unblock it.
 | Verified dependency checking | The GitHub CI checker still has never run against a real repository — the watched one has no pull request, so `prChecks` has nothing to check. It reports `verified: false` and the resolver refuses its `ready`. | One recorded live check against a repository with a PR. It can already **fail** a job on a definite CI failure. |
 | Live Discord delivery | **Partially verified.** All twelve commands are registered (read back with `--diff`), the gateway accepts the connection with the MessageContent intent (`probe:discord-gateway`, READY in 2 276 ms), and the owner confirmed one GPT guild-message round trip after the restart. Slash-command delivery, DMs, reminders, briefings, watches and shared-channel posts remain unverified live. | Interaction records that outlive the terminal. The coordinator logs boot diagnostics and nothing else, so the owner-confirmed reply leaves no durable local interaction record. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
+| A certified repository-workflow run | Invoking the installed publisher creates a GitHub issue, and no disposable registered repository is configured on this host to create one in. Every test therefore drives a recording stand-in. | A disposable repository with an enabled dispatcher registration, and a probe on the model of `probe:live-job`: one unqueued publication, one retry proving the canonical id is reused and the same issue enriched, and one `--ready` run proving the exact label is applied and read back. Until then the bridge is unit-tested and nothing more. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
 
 ## Deferred
@@ -838,8 +931,15 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**90 files, 1217 tests**) and `pnpm build` all
-pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
+`pnpm typecheck`, `pnpm test` (**95 files, 1309 tests**) and `pnpm build` all
+pass on this host, with one standing caveat recorded honestly: seven tests fail
+in a FRESH worktree and fail identically at the previous commit. Four in
+`outbound.test.ts` and one in `result-intake.test.ts` assert on the literal
+path `/home/tj`, which is what the redactor folds only on the machine whose
+home directory that is; two in `placements.test.ts` read `config/repos.dev.json`,
+which is gitignored host configuration and absent from a clean checkout. None
+of the seven is about behaviour, and none was introduced by the workflow
+bridge. See [TESTING.md](TESTING.md) for what each suite guarantees
 and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
 what each step does **not** prove.
 

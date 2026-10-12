@@ -138,6 +138,7 @@ export class FrontDoorCli implements FrontDoorPort {
       dirty: data['dirty'] === true,
       registered: isRecord(registration),
       registrationEnabled: isRecord(registration) && registration['enabled'] === true,
+      completionPolicy: isRecord(registration) ? str(registration['completion']) : undefined,
       activeJobs: active,
       signalCount: Array.isArray(data['signals']) ? data['signals'].length : 0,
       hasWorkflowContract: isRecord(data['workflow']),

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
-  type ConversationProvider, type DependencyChecker, type GitHubReader,
+  type ConversationProvider, type DependencyChecker, type FrontDoorPort, type GitHubReader,
 } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
 import type { ActionPerformer } from '../src/domain/action-performer.js';
@@ -86,6 +86,14 @@ export interface HarnessOptions {
   readonly dependencyChecker?: DependencyChecker;
   /** Replaces the approved-action performer in service-level tests. */
   readonly actionPerformer?: ActionPerformer;
+  /**
+   * Replaces the installed workflow helper.
+   *
+   * There is no default: the real helper creates GitHub issues, so a test
+   * that did not supply one must get `DisabledFrontDoor` and prove the
+   * refusal rather than quietly reaching a network.
+   */
+  readonly frontDoor?: FrontDoorPort;
 }
 
 /**
@@ -149,6 +157,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.dependencyChecker ? { dependencyChecker: opts.dependencyChecker } : {}),
       ...(opts.actionPerformer ? { actionPerformer: opts.actionPerformer } : {}),
+      ...(opts.frontDoor ? { frontDoor: opts.frontDoor } : {}),
       ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),

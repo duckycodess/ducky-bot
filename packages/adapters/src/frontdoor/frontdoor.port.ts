@@ -53,6 +53,21 @@ export interface FrontDoorInspection {
   /** Whether the dispatcher already has an enabled registration for this repo. */
   readonly registered: boolean;
   readonly registrationEnabled: boolean;
+  /**
+   * The registration's completion policy, exactly as the dispatcher records it.
+   *
+   * Carried because it is the one fact that decides what queueing a ticket can
+   * END in. A registration with `pr_only` stops at a pull request awaiting a
+   * human; a registration without it permits the dispatcher's own automatic
+   * merge once its worker signs off and GitHub reports the branch cleanly
+   * mergeable. Ducky cannot change that and does not try -- but an owner
+   * pressing `--ready` deserves to be told which one they are queueing into,
+   * because ticket prose cannot enforce a merge policy.
+   *
+   * `undefined` means the registration states none, which is the
+   * automatic-merge-permitted default.
+   */
+  readonly completionPolicy: string | undefined;
   /** Whether a worker currently owns a checkout here. */
   readonly activeJobs: number;
   /** Counts only. The file list itself is an inventory of somebody's machine. */

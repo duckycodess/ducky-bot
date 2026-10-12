@@ -1,10 +1,11 @@
 import {
   DeterministicScheduleExtractor, FileCredentialStore, GhCliReader, HerdrCli,
-  DisabledConversationProvider, MemoryCredentialStore, MockConversationProvider, GatewayOpenClawProvider,
+  DisabledConversationProvider, DisabledFrontDoor, FrontDoorCli, MemoryCredentialStore,
+  MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
   GitHubCiDependencyChecker, UnavailableDependencyChecker,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
-  type GitHubReader, type ScheduleExtractionProvider,
+  type FrontDoorPort, type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
 import {
   AUDIT_OWNER_REF, DuckyError,
@@ -15,7 +16,7 @@ import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -43,6 +44,7 @@ import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
 import { BriefingNotifier } from './domain/briefing-notifications.service.js';
 import { IntentsService } from './domain/intents.service.js';
+import { SkillBridgeService, type WorkflowRepository } from './domain/skill-bridge.service.js';
 import { DependencyResolver } from './domain/dependency-resolver.js';
 import { DuckyRouter } from './discord/router.js';
 import { MockDiscordTransport } from './discord/mock.transport.js';
@@ -68,6 +70,11 @@ export interface AppOverrides {
   readonly herdrVerified?: boolean;
   /** Test/integration override for the explicitly invoked action performer. */
   readonly actionPerformer?: ActionPerformer;
+  /**
+   * Test/integration override for the installed workflow helper. The real one
+   * creates GitHub issues, so every test drives a recording stand-in.
+   */
+  readonly frontDoor?: FrontDoorPort;
   /**
    * Injected clock for the daily assistant. Tests drive reminder
    * materialization, due dates and briefing day boundaries through this
@@ -119,6 +126,8 @@ export interface App {
   readonly conversationMemory: ConversationMemoryService;
   /** Deterministic natural-language intents. Owner-only, provider-free. */
   readonly intents: IntentsService;
+  /** The owner-only repository workflow bridge. Off unless configured. */
+  readonly skillBridge: SkillBridgeService;
   /** Reported by /status and asserted by tests; off by default. */
   readonly conversationAttachments: ConversationAttachmentConfig;
   readonly sharedPolicy: SharedChannelPolicy;
@@ -288,6 +297,25 @@ export function createApp(
       : new UnavailableDependencyChecker());
   const dependencies = new DependencyResolver({ store, checker: dependencyChecker });
 
+  /**
+   * The installed workflow front door.
+   *
+   * `DisabledFrontDoor` is the shipped default and refuses everything, so an
+   * instance that was never configured for the workflow cannot reach it.
+   * Publication and onboarding need their OWN flag on top of the bridge being
+   * enabled -- the same two-key shape the approved-action performer has.
+   */
+  const bridgeConfig = resolveSkillBridge(env);
+  const frontDoor: FrontDoorPort =
+    overrides.frontDoor ??
+    (bridgeConfig.enabled && bridgeConfig.program
+      ? new FrontDoorCli({
+          program: bridgeConfig.program,
+          interpreter: bridgeConfig.interpreter,
+          mutationEnabled: bridgeConfig.mutationEnabled,
+        })
+      : new DisabledFrontDoor());
+
   // Opt-in, profile-scoped, and empty by default: with nothing configured the
   // shared surface does not exist at all.
   const sharedPolicy = new SharedChannelPolicy(resolveSharedChannelIds(env));
@@ -331,6 +359,59 @@ export function createApp(
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
+  });
+
+  /**
+   * The repository workflow bridge.
+   *
+   * It is handed NO `JobsService`, deliberately: the dispatcher's queue and
+   * Ducky's own executor are two different admission paths, and this one must
+   * be unable to reach the other. The repositories it can address are the
+   * configured ones that carry a GitHub identity -- frozen configuration,
+   * never a database read.
+   */
+  const workflowRepositories = (): readonly WorkflowRepository[] =>
+    allowlist
+      .list()
+      .filter((r) => r.enabled && r.github !== null)
+      .map((r) => ({
+        slug: r.slug,
+        repository: `${r.github!.owner}/${r.github!.repo}`,
+        checkoutRoot: r.absolutePath,
+      }));
+
+  const skillBridge = new SkillBridgeService({
+    store,
+    authz,
+    signer,
+    frontDoor,
+    transport,
+    conversation,
+    clock,
+    config: {
+      enabled: bridgeConfig.enabled,
+      ...(bridgeConfig.grillSkillPath === undefined
+        ? {}
+        : { grillSkillPath: bridgeConfig.grillSkillPath }),
+    },
+    repositories: workflowRepositories,
+    audit: ({ command, outcome, status }) => {
+      try {
+        store.auditLog.record({
+          event: 'workflow.requested',
+          actorKind: 'owner',
+          actorRef: AUDIT_OWNER_REF,
+          subjectKind: 'route',
+          subjectRef: 'workflow',
+          outcome: outcome === 'ok' ? 'ok' : outcome === 'refused' ? 'refused' : 'failed',
+          // The COMMAND and the resulting status word, never the repository,
+          // the issue body or anything the owner typed.
+          detail: `${command} -> ${status}`,
+        });
+      } catch {
+        /* a record is never worth failing a command */
+      }
+    },
   });
   const attachmentBudget = new HourlyBudget(env.SCHEDULE_ATTACHMENTS_PER_HOUR);
   const conversationAttachmentBudget = new HourlyBudget(env.CONVERSATION_ATTACHMENTS_PER_HOUR);
@@ -384,6 +465,7 @@ export function createApp(
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
     githubWatches: `${store.githubWatches.countActive(authz.ownerId)} active`,
+    repositoryWorkflow: skillBridge.describe(),
   });
 
   const router = new DuckyRouter({
@@ -402,6 +484,7 @@ export function createApp(
     forget,
     memory: conversationMemory,
     intents,
+    skillBridge,
     buckets,
     onProviderFailure: ({ provider, code }) => {
       try {
@@ -443,7 +526,7 @@ export function createApp(
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
-    retention, forget, conversationMemory, intents,
+    retention, forget, conversationMemory, intents, skillBridge,
     close: () => store.db.close(),
   };
 }

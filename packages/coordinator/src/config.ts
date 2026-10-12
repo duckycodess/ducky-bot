@@ -204,6 +204,49 @@ export const EnvSchema = z.object({
    */
   DUCKY_BRIEFING_DELIVERY: z.enum(BRIEFING_DELIVERY_MODES).default('dm'),
 
+  /**
+   * The repository workflow bridge (`$grill-me`, `$ticket`, `$agentize`).
+   *
+   * OFF by default, profile-scoped, and split into THREE separate decisions
+   * rather than one flag, because they are three different risks:
+   *
+   * 1. `ENABLED` -- whether the three tokens mean anything at all.
+   * 2. `WORKFLOW` -- the absolute path to the installed helper. There is no
+   *    default and no search: a helper Ducky found on its own is a program
+   *    nobody chose.
+   * 3. `MUTATION_ENABLED` -- whether publishing and onboarding may run.
+   *    Separate on exactly the terms `DUCKY_APPROVED_ACTIONS_ENABLED` is
+   *    separate: an external write is an operator decision, not something a
+   *    feature flag sweeps in. With it off the bridge reads and validates and
+   *    creates nothing.
+   *
+   * Production reads only its own scoped names, like every other
+   * cross-profile setting: a development helper path pointing at a
+   * development dispatcher must never publish production work.
+   */
+  DUCKY_SKILL_BRIDGE_ENABLED: bool(false),
+  DUCKY_DEV_SKILL_BRIDGE_ENABLED: bool(false),
+  DUCKY_PROD_SKILL_BRIDGE_ENABLED: bool(false),
+  DUCKY_WORKFLOW_HELPER: z.string().optional(),
+  DUCKY_DEV_WORKFLOW_HELPER: z.string().optional(),
+  DUCKY_PROD_WORKFLOW_HELPER: z.string().optional(),
+  /** The interpreter the helper runs under. A bare name or an absolute path. */
+  DUCKY_WORKFLOW_PYTHON: z.string().default('python3'),
+  DUCKY_WORKFLOW_MUTATION_ENABLED: bool(false),
+  DUCKY_DEV_WORKFLOW_MUTATION_ENABLED: bool(false),
+  DUCKY_PROD_WORKFLOW_MUTATION_ENABLED: bool(false),
+  /**
+   * The INSTALLED upstream grilling skill, by absolute path.
+   *
+   * Read at call time and handed to the provider as instructions for that
+   * turn. Never copied into this repository: the skill is the user's own
+   * installation, and a copy here would be a second version of somebody
+   * else's method.
+   */
+  DUCKY_WORKFLOW_GRILL_SKILL: z.string().optional(),
+  DUCKY_DEV_WORKFLOW_GRILL_SKILL: z.string().optional(),
+  DUCKY_PROD_WORKFLOW_GRILL_SKILL: z.string().optional(),
+
   SCHEDULE_BINARY_EXTRACTION_ENABLED: bool(false),
   SCHEDULE_MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(SCHEDULE_MAX_ATTACHMENT_BYTES),
   SCHEDULE_ATTACHMENTS_PER_HOUR: z.coerce.number().int().positive().default(SCHEDULE_ATTACHMENTS_PER_HOUR),
@@ -570,3 +613,80 @@ export function resolveCliPaths(env: NodeJS.ProcessEnv): { dbPath: string; crede
 
   return { dbPath, credentialsFile };
 }
+
+/**
+ * The workflow bridge's settings for THIS profile.
+ *
+ * Same isolation rule as every other cross-profile setting: production reads
+ * only its own scoped names and never inherits the unscoped ones, because a
+ * development helper path points at a development dispatcher and publishing
+ * production work through it would be the wrong repository, the wrong
+ * registration and the wrong queue.
+ *
+ * Paths are required to be ABSOLUTE, and a relative one is refused at boot
+ * rather than resolved against whatever directory the process happens to be
+ * in. There is no search and no default location: a helper Ducky located on
+ * its own is a program nobody chose to run.
+ */
+export const resolveSkillBridge = (env: Env): {
+  enabled: boolean;
+  program: string | undefined;
+  interpreter: string;
+  mutationEnabled: boolean;
+  grillSkillPath: string | undefined;
+} => {
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scoped = <T>(prod: T, dev: T, unscoped: T): T =>
+    isProd ? prod : (dev || unscoped);
+
+  const enabled = isProd
+    ? env.DUCKY_PROD_SKILL_BRIDGE_ENABLED
+    : env.DUCKY_DEV_SKILL_BRIDGE_ENABLED || env.DUCKY_SKILL_BRIDGE_ENABLED;
+
+  const program = scoped(
+    blankToUndefined(env.DUCKY_PROD_WORKFLOW_HELPER),
+    blankToUndefined(env.DUCKY_DEV_WORKFLOW_HELPER),
+    blankToUndefined(env.DUCKY_WORKFLOW_HELPER),
+  );
+  const grillSkillPath = scoped(
+    blankToUndefined(env.DUCKY_PROD_WORKFLOW_GRILL_SKILL),
+    blankToUndefined(env.DUCKY_DEV_WORKFLOW_GRILL_SKILL),
+    blankToUndefined(env.DUCKY_WORKFLOW_GRILL_SKILL),
+  );
+  const mutationEnabled = isProd
+    ? env.DUCKY_PROD_WORKFLOW_MUTATION_ENABLED
+    : env.DUCKY_DEV_WORKFLOW_MUTATION_ENABLED || env.DUCKY_WORKFLOW_MUTATION_ENABLED;
+
+  for (const [name, value] of [
+    ['DUCKY_WORKFLOW_HELPER', program],
+    ['DUCKY_WORKFLOW_GRILL_SKILL', grillSkillPath],
+  ] as const) {
+    if (value !== undefined && !value.startsWith('/')) {
+      throw new DuckyError('invalid_input', `${name} must be an absolute path.`);
+    }
+  }
+  // Enabling the bridge without telling it where the helper is would produce a
+  // feature that refuses every command at runtime. Refused at boot instead.
+  if (enabled && program === undefined) {
+    throw new DuckyError(
+      'invalid_input',
+      'The workflow bridge is enabled but no helper path is configured.',
+    );
+  }
+  // And asking for external mutation without the bridge itself is a setting
+  // that cannot mean anything.
+  if (mutationEnabled && !enabled) {
+    throw new DuckyError(
+      'invalid_input',
+      'Workflow publishing is enabled but the workflow bridge is not.',
+    );
+  }
+
+  return {
+    enabled,
+    program,
+    interpreter: env.DUCKY_WORKFLOW_PYTHON,
+    mutationEnabled,
+    grillSkillPath,
+  };
+};

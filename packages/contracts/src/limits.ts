@@ -349,3 +349,58 @@ export type DuckyColor = (typeof DUCKY_COLORS)[keyof typeof DUCKY_COLORS];
 export const EMBED_COLOR_MAX = 0xff_ff_ff;
 export const isValidEmbedColor = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= EMBED_COLOR_MAX;
+
+// ---- native thread conversations (issue #4) ---------------------------------
+/**
+ * Discord's own ceiling for a thread name. Ducky builds the name itself from a
+ * fixed prefix and a sanitized excerpt, so this is a clamp on OUR output rather
+ * than a guess about the API.
+ */
+export const THREAD_NAME_MAX = 100;
+/**
+ * How much of the starter message may appear in the thread name.
+ *
+ * The name is visible to everyone who can see the parent channel, including
+ * people who cannot read the thread's later turns, so it is deliberately a
+ * short excerpt rather than the whole first message.
+ */
+export const THREAD_NAME_EXCERPT_MAX = 60;
+/** Seven days, in minutes. The longest auto-archive Discord offers. */
+export const THREAD_AUTO_ARCHIVE_MINUTES = 10_080;
+
+/**
+ * How many BYTES of prompt context one turn may carry.
+ *
+ * A byte budget, not a token budget, and that distinction is the honest part:
+ * no provider on this host reports a token limit, and inventing a token count
+ * from a character count would be a measurement nobody made. Bytes are what
+ * can actually be counted here, so bytes are what is bounded.
+ *
+ * The default is deliberately conservative. A turn whose context cannot be
+ * brought under it is REFUSED rather than silently truncated, because a model
+ * answering from half a conversation it was not told it was missing is worse
+ * than a clear refusal.
+ */
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT = 24_000;
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_MIN = 2_000;
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_MAX = 400_000;
+/** A compact checkpoint is a summary. Past this it is a transcript again. */
+export const CONVERSATION_CHECKPOINT_TEXT_MAX = 4_000;
+/**
+ * How many recent turns a compaction keeps verbatim beside the checkpoint.
+ *
+ * Small on purpose: the checkpoint carries the durable decisions, and the
+ * recent turns carry the thing being talked about right now.
+ */
+export const CONVERSATION_COMPACT_KEEP_TURNS = 10;
+/**
+ * How many turns one thread-scoped read will ever return.
+ *
+ * The stored transcript is unbounded while the thread lives, so every read of
+ * it has to be bounded somewhere; this is that bound. It is far above the
+ * replay window and the compaction keep-count, so nothing a prompt needs is
+ * ever cut off by it.
+ */
+export const CONVERSATION_THREAD_READ_MAX = 2_000;
+/** How much of an explicitly selected reply anchor is carried into context. */
+export const CONVERSATION_ANCHOR_TEXT_MAX = 600;

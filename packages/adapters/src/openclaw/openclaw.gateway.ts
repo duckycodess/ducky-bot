@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DuckyError, checkCommandAllowed } from '@ducky/contracts';
-import { RECORDED_CONTRACT_VERSION } from './openclaw.contract.js';
+import { RECORDED_CONTRACT_VERSION, RECORDED_SESSION_DELETION } from './openclaw.contract.js';
 import { assertPrivateGatewayUrl } from './private-url.js';
 import { ATTACHMENTS_UNAVAILABLE_MESSAGE } from './openclaw.mock.js';
 import { OpenClawReplySchema, replyTextFrom } from './openclaw.schema.js';
@@ -12,7 +12,7 @@ import { verifyTextOnlyToolPolicy, type ToolPolicyVerdict } from './openclaw.too
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
 import {
-  NO_ATTACHMENT_CAPABILITY,
+  NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION,
   type ConversationCapabilities, type ConversationInput, type ConversationProvider,
   type ConversationReply,
 } from './openclaw.port.js';
@@ -103,6 +103,24 @@ export class GatewayOpenClawProvider implements ConversationProvider {
    */
   readonly capabilities: ConversationCapabilities = {
     attachments: NO_ATTACHMENT_CAPABILITY,
+    /**
+     * DERIVED from the recorded constant, exactly as `verified` is.
+     *
+     * The CLI has `sessions`, `transcripts` and `memory` commands, so a
+     * deletion surface plausibly exists -- and "plausibly exists" is precisely
+     * the claim this field must not make. Until a narrow deletion command AND
+     * an independent readback have been recorded, the honest answer is no, and
+     * `/forget` reports partial deletion rather than implying a reach Ducky
+     * does not have.
+     */
+    sessionDeletion: RECORDED_SESSION_DELETION === null
+      ? NO_SESSION_DELETION(
+          'no OpenClaw session-deletion contract has been recorded on this host. ' +
+            'Run `pnpm probe:openclaw`; it records the deletion-capable command names, and a ' +
+            'deletion is only ever performed once a narrow command and an independent readback ' +
+            'have both been observed.',
+        )
+      : { supported: true, reason: `recorded contract ${RECORDED_SESSION_DELETION}` },
   };
 
   private readonly bin: string;
@@ -210,10 +228,27 @@ export class GatewayOpenClawProvider implements ConversationProvider {
      * 128 bits of the digest is far past collision risk for one person's
      * conversations, and short enough to stay readable in a session listing.
      */
-    const digest = createHash('sha256')
-      .update(`${input.userId}:${input.threadKey}`)
-      .digest('hex')
-      .slice(0, 32);
+    /**
+     * The EPOCH is part of the digest, and it is what makes `/forget` mean
+     * something on this side of the boundary.
+     *
+     * Ducky cannot delete an OpenClaw session -- no deletion contract is
+     * recorded, see `RECORDED_SESSION_DELETION`. So after a deletion it does
+     * the one thing it honestly can: it stops using the contaminated session.
+     * A bumped epoch digests to a different key, so the next turn opens a new
+     * session and the old context cannot come back.
+     *
+     * It is ORPHANING, not erasure. The old session is still in OpenClaw's own
+     * store, and `/forget` says so rather than letting the owner infer
+     * otherwise. Epoch 0 -- a conversation that has never been forgotten --
+     * digests exactly as it did before this existed, so no existing session is
+     * abandoned by the upgrade.
+     */
+    const epoch = input.sessionEpoch ?? 0;
+    const material = epoch === 0
+      ? `${input.userId}:${input.threadKey}`
+      : `${input.userId}:${input.threadKey}:e${epoch}`;
+    const digest = createHash('sha256').update(material).digest('hex').slice(0, 32);
     return `agent:ducky:${digest}`;
   }
 
@@ -335,6 +370,25 @@ export class GatewayOpenClawProvider implements ConversationProvider {
      * of it.
      */
     const parts = [buildSystemPreamble(this.persona)];
+    /**
+     * The checkpoint goes in LABELLED AS A SUMMARY, above the turns and never
+     * among them.
+     *
+     * It is Ducky's own compacted account of older turns, not something either
+     * party said, so rendering it as `User:` or `Assistant:` would put words in
+     * somebody's mouth -- the same reason the stored role set has no `system`.
+     */
+    if (input.checkpoint) {
+      parts.push('', 'Summary of earlier turns, written by Ducky, not spoken by either party:',
+        input.checkpoint);
+    }
+    if (input.reference) {
+      parts.push(
+        '',
+        'The user is replying to this earlier message from this same thread:',
+        `${input.reference.role === 'user' ? 'User' : 'Assistant'}: ${input.reference.text}`,
+      );
+    }
     const history = (input.history ?? [])
       .map((t) => `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.text}`)
       .join('\n');

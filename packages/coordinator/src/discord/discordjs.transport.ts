@@ -1,7 +1,11 @@
 import { sanitizeOutbound } from './sanitize-outbound.js';
 import { EPHEMERAL_FLAG, toDiscordPayload, toModalPayload } from './payload.js';
+import type { ThreadStartOutcome } from '../domain/conversation-threads.js';
 import type { OutboundMessage, SendTarget } from './message.js';
-import type { DiscordSink, DiscordTransport, Incoming, IncomingHandler } from './transport.js';
+import type {
+  ConversationThreadEntry, DiscordSink, DiscordTransport, Incoming, IncomingAuthorKind,
+  IncomingHandler, IncomingMessage,
+} from './transport.js';
 
 /**
  * The ONLY module allowed to import discord.js (asserted by a test).
@@ -78,6 +82,7 @@ export class DiscordJsTransport implements DiscordTransport {
   readonly kind = 'real';
   #handler: IncomingHandler | undefined;
   #client: unknown;
+  #enterThread: ConversationThreadEntry | undefined;
 
   constructor(
     private readonly token: string,
@@ -97,6 +102,10 @@ export class DiscordJsTransport implements DiscordTransport {
      */
     private readonly persists?: (event: Incoming) => boolean,
   ) {}
+
+  useConversationThreads(enter: ConversationThreadEntry): void {
+    this.#enterThread = enter;
+  }
 
   async start(handler: IncomingHandler): Promise<void> {
     this.#handler = handler;
@@ -153,18 +162,27 @@ export class DiscordJsTransport implements DiscordTransport {
         }
       })();
 
-      void this.route({
+      const event: IncomingMessage = {
         kind: 'message',
         userId: message.author.id,
         text: message.content,
         threadKey: message.channelId,
+        messageId: message.id,
+        authorKind: authorKindOf(message),
         // The same context a command carries. `guildId` is null in a DM, and
         // normalizing it to undefined is what lets every policy tell a private
         // conversation from a guild channel rather than guessing from an id.
         context: {
           channelId: message.channelId,
           guildId: message.guildId ?? undefined,
+          // Present only for a thread. A thread's id is not its parent's, so
+          // without this every configured-channel policy answers "no" for a
+          // thread under that channel.
+          ...(parentChannelIdOf(message) === undefined
+            ? {}
+            : { parentChannelId: parentChannelIdOf(message) }),
         },
+        ...(referenceOf(message) === undefined ? {} : { reference: referenceOf(message) }),
         // Metadata only. Nothing is fetched here; the router decides whether
         // anything may be, and refuses before any download when it may not.
         attachments: [...message.attachments.values()].map((a) => ({
@@ -173,9 +191,9 @@ export class DiscordJsTransport implements DiscordTransport {
           size: a.size,
           url: a.url,
         })),
-      }).then(async (reply) => {
-        if (reply) await message.reply(toDiscordPayload({ ...reply, ephemeral: false }));
-      });
+      };
+
+      void this.deliverMessage(message, event);
     });
 
     client.on(Events.InteractionCreate, (interaction) => {
@@ -214,6 +232,142 @@ export class DiscordJsTransport implements DiscordTransport {
   }
 
   // --------------------------------------------------------------------------
+
+  /**
+   * Routes one message into the conversation it belongs to, and answers THERE.
+   *
+   * The thread decision runs BEFORE routing, because it decides the
+   * `threadKey` everything downstream is scoped by -- memory, participation
+   * and the provider session all key on it.
+   *
+   * A refusal is published in the channel and the message is NOT routed. That
+   * is the important half: a thread that could not be created must never fall
+   * back to answering in the shared parent, because the parent is a different
+   * conversation with a different audience.
+   */
+  private async deliverMessage(
+    message: import('discord.js').Message,
+    event: IncomingMessage,
+  ): Promise<void> {
+    let routed = event;
+    let threadId: string | undefined;
+
+    if (this.#enterThread) {
+      const outcome = await this.#enterThread(event);
+      if (outcome.kind === 'refused') {
+        await message
+          .reply(toDiscordPayload({ content: outcome.message, ephemeral: false }))
+          .catch(() => undefined);
+        return;
+      }
+      if (outcome.kind === 'thread' && outcome.threadId !== event.threadKey) {
+        threadId = outcome.threadId;
+        routed = {
+          ...event,
+          threadKey: outcome.threadId,
+          context: {
+            channelId: outcome.threadId,
+            guildId: event.context?.guildId,
+            // The channel the message was actually typed in becomes the
+            // thread's parent, which is what makes role inheritance and
+            // shared-channel exclusion work on the very first turn.
+            parentChannelId: event.context?.channelId,
+          },
+        };
+      }
+    }
+
+    const reply = await this.route(routed);
+    if (!reply) return;
+    const payload = toDiscordPayload({ ...reply, ephemeral: false });
+
+    if (threadId !== undefined) {
+      const sent = await this.sendToChannel(threadId, payload);
+      if (sent) return;
+      // The thread exists but we cannot post in it. Say so where the owner is
+      // looking, and do NOT publish the answer in the parent instead.
+      await message
+        .reply(
+          toDiscordPayload({
+            content:
+              'I opened a thread for this but could not post in it, so I have not answered. ' +
+              'The bot needs Send Messages in Threads here.',
+            ephemeral: false,
+          }),
+        )
+        .catch(() => undefined);
+      return;
+    }
+    await message.reply(payload).catch(() => undefined);
+  }
+
+  private async sendToChannel(channelId: string, payload: unknown): Promise<boolean> {
+    const client = this.#client as {
+      channels?: { fetch(id: string): Promise<unknown> };
+    } | undefined;
+    if (!client?.channels) return false;
+    try {
+      const channel = (await client.channels.fetch(channelId)) as
+        | { send?: (p: unknown) => Promise<unknown> }
+        | null;
+      if (!channel || typeof channel.send !== 'function') return false;
+      await channel.send(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Opens a native thread, from a message or standalone in a channel.
+   *
+   * The ONLY place thread creation touches Discord, and it reports WHY it
+   * failed rather than collapsing every cause into "no". The distinction
+   * matters to whoever reads the refusal: a missing permission is something
+   * they fix, a rate limit is something they wait out.
+   *
+   * `MESSAGE_ALREADY_HAS_THREAD` (160004) is recovered by the documented
+   * identity -- a thread created from a message carries that message's id --
+   * so a retry rejoins the conversation instead of opening a second one.
+   */
+  async startThread(input: {
+    readonly channelId: string;
+    readonly messageId?: string | undefined;
+    readonly name: string;
+    readonly autoArchiveMinutes: number;
+  }): Promise<ThreadStartOutcome> {
+    const client = this.#client as {
+      channels?: { fetch(id: string): Promise<unknown> };
+    } | undefined;
+    if (!client?.channels) return { ok: false, failure: 'unavailable' };
+
+    try {
+      const channel = (await client.channels.fetch(input.channelId)) as {
+        messages?: { fetch(id: string): Promise<{ startThread(o: unknown): Promise<{ id: string }> }> };
+        threads?: { create(o: unknown): Promise<{ id: string }> };
+      } | null;
+      if (!channel) return { ok: false, failure: 'unavailable' };
+
+      if (input.messageId !== undefined) {
+        if (!channel.messages) return { ok: false, failure: 'unavailable' };
+        const message = await channel.messages.fetch(input.messageId);
+        const thread = await message.startThread({
+          name: input.name,
+          autoArchiveDuration: input.autoArchiveMinutes,
+        });
+        return { ok: true, threadId: thread.id };
+      }
+
+      if (!channel.threads) return { ok: false, failure: 'unavailable' };
+      const thread = await channel.threads.create({
+        name: input.name,
+        autoArchiveDuration: input.autoArchiveMinutes,
+      });
+      return { ok: true, threadId: thread.id };
+    } catch (err) {
+      return threadFailureFrom(err, input.messageId);
+    }
+  }
 
   private async route(event: Incoming): Promise<OutboundMessage | undefined> {
     if (!this.#handler) return undefined;
@@ -336,6 +490,89 @@ export class DiscordJsTransport implements DiscordTransport {
       /* expired */
     }
   }
+}
+
+
+/**
+ * Discord's own code for "that message already has a thread".
+ *
+ * Recovered rather than treated as a failure, by the documented identity: a
+ * thread started from a message IS that message's id. So a retry after a crash
+ * between the API call and the database write rejoins the first thread instead
+ * of opening a second beside it.
+ */
+const MESSAGE_ALREADY_HAS_THREAD = 160004;
+
+/** Discord REST codes that mean a permission is missing rather than a bug. */
+const MISSING_PERMISSION_CODES = new Set([50001, 50013]);
+
+function threadFailureFrom(err: unknown, messageId: string | undefined): ThreadStartOutcome {
+  const e = err as { code?: unknown; status?: unknown };
+  const code = typeof e?.code === 'number' ? e.code : undefined;
+  const status = typeof e?.status === 'number' ? e.status : undefined;
+
+  if (code === MESSAGE_ALREADY_HAS_THREAD && messageId !== undefined) {
+    return { ok: false, alreadyExists: true, threadId: messageId };
+  }
+  if (code !== undefined && MISSING_PERMISSION_CODES.has(code)) {
+    return { ok: false, failure: 'forbidden' };
+  }
+  if (status === 429) return { ok: false, failure: 'rate_limited' };
+  if (status === 403) return { ok: false, failure: 'forbidden' };
+  return { ok: false, failure: 'unavailable' };
+}
+
+/**
+ * Who sent a message, as narrowly as discord.js can say.
+ *
+ * `unknown` rather than a guess when neither flag is readable, because the
+ * thread policy treats unknown exactly like a bot -- a notification feed must
+ * not be able to carpet a configured channel with threads because one field
+ * was missing.
+ */
+function authorKindOf(message: import('discord.js').Message): IncomingAuthorKind {
+  const m = message as unknown as {
+    webhookId?: string | null;
+    author?: { bot?: boolean } | undefined;
+  };
+  if (m.webhookId) return 'webhook';
+  if (m.author?.bot === true) return 'bot';
+  if (m.author?.bot === false) return 'user';
+  return 'unknown';
+}
+
+/** The channel a thread hangs under, or undefined for a top-level channel. */
+function parentChannelIdOf(message: import('discord.js').Message): string | undefined {
+  const channel = message.channel as unknown as {
+    isThread?: () => boolean;
+    parentId?: string | null;
+  };
+  if (typeof channel?.isThread !== 'function' || !channel.isThread()) return undefined;
+  return channel.parentId ?? undefined;
+}
+
+/**
+ * The message this one replies to, as metadata.
+ *
+ * Entirely untrusted and resolved later: the router refuses a reference from
+ * another thread and labels an unreadable one unavailable, rather than
+ * importing either. `referencedMessage` is populated by discord.js only when
+ * it is already cached, which is why the text is optional here.
+ */
+function referenceOf(
+  message: import('discord.js').Message,
+): { messageId: string; channelId?: string; text?: string; authorId?: string } | undefined {
+  const ref = message.reference as { messageId?: string | null; channelId?: string | null } | null;
+  if (!ref?.messageId) return undefined;
+  const cached = (message as unknown as {
+    referencedMessage?: { content?: string; author?: { id?: string } } | null;
+  }).referencedMessage;
+  return {
+    messageId: ref.messageId,
+    ...(ref.channelId ? { channelId: ref.channelId } : {}),
+    ...(cached?.content ? { text: cached.content } : {}),
+    ...(cached?.author?.id ? { authorId: cached.author.id } : {}),
+  };
 }
 
 /**

@@ -13,9 +13,12 @@ import {
 import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
 import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
+import {
+  ConversationThreadPolicy, ConversationThreadService,
+} from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
@@ -116,6 +119,8 @@ export interface App {
   readonly forget: ForgetService;
   /** Bounded conversation continuity. Off unless the operator enabled it. */
   readonly conversationMemory: ConversationMemoryService;
+  /** Native Discord threads as conversations. Off unless a parent is named. */
+  readonly conversationThreads: ConversationThreadService;
   /** Deterministic natural-language intents. Owner-only, provider-free. */
   readonly intents: IntentsService;
   /** Reported by /status and asserted by tests; off by default. */
@@ -315,6 +320,33 @@ export function createApp(
         ...(event.kind === 'command' ? { commandName: event.name } : {}),
       }),
     );
+
+  /**
+   * Native conversation threads.
+   *
+   * Off unless an operator NAMES the channels that may sprout one: creating a
+   * thread is Ducky writing into the owner's guild, so it is opt-in per
+   * channel rather than a boolean, and the list is refused at boot if it names
+   * a shared channel or a non-conversational role channel.
+   *
+   * The starter is the TRANSPORT's, handed in as a function so the service
+   * holds no Discord dependency of its own and a test can drive the whole path
+   * with the mock. A transport that cannot create threads leaves the service
+   * refusing rather than pretending.
+   */
+  const conversationThreads = new ConversationThreadService({
+    store,
+    policy: new ConversationThreadPolicy(
+      { parentChannelIds: resolveThreadParentChannelIds(env) },
+      authz,
+      sharedPolicy,
+    ),
+    startThread: transport.startThread ? (req) => transport.startThread!(req) : undefined,
+  });
+  // The decision lives in the domain; the transport only performs it. Absent
+  // on a transport that does not support threads, which leaves routing exactly
+  // as it was.
+  transport.useConversationThreads?.((event) => conversationThreads.enter({ event }));
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });
@@ -364,8 +396,12 @@ export function createApp(
       ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
       : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
-      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread; /forget conversation deletes them`
+      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread, ` +
+        `or the full transcript of a native thread while it lives; up to ` +
+        `${env.DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES} bytes of context per turn; ` +
+        '/forget conversation deletes them'
       : 'off — nothing you say in conversation is stored',
+    conversationThreads: conversationThreads.describe(),
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
@@ -402,6 +438,7 @@ export function createApp(
     conversation,
     forget,
     memory: conversationMemory,
+    threads: conversationThreads,
     intents,
     buckets,
     onProviderFailure: ({ provider, code }) => {
@@ -444,7 +481,7 @@ export function createApp(
     credentials, conversation, status,
     clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
-    retention, forget, conversationMemory, intents,
+    retention, forget, conversationMemory, conversationThreads, intents,
     close: () => store.db.close(),
   };
 }

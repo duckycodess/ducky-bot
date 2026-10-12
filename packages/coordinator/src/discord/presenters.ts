@@ -301,6 +301,8 @@ export interface ProviderStatus {
   readonly conversationAttachments: string;
   /** Whether anything the owner says in conversation is stored, and for how long. */
   readonly conversationMemory: string;
+  /** Which channels may open native conversation threads, and how many are live. */
+  readonly conversationThreads: string;
   /** Whether briefings are pushed, and at what local times. */
   readonly proactiveBriefings: string;
   readonly orchestrator: string;
@@ -334,6 +336,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Conversation', value: p.conversation, inline: true },
           { name: 'Chat attachments', value: p.conversationAttachments, inline: true },
           { name: 'Chat memory', value: p.conversationMemory, inline: true },
+          { name: 'Chat threads', value: p.conversationThreads, inline: true },
           { name: 'Proactive briefings', value: p.proactiveBriefings },
           { name: 'Orchestrator', value: p.orchestrator, inline: true },
           { name: 'Schedule extraction', value: p.scheduleExtraction, inline: true },

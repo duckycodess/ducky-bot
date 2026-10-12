@@ -98,3 +98,45 @@ export const isSharedReadableRoute = (command: string, subcommand?: string): boo
         ? subcommand === undefined
         : subcommand === r.subcommand || (r.command === 'job' && subcommand === undefined)),
   );
+
+/**
+ * The conversational controls, and the ONLY interaction kinds a non-owner may
+ * ever press.
+ *
+ * Declared as a POSITIVE manifest beside `OWNER_ONLY_INTERACTION_KINDS` rather
+ * than as "whatever is not owner-only", because the two lists together are
+ * what the router asserts its registered component surface against. A new
+ * handler must therefore be added to one of them deliberately; it cannot
+ * become reachable by a non-owner through an omission.
+ *
+ * Both act on a CONVERSATION the presser is already a participant in, and
+ * neither can reach a record, a job, a repository or a provider credential:
+ *
+ * - `conv_branch` starts a separate visible thread seeded only with the one
+ *   anchor the presser explicitly selected;
+ * - `conv_compact` replaces the presser's own prompt context with a summary.
+ *
+ * Visibility is still not authorization. A press is re-checked three ways on
+ * the way in: the signature is bound to the presser, the actor must be
+ * conversationally authorized by the frozen `Authorizer`, and they must
+ * already be a recorded participant of the thread the control names. Seeing a
+ * control in scrollback is not permission to press it.
+ */
+export const CONVERSATIONAL_INTERACTION_KINDS = ['conv_branch', 'conv_compact'] as const;
+export type ConversationalInteractionKind = (typeof CONVERSATIONAL_INTERACTION_KINDS)[number];
+
+export const isConversationalInteractionKind = (n: string): n is ConversationalInteractionKind =>
+  (CONVERSATIONAL_INTERACTION_KINDS as readonly string[]).includes(n);
+
+/**
+ * Every interaction kind this build registers, owner-only and conversational
+ * together.
+ *
+ * The router asserts its registered set equals exactly this union, so the two
+ * manifests cannot overlap and nothing can be registered that appears on
+ * neither.
+ */
+export const ALL_INTERACTION_KINDS: readonly string[] = Object.freeze([
+  ...OWNER_ONLY_INTERACTION_KINDS,
+  ...CONVERSATIONAL_INTERACTION_KINDS,
+]);

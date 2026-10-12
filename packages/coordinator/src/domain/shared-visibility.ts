@@ -50,4 +50,30 @@ export class SharedChannelPolicy {
     if (context.guildId === undefined) return false;
     return this.has(context.channelId);
   }
+
+  /**
+   * Whether this request is in, or in a THREAD UNDER, a configured shared
+   * channel.
+   *
+   * Deliberately NOT folded into `isSharedRequest`. That method decides which
+   * requests get the shared PROJECTION, and the projection is scoped to the
+   * exact channel id it was submitted in -- widening it to parents would make
+   * a thread serve its parent's job list, which is a visibility change nobody
+   * asked for.
+   *
+   * This one answers the different question the exclusions need: *does this
+   * conversation touch a channel other people can read?* A thread under a
+   * shared channel is visible to everybody who can read the parent, so it is
+   * no more private than the parent is -- and it must therefore never become a
+   * conversation store nor sprout a conversation thread.
+   *
+   * Absent context still fails closed to `false` here, the same as everywhere
+   * else: an event with no context cannot be a guild channel at all, so the
+   * caller's own guild check is what contains it.
+   */
+  touchesSharedChannel(context: IncomingContext | undefined): boolean {
+    if (!context) return false;
+    if (context.guildId === undefined) return false;
+    return this.has(context.channelId) || this.has(context.parentChannelId);
+  }
 }

@@ -1,11 +1,14 @@
 import {
   FORGET_TARGETS, isForgetEntityTarget, isForgetTarget, type ForgetEntityTarget,
-  CONVERSATIONAL_ROUTE, CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE,
+  ALL_INTERACTION_KINDS, CONVERSATIONAL_INTERACTION_KINDS, CONVERSATIONAL_ROUTE,
+  CONVERSATION_ANCHOR_TEXT_MAX, CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE,
   DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
-  isBriefingKind, isDuckyError, isSharedReadableRoute, isTaskListFilter,
-  type CaptureState, type OwnerOnlyCommand, type OwnerOnlyInteractionKind,
-  type ReminderListFilter, type TaskListFilter,
+  cleanUntrusted,
+  isBriefingKind, isConversationalInteractionKind, isDuckyError, isSharedReadableRoute,
+  isTaskListFilter,
+  type CaptureState, type ConversationalInteractionKind, type OwnerOnlyCommand,
+  type OwnerOnlyInteractionKind, type ReminderListFilter, type TaskListFilter,
 } from '@ducky/contracts';
 import type { ConversationAttachment, ConversationProvider } from '@ducky/adapters';
 import type { ActorContext, Authorizer } from '../security/authz.js';
@@ -18,6 +21,7 @@ import type { GitHubService } from '../domain/github.service.js';
 import type { GitHubWatchService } from '../domain/github-watches.service.js';
 import type { ForgetService } from '../domain/forget.service.js';
 import type { ConversationMemoryService } from '../domain/conversation-memory.service.js';
+import { threadNameFor, type ConversationThreadService } from '../domain/conversation-threads.js';
 import type { IntentsService } from '../domain/intents.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
@@ -28,7 +32,9 @@ import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import { ChannelRolePolicy } from '../domain/channel-roles.js';
 import { ReplyPersistencePolicy } from '../domain/reply-persistence.js';
 import type { OutboundMessage, OutboundRow } from './message.js';
-import type { Incoming, IncomingAttachment, IncomingContext } from './transport.js';
+import type {
+  Incoming, IncomingAttachment, IncomingContext, IncomingReference,
+} from './transport.js';
 import {
   TOO_MANY_ATTACHMENTS_MESSAGE, attachmentAvailability, conversationAttachmentsUsable,
   downloadConversationAttachment, type ConversationAttachmentConfig,
@@ -66,6 +72,12 @@ export interface RouterDeps {
    * unwired router stores nothing and replays nothing.
    */
   readonly memory?: ConversationMemoryService;
+  /**
+   * Native Discord threads as conversations. OMITTING IT means no message ever
+   * routes into a thread and the Branch and Compact controls never appear --
+   * the same fail-closed posture `memory` and `forget` take.
+   */
+  readonly threads?: ConversationThreadService;
   /**
    * Deterministic natural-language intents on the conversation route. OMITTING
    * IT means every message goes straight to the provider, exactly as before.
@@ -124,6 +136,16 @@ type ComponentHandler = (actor: ActorContext, entityId: string, values?: Record<
 export class DuckyRouter {
   private readonly commands = new Map<string, CommandHandler>();
   private readonly components = new Map<string, ComponentHandler>();
+  /**
+   * The conversational controls, in their OWN map.
+   *
+   * Separate from `components` so the owner-only assertion stays exact: the
+   * owner-only map must equal `OWNER_ONLY_INTERACTION_KINDS` with nothing
+   * added, and a control a non-owner may press cannot be allowed to hide in
+   * it. The two maps are asserted disjoint and their union asserted equal to
+   * `ALL_INTERACTION_KINDS`, so neither can grow by omission.
+   */
+  private readonly conversationalComponents = new Map<string, ComponentHandler>();
   private readonly buckets: CommandBuckets;
   private readonly sharedPolicy: SharedChannelPolicy;
   private readonly channelRoles: ChannelRolePolicy;
@@ -142,6 +164,7 @@ export class DuckyRouter {
       deps.replyPersistence ?? new ReplyPersistencePolicy(this.channelRoles, deps.authz.ownerId);
     this.registerCommands();
     this.registerComponents();
+    this.registerConversationalComponents();
     this.assertSurfaceMatchesManifest();
   }
 
@@ -149,8 +172,14 @@ export class DuckyRouter {
     return [...this.commands.keys()].sort();
   }
 
+  /** The OWNER-ONLY interaction kinds. Deliberately still only those. */
   registeredComponentKinds(): string[] {
     return [...this.components.keys()].sort();
+  }
+
+  /** The controls a conversation participant may press. */
+  registeredConversationalComponentKinds(): string[] {
+    return [...this.conversationalComponents.keys()].sort();
   }
 
   /** Fails at construction if the surface drifts from the manifest. */
@@ -169,7 +198,45 @@ export class DuckyRouter {
     if (kinds.size > 0) {
       throw new Error(`interaction outside OWNER_ONLY_INTERACTION_KINDS: ${[...kinds].join(', ')}`);
     }
+    this.assertConversationalSurfaceMatchesManifest();
     this.assertSharedSurfaceIsReadOnly();
+  }
+
+  /**
+   * The non-owner control surface equals its manifest, exactly, and overlaps
+   * the owner-only one nowhere.
+   *
+   * Three separate assertions because three separate mistakes are possible: a
+   * control registered without being declared, a declared control nobody
+   * implemented, and -- the one that matters -- a kind on BOTH manifests,
+   * which would make an owner-only control reachable through the
+   * conversational gate.
+   */
+  private assertConversationalSurfaceMatchesManifest(): void {
+    const kinds = new Set(this.conversationalComponents.keys());
+    for (const k of CONVERSATIONAL_INTERACTION_KINDS) {
+      if (!kinds.delete(k)) throw new Error(`conversational interaction not registered: ${k}`);
+    }
+    if (kinds.size > 0) {
+      throw new Error(
+        `interaction outside CONVERSATIONAL_INTERACTION_KINDS: ${[...kinds].join(', ')}`,
+      );
+    }
+    for (const k of CONVERSATIONAL_INTERACTION_KINDS) {
+      if (this.components.has(k)) {
+        throw new Error(`interaction kind is both owner-only and conversational: ${k}`);
+      }
+    }
+    const all = new Set([
+      ...this.components.keys(),
+      ...this.conversationalComponents.keys(),
+    ]);
+    if (all.size !== ALL_INTERACTION_KINDS.length) {
+      throw new Error('registered interaction kinds do not match ALL_INTERACTION_KINDS');
+    }
+    for (const k of ALL_INTERACTION_KINDS) {
+      if (!all.has(k)) throw new Error(`interaction kind not registered: ${k}`);
+    }
   }
 
   /**
@@ -192,7 +259,7 @@ export class DuckyRouter {
         throw new Error(`shared route names an interaction kind: ${route.command}`);
       }
     }
-    for (const kind of OWNER_ONLY_INTERACTION_KINDS) {
+    for (const kind of ALL_INTERACTION_KINDS) {
       if (isSharedReadableRoute(kind)) {
         throw new Error(`interaction kind is shared-readable: ${kind}`);
       }
@@ -234,7 +301,23 @@ export class DuckyRouter {
     if (gpt === undefined) return false;
     // A DM, or an event with no context, is not a guild channel.
     if (!context || context.guildId === undefined) return false;
-    return context.channelId !== gpt;
+    if (context.channelId === gpt) return false;
+    /**
+     * A THREAD under the GPT channel is the GPT channel, for containment.
+     *
+     * This is the bug the roadmap recorded: containment compared the incoming
+     * channel id against the configured one, a thread's id is not its
+     * parent's, so every thread under the channel designated for conversation
+     * was silenced -- which is the opposite of what configuring it meant.
+     */
+    if (context.parentChannelId === gpt) return false;
+    /**
+     * A thread under any CONFIGURED CONVERSATION PARENT is a conversation by
+     * construction: Ducky opened it to hold one. Silencing it would mean
+     * creating a thread and then refusing to speak in it.
+     */
+    if (this.deps.threads?.isNativeThread(context.channelId ?? '')) return false;
+    return true;
   }
 
   /**
@@ -364,10 +447,58 @@ export class DuckyRouter {
     customId: string,
     values?: Record<string, string>,
   ): Promise<OutboundMessage> {
+    /**
+     * Which GATE applies is chosen from the id's kind segment before the
+     * signature is checked, and that is safe for one reason: the choice only
+     * ever selects a NARROWER gate, and the signature still has to verify
+     * afterwards for anything to run.
+     *
+     * The kind is covered by the MAC, so a pressed control cannot claim to be
+     * a different kind than it was minted as. An owner-only control therefore
+     * cannot be routed down the conversational path by editing its text: the
+     * edit invalidates the signature, and `verify` refuses it.
+     */
+    if (isConversationalInteractionKind(peekKind(customId))) {
+      return this.handleConversationalComponent(actor, customId, values);
+    }
+
     this.deps.authz.requireOwner(actor);
     const verified = this.deps.signer.verify(customId, actor.discordUserId);
     if (!verified) return { content: 'That control is no longer valid.', ephemeral: true };
     const handler = this.components.get(verified.kind);
+    if (!handler) return { content: 'That control is no longer valid.', ephemeral: true };
+    this.buckets.check('interaction', actor.discordUserId);
+    return handler(actor, verified.entityId, values);
+  }
+
+  /**
+   * A conversational control press: Branch or Compact.
+   *
+   * Three independent checks, and all three have to pass. Each exists because
+   * the other two do not cover it:
+   *
+   * 1. **The signature**, bound to the PRESSER. A control copied out of
+   *    scrollback by somebody else does not verify for them, so a shared
+   *    thread's visible buttons are not usable by every reader of the channel.
+   * 2. **Conversational authorization**, from the frozen `Authorizer`. Someone
+   *    removed from the whitelist stops being able to press controls they
+   *    already hold, with no migration.
+   * 3. **Participation**, re-read from the database on every press. A proof is
+   *    issued only when a participation row exists, so somebody who can see
+   *    the thread but has never spoken in it cannot act on it.
+   *
+   * Seeing a control is still not permission to press it, and none of these
+   * reaches a record, a job or a provider credential.
+   */
+  private async handleConversationalComponent(
+    actor: ActorContext,
+    customId: string,
+    values?: Record<string, string>,
+  ): Promise<OutboundMessage> {
+    this.deps.authz.requireConversational(actor);
+    const verified = this.deps.signer.verify(customId, actor.discordUserId);
+    if (!verified) return { content: 'That control is no longer valid.', ephemeral: true };
+    const handler = this.conversationalComponents.get(verified.kind);
     if (!handler) return { content: 'That control is no longer valid.', ephemeral: true };
     this.buckets.check('interaction', actor.discordUserId);
     return handler(actor, verified.entityId, values);
@@ -435,6 +566,8 @@ export class DuckyRouter {
         text: event.text,
         threadKey: event.threadKey,
         ...(event.context ? { context: event.context } : {}),
+        ...(event.reference ? { reference: event.reference } : {}),
+        ...(event.messageId ? { messageId: event.messageId } : {}),
       });
     }
     return this.handleConversationAttachment(actor, event, attachments);
@@ -570,10 +703,26 @@ export class DuckyRouter {
     text: string;
     threadKey: string;
     context?: IncomingContext;
+    reference?: IncomingReference;
+    /** The Discord message this turn came from, when the transport knew it. */
+    messageId?: string;
     attachment?: ConversationAttachment;
+    /** Seeds a freshly branched thread; never read from another conversation. */
+    anchorNote?: string;
   }): Promise<OutboundMessage> {
     const memory = this.deps.memory;
-    const history = memory?.history(input.actor, input.threadKey, input.context) ?? [];
+    const native = this.deps.threads?.isNativeThread(input.threadKey) ?? false;
+
+    /**
+     * The context, bounded. `contextFor` compacts when it must and THROWS when
+     * even a compacted context will not fit -- which reaches the owner as a
+     * refusal rather than as a quietly truncated conversation.
+     */
+    const ctx = memory?.contextFor(input.actor, input.threadKey, input.text, input.context)
+      ?? { turns: [], compacted: false };
+    const history = ctx.turns;
+
+    const anchor = this.resolveAnchor(input.threadKey, input.reference);
 
     let reply;
     try {
@@ -583,6 +732,11 @@ export class DuckyRouter {
         threadKey: input.threadKey,
         ...(input.attachment ? { attachment: input.attachment } : {}),
         ...(history.length > 0 ? { history } : {}),
+        ...(ctx.checkpoint ? { checkpoint: ctx.checkpoint } : {}),
+        ...(anchor.turn ? { reference: anchor.turn } : {}),
+        // Zero for every conversation that has never been forgotten, so the
+        // provider key is unchanged for existing sessions.
+        ...(memory ? { sessionEpoch: memory.epochFor(input.actor, input.threadKey) } : {}),
       });
     } catch (err) {
       // "The owner asked and got no answer" was invisible in the trail. Records
@@ -601,10 +755,114 @@ export class DuckyRouter {
     memory?.record(
       input.actor,
       input.threadKey,
-      { userText: input.text, assistantText: content },
+      {
+        userText: input.text,
+        assistantText: content,
+        ...(input.messageId ? { userMessageId: input.messageId } : {}),
+      },
       input.context,
     );
-    return conversationReply(content, reply.mock);
+
+    const notes = [
+      ...(anchor.note ? [anchor.note] : []),
+      ...(ctx.compacted
+        ? ['Older turns were compacted to fit the model context. Nothing was deleted.']
+        : []),
+      ...(input.anchorNote ? [input.anchorNote] : []),
+    ];
+    return conversationReply(content, reply.mock, {
+      ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
+      ...(native
+        ? { rows: this.conversationRows(input.actor, input.threadKey, input.messageId) }
+        : {}),
+    });
+  }
+
+  /**
+   * The one earlier message a reply points at, if it is usable.
+   *
+   * Usable means: present, carrying text, and **in this same visible thread**.
+   * A reference to another channel or another thread is labelled unavailable
+   * and dropped -- importing it would silently pull another conversation into
+   * this one, which is the leak a per-thread conversation exists to prevent. A
+   * reference never changes which conversation the message belongs to either
+   * way.
+   */
+  private resolveAnchor(
+    threadKey: string,
+    reference: IncomingReference | undefined,
+  ): { turn?: { role: 'user' | 'assistant'; text: string }; note?: string } {
+    if (!reference) return {};
+    if (reference.channelId !== undefined && reference.channelId !== threadKey) {
+      return {
+        note: 'The message you replied to is in another conversation, so I did not use it.',
+      };
+    }
+    const text = cleanUntrusted(reference.text ?? '').trim();
+    if (text === '') {
+      return { note: 'I could not read the message you replied to, so I did not use it.' };
+    }
+    const clipped = text.length > CONVERSATION_ANCHOR_TEXT_MAX
+      ? `${text.slice(0, CONVERSATION_ANCHOR_TEXT_MAX - 1)}\u2026`
+      : text;
+    /**
+     * Whose words these are, decided from the frozen authorizer rather than
+     * from anything Discord said about the message.
+     *
+     * A conversational actor's message is a `user` turn; anything else in the
+     * thread is Ducky's own, which is an `assistant` turn. Mislabelling here
+     * would hand the model an answer as if somebody had asked it.
+     */
+    const role = reference.authorId !== undefined
+      && this.deps.authz.roleOf(reference.authorId) !== 'none'
+      ? 'user' as const
+      : 'assistant' as const;
+    return { turn: { role, text: clipped } };
+  }
+
+  /**
+   * Branch and Compact, as real buttons on the reply.
+   *
+   * Signed and bound to the presser like every other control, and carrying the
+   * THREAD and the anchor message in the entity id so the handler never has to
+   * trust a channel the press claims to come from.
+   */
+  private conversationRows(
+    actor: ActorContext,
+    threadKey: string,
+    anchorMessageId?: string,
+  ): OutboundRow[] {
+    const buttons = [
+      {
+        customId: this.deps.signer.sign({
+          kind: 'conv_compact',
+          entityId: threadKey,
+          actorUserId: actor.discordUserId,
+        }),
+        label: 'Compact',
+        style: 'secondary' as const,
+      },
+      /**
+       * Branch is offered only when there IS an anchor to branch from.
+       *
+       * A Branch button with no selected message would have to invent one --
+       * "the most recent", say -- and a control that guesses which part of a
+       * conversation you meant is how a branch ends up carrying something the
+       * presser did not choose.
+       */
+      ...(anchorMessageId
+        ? [{
+            customId: this.deps.signer.sign({
+              kind: 'conv_branch',
+              entityId: `${threadKey}.${anchorMessageId}`,
+              actorUserId: actor.discordUserId,
+            }),
+            label: 'Branch',
+            style: 'secondary' as const,
+          }]
+        : []),
+    ];
+    return [{ buttons }];
   }
 
   // ------------------------------------------------------------- commands --
@@ -1197,6 +1455,118 @@ export class DuckyRouter {
       return { content: result.message, ephemeral: true };
     });
   }
+
+  // ------------------------------------------- conversational components --
+
+  /**
+   * The two controls a conversation participant may press.
+   *
+   * Registered into their own map, so the owner-only manifest assertion above
+   * stays exact and neither of these can be mistaken for a privileged control.
+   * Both re-check authorization AND participation on every press: the
+   * signature proves who minted it for whom, and the database proves they are
+   * still in the conversation.
+   */
+  private registerConversationalComponents(): void {
+    const unavailable = (): OutboundMessage => ({
+      content: 'That control is no longer valid.',
+      ephemeral: true,
+    });
+
+    /**
+     * Compact: summarize the older turns of THIS thread and keep the recent
+     * ones.
+     *
+     * It changes what the model is sent and nothing else. No stored turn is
+     * removed and no Discord message is touched, which the reply says in so
+     * many words -- "compact" in other tools often means "delete", and an
+     * owner should not have to find out which this is by trying it.
+     */
+    this.conversationalComponents.set('conv_compact', async (actor, entityId) => {
+      const memory = this.deps.memory;
+      if (!memory) return unavailable();
+      if (!memory.participation(actor, entityId)) {
+        return {
+          content: 'You are not part of that conversation, so I cannot compact it.',
+          ephemeral: true,
+        };
+      }
+      return { content: memory.compact(actor, entityId).message, ephemeral: true };
+    });
+
+    /**
+     * Branch: a separate visible thread, seeded with ONE explicitly selected
+     * anchor.
+     *
+     * The anchor travels in the signed entity id, is resolved only against the
+     * thread the presser holds a proof for, and is written into the new thread
+     * as a labelled checkpoint rather than as a turn -- it was said elsewhere,
+     * and claiming otherwise would put words in somebody's mouth. Nothing else
+     * crosses: the branch has its own thread key, so its memory, its
+     * participation and its provider session are all separate by construction.
+     */
+    this.conversationalComponents.set('conv_branch', async (actor, entityId) => {
+      const memory = this.deps.memory;
+      const threads = this.deps.threads;
+      if (!memory || !threads) return unavailable();
+
+      const sep = entityId.indexOf('.');
+      if (sep < 0) return unavailable();
+      const sourceThreadId = entityId.slice(0, sep);
+      const anchorMessageId = entityId.slice(sep + 1);
+
+      if (!memory.participation(actor, sourceThreadId)) {
+        return {
+          content: 'You are not part of that conversation, so I cannot branch from it.',
+          ephemeral: true,
+        };
+      }
+      const anchor = memory.anchorFor(actor, sourceThreadId, anchorMessageId);
+      if (!anchor) {
+        return {
+          content:
+            'That message is not part of this conversation any more, so there is nothing to ' +
+            'branch from. Nothing was created.',
+          ephemeral: true,
+        };
+      }
+
+      const outcome = await threads.branch({
+        sourceThreadId,
+        anchorMessageId,
+        startedBy: actor.discordUserId,
+        name: threadNameFor(anchor.text, 'Branch'),
+      });
+      if (outcome.kind !== 'thread') {
+        return {
+          content: outcome.kind === 'refused' ? outcome.message : 'I could not open that branch.',
+          ephemeral: true,
+        };
+      }
+
+      memory.seedBranch(actor, outcome.threadId, anchor);
+      return {
+        content:
+          `Branched into <#${outcome.threadId}>. It starts with just the message you picked; ` +
+          'nothing else from this thread was copied, and this conversation is unchanged.',
+        ephemeral: true,
+      };
+    });
+  }
+}
+
+/**
+ * The kind segment of a custom id, WITHOUT verifying it.
+ *
+ * Used only to choose which authorization gate applies, never to decide that
+ * anything may happen: the signature covers the kind, so a forged or edited id
+ * fails verification inside whichever gate it was routed to. Returns an empty
+ * string for anything that is not shaped like one of our ids, which falls
+ * through to the owner-only gate -- the conservative direction.
+ */
+function peekKind(customId: string): string {
+  const segments = customId.split(':');
+  return segments.length === 5 ? segments[2]! : '';
 }
 
 export const CONVERSATION_ROUTE_NAME = CONVERSATIONAL_ROUTE;
@@ -1209,4 +1579,4 @@ function errorReply(err: unknown): OutboundMessage {
   return { content: 'Something went wrong handling that.', ephemeral: true };
 }
 
-export type { OwnerOnlyCommand, OwnerOnlyInteractionKind };
+export type { ConversationalInteractionKind, OwnerOnlyCommand, OwnerOnlyInteractionKind };

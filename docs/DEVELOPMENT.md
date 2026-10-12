@@ -55,6 +55,13 @@ Fill in the env file:
   host is either. Attachments are owner-only even though plain chat is not.
   `CONVERSATION_MAX_ATTACHMENT_BYTES` and `CONVERSATION_ATTACHMENTS_PER_HOUR`
   bound it; downloads reuse `DISCORD_CDN_HOSTS`.
+- `DUCKY_DEV_REMINDER_CHANNEL_ID` — optional, default empty. Where a reminder
+  that belongs to a **task** is posted, with your mention. Unconfigured means
+  the DM every reminder has always used. A free-standing `/reminder` never goes
+  there. The card carries signed controls bound to you: anybody else in the
+  channel sees the deadline and can do nothing with it.
+- `DUCKY_PHONE_CAPTURE_ENABLED` + `DUCKY_DEV_PHONE_PASSCODE_VERIFIER` —
+  optional, default off. See *The phone capture page* below.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you
   want the real development bot; leave them unset for the mock transport
 
@@ -101,6 +108,41 @@ DUCKY_EXECUTOR_TOKEN=...
 DUCKY_EXECUTOR_HMAC_SECRET=...
 ```
 
+## The phone capture page
+
+A small page at `/app`, on the coordinator's existing listener, for pasting a
+numbered list of deadlines from a home-screen shortcut. It is **off by
+default** and refuses to start rather than serve unsafely.
+
+```bash
+pnpm phone:passcode        # type a passcode; prints a scrypt verifier
+```
+
+The passcode is read from stdin, never from an argument, so it does not land in
+your shell history. What it prints is a verifier and cannot be turned back into
+the passcode. Then, in the env file for that profile:
+
+```bash
+DUCKY_PHONE_CAPTURE_ENABLED=true
+DUCKY_DEV_PHONE_PASSCODE_VERIFIER=scrypt$...
+DUCKY_HTTP_HOST=100.x.y.z        # your tailnet address
+```
+
+Three things fail at BOOT rather than at the first tap: the flag without a
+verifier, a verifier this profile may not read (production never inherits the
+development one), and a `DUCKY_HTTP_HOST` that is not loopback, RFC1918,
+`100.64.0.0/10` or `fd7a:115c:a1e0::/48`. `0.0.0.0` is refused explicitly.
+
+On the phone: connect Tailscale, open `http://<tailnet-address>:8787/app`,
+enter the passcode, then *Share → Add to Home Screen*. The page declares a web
+manifest, so the shortcut opens standalone rather than as a browser tab.
+
+This is **your own** credential and is deliberately not the executor's. The
+executor's routes on the same listener keep their own HMAC authentication,
+unchanged — binding to a tailnet address exposes them to that tailnet, and
+that is exactly as true as it was before this page existed. Nothing here
+enables Tailscale Funnel; see `deploy/tailscale/README.md` and ADR 0025.
+
 ## Discord application setup
 
 Create **two** applications, one per profile, so test traffic never reaches the
@@ -135,12 +177,22 @@ pnpm migrate --dry
 pnpm probe:herdr  # records live Herdr fixtures; creates and removes a temp repo
 ```
 
+A forward migration is rehearsed against a COPY of a real database rather than
+against the live one:
+
+```bash
+pnpm backup                                   # consistent snapshot, no downtime
+cp data/ducky-dev.db /tmp/rehearsal.db
+DUCKY_DB_PATH=/tmp/rehearsal.db pnpm migrate --dry
+DUCKY_DB_PATH=/tmp/rehearsal.db pnpm migrate
+```
+
 ## Layout
 
 ```
 packages/contracts     schemas, state machine, limits, time/timezone, owner-only manifest
 packages/persistence   SQLite, migrations, repositories
 packages/adapters      credentials, github, herdr, pi, openclaw, schedule, redaction
-packages/coordinator   authz, discord, http, domain services, reconciler
+packages/coordinator   authz, discord, http (executor API + phone page), domain, reconciler
 packages/executor      outbound client, workspace resolution, writer lock
 ```

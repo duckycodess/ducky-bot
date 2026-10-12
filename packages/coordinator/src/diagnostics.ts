@@ -122,6 +122,24 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       ? `${app.channelRoles.configured.map((c) => c.role).join(', ')} — your replies PERSIST there`
       : 'none — every reply in a guild stays ephemeral',
   );
+  /**
+   * Where a task reminder lands, and whether a web surface is answering.
+   *
+   * Both are reported because both change who can SEE the owner's records: a
+   * reminders channel puts task titles where other people may read them, and
+   * the capture page is the only surface on this host meant for a browser.
+   * Neither is a warning -- the default for both is the quiet one -- but an
+   * operator who did not intend either should find out at boot rather than
+   * afterwards.
+   */
+  add(
+    'reminder delivery',
+    true,
+    app.reminderNotifier.channelDelivery === undefined
+      ? 'your DM — every reminder, as before'
+      : 'task reminders post in your reminders channel, with your mention',
+  );
+  add('phone capture', true, app.status().phoneCapture);
   // Not a warning: refusing to resume a job on an unchecked dependency is the
   // correct state, not a degraded one.
   add(

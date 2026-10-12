@@ -298,6 +298,7 @@ describe('a thread that cannot be opened is refused, never redirected', () => {
   for (const [failure, pattern] of [
     ['forbidden', /Create Public Threads/i],
     ['rate_limited', /rate-limit/i],
+    ['archived_locked', /locked or archived/i],
     ['unavailable', /could not open a thread/i],
   ] as const) {
     it(`refuses visibly on ${failure} and answers nowhere else`, async () => {

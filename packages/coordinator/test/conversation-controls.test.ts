@@ -146,6 +146,35 @@ describe('real controls, on a real conversation', () => {
     h.close();
   });
 
+  it('offers neither in a thread memory is excluded from', async () => {
+    /**
+     * A channel can be added to the shared list AFTER a thread under it
+     * exists. The boot check refuses a shared channel as a PARENT, but it
+     * cannot unmake a thread that is already there -- so the controls follow
+     * the same exclusion memory does, rather than leaving a signed button in a
+     * channel other people read.
+     */
+    const { h } = harness();
+    await start(h);
+    const threadId = await openThread(h);
+
+    const later = makeHarness({
+      conversation: new RecordingProvider(),
+      env: {
+        DUCKY_CONVERSATION_MEMORY_ENABLED: 'true',
+        DUCKY_DEV_SHARED_CHANNEL_IDS: PARENT,
+      },
+      store: h.store,
+      registerExecutor: false,
+    });
+    await start(later);
+
+    const reply = await later.transport.dispatch(inThread(threadId, { text: 'after the change' }));
+    expect(reply?.rows ?? []).toEqual([]);
+    later.close();
+    h.close();
+  });
+
   it('offers neither in an ordinary channel, where there is no thread to act on', async () => {
     const { h } = harness();
     await start(h);

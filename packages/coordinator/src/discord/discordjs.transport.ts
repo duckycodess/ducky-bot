@@ -530,6 +530,17 @@ const UNKNOWN_CHANNEL = 10003;
 /** Discord REST codes that mean a permission is missing rather than a bug. */
 const MISSING_PERMISSION_CODES = new Set([50001, 50013]);
 
+/**
+ * `Thread is locked` / `Thread is archived`.
+ *
+ * Distinct from a permission failure because the remedy is different and the
+ * owner is the one who has to apply it: a locked thread is a deliberate act by
+ * somebody with Manage Threads, and Ducky unlocking one would be undoing that.
+ * An ARCHIVED but unlocked thread never reaches here -- posting in one
+ * unarchives it, which is how a conversation resumes after a week of quiet.
+ */
+const THREAD_LOCKED_CODES = new Set([50083, 160005]);
+
 function threadFailureFrom(err: unknown, messageId: string | undefined): ThreadStartOutcome {
   const e = err as { code?: unknown; status?: unknown };
   const code = typeof e?.code === 'number' ? e.code : undefined;
@@ -537,6 +548,9 @@ function threadFailureFrom(err: unknown, messageId: string | undefined): ThreadS
 
   if (code === MESSAGE_ALREADY_HAS_THREAD && messageId !== undefined) {
     return { ok: false, alreadyExists: true, threadId: messageId };
+  }
+  if (code !== undefined && THREAD_LOCKED_CODES.has(code)) {
+    return { ok: false, failure: 'archived_locked' };
   }
   if (code !== undefined && MISSING_PERMISSION_CODES.has(code)) {
     return { ok: false, failure: 'forbidden' };

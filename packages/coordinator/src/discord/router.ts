@@ -711,7 +711,19 @@ export class DuckyRouter {
     anchorNote?: string;
   }): Promise<OutboundMessage> {
     const memory = this.deps.memory;
-    const native = this.deps.threads?.isNativeThread(input.threadKey) ?? false;
+    /**
+     * Controls are offered only when this thread is BOTH a recorded native
+     * thread and one memory applies to.
+     *
+     * The second half is not redundant. A channel can be added to
+     * `DUCKY_*_SHARED_CHANNEL_IDS` after a thread under it was created -- the
+     * boot check refuses a shared channel as a thread PARENT, but it cannot
+     * retroactively unmake a thread. Memory already excludes such a thread
+     * from storage, and this makes the controls follow the same exclusion
+     * rather than leaving a signed button in a channel other people read.
+     */
+    const native = (this.deps.threads?.isNativeThread(input.threadKey) ?? false)
+      && (memory?.applies(input.threadKey, input.context) ?? false);
 
     /**
      * The context, bounded. `contextFor` compacts when it must and THROWS when

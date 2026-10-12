@@ -514,6 +514,16 @@ rules:
   owner wrote, after code spans are stripped, so a pasted command line cannot
   authorize implementation. Ducky reports a ticket queued only when the helper
   has applied AND read back the exact label.
+- **Cancellation is honest in both directions.** A read-only helper call is
+  given an `AbortSignal` and killed; the publisher is never given one, because
+  killing it could leave a GitHub issue created with its canonical read-back
+  unverified. A terminal run cannot be moved, so a subprocess returning after
+  Cancel cannot report success for work the owner stopped -- and if the
+  publication completed anyway, the owner is told what exists rather than left
+  to find it.
+- **One run at a time per thread**, enforced in the statement, so two
+  concurrent Discord messages cannot interleave two publication sequences or
+  cross their issue numbers.
 - **Ducky never starts a worker or a service**, and has no code path that
   could. What queueing can end in is the dispatcher's own configured merge
   policy; the card reports which policy the registration carries rather than

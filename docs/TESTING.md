@@ -81,9 +81,30 @@ the issue number; a publisher failure is never reported as queued or started; a
 queue the helper did not verify stays `published`; grilling refuses without a
 verified provider, uses the INSTALLED skill text read from its configured path,
 continues on plain replies even in a channel where conversation is otherwise
-silent, and feeds those lines into the ticket; the card edits one message and
+silent, frees the thread so `$ticket` can follow it, closes the interview on
+Cancel while keeping the notes it settled, and feeds those lines into the
+ticket; the card edits one message and
 sends a fresh one at the end, reposts when the owner deleted it, carries
 Details / View issue / Cancel, and renders no host path.
+
+**coordinator / skill bridge cancellation** — drives a publisher that BLOCKS
+until the test releases it, because the whole defect class lives in the window
+between "the owner pressed Cancel" and "the helper came back" and cannot be
+observed with a helper that answers instantly: a cancelled run never comes back
+as queued; the owner is still told what the publisher had already created, with
+the URL, and the thread remembers the issue so a retry enriches it; a cancelled
+run does not run the bookkeeping a successful one does, so the notes a grill
+settled survive; a second command while one is in flight is refused rather than
+replacing it; and a late answer from a superseded run attaches its issue to
+nothing.
+
+**coordinator / grill skill** — `$grill-me` refuses, reading nothing and
+reaching no provider, when the skill path is unset, absent, empty, oversized or
+unreadable; it follows the installed skill's own one-hop `Call the Skill tool
+with "…"` redirect to the file that carries the method, never sending the
+pointer itself; it refuses when the redirect target is missing and when a
+pointer points at another pointer; and a usable installed skill still opens the
+interview with the method in its instructions.
 
 **coordinator / workflow invariants** — the bridge and its presenters name no
 `gh` surface, no issue or label API, and no `JobsService`, and spawn nothing

@@ -83,6 +83,19 @@ export interface SkillBridgeDeps {
  *   published ticket is a line the owner typed in this thread.
  */
 export class SkillBridgeService {
+  /**
+   * One abort handle per thread with a live run.
+   *
+   * It reaches the READ-ONLY helper calls only -- `inspect` and `validate`.
+   * `ticket` and `agentize` are deliberately NOT abortable: killing the
+   * publisher mid-flight could leave a GitHub issue created and its canonical
+   * read-back unverified, which is a worse outcome than a cancel that arrives
+   * a few seconds late. This is the same judgement the job path already makes
+   * about interrupting a working agent: stop waiting, then report honestly
+   * what the thing we could not interrupt actually did.
+   */
+  readonly #aborts = new Map<string, AbortController>();
+
   constructor(private readonly deps: SkillBridgeDeps) {}
 
   get enabled(): boolean {
@@ -172,22 +185,46 @@ export class SkillBridgeService {
       );
     }
 
+    /**
+     * The INSTALLED skill, or no grill at all. Checked here, before a card
+     * exists and before the repository is read.
+     *
+     * The acceptance criterion is that `$grill-me` loads the installed
+     * upstream skill. An interview Ducky improvised because the file was
+     * missing is not that skill, and it is the worse of the two failures: the
+     * owner believes they are being grilled by the method they chose, and
+     * they are not. So this refuses and names what is wrong.
+     */
+    const skill = this.grillSkill();
+    if (!skill.ok) return cards.unavailable(skill.reason);
+
     const target = this.resolveTarget(actor, event.threadKey, parsed.args);
     if ('ask' in target) return target.ask;
 
     const run = this.startRun(actor, event, '$grill-me', 'scanning', parsed.ready);
+    if (!run) {
+      const live = this.deps.store.agentThreads.liveRun(actor.discordUserId, event.threadKey);
+      return live ? this.busy(live) : cards.unavailable('That could not be started. Try again.');
+    }
     await this.showCard(actor, event, run);
 
     let found: FrontDoorInspection;
     try {
       // Local read only. `--network` would reach GitHub, and fact-finding for
-      // a conversation does not need it.
+      // a conversation does not need it. Abortable, because it is read-only.
       found = await this.deps.frontDoor.inspect({
         ...(target.repo.checkoutRoot ? { path: target.repo.checkoutRoot } : {}),
         repository: target.repo.repository,
+        ...(this.signalFor(actor, event.threadKey)
+          ? { signal: this.signalFor(actor, event.threadKey)! }
+          : {}),
       });
     } catch (err) {
       return this.failRun(actor, event, run, err);
+    }
+    if (!this.stillLive(actor, event.threadKey, run.runId)) {
+      this.releaseRun(actor, event.threadKey);
+      return this.stoppedReply();
     }
 
     const row = this.deps.store.agentThreads.setGrilling(
@@ -207,7 +244,20 @@ export class SkillBridgeService {
         actor.discordUserId, event.threadKey, parsed.args, this.now(),
       );
     }
-    return this.grillTurn(actor, event, scanned, parsed.args || 'Start the interview.', found);
+    /**
+     * A grill is CONVERSATIONAL from here on, so the run is released and
+     * marked finished: the card has done its job, the interview continues as
+     * messages, and the thread must be free for the `$ticket` that follows.
+     * There is no step left for a Cancel to stop, and leaving the run open
+     * would block the command the grill exists to lead to.
+     */
+    this.deps.store.agentThreads.updateRun(
+      actor.discordUserId, event.threadKey, run.runId,
+      { status: 'grilling', finished: true },
+      this.now(),
+    );
+    this.releaseRun(actor, event.threadKey);
+    return this.grillTurn(actor, event, scanned, parsed.args || 'Start the interview.', skill, found);
   }
 
   /**
@@ -237,30 +287,46 @@ export class SkillBridgeService {
     }
     if (event.text.trim() === '') return undefined;
 
+    /**
+     * The same gate the opening turn passes, re-checked every turn.
+     *
+     * The owner edits their own skills, so a file that was readable when the
+     * interview opened may not be now. Continuing under an improvised method
+     * would be the same lie, arrived at more slowly -- so the interview CLOSES
+     * and says why.
+     */
+    const skill = this.grillSkill();
+    if (!skill.ok) {
+      this.deps.store.agentThreads.setGrilling(
+        actor.discordUserId, event.threadKey, false, this.now(),
+      );
+      return cards.unavailable(`${skill.reason} The grill is closed.`);
+    }
+
     this.deps.store.agentThreads.appendNote(
       actor.discordUserId, event.threadKey, event.text, this.now(),
     );
-    return this.grillTurn(actor, event, row, event.text);
+    return this.grillTurn(actor, event, row, event.text, skill);
   }
 
   /**
    * One interview turn, conducted by the provider under the INSTALLED skill's
    * own instructions.
    *
-   * The instructions are read from the configured private path at call time.
-   * Nothing is copied into this repository, and if the file is missing the
-   * turn still happens -- under a short honest fallback that says what is
-   * absent rather than inventing the upstream method.
+   * The skill text is passed IN rather than read here, so there is exactly one
+   * place that decides whether a usable skill exists and exactly one answer
+   * when it does not. A turn cannot happen without one.
    */
   private async grillTurn(
     actor: ActorContext,
     event: { threadKey: string; text: string; context?: IncomingContext },
     row: AgentThreadRow,
     text: string,
+    skill: UsableSkill,
     found?: FrontDoorInspection,
   ): Promise<OutboundMessage> {
     const instructions = [
-      ...this.grillSkill(),
+      skill.text,
       `The repository under discussion is ${row.repository ?? 'not yet chosen'}.`,
       ...(found ? [`Repository facts observed just now: ${describeScan(found)}.`] : []),
       'This is a conversation only. Do not claim to have created an issue, applied a label, ' +
@@ -286,28 +352,56 @@ export class SkillBridgeService {
   }
 
   /**
-   * The installed skill text, bounded, or nothing.
+   * The installed skill text, or the reason there is none.
    *
    * Read fresh on every turn rather than cached: the user owns that file and
-   * may edit it, and a cached copy is the drift this design exists to avoid.
+   * may edit it, and a cached copy is exactly the drift this design exists to
+   * avoid.
+   *
+   * There is no fallback. Every failure here REFUSES, because the only
+   * alternative is handing the model something that is not the owner's chosen
+   * method and letting it improvise -- which reads, to the person being
+   * interviewed, exactly like the real thing.
    */
-  private grillSkill(): string[] {
+  private grillSkill(): LoadedSkill {
     const file = this.deps.config.grillSkillPath;
     if (!file || !path.isAbsolute(file)) {
-      return [
-        'The installed grilling skill is not configured on this host, so its own method is not ' +
-          'available. Say so, then interview the owner one decision at a time.',
-      ];
+      return {
+        ok: false,
+        reason:
+          'The installed grilling skill is not configured on this instance, so there is no ' +
+          'interview method to load. Nothing was read.',
+      };
     }
-    try {
-      if (statSync(file).size > GRILL_SKILL_MAX_BYTES) return [];
-      return [readFileSync(file, 'utf8').slice(0, GRILL_SKILL_MAX_BYTES)];
-    } catch {
-      return [
-        'The installed grilling skill could not be read on this host. Say so, then interview ' +
-          'the owner one decision at a time.',
-      ];
-    }
+    const first = readSkillFile(file);
+    if (!first.ok) return first;
+
+    /**
+     * One hop through the installed skill's OWN redirect.
+     *
+     * `grill-me/SKILL.md` as installed is a pointer whose entire body is
+     * `Call the Skill tool with "grilling"` -- the method lives in a sibling
+     * directory. An operator configuring the obvious path would otherwise
+     * hand the model a pointer and get an invented interview, which is the
+     * failure this whole function exists to prevent. So the redirect is
+     * followed, ONCE: a second hop would be a loop waiting to happen, and a
+     * pointer to a pointer is not an installation anybody meant.
+     */
+    const redirect = redirectTarget(first.text);
+    if (redirect === undefined) return first;
+
+    const sibling = path.join(path.dirname(path.dirname(file)), redirect, 'SKILL.md');
+    const second = readSkillFile(sibling);
+    if (!second.ok) return second;
+    // A pointer to another pointer is not a method.
+    return redirectTarget(second.text) === undefined
+      ? second
+      : {
+          ok: false,
+          reason:
+            'The installed grilling skill points at another pointer rather than at a method. ' +
+            'Nothing was read.',
+        };
   }
 
   // ---- $ticket -------------------------------------------------------------
@@ -332,6 +426,10 @@ export class SkillBridgeService {
     if ('ask' in target) return target.ask;
 
     const run = this.startRun(actor, event, '$ticket', 'scanning', parsed.ready);
+    if (!run) {
+      const live = this.deps.store.agentThreads.liveRun(actor.discordUserId, event.threadKey);
+      return live ? this.busy(live) : cards.unavailable('That could not be started. Try again.');
+    }
     await this.showCard(actor, event, run);
 
     let found: FrontDoorInspection;
@@ -343,9 +441,16 @@ export class SkillBridgeService {
         ...(target.repo.checkoutRoot ? { path: target.repo.checkoutRoot } : {}),
         repository: target.repo.repository,
         network: true,
+        ...(this.signalFor(actor, event.threadKey)
+          ? { signal: this.signalFor(actor, event.threadKey)! }
+          : {}),
       });
     } catch (err) {
       return this.failRun(actor, event, run, err);
+    }
+    if (!this.stillLive(actor, event.threadKey, run.runId)) {
+      this.releaseRun(actor, event.threadKey);
+      return this.stoppedReply();
     }
 
     const notes = this.settledIntent(actor, event.threadKey, parsed.args);
@@ -389,7 +494,10 @@ export class SkillBridgeService {
      * Ducky's opinion would be the one nobody was checking.
      */
     try {
-      const validated = await this.deps.frontDoor.validate(spec);
+      const validated = await this.deps.frontDoor.validate(
+        spec,
+        this.signalFor(actor, event.threadKey),
+      );
       if (!validated.ok) {
         return this.failRun(
           actor, event, publishing,
@@ -398,6 +506,19 @@ export class SkillBridgeService {
       }
     } catch (err) {
       return this.failRun(actor, event, publishing, err);
+    }
+    /**
+     * The LAST point at which cancelling still prevents something.
+     *
+     * Everything above is read-only and abortable. `publish` is neither:
+     * killing it could leave a GitHub issue created and its canonical
+     * read-back unverified, which is worse than a cancel landing a few
+     * seconds late. So the decision is made here, once, before the
+     * irreversible call.
+     */
+    if (!this.stillLive(actor, event.threadKey, run.runId)) {
+      this.releaseRun(actor, event.threadKey);
+      return this.stoppedReply();
     }
 
     if (!this.deps.frontDoor.availability().mutationEnabled) {
@@ -439,11 +560,37 @@ export class SkillBridgeService {
         );
       }
 
+      /**
+       * Recorded FIRST, and keyed on this run.
+       *
+       * The issue exists whatever happened to the run while the publisher
+       * worked, and the thread needs its number so a retry enriches rather
+       * than opening a second one. Keying on the run is what stops a late
+       * answer attaching its issue to whatever the thread is doing now.
+       */
       this.deps.store.agentThreads.setPublication(
-        actor.discordUserId, event.threadKey,
+        actor.discordUserId, event.threadKey, run.runId,
         { issueNumber: published.issue ?? null, issueUrl: published.url ?? null },
         this.now(),
       );
+
+      /**
+       * The window this whole mechanism exists for: the owner cancelled while
+       * the publisher was running, and the publisher finished anyway.
+       *
+       * Both halves of the honest answer matter. The card stays CANCELLED --
+       * rewriting it to "queued" would report a success for work the owner
+       * stopped. And the owner is told what the publisher had already done,
+       * with the URL, because silence about an issue that now exists is the
+       * other half of the same lie.
+       */
+      if (!this.stillLive(actor, event.threadKey, run.runId)) {
+        this.releaseRun(actor, event.threadKey);
+        return cards.publishedAfterCancel(
+          published.url,
+          parsed.ready && published.queued && published.queueVerified,
+        );
+      }
       /**
        * `queued` requires BOTH that the owner asked and that the helper
        * verified the exact label on the issue. Neither alone is enough, and
@@ -479,6 +626,7 @@ export class SkillBridgeService {
         actor.discordUserId, event.threadKey, false, this.now(),
       );
       this.deps.audit?.({ command: '$ticket', outcome: 'ok', status });
+      this.releaseRun(actor, event.threadKey);
       if (done) await this.showCard(actor, event, done, { fresh: true });
       return cards.publicationReply(status, published.url ?? undefined);
     } catch (err) {
@@ -513,6 +661,10 @@ export class SkillBridgeService {
     }
 
     const run = this.startRun(actor, event, '$agentize', 'onboarding', false);
+    if (!run) {
+      const live = this.deps.store.agentThreads.liveRun(actor.discordUserId, event.threadKey);
+      return live ? this.busy(live) : cards.unavailable('That could not be started. Try again.');
+    }
     await this.showCard(actor, event, run);
 
     try {
@@ -526,6 +678,16 @@ export class SkillBridgeService {
           new DuckyError('invalid_input', onboarded.error ?? 'onboarding did not complete'),
         );
       }
+      if (!this.stillLive(actor, event.threadKey, run.runId)) {
+        this.releaseRun(actor, event.threadKey);
+        return {
+          content:
+            'You cancelled this, and the onboarding helper had already finished. The repository ' +
+            'contract and any registration it made still stand. No label authorizes work and no ' +
+            'service was started.',
+          ephemeral: false,
+        };
+      }
       const detail = onboardingDetail(onboarded.changed, onboarded.registered, onboarded.dispatcher);
       const done = this.deps.store.agentThreads.updateRun(
         actor.discordUserId, event.threadKey, run.runId,
@@ -533,6 +695,7 @@ export class SkillBridgeService {
         this.now(),
       );
       this.deps.audit?.({ command: '$agentize', outcome: 'ok', status: 'onboarded' });
+      this.releaseRun(actor, event.threadKey);
       if (done) await this.showCard(actor, event, done, { fresh: true });
       return {
         content:
@@ -571,22 +734,61 @@ export class SkillBridgeService {
     if (!row?.runStatus || !row.runCommand) {
       return { content: 'That control is no longer valid.', ephemeral: true };
     }
+
+    /**
+     * A finished run whose INTERVIEW is still open.
+     *
+     * A grill stops being a run as soon as its scan is done -- there is no
+     * further step to cancel and holding the thread would block the `$ticket`
+     * the grill exists to lead to. But the interview it opened is still
+     * running, and Cancel on that card has to mean something, so it means
+     * "close the interview".
+     */
     if (row.runFinishedAt !== null) {
+      if (row.grilling && row.runCommand === '$grill-me') {
+        this.deps.store.agentThreads.setGrilling(
+          actor.discordUserId, row.threadKey, false, this.now(),
+        );
+        this.deps.audit?.({ command: row.runCommand, outcome: 'refused', status: 'cancelled' });
+        return {
+          content:
+            'Closed the interview. Your notes are kept, so `$ticket` can still use them; ' +
+            'nothing was created.',
+          ephemeral: true,
+        };
+      }
       return { content: 'That run has already finished. Nothing was changed.', ephemeral: true };
     }
-    this.deps.store.agentThreads.updateRun(
+
+    /**
+     * Abort the read-only helper call, if one is in flight.
+     *
+     * `runArgv` kills the child on abort, so `inspect` and `validate` stop
+     * immediately. `ticket` and `agentize` are never given this signal, on
+     * purpose: killing the publisher could leave an issue created and its
+     * read-back unverified. The marker below is what stops the NEXT step, and
+     * it is what makes a late answer report honestly instead of succeeding.
+     */
+    this.#aborts.get(this.#key(actor, row.threadKey))?.abort();
+
+    const cancelled = this.deps.store.agentThreads.updateRun(
       actor.discordUserId, row.threadKey, runId,
       { status: 'cancelled', detail: 'Cancelled by you.', finished: true },
       this.now(),
     );
+    if (!cancelled) {
+      // It reached a terminal state between the read above and this write.
+      return { content: 'That run has already finished. Nothing was changed.', ephemeral: true };
+    }
     this.deps.store.agentThreads.setGrilling(
       actor.discordUserId, row.threadKey, false, this.now(),
     );
     this.deps.audit?.({ command: row.runCommand, outcome: 'refused', status: 'cancelled' });
     return {
       content:
-        'Cancelled. No further step runs for this request. A publication already in flight is ' +
-        'not interrupted, and anything the installed publisher had already created still exists.',
+        'Cancelled. No further step runs for this request. A read already in flight is stopped; ' +
+        'a publication already in flight is NOT interrupted, and if it completes you will be ' +
+        'told what it created.',
       ephemeral: true,
     };
   }
@@ -745,7 +947,7 @@ export class SkillBridgeService {
     command: SkillCommand,
     status: AgentCardStatus,
     ready: boolean,
-  ): AgentThreadRow & { runId: string } {
+  ): (AgentThreadRow & { runId: string }) | undefined {
     const runId = newPublicAgentRunId();
     const row = this.deps.store.agentThreads.startRun(
       actor.discordUserId,
@@ -753,7 +955,70 @@ export class SkillBridgeService {
       { runId, command, status, ready, detail: null },
       this.now(),
     );
+    if (!row) return undefined;
+    /**
+     * The abort handle for this run's READ-ONLY helper calls.
+     *
+     * Registered only after the row exists, so a refused start never leaves a
+     * controller behind. `startRun` is the single-writer gate, so there is at
+     * most one entry per thread at any time.
+     */
+    this.#aborts.set(this.#key(actor, event.threadKey), new AbortController());
     return { ...row, runId };
+  }
+
+  /**
+   * The honest answer when a thread is already busy.
+   *
+   * Refusing beats queueing: a queued workflow command would publish
+   * something the owner had stopped thinking about by the time it ran, which
+   * is the same reason there is one pending intent proposal per thread and
+   * not a list of them.
+   */
+  private busy(live: AgentThreadRow): OutboundMessage {
+    return cards.unavailable(
+      `A \`${live.runCommand ?? 'workflow'}\` run is already in flight in this thread ` +
+        `(\`${live.runId ?? ''}\`). Let it finish, or press Cancel on its card. Nothing was started.`,
+    );
+  }
+
+  #key(actor: ActorContext, threadKey: string): string {
+    return `${actor.discordUserId}:${threadKey}`;
+  }
+
+  /**
+   * Whether this run may still take its next step.
+   *
+   * Re-read from the DATABASE, not from a flag in memory: the cancel control
+   * arrives on a different interaction, and the row is the only thing both
+   * sides share. Checked after every `await`, because every `await` is a
+   * window in which the owner can press Cancel or the run can be superseded.
+   */
+  private stillLive(actor: ActorContext, threadKey: string, runId: string): boolean {
+    return this.deps.store.agentThreads.runIsLive(actor.discordUserId, threadKey, runId);
+  }
+
+  /** The abort signal for this run's read-only helper calls, if it has one. */
+  private signalFor(actor: ActorContext, threadKey: string): AbortSignal | undefined {
+    return this.#aborts.get(this.#key(actor, threadKey))?.signal;
+  }
+
+  /** Called on every terminal path, so a controller never outlives its run. */
+  private releaseRun(actor: ActorContext, threadKey: string): void {
+    this.#aborts.delete(this.#key(actor, threadKey));
+  }
+
+  /**
+   * What to say when a step finds its run already stopped.
+   *
+   * Deliberately NOT a card edit: the card already says `cancelled`, and
+   * moving it would undo the thing the owner asked for.
+   */
+  private stoppedReply(): OutboundMessage {
+    return {
+      content: 'Stopped. That run was cancelled or replaced, so nothing further was done.',
+      ephemeral: false,
+    };
   }
 
   /**
@@ -821,9 +1086,16 @@ export class SkillBridgeService {
         entityId: row.runId!,
         actorUserId: actor.discordUserId,
       });
+    /**
+     * Cancel appears while there is something it can actually do: a live run
+     * with a step left, or an open interview this card started. A control
+     * that cannot act is worse than no control.
+     */
+    const cancellable =
+      row.runFinishedAt === null || (row.grilling && row.runCommand === '$grill-me');
     return {
       detailsId: sign('agent_details'),
-      ...(row.runFinishedAt === null ? { cancelId: sign('agent_cancel') } : {}),
+      ...(cancellable ? { cancelId: sign('agent_cancel') } : {}),
       ...(row.issueUrl ? { issueUrl: row.issueUrl } : {}),
     };
   }
@@ -842,6 +1114,17 @@ export class SkillBridgeService {
     partialUrl?: string,
   ): Promise<OutboundMessage> {
     const reason = failureReason(err);
+    /**
+     * A run the owner already cancelled stays cancelled.
+     *
+     * `updateRun` refuses a terminal run, so this returns undefined and the
+     * card is left alone -- which is right: an abort the owner CAUSED must
+     * not be reported back to them as a failure of the thing they stopped.
+     */
+    if (row.runId && !this.stillLive(actor, event.threadKey, row.runId)) {
+      this.releaseRun(actor, event.threadKey);
+      return this.stoppedReply();
+    }
     const failed = row.runId
       ? this.deps.store.agentThreads.updateRun(
           actor.discordUserId, event.threadKey, row.runId,
@@ -849,6 +1132,7 @@ export class SkillBridgeService {
           this.now(),
         )
       : undefined;
+    this.releaseRun(actor, event.threadKey);
     this.deps.audit?.({
       command: row.runCommand ?? '$ticket',
       outcome: 'failed',
@@ -866,6 +1150,75 @@ export class SkillBridgeService {
   private now(): string {
     return this.deps.clock.nowIso();
   }
+}
+
+/**
+ * A loaded interview method, or the honest reason there is not one.
+ *
+ * A union rather than an optional string, so there is no "empty means
+ * missing" value a caller could pass straight to the model.
+ */
+export interface UsableSkill {
+  readonly ok: true;
+  readonly text: string;
+}
+
+export type LoadedSkill = UsableSkill | { readonly ok: false; readonly reason: string };
+
+/**
+ * Reads one installed SKILL.md, with every refusal spelled out.
+ *
+ * Oversized REFUSES rather than truncating: half a method is not a method,
+ * and the previous behaviour -- silently sending nothing at all -- was the
+ * worst of the three possible answers.
+ */
+function readSkillFile(file: string): LoadedSkill {
+  let text: string;
+  try {
+    const size = statSync(file).size;
+    if (size > GRILL_SKILL_MAX_BYTES) {
+      return {
+        ok: false,
+        reason:
+          'The installed grilling skill is too large to load, so it was not sent. ' +
+          'Nothing was read.',
+      };
+    }
+    text = readFileSync(file, 'utf8');
+  } catch {
+    // The path, and the reason the filesystem gave, are both host detail and
+    // neither belongs in a Discord message.
+    return {
+      ok: false,
+      reason:
+        'The installed grilling skill could not be read on this host. Nothing was read.',
+    };
+  }
+  if (text.trim() === '') {
+    return {
+      ok: false,
+      reason: 'The installed grilling skill is empty, so there is no method to load.',
+    };
+  }
+  return { ok: true, text };
+}
+
+/** The YAML front matter an installed skill carries, stripped. */
+const withoutFrontMatter = (text: string): string =>
+  text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+
+/**
+ * The skill a pointer redirects to, when the file is only a pointer.
+ *
+ * Matched against the WHOLE body, so a method that happens to mention the
+ * phrase in passing is not mistaken for a redirect: a pointer says this and
+ * nothing else.
+ */
+function redirectTarget(text: string): string | undefined {
+  const body = withoutFrontMatter(text).trim();
+  const match = /^Call the Skill tool with ["`\u2018\u201c]([a-z0-9][a-z0-9-]{0,63})["`\u2019\u201d]\.?$/i
+    .exec(body);
+  return match?.[1];
 }
 
 const targetId = (target: SendTarget): string =>

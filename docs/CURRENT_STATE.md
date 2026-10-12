@@ -201,14 +201,19 @@ exercised; this says what it does.
     beats a single candidate, and anything else ASKS rather than guessing. A
     rebind clears the canonical id and the issue, so a retry cannot enrich an
     issue in a different repository. Host paths are never rendered.
-  - **The grill is the installed skill's own text**, read from a configured
-    absolute path at call time and handed to the provider as instructions for
-    that turn. Nothing is copied into this repository. Without a `verified`
-    provider, `$grill-me` refuses rather than printing a fixed list of
-    questions and calling it an interview. Plain replies continue an open
-    interview, and they are read BEFORE the coding channel's ordinary
-    conversation silence so configuring a channel for the workflow does not
-    make the workflow unusable in it.
+  - **The grill is the installed skill's own text, or there is no grill.**
+    Read from a configured absolute path at call time and handed to the
+    provider as instructions for that turn; nothing is copied into this
+    repository. Unset, absent, unreadable, empty or oversized all REFUSE,
+    before a card exists and before the repository is read, and the same check
+    runs on every turn so a file that becomes unreadable mid-interview closes
+    the grill. There is deliberately no fallback: an interview Ducky
+    improvised because the file was missing is not the installed skill, and
+    the owner would have no way to tell. The installed `grill-me` skill is a
+    157-byte POINTER at `grilling`, so one hop through that redirect is
+    followed; a pointer to a pointer refuses. `$grill-me` also refuses without
+    a `verified` provider. Plain replies continue an open interview, and they
+    are read BEFORE the coding channel's ordinary conversation silence.
   - **Classification is named, never chosen.** `$ticket --label <name>` is
     repeatable and bounded; with none, nothing is classified. `agent:*` is
     refused before a spawn, and a requested label the publisher did not read
@@ -217,6 +222,15 @@ exercised; this says what it does.
     they typed, in the command and during the grill, bounded at 24 lines per
     thread. Nothing is generated: a requirement Ducky invented would be the
     one part of a contract nobody wrote.
+  - **One run at a time per thread**, enforced in the UPDATE statement. A
+    second command while one is in flight is REFUSED, not queued. Cancel stops
+    the next step and kills an in-flight read; the publisher is never killed,
+    because that could leave an issue created with its canonical read-back
+    unverified. A terminal status is final, so a subprocess returning after
+    Cancel cannot rewrite the card to "queued" -- and when a publication does
+    complete anyway, the card stays cancelled and the owner is told what was
+    created, with the URL. A publication is recorded against the run that made
+    it, so a late answer cannot point the next retry at the wrong issue.
   - **One card, edited in place**, with real controls -- a signed Details, a
     signed Cancel while the run is live, and a "View issue" LINK that carries
     no custom id and whose URL the sanitizer admits only as an exact https
@@ -935,7 +949,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**95 files, 1317 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**97 files, 1337 tests**) and `pnpm build` all
 pass on this host, with one standing caveat recorded honestly: seven tests fail
 in a FRESH worktree and fail identically at the previous commit. Four in
 `outbound.test.ts` and one in `result-intake.test.ts` assert on the literal

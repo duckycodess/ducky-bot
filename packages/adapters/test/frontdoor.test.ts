@@ -206,3 +206,51 @@ describe('an unconfigured instance cannot reach the workflow at all', () => {
       .toBe('missing_program');
   });
 });
+
+describe('only a read may be aborted', () => {
+  it('passes the signal through to the subprocess for a read', async () => {
+    const { calls, run } = recorder('{"root":"/tmp/demo"}');
+    const cli = new FrontDoorCli({ program: PROGRAM, run, mutationEnabled: true });
+    const controller = new AbortController();
+
+    await cli.inspect({ path: '.', signal: controller.signal });
+    expect(calls[0]!.options.signal).toBe(controller.signal);
+
+    await cli.validate(spec(), controller.signal);
+    expect(calls[1]!.options.signal).toBe(controller.signal);
+  });
+
+  it('never hands an external mutation a signal, however it is called', async () => {
+    /**
+     * A publisher that could be killed mid-round-trip is one that can leave a
+     * GitHub issue created with its canonical read-back unverified, which is
+     * worse than a cancel landing a few seconds late.
+     *
+     * Asserted on the SPAWN rather than on a throw, because that is the
+     * property that matters and the only one a caller can observe. A passed
+     * signal is ignored; it never reaches the child. (`#invoke` additionally
+     * refuses a signal on a non-read operation, which is unreachable from
+     * here and exists so that a future edit forwarding one trips rather than
+     * quietly making the publisher abortable.)
+     */
+    const { calls, run } = recorder('{"ok":true}');
+    const cli = new FrontDoorCli({ program: PROGRAM, run, mutationEnabled: true });
+    const signal = new AbortController().signal;
+
+    await (cli as unknown as {
+      publish(i: unknown, s: AbortSignal): Promise<unknown>;
+    }).publish({ spec: spec(), ready: false }, signal);
+    await (cli as unknown as {
+      agentize(i: unknown, s: AbortSignal): Promise<unknown>;
+    }).agentize({ path: '/tmp/demo' }, signal);
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.options.signal).toBeUndefined();
+  });
+
+  it('omits the signal entirely when none is given', async () => {
+    const { calls, run } = recorder('{"root":"/tmp/demo"}');
+    await new FrontDoorCli({ program: PROGRAM, run }).inspect({ path: '.' });
+    expect(calls[0]!.options.signal).toBeUndefined();
+  });
+});

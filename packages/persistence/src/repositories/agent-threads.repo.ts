@@ -170,21 +170,51 @@ export class AgentThreadsRepo {
       .run(uuid, nowIso, ownerId, threadKey);
   }
 
+  /**
+   * Records the issue this RUN published.
+   *
+   * Keyed on `run_id`, and that is the whole point. A publication is a fact
+   * about the run that made it, and a helper call can outlive the run that
+   * started it: the owner cancels, starts something else, and the subprocess
+   * comes back a moment later. Without the run in the WHERE clause that late
+   * answer writes its issue number onto whatever the thread is doing NOW, and
+   * the next `$ticket` enriches an issue nobody connected to it.
+   *
+   * A cancelled run still OWNS its thread, so its issue is still recorded --
+   * which is correct, because the issue exists and a retry should find it. A
+   * SUPERSEDED run does not, so its write lands nowhere.
+   */
   setPublication(
     ownerId: string,
     threadKey: string,
+    runId: string,
     publication: { issueNumber: number | null; issueUrl: string | null },
     nowIso: string,
-  ): void {
-    this.db
+  ): boolean {
+    const result = this.db
       .prepare(
         `UPDATE agent_threads SET issue_number = ?, issue_url = ?, updated_at = ?
-          WHERE discord_user_id = ? AND thread_key = ?`,
+          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
       )
-      .run(publication.issueNumber, publication.issueUrl, nowIso, ownerId, threadKey);
+      .run(publication.issueNumber, publication.issueUrl, nowIso, ownerId, threadKey, runId);
+    return Number(result.changes) > 0;
   }
 
-  /** Replaces the thread's current card. A thread holds exactly one. */
+  /**
+   * Opens a run on this thread, or refuses because one is still live.
+   *
+   * ONE RUN AT A TIME, enforced in the statement rather than by a caller
+   * remembering to look first. Two Discord messages arriving a moment apart
+   * are two concurrent handlers, and before this guard the second one
+   * replaced the first one's `run_id` mid-flight -- after which the first
+   * run's remaining writes either vanished or landed on the second run's
+   * card. A thread is a conversation, and a conversation does one thing at a
+   * time.
+   *
+   * `undefined` means a live run already owns the thread. The caller reports
+   * that rather than queueing, because a queue of workflow commands is a way
+   * to publish something the owner has stopped thinking about.
+   */
   startRun(
     ownerId: string,
     threadKey: string,
@@ -196,21 +226,41 @@ export class AgentThreadsRepo {
       detail: string | null;
     },
     nowIso: string,
-  ): AgentThreadRow {
+  ): AgentThreadRow | undefined {
     this.ensure(ownerId, threadKey, nowIso);
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE agent_threads
             SET run_id = ?, run_command = ?, run_status = ?, run_detail = ?, run_ready = ?,
                 run_queued = 0, run_started_at = ?, run_finished_at = NULL,
                 card_channel_id = NULL, card_message_id = NULL, updated_at = ?
-          WHERE discord_user_id = ? AND thread_key = ?`,
+          WHERE discord_user_id = ? AND thread_key = ?
+            AND (run_id IS NULL OR run_finished_at IS NOT NULL)`,
       )
       .run(
         run.runId, run.command, run.status, run.detail, fromBool(run.ready),
         nowIso, nowIso, ownerId, threadKey,
       );
-    return this.get(ownerId, threadKey)!;
+    return Number(result.changes) > 0 ? this.get(ownerId, threadKey)! : undefined;
+  }
+
+  /** The run that currently owns this thread and has not finished, if any. */
+  liveRun(ownerId: string, threadKey: string): AgentThreadRow | undefined {
+    const row = this.get(ownerId, threadKey);
+    return row?.runId !== null && row?.runFinishedAt === null ? row : undefined;
+  }
+
+  /**
+   * Whether `runId` still owns this thread AND has not reached a terminal
+   * status.
+   *
+   * The question every step of a multi-call command asks before it writes
+   * anything: a helper call can outlive both the owner's patience and the run
+   * itself.
+   */
+  runIsLive(ownerId: string, threadKey: string, runId: string): boolean {
+    const row = this.get(ownerId, threadKey);
+    return row?.runId === runId && row.runFinishedAt === null;
   }
 
   /**
@@ -235,7 +285,7 @@ export class AgentThreadsRepo {
     },
     nowIso: string,
   ): AgentThreadRow | undefined {
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE agent_threads
             SET run_status = ?,
@@ -243,7 +293,8 @@ export class AgentThreadsRepo {
                 run_queued = COALESCE(?, run_queued),
                 run_finished_at = CASE WHEN ? = 1 THEN ? ELSE run_finished_at END,
                 updated_at = ?
-          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
+          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?
+            AND run_finished_at IS NULL`,
       )
       .run(
         patch.status,
@@ -256,7 +307,11 @@ export class AgentThreadsRepo {
         threadKey,
         runId,
       );
-    return this.get(ownerId, threadKey);
+    // `undefined` for a run that is gone, superseded, or ALREADY TERMINAL.
+    // A terminal status is final: without that clause a subprocess returning
+    // after the owner pressed Cancel rewrote the card to "queued", which is
+    // the most consequential false report this surface could make.
+    return Number(result.changes) > 0 ? this.get(ownerId, threadKey) : undefined;
   }
 
   /** Records which message the card IS, so a later pass edits it rather than reposting. */

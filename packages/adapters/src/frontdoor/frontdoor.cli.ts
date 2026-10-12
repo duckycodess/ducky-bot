@@ -122,12 +122,13 @@ export class FrontDoorCli implements FrontDoorPort {
     path?: string;
     repository?: string;
     network?: boolean;
+    signal?: AbortSignal;
   }): Promise<FrontDoorInspection> {
     const argv: string[] = [OPERATIONS.inspect.verb, input.path ?? '.'];
     if (input.repository) argv.push('--repository', assertRepository(input.repository));
     if (input.network) argv.push('--network');
 
-    const raw = await this.#invoke('inspect', argv);
+    const raw = await this.#invoke('inspect', argv, input.signal);
     const data = parseJson(raw);
     const registration = data['registration'];
     const active = Array.isArray(data['active_jobs']) ? data['active_jobs'].length : 0;
@@ -146,9 +147,11 @@ export class FrontDoorCli implements FrontDoorPort {
     };
   }
 
-  async validate(spec: TicketSpec): Promise<FrontDoorValidation> {
+  async validate(spec: TicketSpec, signal?: AbortSignal): Promise<FrontDoorValidation> {
     return this.#withSpecFile(spec, async (file) => {
-      const raw = await this.#invoke('validate', [OPERATIONS.validate.verb, '--spec', file]);
+      const raw = await this.#invoke(
+        'validate', [OPERATIONS.validate.verb, '--spec', file], signal,
+      );
       const data = parseJson(raw);
       return {
         ok: data['ok'] === true,
@@ -240,8 +243,24 @@ export class FrontDoorCli implements FrontDoorPort {
    * argv -- interpreter, script path and all -- so nothing can be smuggled in
    * through a configured path.
    */
-  async #invoke(op: keyof typeof OPERATIONS, argv: readonly string[]): Promise<string> {
+  async #invoke(
+    op: keyof typeof OPERATIONS,
+    argv: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<string> {
     const operation = OPERATIONS[op];
+    /**
+     * Only a read may be handed a signal, enforced here rather than trusted
+     * to the caller. A publisher that could be killed mid-round-trip is a
+     * publisher that can leave an unverified issue behind, and the one place
+     * to make that impossible is where the subprocess is spawned.
+     */
+    if (signal && operation.cls !== 'read_only') {
+      throw new DuckyError(
+        'invalid_input',
+        'An external mutation cannot be aborted; it would leave unverified work behind.',
+      );
+    }
     const refusal = checkCommandAllowed(FRONTDOOR_POLICY_BIN, argv, operation.cls);
     if (refusal) throw new DuckyError('not_enabled_in_phase1', refusal.detail);
 
@@ -259,6 +278,8 @@ export class FrontDoorCli implements FrontDoorPort {
     const result = await this.#run(this.#interpreter, real, {
       timeoutMs: operation.timeoutMs,
       maxBuffer: FRONTDOOR_MAX_OUTPUT_BYTES,
+      // Kills the child, so a cancelled read stops rather than running on.
+      ...(signal ? { signal } : {}),
       env: {
         ...process.env,
         // The helper shells out to `gh`. A prompt would hang until the

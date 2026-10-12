@@ -160,6 +160,31 @@ export function publicationReply(
 }
 
 /**
+ * What to say when the publisher finished work the owner had already
+ * cancelled.
+ *
+ * Both facts, in one message. The card stays `cancelled` because that is what
+ * the owner chose; this says what happened anyway, because an issue that
+ * exists and is never mentioned is the same dishonesty pointing the other
+ * way.
+ */
+export function publishedAfterCancel(
+  url: string | undefined,
+  queued: boolean,
+): OutboundMessage {
+  const lines = [
+    'You cancelled this, and the publisher had already created the issue. Cancelling does not ' +
+      'interrupt a publication in flight, so it still exists.',
+    queued
+      ? 'It also carries the agent:ready label, which authorizes implementation. Remove the ' +
+        'label on GitHub if that is not what you want.'
+      : 'It is NOT queued, so nothing is authorized.',
+  ];
+  if (url) lines.push(url);
+  return { content: lines.join('\n'), ephemeral: false };
+}
+
+/**
  * The repository question.
  *
  * It ASKS rather than guessing, and it lists only repositories the owner

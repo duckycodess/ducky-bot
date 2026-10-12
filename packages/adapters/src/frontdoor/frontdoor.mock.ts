@@ -47,6 +47,7 @@ export class MockFrontDoor implements FrontDoorPort {
     path?: string;
     repository?: string;
     network?: boolean;
+    signal?: AbortSignal;
   }): Promise<FrontDoorInspection> {
     this.calls.push({ kind: 'inspect', input: { ...input } });
     const scripted = this.script.inspect;
@@ -67,7 +68,7 @@ export class MockFrontDoor implements FrontDoorPort {
     };
   }
 
-  async validate(spec: TicketSpec): Promise<FrontDoorValidation> {
+  async validate(spec: TicketSpec, _signal?: AbortSignal): Promise<FrontDoorValidation> {
     this.calls.push({ kind: 'validate', input: { id: spec.id, repository: spec.repository } });
     return { ok: true, id: spec.id, error: undefined, ...this.script.validate };
   }

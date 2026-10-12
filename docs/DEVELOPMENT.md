@@ -73,8 +73,12 @@ Fill in the env file:
   - `DUCKY_DEV_WORKFLOW_GRILL_SKILL` — the ABSOLUTE path to the installed
     upstream grilling skill. It is read at call time and handed to the
     conversation provider as instructions for that turn; it is never copied
-    into this repository. `$grill-me` also needs a provider that reports itself
-    `verified`, and refuses rather than faking an interview without one.
+    into this repository. **`$grill-me` refuses without it**, and without a
+    provider that reports itself `verified`: there is no fallback interview,
+    because one the owner could not tell apart from the real method is worse
+    than none. Point it at the file that CARRIES the method -- the installed
+    `grill-me/SKILL.md` is a pointer at `grilling`, and Ducky follows that one
+    hop for you, but a pointer to a pointer is refused.
 
   `$ticket` takes two flags and only two: `--ready`, which is what authorizes
   queueing, and `--label <name>`, repeatable, which names a classification the

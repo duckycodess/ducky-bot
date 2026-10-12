@@ -125,15 +125,32 @@ export interface FrontDoorPort {
   /** A stable name for `/status` and the boot diagnostics. */
   readonly name: string;
   availability(): FrontDoorAvailability;
-  /** Read-only. `network` additionally reads GitHub metadata and labels. */
+  /**
+   * Read-only. `network` additionally reads GitHub metadata and labels.
+   *
+   * ABORTABLE. Killing a read changes nothing that was not already true, so
+   * a cancelled command stops waiting immediately instead of holding the
+   * thread until a scan finishes.
+   */
   inspect(input: {
     path?: string;
     repository?: string;
     network?: boolean;
+    signal?: AbortSignal;
   }): Promise<FrontDoorInspection>;
-  /** Read-only. The installed schema is the authority, not Ducky. */
-  validate(spec: TicketSpec): Promise<FrontDoorValidation>;
-  /** External mutation. Creates or enriches a GitHub issue. */
+  /** Read-only, and abortable for the same reason. */
+  validate(spec: TicketSpec, signal?: AbortSignal): Promise<FrontDoorValidation>;
+  /**
+   * External mutation. Creates or enriches a GitHub issue.
+   *
+   * DELIBERATELY NOT ABORTABLE, and this is the one place in the port where
+   * that asymmetry is a decision rather than an omission. The helper makes
+   * GitHub round trips and then VERIFIES its own read-back; killing it
+   * mid-flight could leave an issue created with its canonical body
+   * unverified and no receipt, which is a worse state than a cancel landing a
+   * few seconds late. The caller stops BEFORE this call or lives with it
+   * finishing, and reports honestly either way.
+   */
   publish(input: {
     spec: TicketSpec;
     ready: boolean;
@@ -141,7 +158,7 @@ export interface FrontDoorPort {
     issue?: number;
     labels?: readonly string[];
   }): Promise<FrontDoorPublication>;
-  /** External mutation. Onboards a repository; starts nothing. */
+  /** External mutation. Onboards a repository; starts nothing. Not abortable. */
   agentize(input: {
     path?: string;
     repository?: string;

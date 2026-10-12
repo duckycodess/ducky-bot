@@ -36,8 +36,14 @@ describe('the agent thread binding', () => {
     const store = fresh();
     store.agentThreads.bindRepository(OWNER, 't1', 'acme/demo', '/tmp/demo', NOW);
     store.agentThreads.setTicketUuid(OWNER, 't1', 'd0d0d0d0-0000-4000-8000-000000000000', NOW);
+    store.agentThreads.startRun(
+      OWNER, 't1',
+      { runId: 'a00001', command: '$ticket', status: 'publishing', ready: false, detail: null },
+      NOW,
+    );
     store.agentThreads.setPublication(
-      OWNER, 't1', { issueNumber: 7, issueUrl: 'https://github.com/acme/demo/issues/7' }, NOW,
+      OWNER, 't1', 'a00001',
+      { issueNumber: 7, issueUrl: 'https://github.com/acme/demo/issues/7' }, NOW,
     );
     expect(store.agentThreads.get(OWNER, 't1')?.issueNumber).toBe(7);
 
@@ -107,21 +113,96 @@ describe('the owner\'s own grill lines', () => {
 });
 
 describe('the card on a thread', () => {
-  it('replaces the previous one rather than accumulating', () => {
+  it('refuses a second run while the first is still live', () => {
+    /**
+     * The single-writer gate, in the statement rather than in a caller.
+     *
+     * Two Discord messages a moment apart are two concurrent handlers. Before
+     * this, the second replaced the first one's `run_id` mid-flight, and the
+     * first run's remaining writes either vanished or landed on the second
+     * run's card.
+     */
+    const store = fresh();
+    expect(
+      store.agentThreads.startRun(
+        OWNER, 't1', { runId: 'a00001', command: '$ticket', status: 'publishing', ready: false, detail: null }, NOW,
+      ),
+    ).toBeDefined();
+    store.agentThreads.setCard(OWNER, 't1', 'a00001', { channelId: 'c1', messageId: 'm1' }, NOW);
+
+    expect(
+      store.agentThreads.startRun(
+        OWNER, 't1', { runId: 'a00002', command: '$agentize', status: 'onboarding', ready: false, detail: null }, NOW,
+      ),
+    ).toBeUndefined();
+    expect(store.agentThreads.get(OWNER, 't1')!.runId).toBe('a00001');
+    expect(store.agentThreads.liveRun(OWNER, 't1')?.runId).toBe('a00001');
+    expect(store.agentThreads.runIsLive(OWNER, 't1', 'a00001')).toBe(true);
+  });
+
+  it('replaces the previous one once it has finished', () => {
     const store = fresh();
     store.agentThreads.startRun(
       OWNER, 't1', { runId: 'a00001', command: '$ticket', status: 'publishing', ready: false, detail: null }, NOW,
     );
     store.agentThreads.setCard(OWNER, 't1', 'a00001', { channelId: 'c1', messageId: 'm1' }, NOW);
-    store.agentThreads.startRun(
-      OWNER, 't1', { runId: 'a00002', command: '$agentize', status: 'onboarding', ready: false, detail: null }, NOW,
-    );
+    store.agentThreads.updateRun(OWNER, 't1', 'a00001', { status: 'failed', finished: true }, NOW);
 
+    expect(
+      store.agentThreads.startRun(
+        OWNER, 't1', { runId: 'a00002', command: '$agentize', status: 'onboarding', ready: false, detail: null }, NOW,
+      ),
+    ).toBeDefined();
     const row = store.agentThreads.get(OWNER, 't1')!;
     expect(row.runId).toBe('a00002');
     // A new run starts with no card, so it cannot edit the previous one.
     expect(row.cardMessageId).toBeNull();
     expect(store.agentThreads.countForOwner(OWNER)).toBe(1);
+  });
+
+  it('refuses to move a run that has already reached a terminal status', () => {
+    /**
+     * The guard that stops a subprocess returning after Cancel from rewriting
+     * the card to "queued" -- the most consequential false report this
+     * surface could make.
+     */
+    const store = fresh();
+    store.agentThreads.startRun(
+      OWNER, 't1', { runId: 'a00001', command: '$ticket', status: 'publishing', ready: true, detail: null }, NOW,
+    );
+    expect(
+      store.agentThreads.updateRun(OWNER, 't1', 'a00001', { status: 'cancelled', finished: true }, NOW),
+    ).toBeDefined();
+
+    expect(
+      store.agentThreads.updateRun(
+        OWNER, 't1', 'a00001', { status: 'queued', queued: true, finished: true }, NOW,
+      ),
+    ).toBeUndefined();
+    const row = store.agentThreads.get(OWNER, 't1')!;
+    expect(row.runStatus).toBe('cancelled');
+    expect(row.runQueued).toBe(false);
+  });
+
+  it('records a publication only onto the run that made it', () => {
+    const store = fresh();
+    store.agentThreads.startRun(
+      OWNER, 't1', { runId: 'a00001', command: '$ticket', status: 'publishing', ready: false, detail: null }, NOW,
+    );
+    // A late answer from a run that no longer owns the thread lands nowhere.
+    expect(
+      store.agentThreads.setPublication(
+        OWNER, 't1', 'a99999', { issueNumber: 7, issueUrl: 'https://github.com/a/b/issues/7' }, NOW,
+      ),
+    ).toBe(false);
+    expect(store.agentThreads.get(OWNER, 't1')!.issueNumber).toBeNull();
+
+    expect(
+      store.agentThreads.setPublication(
+        OWNER, 't1', 'a00001', { issueNumber: 7, issueUrl: 'https://github.com/a/b/issues/7' }, NOW,
+      ),
+    ).toBe(true);
+    expect(store.agentThreads.get(OWNER, 't1')!.issueNumber).toBe(7);
   });
 
   it('updates only the run it names', () => {

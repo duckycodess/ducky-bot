@@ -70,6 +70,9 @@ interface BridgeOptions extends HarnessOptions {
   readonly grillSkillPath?: string;
 }
 
+/** The installed method on disk. `$grill-me` fails closed without one. */
+const defaultSkill = (): string => skillFile('UPSTREAM GRILL METHOD: rounds on a design tree.');
+
 const boot = async (opts: BridgeOptions = {}) => {
   // The mock reports its own availability, so a test that turns publishing off
   // has to say so to BOTH halves: the configuration and the stand-in helper.
@@ -87,7 +90,7 @@ const boot = async (opts: BridgeOptions = {}) => {
       DUCKY_DEV_SKILL_BRIDGE_ENABLED: '1',
       DUCKY_DEV_WORKFLOW_HELPER: '/tmp/not-spawned/workflow.py',
       ...(opts.mutation === false ? {} : { DUCKY_DEV_WORKFLOW_MUTATION_ENABLED: '1' }),
-      ...(opts.grillSkillPath ? { DUCKY_DEV_WORKFLOW_GRILL_SKILL: opts.grillSkillPath } : {}),
+      DUCKY_DEV_WORKFLOW_GRILL_SKILL: opts.grillSkillPath ?? defaultSkill(),
       ...opts.env,
     },
   });
@@ -459,15 +462,6 @@ describe('$grill-me is a conversation and nothing else', () => {
     h.close();
   });
 
-  it('says the skill is absent rather than inventing the method', async () => {
-    const provider = new RecordingProvider();
-    const { h } = await boot({ provider });
-    await say(h, '$grill-me');
-    const instructions = (provider.turns.at(-1)?.instructions ?? []).join('\n');
-    expect(instructions).toMatch(/not configured on this host/i);
-    h.close();
-  });
-
   it('continues the interview on a plain reply, and only while it is open', async () => {
     const provider = new RecordingProvider();
     const { h } = await boot({ provider });
@@ -571,18 +565,39 @@ describe('the job card', () => {
     h.close();
   });
 
-  it('cancels the next step and says what it cannot undo', async () => {
+  it('closes an open interview, and keeps the notes it settled', async () => {
+    /**
+     * A grill stops being a RUN as soon as its scan is done -- there is no
+     * further step to stop, and holding the thread would block the `$ticket`
+     * the grill exists to lead to. Its Cancel therefore means "close the
+     * interview", which is the only thing left that it could mean.
+     */
     const { h } = await boot();
     await say(h, '$grill-me the retry policy');
+    await say(h, 'three attempts, then stop');
     const cancel = cards(h).at(-1)!.rows![0]!.buttons.find((b) => b.label === 'Cancel')!;
 
     const reply = await h.transport.dispatch({
       kind: 'component', customId: controlId(cancel), userId: OWNER,
     });
-    expect(replyText(reply)).toMatch(/not interrupted/i);
+    expect(replyText(reply)).toMatch(/closed the interview/i);
     const row = h.store.agentThreads.get(OWNER, 'dm-1')!;
-    expect(row.runStatus).toBe('cancelled');
     expect(row.grilling).toBe(false);
+    // The notes are the owner's settled intent; closing the interview is not
+    // throwing away the work it established.
+    expect(row.intentNotes).toContain('three attempts, then stop');
+    h.close();
+  });
+
+  it('frees the thread once a grill opens, so $ticket can follow it', async () => {
+    const { h, door } = await boot();
+    await say(h, '$grill-me the retry policy');
+    await say(h, 'three attempts, then stop');
+
+    // No "already in flight" refusal: the grill holds no pending step.
+    const reply = await say(h, '$ticket');
+    expect(replyText(reply)).not.toMatch(/already in flight/i);
+    expect(door.calls.some((c) => c.kind === 'publish')).toBe(true);
     h.close();
   });
 

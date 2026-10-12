@@ -69,13 +69,29 @@ run at all. The third exists on exactly the terms
 decision, not something a feature flag sweeps in. All three are profile-scoped
 and production inherits none of them.
 
-**The grill is the installed skill's own text, read at call time.** The
+**The grill is the installed skill's own text, or there is no grill.** The
 upstream grilling skill is handed to the conversation provider as instructions
-for that turn, read from a configured absolute path. It is not copied into this
-repository: a copy would be a second version of somebody else's method, and the
-one that drifted would be the one nobody was watching. With no verified
-provider, `$grill-me` refuses rather than printing questions from a fixed list
-and calling it an interview.
+for that turn, read from a configured absolute path at call time. It is not
+copied into this repository: a copy would be a second version of somebody
+else's method, and the one that drifted would be the one nobody was watching.
+
+**There is no fallback, and that is the point.** Unset, absent, unreadable,
+empty or oversized all REFUSE, before a card exists and before the repository
+is read, and the refusal names what is wrong. An interview Ducky improvised
+because the file was missing is not the installed skill, and it is the worse of
+the two failures: the owner believes they are being grilled by the method they
+chose, and they are not. The same check runs on every turn, so a file that
+becomes unreadable mid-interview closes the grill instead of silently changing
+what is conducting it. `$grill-me` likewise refuses without a `verified`
+provider.
+
+**One hop through the skill's own redirect.** `grill-me/SKILL.md` as installed
+is a 157-byte pointer whose entire body is `Call the Skill tool with
+"grilling"`; the method lives in a sibling directory. An operator configuring
+the obvious path would otherwise hand the model a pointer and get an invented
+interview, so the redirect is followed once. A pointer to a pointer refuses: a
+second hop is a loop waiting to happen, and it is not an installation anybody
+meant.
 
 **Statuses are words, and the words are the contract.** `scanning`, `grilling`,
 `publishing`, `published`, `queued`, `onboarding`, `onboarded`, `needs_input`,
@@ -123,8 +139,31 @@ control, and "View issue" is a link with no custom id at all.
   nobody wrote cannot appear in a published contract.
 - `/forget conversation` removes the workflow thread records too, including the
   grill notes. It cannot remove a published GitHub issue, and it says so.
-- Cancel stops the next step. It does not interrupt a helper call already in
-  flight, and the reply says that rather than implying otherwise.
+- **One run at a time per thread**, enforced in the UPDATE statement rather
+  than by a caller looking first. Two Discord messages a moment apart are two
+  concurrent handlers; before this gate the second replaced the first one's
+  run mid-flight, after which the first run's remaining writes either vanished
+  or landed on the second run's card. A second command is refused, never
+  queued: a queued workflow command would publish something the owner had
+  stopped thinking about by the time it ran.
+- **Cancel stops the next step, and a terminal status is final.** Read-only
+  helper calls (`inspect`, `validate`) are handed an `AbortSignal` and are
+  killed. The publisher is NOT: killing it could leave an issue created with
+  its canonical read-back unverified, which is worse than a cancel landing a
+  few seconds late. So the decision is taken before the irreversible call, and
+  `updateRun` refuses to move a run that has already reached a terminal
+  status -- without which a subprocess returning after Cancel rewrote the card
+  to "queued", the most consequential false report this surface could make.
+- **A publication that completes anyway is reported, not hidden.** The card
+  stays `cancelled`, and the owner is told what the publisher created, with the
+  URL and whether it carries `agent:ready`. Silence about an issue that now
+  exists is the same dishonesty pointing the other way.
+- **A publication is recorded onto the run that made it.** `setPublication` is
+  keyed on the run id, so a late answer cannot attach its issue number to
+  whatever the thread is doing now and send the next retry at the wrong issue.
+- A grill stops being a RUN once its scan is done -- it has no pending step and
+  must not block the `$ticket` it exists to lead to. Its Cancel closes the
+  INTERVIEW instead, and keeps the notes it settled.
 - The integration is UNVERIFIED against the real helper on this host: every
   test drives a recording stand-in, because the real publisher opens GitHub
   issues. See `docs/CURRENT_STATE.md` for what that does and does not prove.

@@ -57,8 +57,10 @@ for existing development setups, which now set it.
 state, not owner, approval or dependency waits) has a deadline stored on the job
 (default 60 minutes via `DUCKY_ENGINEERING_ATTEMPT_MINUTES`, capped at the
 existing two hour ceiling). A reclaim after lease expiry keeps the same deadline,
-so a restart cannot reset it. The claim carries it as an optional field; an
-executor facing a claim without it applies a bounded local default. The executor
+so a restart cannot reset it. The claim carries it as an optional field; a new
+executor facing a claim without it applies a bounded local default. The claim and
+failure schemas are strict, so this is NOT bidirectional rolling compatibility:
+upgrade by stopping the coordinator and executor together, with engineering off. The executor
 times itself out through the supervised cancellation path. The coordinator
 requests ordinary cancellation after a grace period as a backstop.
 

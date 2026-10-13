@@ -6,6 +6,11 @@ a secret.
 
 ## Take a backup
 
+> On the remote Linux account, do not rely on the defaults below. `pnpm backup`
+> loads `.env` files from the current directory and falls back to `./data/`, which
+> is not that account's private runtime state. Use the explicit `--db` form in
+> [remote-linux-runtime.md](remote-linux-runtime.md).
+
 ```bash
 pnpm backup                            # development profile → ./data/backups
 pnpm backup --profile production

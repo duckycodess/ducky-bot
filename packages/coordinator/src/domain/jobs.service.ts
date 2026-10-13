@@ -204,6 +204,7 @@ export class JobsService {
             ? 'cancelled_awaiting_dependency'
             : 'cancelled_by_owner';
 
+    let kept = false;
     withTransaction(this.store.db, () => {
       if (job.state === 'needs_approval') {
         this.store.approvals.rejectAllPending(job.id, `owner:${actor.discordUserId}`, 'job_cancelled');
@@ -222,9 +223,14 @@ export class JobsService {
         event: 'job.cancelled', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
         subjectKind: 'job', subjectRef: job.publicId, detail: reason,
       });
-      this.releaseUnlessOrphan(job.repoSlug);
+      kept = !this.releaseUnlessOrphan(job);
     });
-    return { state: 'cancelled', note: 'Cancelled. Any workspace was retained for inspection.' };
+    return {
+      state: 'cancelled',
+      note: kept
+        ? `Cancelled, but the executor stopped reporting and nothing has shown its agent stopped. \`${job.repoSlug}\` and the engineering slot stay held until /job cleanup ${job.publicId}.`
+        : 'Cancelled. Any workspace was retained for inspection.',
+    };
   }
 
   /**
@@ -264,7 +270,7 @@ export class JobsService {
           'owner_input_rounds_exhausted',
           'The maximum number of owner-input rounds was reached.',
         );
-        this.releaseUnlessOrphan(job.repoSlug);
+        this.releaseUnlessOrphan(job);
       });
       return { state: 'failed', note: 'That job already used all of its question rounds.' };
     }
@@ -703,7 +709,7 @@ export class JobsService {
         event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
         subjectKind: 'job', subjectRef: job.publicId, detail: 'termination confirmed',
       });
-      this.releaseUnlessOrphan(job.repoSlug);
+      this.releaseUnlessOrphan(job);
     });
     return { state: 'cancelled' };
   }
@@ -762,7 +768,7 @@ export class JobsService {
           `Repository \`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
         );
       } else {
-        this.releaseUnlessOrphan(job.repoSlug);
+        this.releaseUnlessOrphan(job);
       }
     });
     return { state: 'failed', orphan };
@@ -958,10 +964,34 @@ export class JobsService {
     return ttl == null ? null : isoPlus(ttl, this.now());
   }
 
-  private releaseUnlessOrphan(repoSlug: string): void {
-    const r = this.store.jobs.reservation(repoSlug);
-    if (r && r.reason === 'orphan_agent') return;
-    this.store.jobs.releaseReservation(repoSlug);
+  /**
+   * Releases a job's repository, unless doing so would free a possibly-live
+   * writer. Returns true when it was RELEASED and false when it was kept.
+   *
+   * A job that holds the engineering slot as an `unconfirmed_stop` lost its
+   * executor mid-attempt (lease expiry), and nothing has since proved its agent
+   * quiet. Cancelling it, failing it, or answering it must not turn that silence
+   * into permission: the reservation is converted to an orphan, which keeps the
+   * slot with it, and only quiescence or the owner's `/job cleanup` clears it.
+   *
+   * A paused job holds no slot (a pause is quiescent by contract), so cancelling
+   * one still releases at once, exactly as before.
+   */
+  private releaseUnlessOrphan(job: JobRow): boolean {
+    const r = this.store.jobs.reservation(job.repoSlug);
+    if (r && r.reason === 'orphan_agent') return false;
+    const held = this.store.jobs.admission();
+    if (r && r.jobId === job.id && held?.jobId === job.id && held.reason === 'unconfirmed_stop') {
+      this.store.jobs.markReservationOrphan(job.repoSlug);
+      this.store.jobs.appendEvent(
+        job.id,
+        'reservation_orphaned',
+        `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+      );
+      return false;
+    }
+    this.store.jobs.releaseReservation(job.repoSlug);
+    return true;
   }
 
   private ownedJob(actor: ActorContext, publicId: string): JobRow {

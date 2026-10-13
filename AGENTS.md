@@ -11,7 +11,7 @@ pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
-pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
+pnpm probe:openclaw   # records the OpenClaw surface; exit 0 only when the whole contract incl. a reply is recorded, 2 when any half is unrecorded or the binary is absent (it exited 0 on the original dev host; not run on the remote account, where openclaw is absent)
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it

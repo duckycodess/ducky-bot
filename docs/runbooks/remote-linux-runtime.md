@@ -101,9 +101,17 @@ Herdr server's, not the executor's). It says nothing about quota. Check those
 places yourself, printing names only:
 
 ```bash
-# Names only, never values. Herdr server (agents inherit THIS environment):
-pid=$(pgrep -u "$USER" -x herdr | head -1)
-tr '\0' '\n' < "/proc/$pid/environ" | cut -d= -f1 | grep -E '(^|_)API_KEY$|ADMIN_KEY$|AUTH_TOKEN$' || echo "none"
+# Names only, never values. Agents inherit the environment of the Herdr SERVER
+# they were started by. There can be more than one herdr process on the account
+# (another program's server, or your own interactive one), and picking the first
+# match can inspect the wrong one. Inspect EVERY match, and prefer the PID of
+# the server Ducky is actually pinned to (its systemd MainPID, or the process
+# that owns the socket the executor talks to) once that is pinned:
+for pid in $(pgrep -u "$USER" -x herdr); do
+  echo "herdr pid $pid:"
+  tr '\0' '\n' < "/proc/$pid/environ" | cut -d= -f1 \
+    | grep -E '(^|_)API_KEY$|ADMIN_KEY$|AUTH_TOKEN$' || echo "  none"
+done
 # Provider store: confirm it is subscription OAuth with no API key profile.
 openclaw --dev models status     # expect oauth=1, token=0, api_key=0
 ```
@@ -125,13 +133,46 @@ journalctl --user -u ducky-coordinator@development -n 100 --no-pager
 
 - **Logout continuity** holds only while `Linger=yes`; verify by logging out of
   every session and reading `systemctl --user is-active` over a fresh SSH login.
+- **Upgrade is a synchronized stop, not a rolling restart.** The claim response
+  and the failure report are strict schemas, so an executor and a coordinator
+  from different builds can reject each other's messages (an older executor
+  cannot parse a claim carrying the attempt deadline, and an older coordinator
+  rejects a failure report carrying `quiescent`). The optional claim field
+  helps only a NEW executor reading an OLD coordinator, which is not a
+  supported pairing. Stop both units with engineering off (it is off by
+  default), take a backup, update, migrate, then start the coordinator and the
+  executor together.
 - **Restart** is safe: leases expire, a job that lost its executor is requeued
   for recovery and KEEPS its engineering slot and its original attempt deadline,
   and the coordinator never assumes the agent stopped.
 - **Orphans** are never cleared automatically. See
   [orphan-recovery.md](orphan-recovery.md). A held slot also blocks every other
   engineering job until `/job cleanup` is run for the orphaned one.
-- **Backup**: `pnpm backup` then `pnpm backup:verify --file <path>`
+- **Backup and migrate use explicit paths here, not defaults.** `pnpm backup` and
+  `pnpm migrate` load `.env` and `.env.development` from the current directory
+  if they exist, and otherwise fall back to the profile's default database under
+  `./data/`. Neither is the systemd env file or this account's private runtime
+  state, so a bare `pnpm backup` could back up (or migrate) the wrong database,
+  or none. Name the database, and run the scripts directly so no env file is
+  loaded and no secret is read:
+
+  ```bash
+  profile=development   # or production
+  state=$HOME/.local/state/ducky/$profile
+  cd ~/projects/ducky
+  # A consistent online snapshot of THIS profile's database, written 0600:
+  node_modules/.bin/tsx scripts/backup-db.ts --db "$state/ducky.db" --out "$state/backups"
+  node_modules/.bin/tsx scripts/verify-backup.ts --file "$state/backups/<the file it printed>"
+  # Pending migrations for the same database (the coordinator also applies them
+  # at boot). Inline, non-secret variables; --dry only lists them:
+  DUCKY_PROFILE=$profile DUCKY_DB_PATH="$state/ducky.db" \
+    node_modules/.bin/tsx packages/persistence/src/cli/migrate.ts --dry
+  ```
+
+  `--db` wins over `DUCKY_DB_PATH` and the default. Do not `source` the env file
+  or pass it to `--env-file` just to find the path; the path is in the
+  `DUCKY_DB_PATH` line of that file, and nothing else in it is needed. The
+  executor credential file is not in a backup and is saved separately
   ([backup-and-restore.md](backup-and-restore.md)). A backup proves state is
   recoverable. It is no evidence about the provider, the network or admission.
 

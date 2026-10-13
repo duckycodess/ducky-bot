@@ -184,6 +184,67 @@ describe('an uncertain stop keeps the slot', () => {
     h.close();
   });
 
+  it('does not let an owner cancel after lease expiry release a slot nothing has proved quiet', () => {
+    const h = makeHarness();
+    const first = submit(h, 'demo');
+    const second = submit(h, 'other');
+    const c = h.app.jobs.claim(h.executorId, 'k1')!;
+    h.app.jobs.registerWorkspace(h.executorId, c.jobId, c.leaseId, REGISTRATION);
+    at(h, future(10 * 60_000)).expireLeases();
+    expect(h.store.jobs.byId(first.id)?.state).toBe('waiting_for_executor');
+
+    const out = h.app.jobs.requestCancel(h.owner, first.publicId);
+    expect(out.state).toBe('cancelled');
+    expect(out.note).toMatch(/stay held until \/job cleanup/);
+
+    // Cancelled, yet the repository and the slot are an orphan, not released.
+    expect(h.store.jobs.byId(first.id)?.state).toBe('cancelled');
+    expect(h.store.jobs.reservation('demo')?.reason).toBe('orphan_agent');
+    expect(h.store.jobs.admission()).toMatchObject({ jobId: first.id, reason: 'unconfirmed_stop' });
+    // The queued job on ANOTHER repository is still denied.
+    expect(h.app.jobs.claim(h.executorId, 'k2')).toBeUndefined();
+    expect(h.store.jobs.byId(second.id)?.state).toBe('queued');
+
+    // Only the owner's observation-backed cleanup frees it.
+    expect(h.app.jobs.cleanup(h.owner, first.publicId, false, 'absent').released).toBe(true);
+    expect(h.store.jobs.admission()).toBeUndefined();
+    expect(h.app.jobs.claim(h.executorId, 'k3')?.jobId).toBe(second.id);
+    h.close();
+  });
+
+  it('keeps the slot on a cancel after lease expiry even before a workspace was recorded', () => {
+    const h = makeHarness();
+    const first = submit(h, 'demo');
+    submit(h, 'other');
+    h.app.jobs.claim(h.executorId, 'k1');
+    at(h, future(10 * 60_000)).expireLeases();
+
+    h.app.jobs.requestCancel(h.owner, first.publicId);
+    expect(h.store.jobs.admission()?.reason).toBe('unconfirmed_stop');
+    expect(h.app.jobs.claim(h.executorId, 'k2')).toBeUndefined();
+    h.close();
+  });
+
+  it('still releases at once when a PAUSED job is cancelled, because a pause is quiescent', () => {
+    const h = makeHarness();
+    const first = submit(h, 'demo');
+    const other = submit(h, 'other');
+    const c = h.app.jobs.claim(h.executorId, 'k1')!;
+    h.app.jobs.registerWorkspace(h.executorId, c.jobId, c.leaseId, REGISTRATION);
+    h.app.jobs.submitResult(
+      h.executorId, c.jobId, c.leaseId,
+      implementedResult({ verdict: 'needs_owner_input', question: 'which one?', proposedActions: [] }),
+      200,
+    );
+
+    const out = h.app.jobs.requestCancel(h.owner, first.publicId);
+    expect(out.note).toMatch(/workspace was retained/);
+    expect(h.store.jobs.reservation('demo')).toBeUndefined();
+    expect(h.store.jobs.admission()).toBeUndefined();
+    expect(h.app.jobs.claim(h.executorId, 'k2')?.jobId).toBe(other.id);
+    h.close();
+  });
+
   it('releases on a timeout only when the executor proved the agent quiet', () => {
     const quiet = makeHarness();
     const job = submit(quiet, 'demo');

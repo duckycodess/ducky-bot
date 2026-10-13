@@ -102,9 +102,11 @@ export const ClaimResponseSchema = z.strictObject({
    * When this claimed attempt must stop, as an absolute instant.
    *
    * Persisted by the coordinator so a restart or a reclaim after lease expiry
-   * cannot reset a live attempt's budget. Optional so an executor that sees a
-   * claim from a coordinator without it applies its own bounded local ceiling
-   * instead of running unbounded.
+   * cannot reset a live attempt's budget. Optional so a NEW executor that sees
+   * a claim from a coordinator without it applies its own bounded local ceiling
+   * instead of running unbounded. This is not rolling-upgrade compatibility:
+   * this schema is strict, so an OLDER executor rejects a claim that carries the
+   * field. Upgrade the coordinator and executor together.
    */
   attemptDeadlineAt: z.string().optional(),
 });

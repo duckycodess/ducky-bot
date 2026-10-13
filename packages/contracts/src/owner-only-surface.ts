@@ -48,6 +48,25 @@ export const OWNER_ONLY_INTERACTION_KINDS = [
   'execute_approval',
   'task_done',
   'task_cancel',
+  /**
+   * The deadline controls on a task card. Signed, owner-bound and re-checked
+   * server-side like every other interaction.
+   *
+   * They are on THIS manifest and can never be on `SHARED_READABLE_ROUTES`:
+   * a reminder card may be posted in a channel other people can read, and a
+   * control that appeared there must still refuse everyone but the owner.
+   * Visibility is not authorization.
+   */
+  'task_edit',
+  'task_snooze',
+  /**
+   * The three controls on a pasted-list preview. Save is the only one that
+   * writes, and it is idempotent on the preview it names, so a double press
+   * produces the same tasks rather than a second set.
+   */
+  'bulk_save',
+  'bulk_edit',
+  'bulk_discard',
   'reminder_cancel',
   'watch_cancel',
   /** The confirm step of `/forget job`. Signed and bound to the owner. */

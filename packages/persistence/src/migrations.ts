@@ -1007,4 +1007,57 @@ CREATE INDEX ix_briefing_deliveries_pending
   ON briefing_deliveries(status, due_at) WHERE status = 'pending';
 `,
   },
+  {
+    version: 22,
+    name: 'task_previews_and_linked_reminders',
+    sql: `
+-- A pasted list, held between "show me what you read" and "save it".
+--
+-- DURABLE, unlike the in-memory schedule draft, and for a reason the schedule
+-- surface does not have: the phone parses on one request and saves on the
+-- next, and a preview that lived only in a process would be lost by a restart
+-- between the two taps. The owner's own task text is in here, so the row is
+-- deliberately short-lived (TASK_PREVIEW_TTL_MS) and the reconciler sweeps
+-- expired ones whether or not retention is configured.
+--
+-- \`items_json\` is CLEARED the moment the preview settles. A saved preview
+-- keeps only the public ids it produced -- which is what makes a double press
+-- return the same tasks instead of a second set -- and a discarded one keeps
+-- nothing at all. So no copy of what the owner wrote outlives the decision
+-- they made about it.
+CREATE TABLE task_previews (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  source          TEXT NOT NULL CHECK (source IN ('discord','phone')),
+  status          TEXT NOT NULL CHECK (status IN ('pending','saved','discarded')),
+  item_count      INTEGER NOT NULL CHECK (item_count >= 0),
+  items_json      TEXT,
+  saved_ids_json  TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL,
+  settled_at      TEXT,
+  -- A pending preview always has its items; a settled one never does.
+  CHECK ((status = 'pending') = (items_json IS NOT NULL))
+);
+
+CREATE INDEX ix_task_previews_owner ON task_previews(discord_user_id, status, created_at);
+CREATE INDEX ix_task_previews_expiry ON task_previews(expires_at);
+
+-- Which TASK a reminder belongs to, recorded rather than inferred.
+--
+-- The link has to be a column: deriving it from the reminder's text would mean
+-- matching strings to decide whether to cancel a notification, and two tasks
+-- called "Letters" would then cancel each other's. ON DELETE CASCADE so
+-- \`/forget task\` and retention cannot leave a reminder pointing at a task
+-- that is gone -- the reminder goes with it, occurrences and all.
+--
+-- NULL is the normal case and means exactly what it meant before this column
+-- existed: a free-standing reminder the owner asked for directly, delivered to
+-- their DM.
+ALTER TABLE reminders ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE;
+
+CREATE INDEX ix_reminders_task ON reminders(task_id, status) WHERE task_id IS NOT NULL;
+`,
+  },
 ];

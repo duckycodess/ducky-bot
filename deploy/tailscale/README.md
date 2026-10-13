@@ -70,6 +70,29 @@ An ACL sketch, for review rather than for pasting:
 }
 ```
 
+## The phone capture page assumes exactly this shape
+
+`/app` (ADR 0025) is the first surface on the coordinator meant for a HUMAN,
+and it is the reason the table above now has a third reader: the owner's phone,
+on the tailnet, reaching the coordinator's existing port.
+
+Nothing about it relaxes the rules on this page. It is off by default and
+**refuses to start** unless `DUCKY_HTTP_HOST` is loopback, RFC1918,
+`100.64.0.0/10` or `fd7a:115c:a1e0::/48` — the same ranges
+`assertPrivateGatewayUrl` accepts for the gateway, enforced by
+`isPrivateBindHost` for the listener. `0.0.0.0` is refused explicitly.
+
+Two consequences worth stating before anybody types `tailscale up`:
+
+- **Binding the listener to a tailnet address exposes the EXECUTOR routes to
+  that tailnet too.** They keep their own bearer token, HMAC signature,
+  timestamp window and single-use nonce; nothing about the phone page relaxes
+  them. The ACL rule above is what keeps the rest of the tailnet away from the
+  coordinator at all.
+- **The ACL needs a second rule** if the phone is to reach it: the owner's own
+  device, to `tag:ducky-coordinator` on the coordinator's port. Name the device
+  or tag it; do not open the port to the tailnet at large.
+
 ## What must never happen
 
 - **No auth key in this repository, in an env file that gets committed, or in a
@@ -77,7 +100,9 @@ An ACL sketch, for review rather than for pasting:
   like the executor credential file.
 - **No `tailscale funnel`, and no `tailscale serve` to the public internet.**
   That would put the API back on the internet through a different door, and the
-  private-URL guard would not see it happen.
+  private-URL guard would not see it happen. This is doubly true now that a
+  page with the owner's own records on it answers on that listener: nothing in
+  this repository calls Funnel, and no configuration value turns it on.
 - **No exit node, no subnet router** for these two machines. They need to reach
   each other, not each other's networks.
 

@@ -286,8 +286,12 @@ export class ForgetService {
     const store = this.deps.store;
     const rows = withTransaction(store.db, () => {
       switch (target) {
-        case 'task':
-          return store.retention.deleteTaskByPublicId(owner, preview.id);
+        case 'task': {
+          // The task AND the notifications it owns. Counted, so the owner is
+          // told how many records went rather than just "one".
+          const t = store.retention.deleteTaskByPublicId(owner, preview.id);
+          return t.tasks + t.reminders + t.occurrences;
+        }
         case 'reminder': {
           const r = store.retention.deleteReminderByPublicId(owner, preview.id);
           return r.reminders + r.occurrences;

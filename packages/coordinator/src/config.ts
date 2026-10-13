@@ -4,6 +4,7 @@ import {
   BRIEFING_DELIVERY_MODES, assertValidSlotTime, type BriefingDelivery,
 } from './domain/briefing-notifications.service.js';
 import { assertNoChannelRoleConflicts } from './domain/channel-roles.js';
+import { parsePhoneVerifier } from './http/phone-auth.js';
 import {
   CHANNEL_ROLES, UNSCOPED_ROLE_CHANNEL_ENV, type ChannelRole,
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
@@ -11,7 +12,7 @@ import {
   CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES,
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
-  blankToUndefined, resolveConversationMode, resolveDuckyProfile,
+  blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -77,6 +78,20 @@ export const EnvSchema = z.object({
    * its own.
    */
   DUCKY_BRIEFING_CHANNEL_ID: z.string().optional(),
+  /**
+   * Where a task-linked reminder is posted, with the owner's mention.
+   *
+   * Opt-in and profile-scoped like every other channel setting. UNCONFIGURED
+   * MEANS DM, which is exactly what every existing instance already does, so
+   * an upgrade changes nothing until an operator names a channel. Only
+   * reminders that belong to a TASK go there; a free-standing `/reminder add`
+   * stays in the DM it has always used.
+   *
+   * Visibility is not authorization: the cards posted there carry signed
+   * owner-bound controls, and a reader who presses one is refused exactly as
+   * they are anywhere else.
+   */
+  DUCKY_REMINDER_CHANNEL_ID: z.string().optional(),
   DUCKY_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_GPT_CHANNEL_ID: z.string().optional(),
@@ -84,10 +99,12 @@ export const EnvSchema = z.object({
   DUCKY_DEV_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_REMINDER_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_BRIEFING_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_REMINDER_CHANNEL_ID: z.string().optional(),
 
   // Consequential action execution is separately opt-in per profile. The
   // default is false, so an approval remains a recorded decision unless an
@@ -277,6 +294,28 @@ export const EnvSchema = z.object({
    * boundary months later.
    */
   DUCKY_OWNER_TIMEZONE: z.string().max(64).default(DEFAULT_OWNER_TIMEZONE),
+
+  /**
+   * The owner's phone capture page. OFF by default.
+   *
+   * Enabling it is a deliberate act with two further conditions, both checked
+   * at startup rather than at first request: a human credential must be
+   * configured for THIS profile, and the HTTP listener must be bound to a
+   * private address. An instance that fails either refuses to boot instead of
+   * serving the owner's records to whatever the host is attached to.
+   */
+  DUCKY_PHONE_CAPTURE_ENABLED: bool(false),
+  /**
+   * The verifier for the owner's passcode, `scrypt$<salt>$<key>`.
+   *
+   * A VERIFIER, never the passcode: generate one with `pnpm phone:passcode`,
+   * which reads the passcode from stdin so it never reaches a shell history.
+   * Profile-scoped like every other secret, and production never inherits the
+   * unscoped name.
+   */
+  DUCKY_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+  DUCKY_DEV_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+  DUCKY_PROD_PHONE_PASSCODE_VERIFIER: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -542,6 +581,57 @@ export const resolveBriefingSchedule = (env: Env): {
     ...(channelId === undefined ? {} : { channelId }),
   };
 };
+
+/**
+ * The phone capture surface, resolved for THIS profile.
+ *
+ * Returns the parsed credential when it is usable, and a REASON when it is
+ * not -- so `/status` can say "off" or "configured but the listener is public"
+ * rather than leaving the owner to wonder why their shortcut 404s.
+ *
+ * It throws only for a configuration that is dangerous rather than merely
+ * absent: asking for the page while bound to `0.0.0.0` is refused at boot,
+ * because the operator asked for something that would publish their records.
+ */
+export function resolvePhoneCapture(env: Env): {
+  readonly enabled: boolean;
+  readonly reason: string;
+  readonly verifierRaw?: string;
+} {
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scopedName = isProd
+    ? 'DUCKY_PROD_PHONE_PASSCODE_VERIFIER'
+    : 'DUCKY_DEV_PHONE_PASSCODE_VERIFIER';
+  const scoped = blankToUndefined(env[scopedName as keyof Env] as string | undefined);
+  // Production never inherits the unscoped name, exactly like every other secret.
+  const verifierRaw = scoped ?? (isProd ? undefined : blankToUndefined(env.DUCKY_PHONE_PASSCODE_VERIFIER));
+
+  if (!env.DUCKY_PHONE_CAPTURE_ENABLED) {
+    return { enabled: false, reason: 'off — DUCKY_PHONE_CAPTURE_ENABLED is not set' };
+  }
+  if (verifierRaw === undefined) {
+    throw new DuckyError(
+      'invalid_input',
+      `DUCKY_PHONE_CAPTURE_ENABLED needs ${scopedName}. Generate one with \`pnpm phone:passcode\`; ` +
+        'the page is refused rather than served without a credential.',
+    );
+  }
+  if (!isPrivateBindHost(env.DUCKY_HTTP_HOST)) {
+    throw new DuckyError(
+      'invalid_input',
+      'DUCKY_PHONE_CAPTURE_ENABLED requires DUCKY_HTTP_HOST to be a loopback, RFC1918 or ' +
+        'tailnet address. Binding 0.0.0.0 would put your records on every interface this host ' +
+        'has, so it is refused rather than served.',
+    );
+  }
+  // Parsed here so a malformed verifier fails at boot, not at the first tap.
+  parsePhoneVerifier(verifierRaw, scopedName);
+  return {
+    enabled: true,
+    reason: `on — ${env.DUCKY_HTTP_HOST}:${env.DUCKY_HTTP_PORT ?? 'profile default'}/app, tailnet only`,
+    verifierRaw,
+  };
+}
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

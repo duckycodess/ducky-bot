@@ -5,6 +5,7 @@ import { DUCKY_COLORS, EMBED_DESC_MAX, isValidEmbedColor } from '@ducky/contract
 import { sanitizeOutbound } from '../src/discord/sanitize-outbound.js';
 import { toDiscordPayload } from '../src/discord/payload.js';
 import { conversationReply } from '../src/discord/assistant-presenters.js';
+import { bulkPreview, deadlineLine, taskCard } from '../src/discord/task-cards.js';
 
 describe('embed colour', () => {
   it('accepts only a plain 24-bit integer', () => {
@@ -108,5 +109,110 @@ describe('typing indication', () => {
     );
     const near = src.slice(src.indexOf('sendTyping') - 800, src.indexOf('sendTyping') + 200);
     expect(near).not.toMatch(/thinking|working on it|one moment/i);
+  });
+});
+
+/**
+ * The compact actionable card.
+ *
+ * Every assertion here is something the owner asked for explicitly after
+ * reading a draft, and every one of them is easy to undo by accident later.
+ */
+describe('a task card', () => {
+  const MANILA = 'Asia/Manila';
+  const NOW = Date.parse('2026-10-13T02:00:00.000Z');
+  const task = {
+    id: '6f1a4e0c-0c2b-4a3a-9f1e-2b4d6c8e0a11',
+    publicId: 'tabcde',
+    discordUserId: '100000000000000001',
+    title: 'ENG 30 Letters',
+    dueAt: '2026-10-13T15:59:00.000Z',
+    dueAllDay: false,
+    priority: 'normal' as const,
+    status: 'open' as const,
+    createdAt: '2026-10-13T02:00:00.000Z',
+    updatedAt: '2026-10-13T02:00:00.000Z',
+    closedAt: null,
+  };
+  const controls = {
+    done: 'v1:c1:task_done:tabcde:' + 'a'.repeat(22),
+    edit: 'v1:c1:task_edit:tabcde:' + 'b'.repeat(22),
+    snooze: 'v1:c1:task_snooze:tabcde:' + 'c'.repeat(22),
+  };
+
+  it('shows the title and the deadline, and nothing else', () => {
+    const card = taskCard(task, { timeZone: MANILA, nowMs: NOW, controls });
+    expect(card.embeds?.[0]?.title).toBe('ENG 30 Letters');
+    expect(card.embeds?.[0]?.description).toBe('Due October 13, 11:59 PM');
+  });
+
+  it('carries no timezone label', () => {
+    const flat = JSON.stringify(taskCard(task, { timeZone: MANILA, nowMs: NOW, controls }));
+    expect(flat).not.toMatch(/manila|utc|gmt|\+08/i);
+  });
+
+  it('carries no reminder schedule line: when Ducky speaks is Ducky’s business', () => {
+    const flat = JSON.stringify(taskCard(task, { timeZone: MANILA, nowMs: NOW, controls }));
+    expect(flat).not.toMatch(/reminder:/i);
+    expect(flat).not.toMatch(/1 hour before|24 hours before/i);
+  });
+
+  it('prints the short handle and never the internal UUID', () => {
+    const flat = JSON.stringify(taskCard(task, { timeZone: MANILA, nowMs: NOW, controls }));
+    expect(flat).toContain('tabcde');
+    expect(flat).not.toContain(task.id);
+  });
+
+  it('uses real buttons rather than words that look like buttons', () => {
+    const card = taskCard(task, { timeZone: MANILA, nowMs: NOW, controls });
+    expect(card.rows?.[0]?.buttons.map((b) => b.label)).toEqual(['Done', 'Edit', 'Snooze 60m']);
+    // Nothing in the text asks the owner to type anything back.
+    expect(JSON.stringify(card.embeds)).not.toMatch(/reply (done|snooze)|type (done|snooze)/i);
+  });
+
+  it('survives the egress choke point with its controls intact', () => {
+    const out = sanitizeOutbound(taskCard(task, { timeZone: MANILA, nowMs: NOW, controls }));
+    expect(out.rows?.[0]?.buttons).toHaveLength(3);
+    expect(toDiscordPayload(out).components?.[0]?.components).toHaveLength(3);
+  });
+
+  it('says plainly when there is no deadline, inventing none', () => {
+    expect(deadlineLine({ dueAt: null, dueAllDay: false }, MANILA, NOW)).toBe('No deadline');
+  });
+
+  it('shows a date-only deadline as a date', () => {
+    expect(deadlineLine({ dueAt: '2026-10-14T16:00:00.000Z', dueAllDay: true }, MANILA, NOW))
+      .toBe('Due October 15');
+  });
+});
+
+describe('a pasted-list preview', () => {
+  it('says nothing is saved yet, and offers the three real controls', () => {
+    const message = bulkPreview(
+      {
+        items: [
+          { title: 'ENG 30 Letters', dueAt: '2026-10-13T15:59:00.000Z', dueAllDay: false, priority: 'normal' },
+          { title: 'Speech 30 Letters', dueAt: '2026-10-14T16:00:00.000Z', dueAllDay: true, priority: 'normal' },
+        ],
+        ignoredLeadingLines: 0,
+      },
+      {
+        save: 'v1:c1:bulk_save:abc:' + 'a'.repeat(22),
+        edit: 'v1:c1:bulk_edit:abc:' + 'b'.repeat(22),
+        discard: 'v1:c1:bulk_discard:abc:' + 'c'.repeat(22),
+      },
+      'Asia/Manila',
+      Date.parse('2026-10-13T02:00:00.000Z'),
+    );
+    expect(message.embeds?.[0]?.footer).toBe('Nothing is saved yet.');
+    // Numbered and bracketed the way the owner typed it, so checking the
+    // preview against the paste is a comparison rather than a translation --
+    // and with no separator dash, because this is a list and not a sentence.
+    expect(message.embeds?.[0]?.description).toContain('1. ENG 30 Letters (October 13, 11:59 PM)');
+    expect(message.embeds?.[0]?.description).toContain('2. Speech 30 Letters (October 15)');
+    expect(message.embeds?.[0]?.description).not.toContain('—');
+    expect(message.rows?.[0]?.buttons.map((b) => b.label)).toEqual([
+      'Save tasks', 'Edit', 'Discard',
+    ]);
   });
 });

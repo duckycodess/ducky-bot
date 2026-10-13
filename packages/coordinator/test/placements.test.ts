@@ -138,20 +138,19 @@ describe('repository placements', () => {
       }
     });
 
-    it('parses the shipped configuration files, so neither can drift', () => {
-      // The example documents the model and the dev file is what this host
-      // actually loads. A schema change that broke either would otherwise be
-      // found at boot.
-      for (const file of ['config/repos.example.json', 'config/repos.dev.json']) {
+    it('parses shipped example configurations so their documented schemas cannot drift', () => {
+      // Only examples are shipped. Private, gitignored host configuration
+      // must not be a prerequisite for running the repository's tests.
+      for (const file of ['config/repos.example.json', 'config/repos.dev.example.json']) {
         const raw = readFileSync(path.join(REPO_ROOT, file), 'utf8');
         const parsed = RepoAllowlistSchema.safeParse(JSON.parse(raw));
         expect(parsed.success, `${file}: ${parsed.error?.message ?? ''}`).toBe(true);
       }
     });
 
-    it('keeps the watch-only mapping in the dev config genuinely read-only', () => {
+    it('keeps the shipped watch-only mapping genuinely read-only', () => {
       const a = RepoAllowlist.fromJson(
-        readFileSync(path.join(REPO_ROOT, 'config/repos.dev.json'), 'utf8'),
+        readFileSync(path.join(REPO_ROOT, 'config/repos.example.json'), 'utf8'),
       );
       const watched = a.list().filter((r) => !r.allowJobs);
       expect(watched.length).toBeGreaterThan(0);

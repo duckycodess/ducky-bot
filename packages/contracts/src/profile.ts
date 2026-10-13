@@ -80,6 +80,7 @@ export const PROFILE_ENV = {
       task: 'DUCKY_DEV_TASK_CHANNEL_ID',
       coding: 'DUCKY_DEV_CODING_CHANNEL_ID',
       gpt: 'DUCKY_DEV_GPT_CHANNEL_ID',
+      reminder: 'DUCKY_DEV_REMINDER_CHANNEL_ID',
     },
   },
   production: {
@@ -95,6 +96,7 @@ export const PROFILE_ENV = {
       task: 'DUCKY_PROD_TASK_CHANNEL_ID',
       coding: 'DUCKY_PROD_CODING_CHANNEL_ID',
       gpt: 'DUCKY_PROD_GPT_CHANNEL_ID',
+      reminder: 'DUCKY_PROD_REMINDER_CHANNEL_ID',
     },
   },
 } as const satisfies Record<
@@ -119,7 +121,7 @@ export const PROFILE_ENV = {
  * frozen environment configuration and a role channel grants nobody anything.
  * See ADR 0023.
  */
-export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt'] as const;
+export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt', 'reminder'] as const;
 export type ChannelRole = (typeof CHANNEL_ROLES)[number];
 
 /**
@@ -135,6 +137,7 @@ export const UNSCOPED_ROLE_CHANNEL_ENV = {
   task: 'DUCKY_TASK_CHANNEL_ID',
   coding: 'DUCKY_CODING_CHANNEL_ID',
   gpt: 'DUCKY_GPT_CHANNEL_ID',
+  reminder: 'DUCKY_REMINDER_CHANNEL_ID',
 } as const satisfies Record<ChannelRole, string>;
 
 /**

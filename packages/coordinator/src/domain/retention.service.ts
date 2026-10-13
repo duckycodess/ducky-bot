@@ -163,10 +163,19 @@ export class RetentionService {
     // so a failure in one table cannot roll back another's progress.
     withTransaction(this.store.db, () => {
       c.capturesDeleted = r.deleteClosedCaptures(cutoff(p.doneCaptureDays), p.batch);
-      c.tasksDeleted = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      // A closed task takes its own linked reminders with it, counted rather
+      // than cascaded silently: the report says how many records really went.
+      const closedTasks = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      c.tasksDeleted = closedTasks.tasks;
+      c.remindersDeleted += closedTasks.reminders;
+      c.reminderOccurrencesDeleted += closedTasks.occurrences;
+      // `+=`, not `=`: the closed-task pass above has already removed the
+      // reminders those tasks owned, and overwriting here would report them as
+      // never having existed. The two passes count different rows -- a linked
+      // reminder is gone by the time this runs -- so adding cannot double-count.
       const rem = r.deleteClosedReminders(cutoff(p.closedReminderDays), p.batch);
-      c.remindersDeleted = rem.reminders;
-      c.reminderOccurrencesDeleted = rem.occurrences;
+      c.remindersDeleted += rem.reminders;
+      c.reminderOccurrencesDeleted += rem.occurrences;
       // Occurrences of a reminder that is still OPEN, once they are settled.
       c.reminderOccurrencesDeleted += r.deleteSettledOccurrences(
         cutoff(p.closedReminderDays),

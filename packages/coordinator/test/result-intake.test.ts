@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { commitAction, implementedResult, makeHarness } from './helpers.js';
 
@@ -168,12 +169,12 @@ describe('persistence of the accepted result', () => {
     const c = start(h);
     h.app.jobs.submitResult(
       h.executorId, c.jobId, c.leaseId,
-      implementedResult({ summary: 'wrote /home/tj/secret with sk-ant-api03-abcdefghijklmnopqrstuvwx' }),
+      implementedResult({ summary: `wrote ${homedir()}/secret with sk-ant-api03-abcdefghijklmnopqrstuvwx` }),
       500,
     );
     const row = h.store.results.byJobId(c.jobId)!;
     expect(row.summaryRedacted).not.toContain('sk-ant-');
-    expect(row.summaryRedacted).not.toContain('/home/');
+    expect(row.summaryRedacted).not.toContain(homedir());
     h.close();
   });
 });

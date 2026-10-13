@@ -136,12 +136,39 @@ describe('TasksRepo', () => {
       'tsoon1',
     ]);
     expect(
-      store.tasks.overdue(OWNER, '2026-09-01T12:00:00.000Z', 10).map((t) => t.publicId),
+      store.tasks.overdue(OWNER, '2026-09-01T12:00:00.000Z', dayStart, 10).map((t) => t.publicId),
     ).toEqual(['tpast1']);
-    expect(store.tasks.countOverdue(OWNER, '2026-09-01T12:00:00.000Z')).toBe(1);
+    expect(store.tasks.countOverdue(OWNER, '2026-09-01T12:00:00.000Z', dayStart)).toBe(1);
     expect(
       store.tasks.closedBetween(OWNER, 'done', dayStart, dayEnd, 10).map((t) => t.publicId),
     ).toEqual(['tdone1']);
+  });
+
+  /**
+   * The bug this prevents: a task due TODAY with no time was listed as overdue
+   * from one second past midnight, every single morning.
+   */
+  it('calls a date-only task overdue only once its day has ended', () => {
+    const { store } = fresh();
+    // 2026-10-13 00:00 in Asia/Manila, which is how a date-only deadline for
+    // the 13th is stored.
+    const dueDay = '2026-10-12T16:00:00.000Z';
+    task(store, { publicId: 'tallda', dueAt: dueDay, dueAllDay: true });
+    task(store, { publicId: 'ttimed', dueAt: '2026-10-13T01:00:00.000Z', dueAllDay: false });
+
+    const dayStart = dueDay; // the start of the 13th, locally
+    // Mid-morning on the day itself: the timed task is late, the all-day one
+    // is not.
+    const morning = '2026-10-13T02:00:00.000Z';
+    expect(store.tasks.overdue(OWNER, morning, dayStart, 10).map((t) => t.publicId))
+      .toEqual(['ttimed']);
+    expect(store.tasks.countOverdue(OWNER, morning, dayStart)).toBe(1);
+
+    // The next local day has begun: now it is late.
+    const nextDay = '2026-10-13T16:00:00.000Z';
+    expect(store.tasks.overdue(OWNER, nextDay, nextDay, 10).map((t) => t.publicId))
+      .toEqual(['tallda', 'ttimed']);
+    expect(store.tasks.countOverdue(OWNER, nextDay, nextDay)).toBe(2);
   });
 
   it('only closes an open task, and only for its own owner', () => {

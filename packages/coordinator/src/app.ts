@@ -15,8 +15,10 @@ import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
+import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
+import type { PhoneCaptureConfig } from './http/phone.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
 import { ComponentSigner } from './security/component-signing.js';
@@ -38,6 +40,8 @@ import { ChannelRolePolicy } from './domain/channel-roles.js';
 import { ReplyPersistencePolicy } from './domain/reply-persistence.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
+import { TaskReminderLinker } from './domain/task-reminders.js';
+import { TaskCaptureService } from './domain/task-capture.service.js';
 import { RemindersService } from './domain/reminders.service.js';
 import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
@@ -106,6 +110,8 @@ export interface App {
   readonly notifier: JobNotifier;
   readonly clock: OwnerClock;
   readonly tasks: TasksService;
+  /** Pasted task lists, from the phone page and from Discord. One path for both. */
+  readonly taskCapture: TaskCaptureService;
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
@@ -125,6 +131,12 @@ export interface App {
   readonly channelRoles: ChannelRolePolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
+  /**
+   * The phone capture surface, or undefined when it is off. `main.ts` hands it
+   * to the HTTP server; undefined means the routes are never registered at
+   * all, rather than registered and refusing.
+   */
+  readonly phone: PhoneCaptureConfig | undefined;
   readonly transport: DiscordTransport;
   readonly credentials: ExecutorCredentialStore;
   readonly conversation: ConversationProvider;
@@ -152,6 +164,18 @@ export function createApp(
   // refuses an unset value and refuses `mock` outright.
   const conversationMode = resolveConversationProvider(env);
   assertModeUsable(conversationMode, env.DUCKY_PROFILE);
+
+  /**
+   * The owner's phone surface, resolved HERE with the other pure configuration
+   * checks and before any filesystem or database work.
+   *
+   * It is the cheapest place for "you asked for the capture page with no
+   * credential" or "...while bound to every interface" to fail, and it must
+   * fail at boot rather than when a phone first taps the shortcut. `enabled`
+   * false leaves `phone` undefined below, which is what stops the routes from
+   * being registered at all.
+   */
+  const phoneSettings = resolvePhoneCapture(env);
 
   // Secrets for THIS profile only. Production never falls back to a shared or
   // development value.
@@ -254,7 +278,14 @@ export function createApp(
   });
   const approvals = new ApprovalsService({ store, authz, performer: actionPerformer });
   const github = new GitHubService(authz, allowlist, githubReader);
-  const tasks = new TasksService({ store, authz, clock });
+  // The deadline-to-notification link, shared by every path that can create or
+  // move a task: one place decides what a deadline owes, so the slash command,
+  // a pasted list and the phone page cannot drift apart.
+  const taskReminderLinker = new TaskReminderLinker({ store, clock });
+  const tasks = new TasksService({ store, authz, clock, linker: taskReminderLinker });
+  const taskCapture = new TaskCaptureService({
+    store, authz, clock, linker: taskReminderLinker,
+  });
   const reminders = new RemindersService({ store, authz, clock });
   const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
@@ -318,10 +349,16 @@ export function createApp(
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });
-  // Reminders go to the owner's DM and nowhere else: no shared policy, no
-  // shared projection service, no channel branch to configure wrongly.
+  // A free-standing reminder goes to the owner's DM and nowhere else. A
+  // reminder that belongs to a TASK may go to a configured channel with the
+  // owner's mention -- the only reminder with a shape worth posting where
+  // somebody else might see it, and even then the controls on it refuse
+  // everybody but the owner.
   const reminderNotifier = new ReminderNotifier({
-    store, transport, ownerId: authz.ownerId, clock,
+    store, transport, ownerId: authz.ownerId, clock, signer,
+    // Opt-in and profile-scoped. Unconfigured means the DM every reminder has
+    // always used, and only TASK-LINKED reminders are ever routed elsewhere.
+    reminderChannelId: channelRoles.channelFor('reminder'),
   });
   // Rides the SAME interval as everything else, holds no provider, and sends to
   // the owner's DM only. Off by default: a briefing is pulled unless somebody
@@ -351,6 +388,17 @@ export function createApp(
     ...(overrides.conversationFetch ? { fetchImpl: overrides.conversationFetch } : {}),
   };
 
+  const phone: PhoneCaptureConfig | undefined =
+    phoneSettings.enabled && phoneSettings.verifierRaw !== undefined
+      ? {
+          verifier: parsePhoneVerifier(phoneSettings.verifierRaw, 'DUCKY_PHONE_PASSCODE_VERIFIER'),
+          sessionKey: phoneSessionKey(phoneSettings.verifierRaw),
+          capture: taskCapture,
+          authz,
+          nowMs: () => clock.nowMs(),
+        }
+      : undefined;
+
   const scope = discordProfile.token ? commandScopeFor(discordProfile) : undefined;
   const status = (): ProviderStatus => ({
     profile: `${discordProfile.profile} (${paths.instanceLabel})`,
@@ -374,6 +422,10 @@ export function createApp(
     dependencyChecker: dependencies.checkerVerified
       ? `${dependencies.checkerName} (verified)`
       : `${dependencies.checkerName} — dependency waits end at your desk, never auto-resumed`,
+    phoneCapture: phoneSettings.reason,
+    reminderDelivery: channelRoles.channelFor('reminder')
+      ? 'task reminders post in your reminders channel with a mention; everything else is a DM'
+      : 'every reminder is a DM',
     channelRoles: channelRoles.enabled
       ? `${channelRoles.configured.map((c) => c.role).join(', ')} — replies persist there`
       : 'none configured; every owner reply stays ephemeral in a guild',
@@ -397,6 +449,7 @@ export function createApp(
     github,
     githubWatches,
     tasks,
+    taskCapture,
     reminders,
     briefing,
     conversation,
@@ -440,9 +493,9 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport,
+    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
-    clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
+    clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
     retention, forget, conversationMemory, intents,
     close: () => store.db.close(),

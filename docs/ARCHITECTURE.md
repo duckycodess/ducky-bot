@@ -96,7 +96,8 @@ Every transition writes a `job_transitions` row with a reason and an actor
 
 ## Single-writer guarantees and their lifetimes
 
-Four guards, each with a deliberately different span:
+Four guards, each with a deliberately different span, plus one engineering slot
+above them (decision 0029):
 
 | Guard | Scope | Held from | Released on |
 |---|---|---|---|
@@ -104,6 +105,7 @@ Four guards, each with a deliberately different span:
 | Lease (`lease_id`, `lease_expires_at`) | per job | claim | result, cancel-ack, requeue, or expiry |
 | Filesystem lock (`O_EXCL`) | per repo, executor host | just before a Pi turn | when that turn ends, **including before reporting `needs_owner_input`** |
 | Herdr agent-name uniqueness | per host | `agent start` | agent exit |
+| `engineering_admission` row (key pinned to 1) | **one per coordinator database**, across repos and executors; not across profiles and not shared with agent-flow | successful claim | confirmed quiescence: a pause, a terminal release, an owner `/job cleanup`. Kept as `unconfirmed_stop` on lease expiry or an orphan |
 
 The **reservation** — not `state = 'running'` — is the claim predicate, so it
 spans `running`, `needs_owner_input` and `needs_approval`. A paused job keeps

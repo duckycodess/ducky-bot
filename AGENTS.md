@@ -51,6 +51,16 @@ Report contradictions rather than picking whichever reads best.
   two shared-channel reads in `SHARED_READABLE_ROUTES`. Conversational and
   owner-only control manifests remain disjoint; shared reads stay narrowed
   views of commands already on the owner manifest.
+- **Model access for anyone but the owner is off by default.**
+  `DUCKY_ADDITIONAL_USER_AI_ENABLED` is frozen into the `Authorizer`, and
+  `Authorizer.mayConverse` is the one question every model-reaching path asks,
+  including Branch and Compact. The whitelist names who may be offered chat; it
+  never authorizes it.
+- **The engineering slot is local to one coordinator database.** Never describe
+  it as cross-program or cross-profile safety: agent-flow has no supported
+  shared-admission protocol and the profiles share no state. Engineering is off
+  unless `DUCKY_ENGINEERING_ENABLED` says otherwise, and a slot with an
+  unconfirmed stop is released only by quiescence or an owner's `/job cleanup`.
 - **Shared visibility is never authorization.** A configured shared channel
   says where information may be shown, never who may act. Non-owner output
   goes through `SharedJobsService` and `shared-presenters.ts`, which accept

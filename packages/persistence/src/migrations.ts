@@ -1152,4 +1152,38 @@ ALTER TABLE agent_threads_v2 RENAME TO agent_threads;
 CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
 `,
   },
+  {
+    version: 24,
+    name: 'agent_published_ticket',
+    sql: `
+-- The SETTLED ticket this thread last published, kept so the owner can
+-- authorize it without retyping it.
+--
+-- The issue requires a two-step: a bare $ticket creates unqueued GitHub work,
+-- and $ticket --ready SEPARATELY authorizes queueing. The second step has to
+-- reach the issue the first one made -- same canonical id, same spec, same
+-- issue number -- because the installed publisher refuses to change the
+-- execution contract of an authorized issue, and because a rebuilt spec is a
+-- different ticket wearing the same description.
+--
+-- This is DELIBERATELY a different slot from \`ticket_uuid\`/\`issue_number\`.
+-- Those are the binding for retrying a publication that has NOT succeeded, and
+-- conflating the two is exactly the defect migration 23's generation of this
+-- work had to fix: a settled ticket left in the retry slot meant the next,
+-- different $ticket inherited it and rewrote a published issue.
+--
+--   ticket_uuid / issue_number -> "this attempt has not landed yet"
+--   published_*                -> "this thread has a finished, unqueued ticket"
+--
+-- The spec is the owner's own words, bounded by the note caps that built it,
+-- one row per thread, replaced in place. It is removed with the row by
+-- /forget conversation, exactly as the notes are.
+ALTER TABLE agent_threads ADD COLUMN published_spec TEXT;
+ALTER TABLE agent_threads ADD COLUMN published_issue INTEGER;
+ALTER TABLE agent_threads ADD COLUMN published_url TEXT;
+-- Whether that publication already carries the exact agent:ready label, so a
+-- second authorization is answered rather than attempted.
+ALTER TABLE agent_threads ADD COLUMN published_queued INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];

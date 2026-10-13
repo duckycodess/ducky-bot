@@ -220,10 +220,17 @@ exercised; this says what it does.
     may well be there; reporting it as "nothing was queued" is a false
     negative about the only label that authorizes an agent, and the owner
     stops looking. `unknown` says to open the issue and check.
-  - **The publication binding is released on success.** The canonical id and
-    issue number exist for RETRIES; keeping them after a success meant the
-    next, different `$ticket` in the thread rewrote the previous issue with an
-    unrelated contract.
+  - **Two slots, and the owner's two-step works because of it.** The RETRY
+    binding is released on success, so the next different `$ticket` cannot
+    rewrite the previous issue. The SETTLED ticket -- the canonical spec the
+    publisher accepted -- is kept, so `$ticket --ready` with no arguments
+    authorizes that exact issue through the installed publisher, with the
+    original id and spec. Anything newly said is a new ticket instead; a bare
+    `$ticket` authorizes nothing and says which step does; an already-queued
+    ticket is answered rather than re-applied; a failed authorization keeps
+    the settled ticket so it can be retried and reports `unknown`; and a
+    rebound thread is not offered the previous repository's issue. The stored
+    contract is the owner's own words and goes with `/forget conversation`.
   - **A repository is addressed with `owner/name` as the leading token, or
     not at all.** A bare slug is a word in a sentence, and matching one in the
     prose silently retargeted the thread.
@@ -965,7 +972,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**98 files, 1355 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**99 files, 1371 tests**) and `pnpm build` all
 pass on this host, with one standing caveat recorded honestly: seven tests fail
 in a FRESH worktree and fail identically at the previous commit. Four in
 `outbound.test.ts` and one in `result-intake.test.ts` assert on the literal

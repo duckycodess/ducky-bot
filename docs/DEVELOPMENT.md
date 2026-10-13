@@ -86,6 +86,10 @@ Fill in the env file:
   installed publisher applies and reads back. Ducky chooses no label of its
   own.
 
+  The two-step is `$ticket <what the work is>` and then `$ticket --ready` on
+  its own, which authorizes the ticket that thread just published. Saying
+  anything new first makes a new ticket instead.
+
   All four have `DUCKY_PROD_*` counterparts, and production reads only its own:
   a development helper path points at a development dispatcher. Paths must be
   absolute, and a relative one is refused at boot rather than resolved against

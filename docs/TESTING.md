@@ -121,6 +121,18 @@ merely slow one is left alone; and a repository is bound only by an explicit
 leading `owner/name`, with prose that merely mentions a slug changing nothing
 and an unaddressed ambiguous thread asking.
 
+**coordinator / skill bridge authorization** — the two-step the issue
+requires: a no-argument `$ticket --ready` queues the issue this thread
+published, reusing the original canonical id, spec and issue number rather
+than minting a second ticket, and does so ACROSS A RESTART because the settled
+contract is on disk; a bare `$ticket` authorizes nothing and names the step
+that does; an already-queued ticket is answered without a GitHub write; new
+intent -- typed or grilled -- is always a new ticket even with `--ready`; a
+failed authorization keeps the settled ticket and reports the queue state as
+unknown, and the same authorization then succeeds on retry; a rebound thread
+is not offered the previous repository's issue; and the stored contract goes
+with `/forget conversation`.
+
 **coordinator / workflow invariants** — the bridge and its presenters name no
 `gh` surface, no issue or label API, and no `JobsService`, and spawn nothing
 themselves; `OWNER_ONLY_COMMANDS` is still exactly twelve and no shared route

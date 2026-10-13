@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { openDatabase } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
 import { createStore } from '../src/index.js';
-import { AGENT_INTENT_NOTES_MAX, AGENT_INTENT_NOTE_MAX_CHARS } from '../src/repositories/agent-threads.repo.js';
+import {
+  AGENT_INTENT_NOTES_MAX, AGENT_INTENT_NOTE_MAX_CHARS, AGENT_PUBLISHED_SPEC_MAX_CHARS,
+} from '../src/repositories/agent-threads.repo.js';
 
 const OWNER = '111111111111111111';
 const OTHER = '222222222222222222';
@@ -253,5 +255,96 @@ describe('deleting the owner\'s workflow records', () => {
     expect(store.agentThreads.deleteForOwner(OWNER)).toBe(2);
     expect(store.agentThreads.countForOwner(OWNER)).toBe(0);
     expect(store.agentThreads.countForOwner(OTHER)).toBe(1);
+  });
+});
+
+describe('the settled ticket slot', () => {
+  const openRun = (store: ReturnType<typeof fresh>, runId = 'a00001') =>
+    store.agentThreads.startRun(
+      OWNER, 't1',
+      { runId, command: '$ticket', status: 'publishing', ready: false, detail: null },
+      NOW,
+    );
+
+  it('is a different slot from the retry binding', () => {
+    /**
+     * The whole point. The retry binding says "this attempt has not landed";
+     * the settled slot says "this thread has a finished, unqueued ticket".
+     * One field serving both is what let a published issue be rewritten.
+     */
+    const store = fresh();
+    openRun(store);
+    store.agentThreads.setTicketUuid(OWNER, 't1', 'aaaaaaaa-0000-4000-8000-000000000000', NOW);
+    store.agentThreads.setPublication(
+      OWNER, 't1', 'a00001', { issueNumber: 41, issueUrl: 'u' }, NOW,
+    );
+    expect(store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a00001',
+      { specJson: '{"id":"x"}', issueNumber: 41, issueUrl: 'u', queued: false }, NOW,
+    )).toBe(true);
+    store.agentThreads.clearPublicationBinding(OWNER, 't1', 'a00001', NOW);
+
+    const row = store.agentThreads.get(OWNER, 't1')!;
+    expect(row.ticketUuid).toBeNull();
+    expect(row.issueNumber).toBeNull();
+    expect(row.publishedSpec).toBe('{"id":"x"}');
+    expect(row.publishedIssue).toBe(41);
+    expect(row.publishedQueued).toBe(false);
+  });
+
+  it('refuses a spec too large to keep, rather than truncating a contract', () => {
+    const store = fresh();
+    openRun(store);
+    expect(store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a00001',
+      {
+        specJson: 'x'.repeat(AGENT_PUBLISHED_SPEC_MAX_CHARS + 1),
+        issueNumber: 41, issueUrl: 'u', queued: false,
+      },
+      NOW,
+    )).toBe(false);
+    expect(store.agentThreads.get(OWNER, 't1')!.publishedSpec).toBeNull();
+  });
+
+  it('records authorization separately from publication', () => {
+    const store = fresh();
+    openRun(store);
+    store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a00001',
+      { specJson: '{"id":"x"}', issueNumber: 41, issueUrl: 'u', queued: false }, NOW,
+    );
+    store.agentThreads.markPublishedQueued(OWNER, 't1', NOW);
+    expect(store.agentThreads.get(OWNER, 't1')!.publishedQueued).toBe(true);
+  });
+
+  it('is replaced wholesale when the thread publishes something else', () => {
+    const store = fresh();
+    openRun(store);
+    store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a00001',
+      { specJson: '{"id":"first"}', issueNumber: 41, issueUrl: 'u1', queued: true }, NOW,
+    );
+    store.agentThreads.updateRun(OWNER, 't1', 'a00001', { status: 'published', finished: true }, NOW);
+    openRun(store, 'a00002');
+    store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a00002',
+      { specJson: '{"id":"second"}', issueNumber: 42, issueUrl: 'u2', queued: false }, NOW,
+    );
+
+    const row = store.agentThreads.get(OWNER, 't1')!;
+    expect(row.publishedSpec).toBe('{"id":"second"}');
+    expect(row.publishedIssue).toBe(42);
+    // ...including the authorization, which belonged to the previous ticket.
+    expect(row.publishedQueued).toBe(false);
+  });
+
+  it('is written only by the run that owns the thread', () => {
+    const store = fresh();
+    openRun(store);
+    expect(store.agentThreads.recordPublishedTicket(
+      OWNER, 't1', 'a99999',
+      { specJson: '{"id":"x"}', issueNumber: 41, issueUrl: 'u', queued: false }, NOW,
+    )).toBe(false);
+    expect(store.agentThreads.get(OWNER, 't1')!.publishedSpec).toBeNull();
   });
 });

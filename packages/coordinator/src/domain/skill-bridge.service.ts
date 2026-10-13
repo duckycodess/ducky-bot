@@ -473,6 +473,42 @@ export class SkillBridgeService {
     // The repository token, when one was typed, has already been removed: it
     // is addressing, not a statement about what the work is.
     const notes = this.settledIntent(actor, event.threadKey, target.intent);
+
+    /**
+     * The SECOND half of the owner's two-step.
+     *
+     * A bare `$ticket` creates unqueued GitHub work; `$ticket --ready`
+     * separately authorizes it. When the owner has said nothing new -- no
+     * argument text, no grill notes since -- `--ready` means "queue the
+     * ticket this thread just published", and it reaches the original
+     * canonical id, the original spec and the original issue.
+     *
+     * Order matters: notes are checked FIRST, so anything newly settled is a
+     * new ticket rather than an authorization of an old one. Silently queueing
+     * fresh intent onto a published issue would rewrite a contract somebody
+     * may already be acting on.
+     */
+    if (notes.length === 0) {
+      const settled = this.settledTicket(actor, event.threadKey, target.repo.repository);
+      if (settled && parsed.ready) {
+        return this.authorizeSettled(actor, event, run, target, settled);
+      }
+      if (settled) {
+        // A bare `$ticket` NEVER authorizes. It points at the step that does.
+        return this.endRun(
+          actor, event, run, 'published',
+          'This thread already has an unqueued ticket.',
+          {
+            content:
+              `This thread already published \`${settled.repository}\`#${settled.issueNumber}, ` +
+              'and it is not queued. Send `$ticket --ready` on its own to authorize it, or ' +
+              'describe different work to make a new ticket.' +
+              (settled.issueUrl ? `\n${settled.issueUrl}` : ''),
+            ephemeral: false,
+          },
+        );
+      }
+    }
     if (notes.length === 0) {
       const asked = this.deps.store.agentThreads.updateRun(
         actor.discordUserId, event.threadKey, run.runId,
@@ -681,6 +717,35 @@ export class SkillBridgeService {
       this.deps.store.agentThreads.clearPublicationBinding(
         actor.discordUserId, event.threadKey, run.runId, this.now(),
       );
+      /**
+       * ...and the ticket moves into the SETTLED slot instead.
+       *
+       * That is what makes the owner's two-step work. The retry binding is
+       * gone, so the next different `$ticket` cannot rewrite this issue; the
+       * settled contract is kept, so a no-argument `$ticket --ready` can
+       * authorize THIS issue with the exact spec the publisher accepted.
+       *
+       * A spec too large to keep is not stored, and the authorize step then
+       * says it cannot reach the settled ticket -- the one thing it must not
+       * do is send a truncated contract.
+       */
+      const storedSettled = this.deps.store.agentThreads.recordPublishedTicket(
+        actor.discordUserId, event.threadKey, run.runId,
+        {
+          specJson: JSON.stringify(spec),
+          issueNumber: published.issue ?? null,
+          issueUrl: published.url ?? null,
+          queued: queueState === 'queued',
+        },
+        this.now(),
+      );
+      if (!storedSettled) {
+        // Nothing half-stored: a stale settled ticket would be worse than
+        // none, because a later `--ready` would authorize the wrong contract.
+        this.deps.store.agentThreads.clearPublishedTicket(
+          actor.discordUserId, event.threadKey, this.now(),
+        );
+      }
       this.deps.store.agentThreads.setGrilling(
         actor.discordUserId, event.threadKey, false, this.now(),
       );
@@ -699,6 +764,205 @@ export class SkillBridgeService {
         queueState: parsed.ready ? 'unknown' : 'not_requested',
       });
     }
+  }
+
+
+  // ---- the settled ticket, and authorizing it ------------------------------
+
+  /**
+   * The finished, UNQUEUED ticket this thread published, if there is one.
+   *
+   * Returns nothing once it has been queued, once the stored contract cannot
+   * be parsed, and when there is no issue to act on -- in each case there is
+   * nothing a no-argument `--ready` could honestly do.
+   */
+  private settledTicket(
+    actor: ActorContext,
+    threadKey: string,
+    /**
+     * The repository this command is addressing.
+     *
+     * A settled ticket belongs to the repository it was published in. After a
+     * rebind the thread is about something else, and authorizing the previous
+     * repository's issue from here would queue work nobody asked to queue --
+     * the installed publisher would refuse the mismatched checkout anyway, but
+     * refusing locally means the owner gets a sentence rather than a
+     * subprocess error.
+     */
+    repository: string,
+  ): {
+    spec: TicketSpec;
+    issueNumber: number;
+    issueUrl: string | null;
+    repository: string;
+    alreadyQueued: boolean;
+  } | undefined {
+    const row = this.deps.store.agentThreads.get(actor.discordUserId, threadKey);
+    if (!row?.publishedSpec || row.publishedIssue === null) return undefined;
+    let spec: TicketSpec;
+    try {
+      spec = JSON.parse(row.publishedSpec) as TicketSpec;
+    } catch {
+      // A contract that cannot be read is not one to re-send.
+      return undefined;
+    }
+    if (typeof spec?.id !== 'string' || typeof spec?.repository !== 'string') return undefined;
+    if (spec.repository.toLowerCase() !== repository.toLowerCase()) return undefined;
+    return {
+      spec,
+      issueNumber: row.publishedIssue,
+      issueUrl: row.publishedUrl,
+      repository: spec.repository,
+      alreadyQueued: row.publishedQueued,
+    };
+  }
+
+  /**
+   * Authorizes the ticket this thread already published.
+   *
+   * The ORIGINAL spec goes back to the installed publisher, byte for byte,
+   * with `--ready` and the original issue number. That is not an optimisation:
+   * the publisher refuses to change the execution contract of an authorized
+   * issue, so a spec rebuilt from a description would be rejected -- and if it
+   * were not, it would be a different ticket wearing the same words.
+   *
+   * Nothing is minted and nothing is created. The canonical id is the one the
+   * first publication used.
+   */
+  private async authorizeSettled(
+    actor: ActorContext,
+    event: { threadKey: string; text: string; context?: IncomingContext },
+    run: AgentThreadRow & { runId: string },
+    target: { repo: WorkflowRepository },
+    settled: {
+      spec: TicketSpec;
+      issueNumber: number;
+      issueUrl: string | null;
+      repository: string;
+      alreadyQueued: boolean;
+    },
+  ): Promise<OutboundMessage> {
+    if (settled.alreadyQueued) {
+      // Answered, not attempted. Re-applying a label that is already verified
+      // would be a GitHub write with nothing to gain.
+      return this.endRun(
+        actor, event, run, 'queued',
+        `Already authorized. ${QUEUE_STATE_LABEL.queued}`,
+        {
+          content:
+            `Already authorized. \`${settled.repository}\`#${settled.issueNumber} carries a ` +
+            'verified agent:ready, so nothing was changed. That authorizes implementation and ' +
+            'is still not evidence that a worker started.' +
+            (settled.issueUrl ? `\n${settled.issueUrl}` : ''),
+          ephemeral: false,
+        },
+        'queued',
+      );
+    }
+
+    const publishing = this.deps.store.agentThreads.updateRun(
+      actor.discordUserId, event.threadKey, run.runId,
+      { status: 'publishing', detail: 'Authorizing the ticket this thread published.' },
+      this.now(),
+    ) ?? run;
+    await this.showCard(actor, event, publishing);
+
+    // The installed validator still decides, on the way back in as on the way
+    // out: a contract that no longer validates must not be re-sent.
+    try {
+      const validated = await this.deps.frontDoor.validate(
+        settled.spec,
+        this.signalFor(actor, event.threadKey),
+      );
+      if (!validated.ok) {
+        return this.failRun(
+          actor, event, publishing,
+          new DuckyError('invalid_input', validated.error ?? 'the canonical schema refused it'),
+          { queueState: 'not_queued' },
+        );
+      }
+    } catch (err) {
+      return this.failRun(actor, event, publishing, err, { queueState: 'not_queued' });
+    }
+    if (!this.stillLive(actor, event.threadKey, run.runId)) {
+      this.releaseRun(actor, event.threadKey);
+      return this.stoppedReply();
+    }
+
+    try {
+      const published = await this.deps.frontDoor.publish({
+        spec: settled.spec,
+        ready: true,
+        ...(target.repo.checkoutRoot ? { path: target.repo.checkoutRoot } : {}),
+        issue: settled.issueNumber,
+      });
+
+      if (!published.ok) {
+        /**
+         * The settled ticket is NOT forgotten here. The authorization failed,
+         * the issue is still unqueued as far as anyone can tell, and the owner
+         * must be able to try the same authorization again.
+         */
+        return this.failRun(
+          actor, event, publishing,
+          new DuckyError('invalid_input', published.error ?? 'the publisher refused it'),
+          {
+            queueState: 'unknown',
+            issueNumber: settled.issueNumber,
+            ...(published.url === undefined ? {} : { issueUrl: published.url }),
+          },
+        );
+      }
+
+      const queueState = queueStateFrom(true, published);
+      if (queueState === 'queued') {
+        this.deps.store.agentThreads.markPublishedQueued(
+          actor.discordUserId, event.threadKey, this.now(),
+        );
+      }
+      const url = published.url ?? settled.issueUrl ?? undefined;
+      return this.endRun(
+        actor, event, run,
+        queueState === 'queued' ? 'queued' : 'published',
+        queueState === 'queued'
+          ? `Authorized the ticket this thread published. ${QUEUE_STATE_LABEL.queued}`
+          : `Authorization did NOT complete. ${QUEUE_STATE_LABEL.unknown}`,
+        cards.publicationReply(queueState === 'queued' ? 'queued' : 'published', url),
+        queueState,
+      );
+    } catch (err) {
+      return this.failRun(actor, event, publishing, err, {
+        queueState: 'unknown',
+        issueNumber: settled.issueNumber,
+        ...(settled.issueUrl === null ? {} : { issueUrl: settled.issueUrl }),
+      });
+    }
+  }
+
+  /**
+   * Closes a run with a terminal status, a card and a reply.
+   *
+   * One place, so every terminal path releases the run, refreshes the card and
+   * records the same audit row rather than three of them drifting.
+   */
+  private async endRun(
+    actor: ActorContext,
+    event: { threadKey: string; context?: IncomingContext },
+    run: AgentThreadRow & { runId: string },
+    status: AgentCardStatus,
+    detail: string,
+    reply: OutboundMessage,
+    queueState: QueueState = 'not_requested',
+  ): Promise<OutboundMessage> {
+    const done = this.deps.store.agentThreads.updateRun(
+      actor.discordUserId, event.threadKey, run.runId,
+      { status, detail, queueState, finished: true },
+      this.now(),
+    );
+    this.deps.audit?.({ command: run.runCommand ?? '$ticket', outcome: 'ok', status });
+    this.releaseRun(actor, event.threadKey);
+    if (done) await this.showCard(actor, event, done, { fresh: true });
+    return reply;
   }
 
   // ---- $agentize -----------------------------------------------------------

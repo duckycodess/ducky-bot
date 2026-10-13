@@ -66,15 +66,42 @@ and `unknown` tells the owner to open the issue and look. A false negative
 about the one label that authorizes an agent is worse than no answer, because
 the owner stops looking.
 
-**The publication binding is released the moment a publication succeeds.** The
-canonical id and the issue number exist so a RETRY enriches the same issue;
-once a publication has succeeded there is nothing to retry, and keeping them
-meant the next -- DIFFERENT -- `$ticket` in that thread inherited them and
-rewrote the previous issue with an unrelated contract. The issue URL is kept
-for the card's link, which is a different question. The cost is that
-authorizing an already-published issue means sending `$ticket --ready` with the
-description again, and that is the right trade against a silent destructive
-edit to work somebody may already be acting on.
+**Two slots, because there are two questions.** The retry binding
+(`ticket_uuid`, `issue_number`) means "this attempt has not landed yet" and is
+released the moment a publication succeeds -- keeping it meant the next,
+DIFFERENT `$ticket` in that thread inherited it and rewrote the previous issue
+with an unrelated contract. The settled slot (`published_spec`,
+`published_issue`) means "this thread has a finished ticket" and is what makes
+the owner's two-step work.
+
+**`$ticket --ready` with no arguments authorizes the ticket this thread
+published.** The issue requires that a bare `$ticket` create unqueued GitHub
+work and that `--ready` separately authorize queueing, so the second step has
+to reach the first step's issue. It sends the ORIGINAL canonical spec back to
+the installed publisher, byte for byte, with the original id and issue number.
+That is not an optimisation: the publisher refuses to change the execution
+contract of an authorized issue, and a spec rebuilt from a description is a
+different ticket wearing the same words.
+
+The rules around it are what keep it from becoming an implicit authorization:
+
+- **Nothing new must have been said.** Settled intent -- argument text or
+  grill notes since the publication -- is checked FIRST and always means a
+  NEW ticket. Queueing fresh intent onto a published issue would rewrite a
+  contract somebody may already be acting on.
+- **A bare `$ticket` authorizes nothing.** With a settled ticket present it
+  says so and names the explicit step, rather than acting.
+- **An already-queued ticket is answered, not re-applied.** Re-writing a
+  verified label is a GitHub write with nothing to gain.
+- **A failed authorization keeps the settled ticket**, so the same
+  authorization can be tried again, and reports the queue state as `unknown`
+  because the label may have landed.
+- **The settled ticket belongs to its repository.** After a rebind it is not
+  offered: the thread is about something else now.
+- The stored contract is the owner's own words, bounded, one row per thread,
+  and goes with `/forget conversation`. A spec too large to keep is not
+  stored, and the authorize step then says it cannot reach the settled ticket
+  rather than sending a truncated contract.
 
 **A repository is addressed, never merely mentioned.** Only `owner/name`, and
 only as the leading token of the arguments. A bare slug is a word people say in

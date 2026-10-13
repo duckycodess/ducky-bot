@@ -94,6 +94,15 @@ export interface HarnessOptions {
    * refusal rather than quietly reaching a network.
    */
   readonly frontDoor?: FrontDoorPort;
+  /**
+   * An existing store to build this app over.
+   *
+   * What a coordinator RESTART looks like from the outside: a new app, new
+   * services, new in-memory everything, over the same rows. Without it a test
+   * can only ever assert that state survives within one process, which is not
+   * the property durable state is for.
+   */
+  readonly store?: Store;
 }
 
 /**
@@ -122,9 +131,10 @@ export class TestClock extends ConfiguredOwnerClock {
 }
 
 export function makeHarness(opts: HarnessOptions = {}, realTransport = false): Harness {
-  const db = openDatabase({ location: ':memory:' });
-  runMigrations(db);
-  const store = createStore(db);
+  // A supplied store is reused as-is; its migrations have already run.
+  const db = opts.store?.db ?? openDatabase({ location: ':memory:' });
+  if (!opts.store) runMigrations(db);
+  const store = opts.store ?? createStore(db);
 
   const executorId = 'exec-a';
   const keyId = 'k1';
@@ -164,7 +174,15 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
     },
   );
 
-  if (opts.registerExecutor !== false) {
+  /**
+   * A borrowed store already has its executor registered.
+   *
+   * Re-issuing the credential would trip the unique key id, which is the
+   * schema correctly refusing to mint a second credential for the same key --
+   * and a restart does not re-issue credentials either.
+   */
+  const registerExecutor = opts.registerExecutor ?? opts.store === undefined;
+  if (registerExecutor) {
     store.executors.upsertExecutor(executorId, 'test executor');
     store.executors.addCredential({
       executorId,
@@ -186,7 +204,11 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
     keyId,
     bearer,
     hmac,
-    close: () => db.close(),
+    // A borrowed store belongs to the test, which closes it when it is done
+    // with every app built over it.
+    close: () => {
+      if (!opts.store) db.close();
+    },
   };
 }
 

@@ -447,6 +447,17 @@ export interface AgentThreadRow {
    * express. See migration 23.
    */
   queueState: QueueState;
+  /**
+   * The canonical JSON of the ticket this thread last PUBLISHED, so a
+   * no-argument `$ticket --ready` can authorize that exact contract. Distinct
+   * from `ticketUuid`/`issueNumber`, which bind a publication that has not
+   * succeeded yet. See migration 24.
+   */
+  publishedSpec: string | null;
+  publishedIssue: number | null;
+  publishedUrl: string | null;
+  /** Whether that publication already carries the verified `agent:ready`. */
+  publishedQueued: boolean;
   runStartedAt: string | null;
   runFinishedAt: string | null;
   cardChannelId: string | null;

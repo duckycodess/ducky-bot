@@ -14,6 +14,16 @@ import { fromBool, toBool, type AgentThreadRow } from './types.js';
  */
 export const AGENT_INTENT_NOTES_MAX = 24;
 export const AGENT_INTENT_NOTE_MAX_CHARS = 400;
+/**
+ * Ceiling on the stored settled ticket.
+ *
+ * The notes that build a spec are already bounded (24 x 400 chars), so a
+ * well-formed spec is a few kilobytes and this is headroom rather than a
+ * constraint anybody should meet. A spec past it is not stored, and the
+ * authorize step then says it cannot reach the settled ticket instead of
+ * sending a truncated contract to the publisher.
+ */
+export const AGENT_PUBLISHED_SPEC_MAX_CHARS = 32 * 1024;
 
 const map = (r: Record<string, unknown>): AgentThreadRow => ({
   discordUserId: String(r['discord_user_id']),
@@ -34,6 +44,10 @@ const map = (r: Record<string, unknown>): AgentThreadRow => ({
   queueState: String(r['run_queue_state'] ?? 'not_requested') as QueueState,
   runStartedAt: r['run_started_at'] == null ? null : String(r['run_started_at']),
   runFinishedAt: r['run_finished_at'] == null ? null : String(r['run_finished_at']),
+  publishedSpec: r['published_spec'] == null ? null : String(r['published_spec']),
+  publishedIssue: r['published_issue'] == null ? null : Number(r['published_issue']),
+  publishedUrl: r['published_url'] == null ? null : String(r['published_url']),
+  publishedQueued: toBool(r['published_queued']),
   cardChannelId: r['card_channel_id'] == null ? null : String(r['card_channel_id']),
   cardMessageId: r['card_message_id'] == null ? null : String(r['card_message_id']),
   createdAt: String(r['created_at']),
@@ -181,6 +195,86 @@ export class AgentThreadsRepo {
           WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
       )
       .run(nowIso, ownerId, threadKey, runId);
+  }
+
+  /**
+   * Remembers the ticket this thread actually published.
+   *
+   * Stored as the canonical JSON the publisher accepted, because the SECOND
+   * step of the owner's two-step has to send that exact contract back: the
+   * installed publisher refuses to change the execution contract of an
+   * authorized issue, and a spec rebuilt from a description is a different
+   * ticket wearing the same words.
+   *
+   * Returns false when the spec is too large to keep. The caller then has a
+   * published issue and no way to authorize it from here, which it says
+   * plainly rather than storing half a contract.
+   */
+  recordPublishedTicket(
+    ownerId: string,
+    threadKey: string,
+    runId: string,
+    published: {
+      specJson: string;
+      issueNumber: number | null;
+      issueUrl: string | null;
+      queued: boolean;
+    },
+    nowIso: string,
+  ): boolean {
+    if (published.specJson.length > AGENT_PUBLISHED_SPEC_MAX_CHARS) return false;
+    const result = this.db
+      .prepare(
+        `UPDATE agent_threads
+            SET published_spec = ?, published_issue = ?, published_url = ?,
+                published_queued = ?, updated_at = ?
+          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
+      )
+      .run(
+        published.specJson,
+        published.issueNumber,
+        published.issueUrl,
+        fromBool(published.queued),
+        nowIso,
+        ownerId,
+        threadKey,
+        runId,
+      );
+    return Number(result.changes) > 0;
+  }
+
+  /**
+   * Marks the settled ticket as carrying the verified `agent:ready` label.
+   *
+   * Separate from `recordPublishedTicket` because authorization is a separate
+   * act: the row that records WHAT was published is written once, and this
+   * records that it has since been authorized.
+   */
+  markPublishedQueued(ownerId: string, threadKey: string, nowIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_threads SET published_queued = 1, updated_at = ?
+          WHERE discord_user_id = ? AND thread_key = ? AND published_spec IS NOT NULL`,
+      )
+      .run(nowIso, ownerId, threadKey);
+  }
+
+  /**
+   * Forgets the settled ticket, because a NEW one has replaced it.
+   *
+   * Called when a thread publishes something different: keeping the previous
+   * one would let a later no-argument `--ready` authorize a ticket the owner
+   * has moved on from.
+   */
+  clearPublishedTicket(ownerId: string, threadKey: string, nowIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_threads
+            SET published_spec = NULL, published_issue = NULL, published_url = NULL,
+                published_queued = 0, updated_at = ?
+          WHERE discord_user_id = ? AND thread_key = ?`,
+      )
+      .run(nowIso, ownerId, threadKey);
   }
 
   /** The canonical id for this thread's publication, minted once and reused. */

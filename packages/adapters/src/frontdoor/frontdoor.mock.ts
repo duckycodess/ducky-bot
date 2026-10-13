@@ -24,8 +24,13 @@ export class MockFrontDoor implements FrontDoorPort {
     input: Record<string, unknown>;
   }[] = [];
 
+  /**
+   * Mutable, so one harness can model a failure and then a recovery -- which
+   * is what a retry test IS. A readonly script could only ever describe a
+   * world that never changes.
+   */
   constructor(
-    private readonly script: {
+    readonly script: {
       availability?: Partial<FrontDoorAvailability>;
       inspect?: Partial<FrontDoorInspection> | (() => never);
       validate?: Partial<FrontDoorValidation>;

@@ -43,5 +43,6 @@ describe('subscription-only environment guard', () => {
     expect(message).toContain('OPENAI_API_KEY');
     expect(message).not.toContain(secret);
     expect(message).toMatch(/subscription-only/);
+    expect(message).toMatch(/no value was displayed or logged/);
   });
 });

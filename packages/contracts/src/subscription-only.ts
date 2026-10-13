@@ -4,8 +4,10 @@ import { DuckyError } from './errors.js';
  * Environment variable names that would let a model provider bill the owner
  * separately from the subscription this runtime is meant to use.
  *
- * NAMES ONLY, ever. The guard reads which variables are set and never what they
- * hold, and the error it raises quotes the names and nothing else.
+ * NAMES ONLY in every output. The guard looks at each value solely to tell a
+ * blank from a set variable (an env file unsets a name by blanking it); no value
+ * is displayed, logged or put in an error, and the error quotes the names and
+ * nothing else.
  *
  * Deliberately an explicit list plus one generic suffix rule. The list is the
  * providers the owner could plausibly point an agent at; the suffix catches a
@@ -39,7 +41,7 @@ export function billedApiKeyEnvNames(env: NodeJS.ProcessEnv): string[] {
 
 /**
  * Refuses to start a subscription-only process whose OWN environment carries a
- * separately billed API key name.
+ * separately billed API key name (a set, non-blank variable).
  *
  * **This is partial evidence, and it is labelled so.** It proves one thing: this
  * process did not start with such a variable set. It cannot prove the provider
@@ -57,6 +59,6 @@ export function assertSubscriptionOnlyEnvironment(env: NodeJS.ProcessEnv, who: s
     'invalid_input',
     `${who} runs subscription-only, but its environment sets ${found.join(', ')}. ` +
       'A separately billed API key could be used instead of the subscription, so it is ' +
-      'refused rather than guessed at. Unset it for this process; no value was read.',
+      'refused rather than guessed at. Unset it for this process; no value was displayed or logged.',
   );
 }

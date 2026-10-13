@@ -141,6 +141,11 @@ authorization carries the same merge-policy warning the single step does, for
 both a `pr_only` registration and one without, and says nothing about merging
 when the authorization did not complete; and a card links only to the issue
 its own run touched, while the issue binding a retry needs still survives.
+The two-step's own card is asserted on its ACTUAL buttons -- Details and a
+View issue link carrying the real URL, no Cancel on a finished run -- for the
+authorization, the already-authorized notice and the notice a bare `$ticket`
+gives, with no carry-over into an unrelated later run and no retry binding
+left behind.
 
 **coordinator / workflow invariants** — the bridge and its presenters name no
 `gh` surface, no issue or label API, and no `JobsService`, and spawn nothing

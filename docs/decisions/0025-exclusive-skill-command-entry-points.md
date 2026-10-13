@@ -100,6 +100,11 @@ The rules around it are what keep it from becoming an implicit authorization:
 - **A failed authorization keeps the settled ticket**, so the same
   authorization can be tried again, and reports the queue state as `unknown`
   because the label may have landed.
+- **Its card carries the same controls.** A run that authorizes or reports on
+  an already-published ticket records that issue against ITSELF before the
+  card is rendered, and releases the retry binding after. Without that the
+  two-step produced a queued ticket with no "View issue" button, because the
+  per-run issue is deliberately cleared when a run starts.
 - **It carries the same merge-policy warning the single step does.** Both
   routes to a queued ticket end on one shared sentence, built from the
   registration the scan just observed; a warning that exists on one path and

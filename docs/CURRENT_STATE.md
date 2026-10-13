@@ -259,7 +259,10 @@ exercised; this says what it does.
     which is wrong whenever the queue state is `unknown`, so the card renders
     the unknown truth instead. It also links only to the issue its OWN run
     touched: the issue URL is cleared when a run starts and set again when
-    that run learns one, while the retry binding deliberately survives.
+    that run learns one, while the retry binding deliberately survives. A run
+    that authorizes or reports on an already-published ticket records that
+    issue against itself, so the two-step card carries the same Details /
+    View issue controls the single-step card does.
   - **One card, edited in place**, with real controls -- a signed Details, a
     signed Cancel while the run is live, and a "View issue" LINK that carries
     no custom id and whose URL the sanitizer admits only as an exact https

@@ -517,6 +517,8 @@ export class SkillBridgeService {
               (settled.issueUrl ? `\n${settled.issueUrl}` : ''),
             ephemeral: false,
           },
+          'not_requested',
+          { issueNumber: settled.issueNumber, issueUrl: settled.issueUrl },
         );
       }
     }
@@ -870,6 +872,7 @@ export class SkillBridgeService {
           ephemeral: false,
         },
         'queued',
+        { issueNumber: settled.issueNumber, issueUrl: settled.issueUrl },
       );
     }
 
@@ -947,6 +950,9 @@ export class SkillBridgeService {
         detail.slice(0, AGENT_CARD_DETAIL_MAX),
         cards.publicationReply(queueState === 'queued' ? 'queued' : 'published', url),
         queueState,
+        // The issue this run authorized, so its card carries the same
+        // View issue control the single-step card does.
+        { issueNumber: settled.issueNumber, issueUrl: url ?? settled.issueUrl },
       );
     } catch (err) {
       return this.failRun(actor, event, publishing, err, {
@@ -971,12 +977,44 @@ export class SkillBridgeService {
     detail: string,
     reply: OutboundMessage,
     queueState: QueueState = 'not_requested',
+    /**
+     * The issue THIS run acted on, when it acted on one.
+     *
+     * A run that authorizes or reports on an already-published ticket has an
+     * issue to link, and the card's "View issue" control is an explicit
+     * acceptance criterion -- but `startRun` clears the per-run issue so a
+     * later card cannot inherit a stale one. So a run that genuinely has an
+     * issue has to say so, here, rather than relying on a value that outlived
+     * somebody else's run.
+     */
+    publication?: { issueNumber: number; issueUrl: string | null },
   ): Promise<OutboundMessage> {
+    if (publication) {
+      this.deps.store.agentThreads.setPublication(
+        actor.discordUserId, event.threadKey, run.runId,
+        { issueNumber: publication.issueNumber, issueUrl: publication.issueUrl },
+        this.now(),
+      );
+    }
+    /**
+     * The snapshot is taken AFTER the publication above and BEFORE the
+     * binding is released below, so the card renders with the issue and the
+     * link while the stored binding ends up empty. The single-step path has
+     * always worked this way; doing it anywhere else would mean a card that
+     * shows a link and a row that invites the next ticket to rewrite that
+     * issue.
+     */
     const done = this.deps.store.agentThreads.updateRun(
       actor.discordUserId, event.threadKey, run.runId,
       { status, detail, queueState, finished: true },
       this.now(),
     );
+    if (publication) {
+      // "This attempt has not landed yet" is no longer true of this issue.
+      this.deps.store.agentThreads.clearPublicationBinding(
+        actor.discordUserId, event.threadKey, run.runId, this.now(),
+      );
+    }
     this.deps.audit?.({ command: run.runCommand ?? '$ticket', outcome: 'ok', status });
     this.releaseRun(actor, event.threadKey);
     if (done) await this.showCard(actor, event, done, { fresh: true });

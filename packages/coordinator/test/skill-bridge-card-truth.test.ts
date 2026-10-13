@@ -195,3 +195,85 @@ describe('a card links only to the issue its own run touched', () => {
     h.close();
   });
 });
+
+/**
+ * The card's controls are an explicit acceptance criterion: Details, View
+ * issue and Cancel, as REAL buttons. The two-step reaches a queued ticket by
+ * a different route from the single step, so its card has to carry the same
+ * controls -- a link that exists on one path and not the other is the owner
+ * discovering the difference by its absence.
+ */
+describe('the two-step card carries the same controls as the single step', () => {
+  const buttonLabels = (m: OutboundMessage): string[] =>
+    (m.rows?.[0]?.buttons ?? []).map((b) => b.label);
+
+  const linkUrl = (m: OutboundMessage): string | undefined => {
+    const link = m.rows?.[0]?.buttons.find(isLinkButton);
+    return link && isLinkButton(link) ? link.url : undefined;
+  };
+
+  it('links the issue it just authorized', async () => {
+    const { h } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    await say(h, '$ticket --ready');
+
+    const card = lastCard(h);
+    expect(buttonLabels(card)).toContain('Details');
+    expect(buttonLabels(card)).toContain('View issue');
+    expect(linkUrl(card)).toBe('https://github.com/acme/demo/issues/41');
+    // A finished run has nothing left to cancel.
+    expect(buttonLabels(card)).not.toContain('Cancel');
+    // ...and it names the issue it acted on.
+    expect(cardText(card)).toMatch(/#41/);
+    h.close();
+  });
+
+  it('links from the already-authorized notice', async () => {
+    const { h, door } = await boot();
+    await say(h, '$ticket --ready add a health endpoint');
+
+    await say(h, '$ticket --ready');
+
+    // Re-applying a verified label is a GitHub write with nothing to gain.
+    // A read-only scan still runs -- that is how the card knows the current
+    // merge policy -- so it is PUBLISHES that must not grow.
+    expect(door.calls.filter((c) => c.kind === 'publish')).toHaveLength(1);
+    expect(linkUrl(lastCard(h))).toBe('https://github.com/acme/demo/issues/41');
+    h.close();
+  });
+
+  it('links from the notice that a bare $ticket gives', async () => {
+    const { h } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    await say(h, '$ticket');
+
+    expect(linkUrl(lastCard(h))).toBe('https://github.com/acme/demo/issues/41');
+    h.close();
+  });
+
+  it('does not carry the link into an unrelated later run', async () => {
+    const { h } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    await say(h, '$ticket --ready');
+    expect(linkUrl(lastCard(h))).toBeDefined();
+
+    await say(h, '$grill-me the retry policy');
+
+    expect(linkUrl(lastCard(h))).toBeUndefined();
+    expect(cardText(lastCard(h))).not.toMatch(/#41/);
+    h.close();
+  });
+
+  it('leaves no retry binding behind after authorizing', async () => {
+    // The binding means "this attempt has not landed". It has.
+    const { h, door } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    await say(h, '$ticket --ready');
+    expect(h.store.agentThreads.get(OWNER, 'dm-1')!.issueNumber).toBeNull();
+
+    await say(h, '$ticket add a logout endpoint');
+    const latest = door.calls.filter((c) => c.kind === 'publish').at(-1)!;
+    expect(latest.input['issue']).toBeUndefined();
+    h.close();
+  });
+});

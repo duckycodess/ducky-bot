@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { CUSTOM_ID_MAX, DISCORD_CONTENT_MAX, EMBED_FIELD_VALUE_MAX } from '@ducky/contracts';
 import { sanitizeOutbound } from '../src/discord/sanitize-outbound.js';
@@ -14,7 +15,7 @@ const SECRETS = [
   'ghp_abcdefghijklmnopqrstuvwxyz012345',
   'sk-ant-api03-abcdefghijklmnopqrstuvwx',
   'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
-  '/home/tj/projects/secret',
+  path.join(homedir(), 'projects', 'secret'),
 ];
 
 const poisoned = (): OutboundMessage => ({

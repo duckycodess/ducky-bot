@@ -1,3 +1,4 @@
+import { controlId, type OutboundMessage } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
 import {
   ALL_INTERACTION_KINDS, CONVERSATIONAL_INTERACTION_KINDS, OWNER_ONLY_INTERACTION_KINDS,
@@ -90,10 +91,10 @@ const openThread = async (h: Harness): Promise<string> => {
 };
 
 const buttonFor = (
-  reply: { rows?: readonly { buttons: readonly { customId: string; label: string }[] }[] } | undefined,
+  reply: OutboundMessage | undefined,
   label: string,
 ): string | undefined =>
-  reply?.rows?.flatMap((r) => r.buttons).find((b) => b.label === label)?.customId;
+  controlId(reply?.rows?.flatMap((r) => r.buttons).find((b) => b.label === label)) || undefined;
 
 describe('the control manifests are two lists, and they do not overlap', () => {
   it('registers exactly the owner-only manifest in the owner-only map', () => {

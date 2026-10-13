@@ -26,12 +26,6 @@ export const INTENT_KINDS = [
   'task_add',
   'reminder_add',
   'capture',
-  /**
-   * A coding job. A WRITE in the strongest sense here: it puts a real agent
-   * with edit capability into a working tree, so it is proposed and never
-   * inferred into existence.
-   */
-  'job_submit',
   /** READS, answered immediately. Owner-only, and none of them generates prose. */
   'briefing',
   'meal',
@@ -39,8 +33,18 @@ export const INTENT_KINDS = [
 ] as const;
 export type IntentKind = (typeof INTENT_KINDS)[number];
 
-/** The three that change stored data, and therefore need confirming. */
-export const WRITE_INTENTS = ['task_add', 'reminder_add', 'capture', 'job_submit'] as const;
+/**
+ * The three that change stored data, and therefore need confirming.
+ *
+ * There used to be a fourth. `job_submit` let `implement in <repo>: <task>`
+ * propose an engineering job from ordinary prose, and it is GONE -- not
+ * disabled, removed -- because the owner's workflow contract says engineering
+ * work starts at `$grill-me`, `$ticket` and `$agentize` and nowhere else. A
+ * sentence that can start a coding agent is a sentence that can be pasted,
+ * quoted or mistyped into starting one. See
+ * `decisions/0025-exclusive-skill-command-entry-points.md`.
+ */
+export const WRITE_INTENTS = ['task_add', 'reminder_add', 'capture'] as const;
 export type WriteIntent = (typeof WRITE_INTENTS)[number];
 
 export const isWriteIntent = (k: IntentKind): k is WriteIntent =>
@@ -54,16 +58,6 @@ export interface DetectedIntent {
   readonly when?: string;
   /** A repeat expression for a reminder, exactly as typed. */
   readonly every?: string;
-  /**
-   * The repository slug for a `job_submit`, exactly as typed.
-   *
-   * Always present when the kind is `job_submit`, and never inferred: the
-   * detector requires the owner to name it. Whether it is ALLOWLISTED is not
-   * decided here -- the contracts package knows nothing about configuration --
-   * so the service checks it and refuses an unknown slug rather than proposing
-   * a job that could not run.
-   */
-  readonly repo?: string;
 }
 
 /** How long a proposal waits for a yes. Short: intent is about right now. */
@@ -108,21 +102,15 @@ const RULES: readonly { kind: IntentKind; re: RegExp }[] = [
   { kind: 'task_add', re: /^i need to\s+(?<subject>.+)$/i },
   { kind: 'capture', re: /^(?:capture|note|jot down|remember)[:,]?\s+(?<subject>.+)$/i },
   /**
-   * A coding job, and the repository is MANDATORY in the pattern itself.
+   * There is deliberately NO rule here that starts engineering work.
    *
-   * "fix the login bug" names no repository, and there is no safe way to pick
-   * one: an assistant that guessed would eventually point a real agent with
-   * edit capability at the wrong working tree. So the slug is part of the
-   * grammar -- `in <repo>:` -- and a message without it matches nothing.
+   * `implement in <repo>: <task>` used to be one. It is removed rather than
+   * narrowed: the owner's contract is that `$grill-me`, `$ticket` and
+   * `$agentize` -- as the first unquoted token of a message -- are the only
+   * things that reach the repository workflow. A prose rule, however careful
+   * its grammar, is a second entry point, and a second entry point is one that
+   * can be reached by a quote, a paste or a typo.
    */
-  {
-    kind: 'job_submit',
-    re: /^(?:code|build|implement|fix|work on)\s+in\s+(?<repo>[a-z0-9][a-z0-9-]{0,63})\s*[:,]\s*(?<subject>.+)$/i,
-  },
-  {
-    kind: 'job_submit',
-    re: /^(?:submit|start) a? ?(?:coding )?job\s+in\s+(?<repo>[a-z0-9][a-z0-9-]{0,63})\s*[:,]\s*(?<subject>.+)$/i,
-  },
   { kind: 'briefing', re: /^(?:what(?:'s| is) (?:on|up) today|my day|brief me|briefing)\b.*$/i },
   { kind: 'meal', re: /^(?:what should i (?:cook|eat)|meal idea|what(?:'s| is) for (?:lunch|dinner|breakfast))\b(?<subject>.*)$/i },
   { kind: 'study', re: /^(?:help me study|study plan(?: for)?|quiz me(?: on)?)\b(?<subject>.*)$/i },
@@ -151,14 +139,6 @@ export function detectIntent(text: string): DetectedIntent | undefined {
 
   // A briefing has no subject; the others must have one to be actionable.
   if (kind === 'briefing') return { kind, subject: '' };
-
-  // A coding job carries its repository, lowercased to the slug form the
-  // allowlist uses. The subject is the task, verbatim.
-  if (kind === 'job_submit') {
-    const repo = (first.m!.groups?.['repo'] ?? '').toLowerCase();
-    if (repo === '' || subject === '') return undefined;
-    return { kind, subject, repo };
-  }
 
   let every: string | undefined;
   const everyMatch = EVERY.exec(subject);

@@ -56,6 +56,19 @@ class ChannelOutageTransport implements DiscordTransport {
     }
     await this.inner.send(target, message);
   }
+
+  /** Cards are not what these tests drive; delegated so the type is honest. */
+  async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+    return this.inner.sendCard(target, message);
+  }
+
+  async updateCard(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean> {
+    return this.inner.updateCard(target, messageId, message);
+  }
 }
 
 const bothTargets = (sent: readonly { target: SendTarget; message: OutboundMessage }[]) => ({

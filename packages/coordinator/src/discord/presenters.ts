@@ -326,6 +326,12 @@ export interface ProviderStatus {
   /** Whether anything can actually confirm a dependency, and what happens if not. */
   readonly dependencyChecker: string;
   readonly githubWatches: string;
+  /**
+   * Whether `$grill-me` / `$ticket` / `$agentize` mean anything here, and
+   * whether publishing is enabled. Three states rather than two, because
+   * "enabled for reads" is a real and useful configuration.
+   */
+  readonly repositoryWorkflow: string;
 }
 
 /** Always visible, so the owner is never guessing which providers are real. */
@@ -351,6 +357,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Your timezone', value: p.ownerTimezone, inline: true },
           { name: 'Dependency checks', value: p.dependencyChecker },
           { name: 'GitHub watches', value: p.githubWatches, inline: true },
+          { name: 'Repository workflow', value: p.repositoryWorkflow },
           { name: 'Shared visibility', value: p.sharedChannels },
           { name: 'Assistant channels', value: p.channelRoles },
         ],

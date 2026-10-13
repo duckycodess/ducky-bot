@@ -1,7 +1,7 @@
 import {
   ACTION_ROWS_MAX, BUTTONS_PER_ROW_MAX, EMBED_FIELDS_MAX, isValidEmbedColor,
 } from '@ducky/contracts';
-import type { ButtonStyle, OutboundMessage } from './message.js';
+import { isLinkButton, type ButtonStyle, type OutboundMessage } from './message.js';
 
 /**
  * Structural conversion from our sanitized outbound shape to the JSON Discord
@@ -20,6 +20,9 @@ const BUTTON_STYLE: Record<ButtonStyle, number> = {
   danger: 4,
 };
 
+/** Discord's link-button style. It takes a url and refuses a custom_id. */
+const BUTTON_STYLE_LINK = 5;
+
 const COMPONENT_ACTION_ROW = 1;
 const COMPONENT_BUTTON = 2;
 const COMPONENT_TEXT_INPUT = 4;
@@ -32,9 +35,17 @@ export interface DiscordEmbedPayload {
   color?: number;
 }
 
+export interface DiscordButtonPayload {
+  type: number;
+  label: string;
+  style: number;
+  custom_id?: string;
+  url?: string;
+}
+
 export interface DiscordComponentPayload {
   type: number;
-  components: { type: number; custom_id: string; label: string; style: number }[];
+  components: DiscordButtonPayload[];
 }
 
 export interface DiscordMessagePayload {
@@ -78,12 +89,19 @@ export function toDiscordPayload(message: OutboundMessage): DiscordMessagePayloa
       .slice(0, ACTION_ROWS_MAX)
       .map((row) => ({
         type: COMPONENT_ACTION_ROW,
-        components: row.buttons.slice(0, BUTTONS_PER_ROW_MAX).map((b) => ({
-          type: COMPONENT_BUTTON,
-          custom_id: b.customId,
-          label: b.label,
-          style: BUTTON_STYLE[b.style ?? 'secondary'],
-        })),
+        components: row.buttons.slice(0, BUTTONS_PER_ROW_MAX).map((b): DiscordButtonPayload =>
+          isLinkButton(b)
+            // A link button carries a url and NO custom_id. Discord rejects a
+            // component that has both, which is the API enforcing the same
+            // distinction the outbound type already makes.
+            ? { type: COMPONENT_BUTTON, label: b.label, style: BUTTON_STYLE_LINK, url: b.url }
+            : {
+                type: COMPONENT_BUTTON,
+                custom_id: b.customId,
+                label: b.label,
+                style: BUTTON_STYLE[b.style ?? 'secondary'],
+              },
+        ),
       }))
       // A row with no buttons is rejected by Discord; sanitization can empty
       // one by dropping an unsafe id, so drop the row too.

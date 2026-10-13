@@ -5,7 +5,7 @@ import {
   isValidEmbedColor,
 } from '@ducky/contracts';
 import { redact, type Redactor } from '@ducky/adapters';
-import type { OutboundEmbed, OutboundMessage, OutboundRow } from './message.js';
+import { isLinkButton, type OutboundButton, type OutboundEmbed, type OutboundMessage, type OutboundRow } from './message.js';
 
 /**
  * A component id is a signed opaque handle, so it cannot be redacted -- doing
@@ -21,6 +21,34 @@ const SAFE_CUSTOM_ID = /^v1:[a-z0-9][a-z0-9-]{0,31}:[a-z_]{1,32}:[A-Za-z0-9._-]{
 
 export const isSafeCustomId = (id: string): boolean =>
   id.length <= CUSTOM_ID_MAX && SAFE_CUSTOM_ID.test(id);
+
+/**
+ * The only hosts a link button may point at.
+ *
+ * A URL in a Discord message is a thing the owner is invited to click, so the
+ * set is a short allowlist rather than a scheme check: "https" is not a
+ * statement about where it goes. GitHub is the only destination any Ducky
+ * surface has a reason to offer -- an issue or a pull request -- and anything
+ * else is dropped exactly as an unsafe custom id is.
+ */
+export const LINK_BUTTON_HOSTS = Object.freeze(['github.com', 'www.github.com']);
+/** Bounded: Discord's own limit is 512, and nothing here needs close to it. */
+export const LINK_BUTTON_URL_MAX = 300;
+
+export function isSafeLinkUrl(raw: string): boolean {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > LINK_BUTTON_URL_MAX) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+  if (url.username !== '' || url.password !== '') return false;
+  if (!LINK_BUTTON_HOSTS.includes(url.hostname.toLowerCase())) return false;
+  // Re-serialized, so what is checked is exactly what is sent.
+  return url.toString() === raw;
+}
 
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
@@ -94,15 +122,23 @@ export function sanitizeOutbound(message: OutboundMessage, r: Redactor = redact)
     out.rows = message.rows.slice(0, ACTION_ROWS_MAX).map((row) => ({
       buttons: row.buttons
         .slice(0, BUTTONS_PER_ROW_MAX)
-        // Dropped rather than mangled: a truncated or malformed id would fail
-        // signature verification anyway, and letting arbitrary text through
-        // here would bypass the redactor.
-        .filter((b) => isSafeCustomId(b.customId))
-        .map((b) => ({
-          customId: b.customId,
-          label: clip(r(b.label), 80),
-          ...(b.style ? { style: b.style } : {}),
-        })),
+        // Dropped rather than mangled, for both kinds: a truncated or
+        // malformed id would fail signature verification anyway, a URL that is
+        // not on the allowlist is not a destination Ducky offers, and letting
+        // arbitrary text through here would bypass the redactor.
+        .filter((b) => (isLinkButton(b) ? isSafeLinkUrl(b.url) : isSafeCustomId(b.customId)))
+        .map((b): OutboundButton =>
+          isLinkButton(b)
+            // The URL is NOT passed through the redactor: it has already been
+            // proven to be an exact https GitHub URL, and redacting one would
+            // corrupt a link exactly as it would corrupt a signature.
+            ? { url: b.url, label: clip(r(b.label), 80) }
+            : {
+                customId: b.customId,
+                label: clip(r(b.label), 80),
+                ...(b.style ? { style: b.style } : {}),
+              },
+        ),
     }));
   }
 

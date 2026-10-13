@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
-  type ConversationProvider, type DependencyChecker, type GitHubReader,
+  type ConversationProvider, type DependencyChecker, type FrontDoorPort, type GitHubReader,
 } from '@ducky/adapters';
 import { createApp, type App } from '../src/app.js';
 import type { ActionPerformer } from '../src/domain/action-performer.js';
@@ -87,8 +87,20 @@ export interface HarnessOptions {
   /** Replaces the approved-action performer in service-level tests. */
   readonly actionPerformer?: ActionPerformer;
   /**
-   * Reuses an existing store, which is what a RESTART looks like from the
-   * database's point of view: a second app, the same rows.
+   * Replaces the installed workflow helper.
+   *
+   * There is no default: the real helper creates GitHub issues, so a test
+   * that did not supply one must get `DisabledFrontDoor` and prove the
+   * refusal rather than quietly reaching a network.
+   */
+  readonly frontDoor?: FrontDoorPort;
+  /**
+   * An existing store to build this app over.
+   *
+   * What a coordinator RESTART looks like from the outside: a new app, new
+   * services, new in-memory everything, over the same rows. Without it a test
+   * can only ever assert that state survives within one process, which is not
+   * the property durable state is for.
    */
   readonly store?: Store;
 }
@@ -119,10 +131,10 @@ export class TestClock extends ConfiguredOwnerClock {
 }
 
 export function makeHarness(opts: HarnessOptions = {}, realTransport = false): Harness {
-  const reused = opts.store;
-  const db = reused?.db ?? openDatabase({ location: ':memory:' });
-  if (!reused) runMigrations(db);
-  const store = reused ?? createStore(db);
+  // A supplied store is reused as-is; its migrations have already run.
+  const db = opts.store?.db ?? openDatabase({ location: ':memory:' });
+  if (!opts.store) runMigrations(db);
+  const store = opts.store ?? createStore(db);
 
   const executorId = 'exec-a';
   const keyId = 'k1';
@@ -155,13 +167,22 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       ...(opts.clock ? { clock: opts.clock } : {}),
       ...(opts.dependencyChecker ? { dependencyChecker: opts.dependencyChecker } : {}),
       ...(opts.actionPerformer ? { actionPerformer: opts.actionPerformer } : {}),
+      ...(opts.frontDoor ? { frontDoor: opts.frontDoor } : {}),
       ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
     },
   );
 
-  if (opts.registerExecutor !== false) {
+  /**
+   * A borrowed store already has its executor registered.
+   *
+   * Re-issuing the credential would trip the unique key id, which is the
+   * schema correctly refusing to mint a second credential for the same key --
+   * and a restart does not re-issue credentials either.
+   */
+  const registerExecutor = opts.registerExecutor ?? opts.store === undefined;
+  if (registerExecutor) {
     store.executors.upsertExecutor(executorId, 'test executor');
     store.executors.addCredential({
       executorId,
@@ -183,10 +204,10 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
     keyId,
     bearer,
     hmac,
-    // A reused store belongs to the harness that opened it, so a restart
-    // harness must not close the database out from under it.
+    // A borrowed store belongs to the test, which closes it when it is done
+    // with every app built over it.
     close: () => {
-      if (!reused) db.close();
+      if (!opts.store) db.close();
     },
   };
 }

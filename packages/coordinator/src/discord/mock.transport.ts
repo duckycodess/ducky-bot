@@ -98,6 +98,43 @@ export class MockDiscordTransport implements DiscordTransport {
   }
 
   /**
+   * The in-memory editable-message store.
+   *
+   * Modelled rather than stubbed, because the property under test is that a
+   * card is EDITED and not reposted -- which a stub that always appends could
+   * not distinguish from a bug.
+   */
+  readonly cards = new Map<string, { target: SendTarget; message: OutboundMessage }>();
+  #nextCardId = 1;
+  /** Set to model a card the owner deleted. The caller must post a fresh one. */
+  missingCardIds = new Set<string>();
+
+  async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+    if (this.failSends) throw new Error('mock transport: delivery refused');
+    const id = `m${this.#nextCardId++}`;
+    const safe = sanitizeOutbound(message);
+    this.cards.set(id, { target, message: safe });
+    this.sent.push({ target, message: safe });
+    return id;
+  }
+
+  async updateCard(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean> {
+    if (this.failSends) throw new Error('mock transport: delivery refused');
+    if (this.missingCardIds.has(messageId) || !this.cards.has(messageId)) return false;
+    this.cards.set(messageId, { target, message: sanitizeOutbound(message) });
+    return true;
+  }
+
+  /** Test helper: the card as it now reads, after every edit. */
+  card(messageId: string): OutboundMessage | undefined {
+    return this.cards.get(messageId)?.message;
+  }
+
+  /**
    * Test helper: pushes an event through the router and returns the reply.
    *
    * It runs the SAME thread-entry hook the real transport does, so a test

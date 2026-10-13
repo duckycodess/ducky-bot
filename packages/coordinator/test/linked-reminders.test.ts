@@ -1,3 +1,4 @@
+import { controlId } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
 import { TASK_SNOOZE_MINUTES } from '@ducky/contracts';
 import { planTaskReminderFires } from '../src/domain/task-reminders.js';
@@ -292,8 +293,9 @@ describe('a card in a channel is information, never authority', () => {
     const buttons = h.transport.sent[0]?.message.rows?.[0]?.buttons ?? [];
     expect(buttons).toHaveLength(3);
     for (const button of buttons) {
+      expect(controlId(button)).not.toBe('');
       const refused = await h.transport.dispatch({
-        kind: 'component', customId: button.customId, userId: CHAT,
+        kind: 'component', customId: controlId(button), userId: CHAT,
       } as never);
       expect(replyText(refused)).toMatch(/not authorized/i);
     }
@@ -306,7 +308,8 @@ describe('a card in a channel is information, never authority', () => {
     const task = h.app.tasks.add(h.owner, { title: 'ENG 30 Letters', due: '2026-10-14 09:00' });
     clock.advance(PAST_OFFSET);
     await h.app.reminderNotifier.tick();
-    const stale = h.transport.sent[0]!.message.rows![0]!.buttons[0]!.customId;
+    const stale = controlId(h.transport.sent[0]!.message.rows![0]!.buttons[0]!);
+    expect(stale).not.toBe('');
 
     h.app.tasks.setDeadline(h.owner, task.publicId, h.app.tasks.parseDeadline('October 25'));
     const refused = await h.transport.dispatch({
@@ -323,7 +326,8 @@ describe('a card in a channel is information, never authority', () => {
     clock.advance(PAST_OFFSET);
     await h.app.reminderNotifier.tick();
 
-    const done = h.transport.sent[0]!.message.rows![0]!.buttons[0]!.customId;
+    const done = controlId(h.transport.sent[0]!.message.rows![0]!.buttons[0]!);
+    expect(done).not.toBe('');
     const reply = await h.transport.dispatch({
       kind: 'component', customId: done, userId: OWNER,
     } as never);

@@ -1,3 +1,4 @@
+import { controlId } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
 import {
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
@@ -33,7 +34,7 @@ describe('command routing', () => {
     const reply = await h.transport.dispatch({
       kind: 'command', name: 'inbox', userId: OWNER, options: {},
     });
-    const ids = reply?.rows?.[0]?.buttons.map((b) => b.customId) ?? [];
+    const ids = reply?.rows?.[0]?.buttons.map(controlId) ?? [];
     expect(ids.length).toBeGreaterThan(0);
     for (const id of ids) expect(id.length).toBeLessThanOrEqual(100);
     h.close();
@@ -59,7 +60,7 @@ describe('command routing', () => {
     expect(flat(preview)).toContain('Nothing is saved yet');
     expect(h.store.schedules.count()).toBe(0);
 
-    const confirmId = preview?.rows?.[0]?.buttons[0]?.customId ?? '';
+    const confirmId = controlId(preview?.rows?.[0]?.buttons[0]);
     const confirmed = await h.transport.dispatch({
       kind: 'component', customId: confirmId, userId: OWNER,
     });
@@ -220,8 +221,8 @@ describe('schedule corrections', () => {
     });
     const buttons = preview?.rows?.[0]?.buttons ?? [];
     return {
-      confirm: buttons.find((b) => /Confirm/.test(b.label))!.customId,
-      edit: buttons.find((b) => /Correct/.test(b.label))!.customId,
+      confirm: controlId(buttons.find((b) => /Confirm/.test(b.label))),
+      edit: controlId(buttons.find((b) => /Correct/.test(b.label))),
     };
   };
 

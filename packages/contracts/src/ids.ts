@@ -11,6 +11,8 @@ const BASE32 = '0123456789abcdefghjkmnpqrstvwxyz';
 export type PublicTaskId = string;
 export type PublicReminderId = string;
 export type PublicWatchId = string;
+/** One run of a repository-workflow command, as shown on its card. */
+export type PublicAgentRunId = string;
 
 export const newUuid = (): string => randomUUID();
 
@@ -37,11 +39,13 @@ export const newPublicJobId = (): PublicJobId => newShortHandle('j');
 export const newPublicTaskId = (): PublicTaskId => newShortHandle('t');
 export const newPublicReminderId = (): PublicReminderId => newShortHandle('r');
 export const newPublicWatchId = (): PublicWatchId => newShortHandle('w');
+export const newPublicAgentRunId = (): PublicAgentRunId => newShortHandle('a');
 
 export const PUBLIC_JOB_ID_RE = /^j[0-9abcdefghjkmnpqrstvwxyz]{5}$/;
 export const PUBLIC_TASK_ID_RE = /^t[0-9abcdefghjkmnpqrstvwxyz]{5}$/;
 export const PUBLIC_REMINDER_ID_RE = /^r[0-9abcdefghjkmnpqrstvwxyz]{5}$/;
 export const PUBLIC_WATCH_ID_RE = /^w[0-9abcdefghjkmnpqrstvwxyz]{5}$/;
+export const PUBLIC_AGENT_RUN_ID_RE = /^a[0-9abcdefghjkmnpqrstvwxyz]{5}$/;
 export const EXECUTOR_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const KEY_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const REPO_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;

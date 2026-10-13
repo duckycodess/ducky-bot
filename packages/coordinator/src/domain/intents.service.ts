@@ -23,10 +23,12 @@ import type { ChannelRole } from '@ducky/contracts';
  *
  * A role channel is a statement about what that channel is FOR:
  *
- * - `task`: the personal-record writes and the reads that describe them. A
- *   coding job is not a note.
- * - `coding`: coding jobs, and nothing else. A stray "i need to renew the
- *   domain" in the coding channel means nothing rather than a task.
+ * - `task`: the personal-record writes and the reads that describe them.
+ * - `coding`: NOTHING deterministic. It is the repository-workflow channel,
+ *   where `$grill-me` / `$ticket` / `$agentize` and the grill replies they
+ *   open live -- all of which are handled before this service is consulted. A
+ *   stray "i need to renew the domain" there means nothing rather than a task,
+ *   and no prose there can start engineering work.
  * - `briefing`: reads only. It is where output is DELIVERED; a channel that
  *   writes because somebody typed into it would be a surprise.
  * - `gpt`: handled earlier and never reaches here.
@@ -35,9 +37,9 @@ function allowedInRole(kind: IntentKind, role: ChannelRole | undefined): boolean
   if (role === undefined) return true;
   switch (role) {
     case 'task':
-      return kind !== 'job_submit';
+      return true;
     case 'coding':
-      return kind === 'job_submit';
+      return false;
     case 'briefing':
       return !isWriteIntent(kind);
     case 'gpt':
@@ -60,25 +62,6 @@ export interface IntentsServiceDeps {
   readonly briefing: BriefingService;
   /** The configured owner. Frozen config, never a stored row. */
   readonly ownerId: string;
-  /**
-   * Submits a confirmed coding job through the SAME path `/job submit` uses.
-   *
-   * A function rather than the service, so this cannot reach anything else on
-   * it: an inferred intent must be able to submit a job and nothing more --
-   * not cancel one, not answer one, not approve an action.
-   */
-  readonly submitJob?: (
-    actor: ActorContext,
-    input: { repoSlug: string; task: string },
-  ) => { publicId: string };
-  /**
-   * Whether a repository slug is one the owner configured, WITHOUT saying
-   * anything about it if it is not.
-   *
-   * Checked before a job is proposed, so the owner is told immediately rather
-   * than confirming something that would be refused a moment later.
-   */
-  readonly repoExists?: (slug: string) => boolean;
 }
 
 interface Pending {
@@ -196,23 +179,6 @@ export class IntentsService {
     threadKey: string,
     intent: DetectedIntent,
   ): OutboundMessage | undefined {
-    if (intent.kind === 'job_submit') {
-      // No performer wired, so there is nothing to propose. Silence rather than
-      // an offer that could not be kept.
-      if (!this.deps.submitJob || !this.deps.repoExists) return undefined;
-      const repo = intent.repo ?? '';
-      if (!this.deps.repoExists(repo)) {
-        // Named, but not a repository the owner configured. Refused HERE, so
-        // the owner is not asked to confirm something that would fail -- and
-        // the message says only that it is not configured, never what is.
-        return {
-          content:
-            `\`${repo}\` is not a configured repository, so there is nothing to submit. ` +
-            'Check `/repo status <slug>` for one that is.',
-          ephemeral: false,
-        };
-      }
-    }
     // Replaces any earlier proposal: one per thread, so a "yes" can only ever
     // mean the thing that was just described.
     this.pending.set(this.key(actor, threadKey), {
@@ -256,27 +222,6 @@ export class IntentsService {
         case 'capture': {
           const row = this.deps.captures.create(actor, intent.subject);
           return { content: `Captured \`${row.id.slice(0, 8)}\`.`, ephemeral: false };
-        }
-        case 'job_submit': {
-          /**
-           * Through `JobsService.submit`, exactly as `/job submit` does.
-           *
-           * So every gate stays where it is and none of them is bypassed: the
-           * owner check, the allowlist, `allowJobs`, placements, the repository
-           * reservation, and the approval gate for anything the job later
-           * proposes. A confirmed sentence and a typed command reach the same
-           * code.
-           */
-          if (!this.deps.submitJob) return { content: 'Nothing to confirm.', ephemeral: false };
-          const job = this.deps.submitJob(actor, {
-            repoSlug: intent.repo ?? '',
-            task: intent.subject,
-          });
-          return {
-            content:
-              `Job \`${job.publicId}\` submitted. Track it with \`/job status ${job.publicId}\`.`,
-            ephemeral: false,
-          };
         }
         default:
           return { content: 'Nothing to confirm.', ephemeral: false };

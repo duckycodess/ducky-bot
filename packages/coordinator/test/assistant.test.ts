@@ -1,3 +1,4 @@
+import { controlId } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
 import { OWNER_ONLY_COMMANDS, SHARED_READABLE_ROUTES } from '@ducky/contracts';
 import { CHAT, OWNER, STRANGER, TestClock, makeHarness } from './helpers.js';
@@ -185,7 +186,7 @@ describe('the assistant Discord surface', () => {
     const done = list?.rows?.[0]?.buttons.find((b) => b.label.startsWith('done'));
     expect(done).toBeDefined();
     const closed = await h.transport.dispatch({
-      kind: 'component', customId: done!.customId, userId: OWNER,
+      kind: 'component', customId: controlId(done), userId: OWNER,
     });
     expect(closed?.content).toMatch(/is now done/);
     expect(h.app.tasks.list(h.owner, 'open')).toHaveLength(0);
@@ -201,7 +202,7 @@ describe('the assistant Discord surface', () => {
     const taskButton = inbox?.rows?.[0]?.buttons.find((b) => b.label.startsWith('task'));
     expect(taskButton).toBeDefined();
     const promoted = await h.transport.dispatch({
-      kind: 'component', customId: taskButton!.customId, userId: OWNER,
+      kind: 'component', customId: controlId(taskButton), userId: OWNER,
     });
     expect(promoted?.content).toMatch(/promoted to task/);
     expect(h.app.tasks.list(h.owner, 'open')[0]?.title).toBe('send the invoice');
@@ -215,7 +216,7 @@ describe('the assistant Discord surface', () => {
     const list = await h.transport.dispatch({
       kind: 'command', name: 'task', subcommand: 'list', userId: OWNER, options: {},
     });
-    const customId = list?.rows?.[0]?.buttons[0]?.customId ?? '';
+    const customId = controlId(list?.rows?.[0]?.buttons[0]);
     expect(customId.length).toBeGreaterThan(0);
     expect(customId.length).toBeLessThanOrEqual(100);
 
@@ -239,7 +240,7 @@ describe('the assistant Discord surface', () => {
     const list = await h.transport.dispatch({
       kind: 'command', name: 'reminder', subcommand: 'list', userId: OWNER, options: {},
     });
-    const cancel = list?.rows?.[0]?.buttons[0]?.customId ?? '';
+    const cancel = controlId(list?.rows?.[0]?.buttons[0]);
     const cancelled = await h.transport.dispatch({
       kind: 'component', customId: cancel, userId: OWNER,
     });

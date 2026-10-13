@@ -235,6 +235,49 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
       'turn runs. `config set` and `config patch` are deliberately unlisted, so Ducky can read ' +
       'that policy and can never write it.',
   },
+
+  // -- the installed Agent Flow front door (packages/adapters/src/frontdoor) --
+  //
+  // Classified under the LOGICAL bin `agent-workflow`, not under `python3`.
+  //
+  // The real spawn is `python3 <absolute workflow.py> <verb> ...`, and the
+  // script path is host configuration: it differs on every machine, so a
+  // frozen table keyed on argv[0] could not match it without embedding one
+  // host's layout in this source. What is stable, and what actually decides
+  // what happens, is the VERB -- so the verb is what is classified, and the
+  // adapter asserts the logical argv here before it builds the real one.
+  //
+  // The forbidden-verb and forbidden-flag scans still run over the WHOLE argv
+  // the adapter constructs, interpreter and script path included.
+  {
+    bin: 'agent-workflow', verb: ['inspect'], cls: 'read_only',
+    note:
+      'Reads a checkout inventory and, with --network, GitHub metadata. Writes nothing. ' +
+      'This is the repository SCAN behind $grill-me and the ticket preflight.',
+  },
+  {
+    bin: 'agent-workflow', verb: ['validate'], cls: 'read_only',
+    note: 'Checks a TicketSpec against the installed canonical schema. Touches nothing.',
+  },
+  {
+    bin: 'agent-workflow', verb: ['render'], cls: 'read_only',
+    note: 'Renders the canonical issue body locally. Publishes nothing.',
+  },
+  {
+    bin: 'agent-workflow', verb: ['ticket'], cls: 'external_mutation',
+    note:
+      'Creates or enriches a GitHub issue through the installed publisher, and with --ready ' +
+      'applies the exact agent:ready label. Other people can see the result, so it is an ' +
+      'external mutation and only the explicitly opted-in bridge may run it. It starts no ' +
+      'worker and restarts no service.',
+  },
+  {
+    bin: 'agent-workflow', verb: ['agentize'], cls: 'external_mutation',
+    note:
+      'Onboards a repository: the portable contract locally, and missing labels plus ' +
+      'dispatcher registration remotely. External because the label and registration halves ' +
+      'are visible outside this host. Never starts or restarts a service.',
+  },
 ]);
 
 /**

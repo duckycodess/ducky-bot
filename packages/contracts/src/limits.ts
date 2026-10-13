@@ -390,6 +390,45 @@ export const GITHUB_WATCH_MAX_PR_CHECKS = 5;
 export const GITHUB_WATCH_SUMMARY_MAX = 1200;
 export const GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS = 8;
 
+// ---- the installed workflow front door (issue #7) ---------------------------
+/**
+ * Budgets for the installed Agent Flow helper. Every one is a CEILING handed
+ * to `runArgv`, which has a mandatory timeout: there is no unbounded helper
+ * call anywhere.
+ *
+ * `inspect` reads a tree and may touch GitHub; `ticket` and `agentize` make
+ * real network round trips through `gh` and are given more room, but still a
+ * fixed amount. A helper that hangs must fail the command, not the process.
+ */
+export const FRONTDOOR_READ_TIMEOUT_MS = 60_000;
+export const FRONTDOOR_PUBLISH_TIMEOUT_MS = 180_000;
+/**
+ * Hard cap on helper stdout. The helper answers with small JSON documents;
+ * anything larger is a malfunction, and an unbounded read of a subprocess is
+ * how a log file becomes a Discord message.
+ */
+export const FRONTDOOR_MAX_OUTPUT_BYTES = 512 * 1024;
+/** How long a thread's grill stays active without a message. */
+export const GRILL_SESSION_TTL_MS = 12 * 60 * 60_000;
+/**
+ * How long a workflow run may be in flight before it is treated as abandoned.
+ *
+ * A coordinator killed mid-call leaves `run_finished_at` NULL forever, and the
+ * single-writer gate then refuses every later command in that thread -- one
+ * crash would make the thread permanently unusable. This is the ceiling that
+ * ends such a run.
+ *
+ * Comfortably above `FRONTDOOR_PUBLISH_TIMEOUT_MS` (180 s) and derived from
+ * it, because a run that is merely slow must never be swept: the whole point
+ * of the gate is that two publication sequences cannot overlap, and expiring a
+ * live one would hand that guarantee back.
+ */
+export const STALE_RUN_AFTER_MS = 10 * FRONTDOOR_PUBLISH_TIMEOUT_MS;
+/** How many of the owner's own settled-intent lines a Details view shows. */
+export const AGENT_CARD_INTENT_LINES_MAX = 10;
+/** Every free-text card field is clamped to this, after it is derived. */
+export const AGENT_CARD_DETAIL_MAX = 1_200;
+
 // ---- audit log --------------------------------------------------------------
 /** Every free-text audit detail is redacted and then clamped to this. */
 export const AUDIT_DETAIL_MAX = 300;

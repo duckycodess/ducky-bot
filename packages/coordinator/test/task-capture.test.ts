@@ -1,3 +1,4 @@
+import type { OutboundMessage } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
 import { MAX_OPEN_TASKS_PER_OWNER, TASK_PREVIEW_TTL_MS } from '@ducky/contracts';
 import { CHAT, OWNER, TestClock, makeHarness, replyText } from './helpers.js';
@@ -21,8 +22,8 @@ const paste = async (h: Awaited<ReturnType<typeof boot>>['h'], text = PASTE) =>
     kind: 'message', userId: OWNER, text, threadKey: 'dm-1',
   } as never);
 
-const buttonsOf = (reply: { rows?: readonly { buttons: readonly { label: string; customId: string }[] }[] } | undefined) =>
-  Object.fromEntries((reply?.rows?.[0]?.buttons ?? []).map((b) => [b.label, b.customId]));
+const buttonsOf = (reply: OutboundMessage | undefined) =>
+  Object.fromEntries((reply?.rows?.[0]?.buttons ?? []).flatMap((b) => 'customId' in b ? [[b.label, b.customId]] : []));
 
 describe('pasting a list into Discord', () => {
   it('previews both of the owner’s own lines and saves nothing yet', async () => {

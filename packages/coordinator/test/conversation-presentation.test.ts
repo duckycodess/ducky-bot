@@ -1,5 +1,3 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { STYLE_CONTRACT } from '@ducky/adapters';
 import { NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION } from '@ducky/adapters';
@@ -14,23 +12,9 @@ import { OWNER, makeHarness, replyText } from './helpers.js';
  *
  * Two things are under test and they are different in kind. The STYLE rules are
  * instructions to a model and can only be asserted as instructions; the
- * CONTROLS, the deadline rendering and the absence of a workflow dispatcher are
+ * CONTROLS, deadline rendering and quoted workflow commands are
  * properties of this build and are asserted directly.
  */
-
-const SRC_ROOTS = ['adapters', 'contracts', 'coordinator', 'executor', 'persistence'].map((p) =>
-  path.resolve(import.meta.dirname, '..', '..', p, 'src'),
-);
-
-const sourceFiles = (dir: string): string[] => {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...sourceFiles(full));
-    else if (full.endsWith('.ts')) out.push(full);
-  }
-  return out;
-};
 
 class EchoProvider implements ConversationProvider {
   readonly name = 'echo';
@@ -77,24 +61,7 @@ describe('the style contract asks for a conversation, not a document', () => {
   });
 });
 
-describe('this build adds no workflow trigger dispatcher', () => {
-  /**
-   * The issue names `$grill-me`, `$ticket` and `$agentize` as the only tokens
-   * that may trigger a repository workflow -- in a system that HAS one. This
-   * one does not, and inventing a second ticket pipeline is explicitly out of
-   * scope, so the assertion is that no source file dispatches on them at all.
-   */
-  it('names none of the trigger tokens anywhere in source', () => {
-    const offenders: string[] = [];
-    for (const root of SRC_ROOTS) {
-      for (const file of sourceFiles(root)) {
-        const text = readFileSync(file, 'utf8');
-        if (/\$grill-me|\$ticket|\$agentize/.test(text)) offenders.push(file);
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-
+describe('workflow tokens inside ordinary chat remain data', () => {
   it('treats a quoted trigger word as ordinary conversation', async () => {
     const provider = new EchoProvider();
     const h = makeHarness({ conversation: provider });

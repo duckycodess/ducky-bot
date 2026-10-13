@@ -1,3 +1,4 @@
+import { controlId, controlStyle } from '../src/discord/message.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -268,7 +269,7 @@ describe('the /forget route', () => {
     const reply = await dispatch(h, { target: 'job', id: publicId });
     expect(reply?.content).toMatch(/cannot be undone/i);
     expect(reply?.ephemeral).toBe(true);
-    expect(reply?.rows?.[0]?.buttons?.[0]?.style).toBe('danger');
+    expect(controlStyle(reply?.rows?.[0]?.buttons?.[0])).toBe('danger');
     // Still there: showing is not deleting.
     expect(h.store.jobs.byPublicId(publicId)).toBeDefined();
     h.close();
@@ -278,7 +279,7 @@ describe('the /forget route', () => {
     const h = makeHarness();
     const publicId = seedJob(h, 'j1');
     const reply = await dispatch(h, { target: 'job', id: publicId });
-    const customId = reply!.rows![0]!.buttons![0]!.customId;
+    const customId = controlId(reply!.rows![0]!.buttons![0]);
 
     const confirmed = await h.transport.dispatch({
       kind: 'component', customId, userId: h.owner.discordUserId,
@@ -292,7 +293,7 @@ describe('the /forget route', () => {
     const h = makeHarness();
     const publicId = seedJob(h, 'j1');
     const reply = await dispatch(h, { target: 'job', id: publicId });
-    const customId = reply!.rows![0]!.buttons![0]!.customId;
+    const customId = controlId(reply!.rows![0]!.buttons![0]);
 
     const stolen = await h.transport.dispatch({
       kind: 'component', customId, userId: h.stranger.discordUserId,
@@ -360,7 +361,7 @@ describe('per-record deletion', () => {
       kind: 'command', name: 'forget', userId: h.owner.discordUserId,
       options: { target, id },
     } as never);
-    const customId = shown?.rows?.[0]?.buttons?.[0]?.customId;
+    const customId = controlId(shown?.rows?.[0]?.buttons?.[0]) || undefined;
     if (!customId) return { shown, confirmed: undefined };
     const confirmed = await h.transport.dispatch({
       kind: 'component', customId, userId: userId ?? h.owner.discordUserId,

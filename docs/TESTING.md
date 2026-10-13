@@ -39,12 +39,121 @@ phase as a no-op, and every edge names a known phase; and the detailed owner
 label refines only a running job, never rendering a stale phase on a paused or
 finished one.
 
-**contracts / command policy** — nothing in the table is classified above a
-local mutation; no forbidden verb appears anywhere in the table itself; an
+**contracts / command policy** — nothing reachable by an ordinary caller is
+classified above a local mutation, and the entries that ARE external mutations
+(`git push`, `gh pr create`, and the installed front door's `ticket` and
+`agentize`) are refused unless the caller explicitly raises its own ceiling; no forbidden verb appears anywhere in the table itself; an
 unclassified command and an unknown subcommand are REFUSED rather than allowed
 by default; a forbidden verb is caught before the table is consulted and even
 when buried mid-argv; a `--flag` is not mistaken for a verb; the longest verb
 match wins; and every argv the frozen `gh` table can actually produce passes.
+
+**contracts / skill commands** — the three workflow tokens are recognised only
+in FIRST position; a fenced block, a quote prefix, an inline code span, a
+mid-sentence mention and a near-miss token (`$ticketing`, `$ticket:`) all mean
+nothing; `ticket it`, `queue it`, `implement this` and `make this agent ready`
+are ordinary English; `--ready` is read only as a bare token, only on
+`$ticket`, never from inside a code span, and never from a QUOTED line
+anywhere in the message -- quoting somebody who wrote `--ready` must not
+authorize a queue in their name, and a quoted line stays out of the intent
+text too; `--label` is repeatable,
+de-duplicated, bounded, removed from the intent text along with its value, and
+names nothing for a trailing flag or a flag-shaped value; and the card
+vocabulary never labels a queued ticket as running or a published one as
+queued.
+
+**adapters / front door** — every operation the adapter can construct is
+classified, and `ticket` / `agentize` are refused by the ordinary local-only
+ceiling; the argv is an array with the interpreter, the script path and the
+verb, with a timeout and a bounded buffer; only narrow fields cross the port,
+so the inventory's file LIST never leaves it; publishing and onboarding refuse
+without their own opt-in and spawn nothing when they do; `--ready` appears only
+when asked for; an `agent:*` label and a malformed repository are refused
+before a spawn; the spec file is written `0600` and removed afterwards; a
+structured `ok: false` keeps its reason and never carries stderr; and
+unparseable or empty output is refused WITHOUT being quoted back.
+
+**coordinator / skill bridge** — the end-to-end behaviour of `$grill-me`,
+`$ticket` and `$agentize` against a recording stand-in: a friend's `$ticket` is
+ordinary conversation and reaches no helper; a shared channel never reaches the
+bridge; a single configured repository binds and a second one makes it ASK; an
+explicit rebind clears the canonical id so the retry creates rather than
+enriching the wrong issue; a bare `$ticket` publishes unqueued and `--ready`
+queues and says what that does not prove; a retry reuses the canonical id and
+the issue number; a publisher failure is never reported as queued or started; a
+queue the helper did not verify stays `published`; grilling refuses without a
+verified provider, uses the INSTALLED skill text read from its configured path,
+continues on plain replies even in a channel where conversation is otherwise
+silent, frees the thread so `$ticket` can follow it, closes the interview on
+Cancel while keeping the notes it settled, and feeds those lines into the
+ticket; the card edits one message and
+sends a fresh one at the end, reposts when the owner deleted it, carries
+Details / View issue / Cancel, and renders no host path.
+
+**coordinator / skill bridge cancellation** — drives a publisher that BLOCKS
+until the test releases it, because the whole defect class lives in the window
+between "the owner pressed Cancel" and "the helper came back" and cannot be
+observed with a helper that answers instantly: a cancelled run never comes back
+as queued; the owner is still told what the publisher had already created, with
+the URL, and the thread remembers the issue so a retry enriches it; a cancelled
+run does not run the bookkeeping a successful one does, so the notes a grill
+settled survive; a second command while one is in flight is refused rather than
+replacing it; and a late answer from a superseded run attaches its issue to
+nothing.
+
+**coordinator / grill skill** — `$grill-me` refuses, reading nothing and
+reaching no provider, when the skill path is unset, absent, empty, oversized or
+unreadable; it follows the installed skill's own one-hop `Call the Skill tool
+with "…"` redirect to the file that carries the method, never sending the
+pointer itself; it refuses when the redirect target is missing and when a
+pointer points at another pointer; and a usable installed skill still opens the
+interview with the method in its instructions.
+
+**coordinator / skill bridge review findings** — the five defects an
+independent review found, each covered by a test written to fail first: a
+publisher failure or timeout after `--ready` reports the queue state as
+UNKNOWN and tells the owner to check, never as "nothing was queued", while a
+failure before any label still reports a true negative; a successful
+publication releases its binding so the next, different ticket does not rewrite
+the previous issue, and a retry before success still reuses both id and issue;
+a run abandoned by a crash is swept by the next command in its thread while a
+merely slow one is left alone; and a repository is bound only by an explicit
+leading `owner/name`, with prose that merely mentions a slug changing nothing
+and an unaddressed ambiguous thread asking.
+
+**coordinator / skill bridge authorization** — the two-step the issue
+requires: a no-argument `$ticket --ready` queues the issue this thread
+published, reusing the original canonical id, spec and issue number rather
+than minting a second ticket, and does so ACROSS A RESTART because the settled
+contract is on disk; a bare `$ticket` authorizes nothing and names the step
+that does; an already-queued ticket is answered without a GitHub write; new
+intent -- typed or grilled -- is always a new ticket even with `--ready`; a
+failed authorization keeps the settled ticket and reports the queue state as
+unknown, and the same authorization then succeeds on retry; a rebound thread
+is not offered the previous repository's issue; and the stored contract goes
+with `/forget conversation`.
+
+**coordinator / skill bridge card truth** — the durable card is held to the
+same standard as the Details view behind it: it never says "nothing was
+queued" while the stored queue state is `unknown`, it still says so when that
+is actually true, and the two surfaces are asserted to agree; the two-step
+authorization carries the same merge-policy warning the single step does, for
+both a `pr_only` registration and one without, and says nothing about merging
+when the authorization did not complete; and a card links only to the issue
+its own run touched, while the issue binding a retry needs still survives.
+The two-step's own card is asserted on its ACTUAL buttons -- Details and a
+View issue link carrying the real URL, no Cancel on a finished run -- for the
+authorization, the already-authorized notice and the notice a bare `$ticket`
+gives, with no carry-over into an unrelated later run and no retry binding
+left behind.
+
+**coordinator / workflow invariants** — the bridge and its presenters name no
+`gh` surface, no issue or label API, and no `JobsService`, and spawn nothing
+themselves; `OWNER_ONLY_COMMANDS` is still exactly twelve and no shared route
+names a card control; a link button admits only an exact https GitHub URL and
+renders with a url and no custom id; and the configuration fails closed -- off
+by default, refusing a relative or missing helper path, refusing publication
+without the bridge, and never letting production inherit a development helper.
 
 **contracts / time** — a timezone is validated against the runtime's own ICU
 data and a bad one throws at startup; a civil day starts at local midnight, not
@@ -503,9 +612,8 @@ open or closed.
 **coordinator / conversation presentation** — the style contract asks for short
 plain paragraphs and forbids headings, em dashes, middle dots, heavy bold and
 printing an action word as though it were a control, and a persona cannot
-replace it; no source file in any package names `$grill-me`, `$ticket` or
-`$agentize`, and a quoted one is ordinary conversation that creates no job and no
-task; task lists, reminder lists and briefings carry no timezone suffix and no
+replace it; only explicit workflow commands enter the canonical bridge, and a quoted
+command remains ordinary conversation that creates no job and no task; task lists, reminder lists and briefings carry no timezone suffix and no
 reminder-lead line while the configured zone still drives scheduling.
 
 **coordinator / thread transport** — what lives only in the transport, tested

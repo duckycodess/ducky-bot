@@ -5,7 +5,7 @@ import { MockDiscordTransport } from '../src/discord/mock.transport.js';
 import type { DiscordTransport } from '../src/discord/transport.js';
 import type { OutboundMessage, SendTarget } from '../src/discord/message.js';
 import { ownerStateLabel } from '@ducky/contracts';
-import { dmTarget } from '../src/discord/message.js';
+import { dmTarget, controlId } from '../src/discord/message.js';
 import { makeHarness, implementedResult, commitAction, OWNER } from './helpers.js';
 
 /** Finds the notification for a state by its contract label, not by wording. */
@@ -40,6 +40,19 @@ class FlakyTransport implements DiscordTransport {
       throw new Error('simulated Discord outage');
     }
     await this.inner.send(target, message);
+  }
+
+  /** Cards are not what these tests drive; delegated so the type is honest. */
+  async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+    return this.inner.sendCard(target, message);
+  }
+
+  async updateCard(
+    target: SendTarget,
+    messageId: string,
+    message: OutboundMessage,
+  ): Promise<boolean> {
+    return this.inner.updateCard(target, messageId, message);
   }
 }
 
@@ -158,6 +171,17 @@ describe('job notification delivery', () => {
         calls += 1;
         if (calls === 1) throw new Error('boom');
         await this.inner.send(target, message);
+      }
+      /** Cards are not what these tests drive; delegated so the type is honest. */
+      async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+        return this.inner.sendCard(target, message);
+      }
+      async updateCard(
+        target: SendTarget,
+        messageId: string,
+        message: OutboundMessage,
+      ): Promise<boolean> {
+        return this.inner.updateCard(target, messageId, message);
       }
     }
     const transport = new FailFirst();
@@ -304,6 +328,17 @@ describe('job notification delivery', () => {
         await this.inner.send(target, message);
         inFlight -= 1;
       }
+      /** Cards are not what these tests drive; delegated so the type is honest. */
+      async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+        return this.inner.sendCard(target, message);
+      }
+      async updateCard(
+        target: SendTarget,
+        messageId: string,
+        message: OutboundMessage,
+      ): Promise<boolean> {
+        return this.inner.updateCard(target, messageId, message);
+      }
     }
     const transport = new SlowTransport();
     const notifier = new JobNotifier({ store: h.store, transport, ownerId: OWNER, signer: h.app.signer });
@@ -384,6 +419,17 @@ describe('job notification delivery: startup/shutdown ordering', () => {
         await new Promise((r) => setTimeout(r, 15));
         await this.inner.send(target, message);
         sendResolved = true;
+      }
+      /** Cards are not what these tests drive; delegated so the type is honest. */
+      async sendCard(target: SendTarget, message: OutboundMessage): Promise<string | undefined> {
+        return this.inner.sendCard(target, message);
+      }
+      async updateCard(
+        target: SendTarget,
+        messageId: string,
+        message: OutboundMessage,
+      ): Promise<boolean> {
+        return this.inner.updateCard(target, messageId, message);
       }
     }
     const transport = new DelayedTransport();
@@ -521,7 +567,7 @@ describe('job notification delivery: interactive components', () => {
     // the EXACT shape the router's job_answer handler (and the modal auto-open
     // matcher) expect, so a click from this DM is verified identically to one
     // from an interactive `/job status` reply.
-    const verified = h.app.signer.verify(button.customId, OWNER);
+    const verified = h.app.signer.verify(controlId(button), OWNER);
     expect(verified).toEqual({ kind: 'job_answer', entityId: c.publicId });
     h.close();
   });
@@ -588,9 +634,9 @@ describe('job notification delivery: interactive components', () => {
       const approve = row.buttons.find((b) => b.label.startsWith('approve'))!;
       const reject = row.buttons.find((b) => b.label.startsWith('reject'))!;
       const details = row.buttons.find((b) => b.label.startsWith('details'))!;
-      expect(h.app.signer.verify(approve.customId, OWNER)).toEqual({ kind: 'approve', entityId: approval.id });
-      expect(h.app.signer.verify(reject.customId, OWNER)).toEqual({ kind: 'reject', entityId: approval.id });
-      expect(h.app.signer.verify(details.customId, OWNER)).toEqual({ kind: 'approval_details', entityId: approval.id });
+      expect(h.app.signer.verify(controlId(approve), OWNER)).toEqual({ kind: 'approve', entityId: approval.id });
+      expect(h.app.signer.verify(controlId(reject), OWNER)).toEqual({ kind: 'reject', entityId: approval.id });
+      expect(h.app.signer.verify(controlId(details), OWNER)).toEqual({ kind: 'approval_details', entityId: approval.id });
     }
     h.close();
   });
@@ -650,7 +696,7 @@ describe('job notification delivery: interactive components', () => {
     expect(sent).toBeDefined();
     expect(sent!.message.rows).toHaveLength(1);
     const only = sent!.message.rows![0]!.buttons[0]!;
-    expect(h.app.signer.verify(only.customId, OWNER)).toEqual({ kind: 'approve', entityId: first!.id });
+    expect(h.app.signer.verify(controlId(only), OWNER)).toEqual({ kind: 'approve', entityId: first!.id });
 
     const actionsField = sent!.message.embeds![0]!.fields!.find((f) => f.name === 'Proposed actions');
     expect(actionsField!.value).toContain('keep this one');
@@ -686,7 +732,7 @@ describe('job notification delivery: interactive components', () => {
     // no special authorization for this button; it is the SAME
     // ApprovalsService.decide re-check every click goes through, and it must
     // still reject cleanly.
-    const verified = h.app.signer.verify(approveButton.customId, OWNER);
+    const verified = h.app.signer.verify(controlId(approveButton), OWNER);
     expect(verified).toEqual({ kind: 'approve', entityId: approval!.id });
     expect(() => h.app.approvals.decide(h.owner, verified!.entityId, 'approved')).toThrow(/already/);
     h.close();

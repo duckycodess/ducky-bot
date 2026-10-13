@@ -1164,4 +1164,183 @@ CREATE INDEX ix_conversation_turns_message
   ON conversation_turns(thread_key, message_id);
 `,
   },
+  {
+    version: 24,
+    name: 'agent_threads',
+    sql: `
+-- The repository-workflow binding for one Discord thread (issue #7).
+--
+-- ONE ROW PER (owner, thread), replaced in place. That shape is the whole
+-- design, not an optimisation:
+--
+--   * A thread is a conversation, and a conversation is about one repository
+--     at a time. Binding once and rebinding on an explicit change is what lets
+--     $ticket and $agentize act without guessing a target -- and guessing a
+--     target means pointing a real agent at the wrong working tree.
+--   * One row cannot grow. There is no per-message append anywhere here except
+--     \`intent_notes\`, which is a JSON array the repository itself truncates,
+--     so a long grill costs a bounded amount of storage rather than a
+--     transcript.
+--   * The CURRENT card lives on the same row, so a restart can find the
+--     message it was editing. A thread has at most one workflow command in
+--     flight, exactly as it has at most one pending intent proposal.
+--
+-- \`checkout_root\` is a host filesystem path and is NEVER rendered: Discord
+-- supplies a repository name and gets a repository name back, here as
+-- everywhere else in this codebase.
+CREATE TABLE agent_threads (
+  discord_user_id  TEXT NOT NULL,
+  thread_key       TEXT NOT NULL,
+  -- \`owner/name\`, the only repository form the installed contract accepts.
+  repository       TEXT,
+  checkout_root    TEXT,
+  grilling         INTEGER NOT NULL DEFAULT 0,
+  grill_started_at TEXT,
+  -- The owner's OWN words, bounded and truncated by the repository. Nothing
+  -- Ducky generated, and nothing the model said.
+  intent_notes     TEXT NOT NULL DEFAULT '[]',
+  -- The canonical TicketSpec id for this thread's publication. Minted once and
+  -- REUSED on every retry, which is what makes a retry enrich the same issue
+  -- instead of opening a second one.
+  ticket_uuid      TEXT,
+  issue_number     INTEGER,
+  issue_url        TEXT,
+  run_id           TEXT,
+  run_command      TEXT
+    CHECK (run_command IS NULL OR run_command IN ('$grill-me','$ticket','$agentize')),
+  run_status       TEXT
+    CHECK (run_status IS NULL OR run_status IN
+      ('scanning','grilling','publishing','published','queued','onboarding','onboarded',
+       'needs_input','failed','cancelled')),
+  run_detail       TEXT,
+  run_ready        INTEGER NOT NULL DEFAULT 0,
+  run_queued       INTEGER NOT NULL DEFAULT 0,
+  run_started_at   TEXT,
+  run_finished_at  TEXT,
+  card_channel_id  TEXT,
+  card_message_id  TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, thread_key)
+);
+
+-- The card controls carry the run id, so pressing one has to find its row.
+CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
+`,
+  },
+  {
+    version: 25,
+    name: 'agent_run_queue_state',
+    sql: `
+-- \`run_queued\` was a BOOLEAN, and a boolean cannot say "I do not know".
+--
+-- The installed publisher applies \`agent:ready\` and THEN reads it back. A
+-- failure after that write -- a read-back error, a network fault, our own
+-- subprocess timeout, a coordinator that died mid-call -- leaves a state where
+-- the label may well be on the issue and nothing here can tell. The boolean
+-- made every one of those read as false, so the card and the Details view both
+-- asserted "nothing was queued" about the one label that authorizes an agent
+-- to start work. A false negative there is worse than no answer: the owner
+-- stops looking.
+--
+-- Four states, because there are four genuinely different things to say:
+--   not_requested -- the owner did not ask. No label was attempted.
+--   not_queued    -- the run failed BEFORE any label could be written.
+--   queued        -- applied AND verified on the issue by the publisher.
+--   unknown       -- the attempt may have landed. Go and look.
+--
+-- A rebuild rather than an ALTER: the boolean has to go, or the next reader
+-- gets two sources of truth and picks the convenient one. Nothing carries a
+-- foreign key to agent_threads (checked), so dropping it breaks no child.
+--
+-- Existing rows map exactly: a true becomes \`queued\`, and a false becomes
+-- \`not_requested\` or \`not_queued\` depending on whether the owner had asked.
+-- No row is invented into \`unknown\`: that state is a report about a specific
+-- failure, and backfilling it would be claiming doubt nobody observed.
+CREATE TABLE agent_threads_v2 (
+  discord_user_id  TEXT NOT NULL,
+  thread_key       TEXT NOT NULL,
+  repository       TEXT,
+  checkout_root    TEXT,
+  grilling         INTEGER NOT NULL DEFAULT 0,
+  grill_started_at TEXT,
+  intent_notes     TEXT NOT NULL DEFAULT '[]',
+  ticket_uuid      TEXT,
+  issue_number     INTEGER,
+  issue_url        TEXT,
+  run_id           TEXT,
+  run_command      TEXT
+    CHECK (run_command IS NULL OR run_command IN ('$grill-me','$ticket','$agentize')),
+  run_status       TEXT
+    CHECK (run_status IS NULL OR run_status IN
+      ('scanning','grilling','publishing','published','queued','onboarding','onboarded',
+       'needs_input','failed','cancelled')),
+  run_detail       TEXT,
+  run_ready        INTEGER NOT NULL DEFAULT 0,
+  run_queue_state  TEXT NOT NULL DEFAULT 'not_requested'
+    CHECK (run_queue_state IN ('not_requested','not_queued','queued','unknown')),
+  run_started_at   TEXT,
+  run_finished_at  TEXT,
+  card_channel_id  TEXT,
+  card_message_id  TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, thread_key)
+);
+
+INSERT INTO agent_threads_v2
+  (discord_user_id, thread_key, repository, checkout_root, grilling, grill_started_at,
+   intent_notes, ticket_uuid, issue_number, issue_url, run_id, run_command, run_status,
+   run_detail, run_ready, run_queue_state, run_started_at, run_finished_at,
+   card_channel_id, card_message_id, created_at, updated_at)
+  SELECT discord_user_id, thread_key, repository, checkout_root, grilling, grill_started_at,
+         intent_notes, ticket_uuid, issue_number, issue_url, run_id, run_command, run_status,
+         run_detail, run_ready,
+         CASE WHEN run_queued = 1 THEN 'queued'
+              WHEN run_ready = 1 THEN 'not_queued'
+              ELSE 'not_requested' END,
+         run_started_at, run_finished_at,
+         card_channel_id, card_message_id, created_at, updated_at
+    FROM agent_threads;
+
+DROP TABLE agent_threads;
+ALTER TABLE agent_threads_v2 RENAME TO agent_threads;
+
+CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
+`,
+  },
+  {
+    version: 26,
+    name: 'agent_published_ticket',
+    sql: `
+-- The SETTLED ticket this thread last published, kept so the owner can
+-- authorize it without retyping it.
+--
+-- The issue requires a two-step: a bare $ticket creates unqueued GitHub work,
+-- and $ticket --ready SEPARATELY authorizes queueing. The second step has to
+-- reach the issue the first one made -- same canonical id, same spec, same
+-- issue number -- because the installed publisher refuses to change the
+-- execution contract of an authorized issue, and because a rebuilt spec is a
+-- different ticket wearing the same description.
+--
+-- This is DELIBERATELY a different slot from \`ticket_uuid\`/\`issue_number\`.
+-- Those are the binding for retrying a publication that has NOT succeeded, and
+-- conflating the two is exactly the defect migration 23's generation of this
+-- work had to fix: a settled ticket left in the retry slot meant the next,
+-- different $ticket inherited it and rewrote a published issue.
+--
+--   ticket_uuid / issue_number -> "this attempt has not landed yet"
+--   published_*                -> "this thread has a finished, unqueued ticket"
+--
+-- The spec is the owner's own words, bounded by the note caps that built it,
+-- one row per thread, replaced in place. It is removed with the row by
+-- /forget conversation, exactly as the notes are.
+ALTER TABLE agent_threads ADD COLUMN published_spec TEXT;
+ALTER TABLE agent_threads ADD COLUMN published_issue INTEGER;
+ALTER TABLE agent_threads ADD COLUMN published_url TEXT;
+-- Whether that publication already carries the exact agent:ready label, so a
+-- second authorization is answered rather than attempted.
+ALTER TABLE agent_threads ADD COLUMN published_queued INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];

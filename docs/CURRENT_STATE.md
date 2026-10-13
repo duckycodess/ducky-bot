@@ -889,16 +889,13 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck` and `pnpm build` pass on this host. `pnpm test` runs **94
-files, 1317 tests**: 1310 pass, and **7 fail for reasons that predate this
-work and belong to this host rather than to the code** -- four in
-`outbound.test.ts` and one in `result-intake.test.ts` assert that the redactor
-folds `/home/tj/...`, which only holds where the home directory is `tj`, and
-two in `placements.test.ts` read `config/repos.dev.json`, which is gitignored
-operator-local configuration. The same seven fail on an unmodified checkout of
-the previous commit on this machine. See [TESTING.md](TESTING.md) for what each suite guarantees
-and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
-what each step does **not** prove.
+`pnpm typecheck` and `pnpm build` pass on the remote Linux host.
+The unmodified `pnpm test` command passes all **1331 tests in 94 files**.
+Coordinator redaction checks now use the current home directory, and placement
+checks read both shipped example configurations instead of depending on a
+private, gitignored development file. No temporary HOME override or synthetic
+operator configuration is needed. Live phone and Discord validation remain
+separate and unverified.
 
 Probes run in this milestone, with their real outcomes:
 

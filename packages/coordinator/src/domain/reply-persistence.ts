@@ -1,5 +1,5 @@
 import type { IncomingContext } from '../discord/transport.js';
-import type { ChannelRolePolicy } from './channel-roles.js';
+import { isDeliveryOnlyRole, type ChannelRolePolicy } from './channel-roles.js';
 
 /**
  * Commands whose reply stays ephemeral even in a role channel.
@@ -77,6 +77,10 @@ export class ReplyPersistencePolicy {
   }): boolean {
     if (input.userId !== this.ownerId) return false;
     if (!this.channelRoles.isRoleChannel(input.context)) return false;
+    // A delivery-only channel (GitHub updates) can be read by people other than
+    // the owner, so an owner reply made there must NEVER become public. The
+    // owner's command still runs and still answers -- ephemerally.
+    if (isDeliveryOnlyRole(this.channelRoles.roleOf(input.context))) return false;
 
     if (input.kind === 'command') {
       const name = input.commandName;

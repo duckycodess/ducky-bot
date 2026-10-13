@@ -19,7 +19,7 @@ import {
 } from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -36,11 +36,12 @@ import { type ActionPerformer } from './domain/action-performer.js';
 import { GitActionPerformer } from './domain/git-action-performer.js';
 import { GitHubService } from './domain/github.service.js';
 import { GitHubWatchService } from './domain/github-watches.service.js';
+import { GitHubFeedService } from './domain/github-feed.service.js';
 import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
 import { SharedChannelPolicy } from './domain/shared-visibility.js';
-import { ChannelRolePolicy } from './domain/channel-roles.js';
+import { ChannelRolePolicy, describeChannelRoles } from './domain/channel-roles.js';
 import { ReplyPersistencePolicy } from './domain/reply-persistence.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
@@ -117,6 +118,8 @@ export interface App {
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly githubWatches: GitHubWatchService;
+  /** Actionable GitHub events and the daily commit digest. Off unless enabled. */
+  readonly githubFeed: GitHubFeedService;
   readonly reconciler: Reconciler;
   readonly notifier: JobNotifier;
   readonly clock: OwnerClock;
@@ -462,6 +465,17 @@ export function createApp(
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
   });
+  /**
+   * The GitHub feed rides the SAME coordinator interval and holds no model
+   * provider, so a paused subscription quota cannot stop it. It is handed the
+   * allowlist only to READ the selected list's seeds from; it never writes to it.
+   * The selected list is reconciled here, once, from frozen configuration.
+   */
+  const githubFeed = new GitHubFeedService({
+    store, reader: githubReader, transport, ownerId: authz.ownerId, clock, allowlist,
+    config: resolveGitHubFeed(env),
+  });
+  githubFeed.reconcileSelection();
 
   /**
    * The repository workflow bridge.
@@ -575,9 +589,7 @@ export function createApp(
     reminderDelivery: channelRoles.channelFor('reminder')
       ? 'task reminders post in your reminders channel with a mention; everything else is a DM'
       : 'every reminder is a DM',
-    channelRoles: channelRoles.enabled
-      ? `${channelRoles.configured.map((c) => c.role).join(', ')} — replies persist there`
-      : 'none configured; every owner reply stays ephemeral in a guild',
+    channelRoles: describeChannelRoles(channelRoles.configured),
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',
@@ -586,6 +598,7 @@ export function createApp(
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
     githubWatches: `${store.githubWatches.countActive(authz.ownerId)} active`,
+    githubFeed: githubFeed.statusLine(),
     repositoryWorkflow: skillBridge.describe(),
   });
 
@@ -645,7 +658,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
+    approvals, github, githubWatches, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,

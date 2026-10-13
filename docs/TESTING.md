@@ -561,6 +561,25 @@ ambiguous prefix is refused rather than resolved; another owner's id and a
 missing id are answered identically; a stranger cannot press the owner's control;
 every deletion is audited by count under the `record` subject kind.
 
+**coordinator / GitHub feed** (`github-feed*.test.ts`, `github-channel-role.test.ts`) —
+the first watch records history and announces none of it; repeated polls and a
+restarted service announce nothing twice; a failed read never becomes an empty
+baseline and one failing kind does not replay or silence the others; a workflow
+run is announced when it finishes badly and again when a rerun does, a failing
+external check (not Actions-backed) likewise, and an Actions-backed check is
+never announced twice; review requests are baselined, dated, renewed only after
+a provable end, and never announced when an old one rolls into a full window;
+the selected list widens no allowlist and keeps a cancelled seed cancelled;
+routing is judged fresh at send time (private, unselected, unreadable, and a
+repository that turned private between observation and delivery all reach the
+DM); the digest fires at 09:00 LOCAL time (Manila, DST), once per day, waits for
+a post-slot read, groups by repository, reroutes a private section to the DM,
+skips a stale slot and stays bounded across an outage or a force-push; cards are
+plain, carry style-5 link buttons only, and fit Discord's limits without a
+silent clip; the github role is delivery only (ephemeral replies, silence,
+nothing written). `adapters / gh-feed-policy` asserts the two exact argv shapes
+at BOTH gates (the builder refuses; the central policy re-checks from scratch).
+
 **coordinator / GitHub watches (extended)** — merges, approvals, requested
 changes, review comments, workflow failure AND recovery, and issue activity each
 produce a summary line; every call the loop makes is a read; a requested change

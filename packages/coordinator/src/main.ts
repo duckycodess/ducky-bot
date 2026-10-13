@@ -110,6 +110,12 @@ async function main(): Promise<void> {
     app.githubWatches.tick().catch((err: unknown) => {
       log.error('github_watches.tick_failed', { err });
     });
+    // The GitHub feed is one more bounded observation on the same interval. It
+    // reads GitHub and posts cards; it consults no model, so a paused
+    // subscription quota changes nothing about it.
+    app.githubFeed.tick().catch((err: unknown) => {
+      log.error('github_feed.tick_failed', { err });
+    });
     // Retention rides the SAME interval as everything else. No second
     // scheduler, and it is a no-op unless an operator enabled it.
     app.retention.tick().catch((err: unknown) => {
@@ -128,6 +134,7 @@ async function main(): Promise<void> {
     await app.briefingNotifier.waitForIdle();
     await app.dependencies.waitForIdle();
     await app.githubWatches.waitForIdle();
+    await app.githubFeed.waitForIdle();
     await app.transport.stop();
     await server.close();
     app.close();

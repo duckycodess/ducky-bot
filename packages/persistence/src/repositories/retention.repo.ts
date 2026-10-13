@@ -346,6 +346,57 @@ export class RetentionRepo {
     );
   }
 
+  /**
+   * Finished feed alerts. Three kinds of row are deliberately out of reach:
+   * `baseline` rows (they are the memory that history is not news), pending
+   * rows (not finished), and `review_requested` events, because discovery has no
+   * creation watermark and that key is the only thing stopping a request that
+   * is still open from being announced a second time.
+   */
+  deleteSettledFeedEvents(cutoffIso: string, limit: number): number {
+    return this.runLimited(
+      `DELETE FROM github_feed_events WHERE id IN (
+         SELECT id FROM github_feed_events
+          WHERE status IN ('delivered','abandoned','skipped')
+            AND kind <> 'review_requested'
+            AND created_at < ? LIMIT ?)`,
+      cutoffIso,
+      limit,
+    );
+  }
+
+  /**
+   * Commits a digest has already consumed (or that aged out unread).
+   *
+   * The newest 100 consumed rows of EVERY repository are kept whatever their
+   * age. Those rows are the memory of which shas were seen, and the walk reads
+   * the newest 90: delete them from a repository that has been quiet for three
+   * months and its old commits would look new again.
+   */
+  deleteConsumedFeedCommits(cutoffIso: string, limit: number): number {
+    return this.runLimited(
+      `DELETE FROM github_feed_commits WHERE rowid IN (
+         SELECT rowid FROM (
+           SELECT rowid, consumed_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY repo_key ORDER BY committed_at DESC, sha DESC) AS rn
+             FROM github_feed_commits WHERE consumed_at IS NOT NULL)
+          WHERE rn > 100 AND consumed_at < ? LIMIT ?)`,
+      cutoffIso,
+      limit,
+    );
+  }
+
+  deleteSettledFeedDigests(cutoffIso: string, limit: number): number {
+    return this.runLimited(
+      `DELETE FROM github_feed_digests WHERE id IN (
+         SELECT id FROM github_feed_digests
+          WHERE status <> 'pending' AND created_at < ? LIMIT ?)`,
+      cutoffIso,
+      limit,
+    );
+  }
+
   /** Cancelled watches only. An active watch is never touched. */
   deleteCancelledWatches(cutoffIso: string, limit: number): { watches: number; events: number } {
     const ids = (

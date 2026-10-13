@@ -236,6 +236,29 @@
         "updatedAt",
         "url"
       ]
+    },
+    "search prs": {
+      "exitCode": 1,
+      "fields": [
+        "assignees",
+        "author",
+        "authorAssociation",
+        "body",
+        "closedAt",
+        "commentsCount",
+        "createdAt",
+        "id",
+        "isDraft",
+        "isLocked",
+        "isPullRequest",
+        "labels",
+        "number",
+        "repository",
+        "state",
+        "title",
+        "updatedAt",
+        "url"
+      ]
     }
   }
 }

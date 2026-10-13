@@ -71,6 +71,10 @@ const COMMANDS = [
   ['pr', 'checks'],
   ['run', 'list'],
   ['issue', 'list'],
+  // The cross-repository review-request search. `gh search prs --json` with no
+  // value prints its selector list locally, like the others; the query itself
+  // is never sent by this probe.
+  ['search', 'prs'],
 ];
 
 async function main() {

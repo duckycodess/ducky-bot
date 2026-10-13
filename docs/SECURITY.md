@@ -431,6 +431,47 @@ None of them says WHY authentication failed — that would make the audit trail 
 oracle the 401 deliberately is not. None records the material that failed.
 Recording is wrapped so a failure to write can never turn a 401 into a 500.
 
+## The GitHub feed and the github channel
+
+The feed posts into a channel other people may read, so it is built around what
+may be shown rather than around who may act.
+
+- **Reading a channel is not permission to act.** A feed card carries link
+  buttons only (Discord style 5, a `url` and no `custom_id`), so nothing in it can
+  be pressed to do anything on Ducky's side, and a link goes to GitHub, where
+  GitHub's own permissions decide what the reader sees. The owner-only manifest
+  gains no command, and no router code reaches the feed (asserted by a test).
+- **The `github` role is delivery only.** An owner reply made there is
+  ephemeral; nothing typed there is read, answered, stored or turned into a task,
+  reminder, repository workflow or model turn, whoever types it; a thread under
+  it inherits that. It is refused at boot as a shared channel, another role's
+  channel or a thread parent.
+- **What reaches the channel.** A card posts there only when the channel is
+  configured, the repository is on the SELECTED list, and a `repoView` read made
+  in the last five minutes says it is public. Private, unselected, unknown or
+  unreadable means the owner's DM. Visibility is never stored, so a repository
+  that turns private between observation and delivery is not published from its
+  old projection, and a delivery that is retried is judged again. A digest
+  section that is private at send time goes to the DM in the same pass and is
+  never dropped. A repository that could not be read is named only in the DM.
+- **Selection is not allowlisting.** The selected list is a separate table keyed
+  by `owner/repo`. Nothing in the feed writes to `repos`, sets `allow_jobs`, or
+  reaches an executor, so being watched grants no job target and no write path.
+- **Two reads have an exact argv shape.** `gh api` is allowed only as
+  `api --method GET repos/{owner}/{repo}/commits?sha=<branch>&per_page=30&page=N`
+  and `gh search prs` only as the fixed review-request query. Each is built from
+  validated parts and re-checked from scratch by the central command policy:
+  another method, field, header, host, jq/template/cache/paginate flag, graphql,
+  absolute URL, traversal, placeholder or alternate encoding is unclassified and
+  refused. `api` remains on the forbidden-verb list for every other table.
+- **What is stored.** A title or a commit headline is redacted and clamped
+  before it reaches SQLite; author emails and bodies are stripped by the schemas;
+  a link is built from validated parts and never taken from a payload; retention
+  records counts only.
+- **Failures say nothing.** An unreachable or inaccessible repository degrades
+  its own reads with a generic message and exponential backoff; no stderr, path
+  or credential is recorded, and `/status` reports the degraded coverage.
+
 ## Egress and redaction
 
 `sanitizeOutbound` is the single choke point and is called as the **first

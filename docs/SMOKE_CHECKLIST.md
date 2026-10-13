@@ -106,6 +106,7 @@ successful tap — check `DUCKY_HTTP_HOST` and the ACL, and remember that
 | Probe | Cost | Exits non-zero when |
 |---|---|---|
 | `pnpm probe:gh` | none: local, repo-less, no network | it cannot read a field list |
+| `pnpm probe:github-feed` | read-only GitHub reads of ONE allowlisted repository, plus an HTTP HEAD per card link; no Discord, no env file | anything it set out to observe was not observed (2) |
 | `pnpm probe:openclaw` | starts nothing; runs one local agent turn under the required text-only policy | the provider contract or policy evidence is missing (2) |
 | `pnpm probe:herdr` | creates and removes a temp git repository | evidence is missing, or cleanup left something (3) |
 | `pnpm probe:herdr --with-agent` | **starts a real Pi agent; real model capacity** | the readiness marker never matched (3) |
@@ -156,6 +157,13 @@ happens without an explicit flag, and none is implied by any step above.
   repository — `probe:gh-live` ran the loop twice against `duckycodess/ducky-bot`
   and the second pass was correctly silent — but no watch summary has reached a
   real DM.
+- **Not that a GitHub feed card or digest has reached a real channel or DM.**
+  `probe:github-feed` ran the real reader and service against
+  `duckycodess/ducky-bot` with the mock transport: history was recorded and not
+  announced, repeated polls announced nothing, every card link returned HTTP 200
+  and the 09:00 digest was built from real commits. It simulated WHEN the watch
+  began (so real existing issues and commits count as new), found no review
+  request for the signed-in account, and had no failing external check to read.
 - **Not that a reminder or briefing has reached a real DM.** That needs step 3
   of "External writes".
 - **Not that the phone page has ever been opened from a phone.** Steps 14–19

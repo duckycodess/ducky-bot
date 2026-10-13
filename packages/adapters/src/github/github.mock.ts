@@ -1,5 +1,6 @@
 import type {
-  IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, WorkflowRuns,
+  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  WorkflowRuns,
 } from '@ducky/contracts';
 import type { GitHubReader, RepoRef } from './github.port.js';
 
@@ -26,6 +27,14 @@ export class MockGitHubReader implements GitHubReader {
       prReviews?: Record<number, PrReviews>;
       runList?: WorkflowRuns;
       issueList?: IssueList;
+      feedPrList?: PrList;
+      feedIssueList?: IssueList;
+      feedRunList?: WorkflowRuns;
+      /** Keyed by PR number. */
+      feedPrChecks?: Record<number, FeedPrChecks>;
+      reviewRequests?: ReviewRequestSearch;
+      /** Keyed `branch:page`. */
+      commits?: Record<string, CommitsPage>;
     } = {},
   ) {}
 
@@ -69,5 +78,35 @@ export class MockGitHubReader implements GitHubReader {
   async issueList(ref: RepoRef): Promise<IssueList> {
     this.calls.push({ op: 'issueList', ref });
     return this.fixtures.issueList ?? [];
+  }
+
+  async feedPrList(ref: RepoRef): Promise<PrList> {
+    this.calls.push({ op: 'feedPrList', ref });
+    return this.fixtures.feedPrList ?? [];
+  }
+
+  async feedIssueList(ref: RepoRef): Promise<IssueList> {
+    this.calls.push({ op: 'feedIssueList', ref });
+    return this.fixtures.feedIssueList ?? [];
+  }
+
+  async feedPrChecks(ref: RepoRef, n: number): Promise<FeedPrChecks> {
+    this.calls.push({ op: 'feedPrChecks', ref, n });
+    return this.fixtures.feedPrChecks?.[n] ?? [];
+  }
+
+  async feedRunList(ref: RepoRef): Promise<WorkflowRuns> {
+    this.calls.push({ op: 'feedRunList', ref });
+    return this.fixtures.feedRunList ?? [];
+  }
+
+  async reviewRequests(): Promise<ReviewRequestSearch> {
+    this.calls.push({ op: 'reviewRequests', ref: { owner: '', repo: '' } });
+    return this.fixtures.reviewRequests ?? [];
+  }
+
+  async commits(ref: RepoRef, branch: string, page: number): Promise<CommitsPage> {
+    this.calls.push({ op: 'commits', ref, n: page });
+    return this.fixtures.commits?.[`${branch}:${page}`] ?? [];
   }
 }

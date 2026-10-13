@@ -565,6 +565,21 @@ export class DuckyRouter {
     event: Extract<Incoming, { kind: 'message' }>,
   ): Promise<OutboundMessage | undefined> {
     this.deps.authz.requireConversational(actor);
+
+    /**
+     * A delivery-only channel hears nothing.
+     *
+     * The GitHub-updates channel is somewhere other people may be reading, so
+     * it is not a place the owner converses, writes records or starts a
+     * repository workflow from. This is checked BEFORE the workflow bridge, the
+     * pasted-list capture, the deterministic intents, the attachment path and
+     * the provider -- every one of which can write or spend model capacity --
+     * and it applies to the owner and everybody else alike. A thread under the
+     * channel inherits the role, so it is silent too. Nothing is recorded in
+     * conversation memory, because nothing was said to anyone.
+     */
+    if (this.channelRoles.isDeliveryOnly(event.context)) return undefined;
+
     const attachments = event.attachments ?? [];
 
     if (attachments.length === 0) {

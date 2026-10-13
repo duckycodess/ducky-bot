@@ -150,6 +150,22 @@ async function main(): Promise<void> {
     await record('runList', () => reader.runList(ref));
     await record('issueList', () => reader.issueList(ref));
 
+    // The GitHub feed's reads: the same shipped reader, the same schemas. The
+    // commits read is a `gh api` GET and has no recorded selector list, so this
+    // live response is the only evidence its schema has ever met a real one.
+    await record('feedPrList', () => reader.feedPrList(ref));
+    await record('feedIssueList', () => reader.feedIssueList(ref));
+    await record('feedRunList', () => reader.feedRunList(ref));
+    const view = (await record('repoViewForCommits', () => reader.repoView(ref))) as
+      | { defaultBranchRef?: { name: string } | null }
+      | undefined;
+    const branch = view?.defaultBranchRef?.name;
+    if (branch === undefined) {
+      skip('commits', 'the repository has no default branch to read commits from');
+    } else {
+      await record('commits', () => reader.commits(ref, branch, 1));
+    }
+
     /**
      * The three per-PR surfaces need a pull request to exist.
      *
@@ -164,10 +180,38 @@ async function main(): Promise<void> {
       for (const s of ['prView', 'prChecks', 'prReviews']) skip(s, why);
     } else {
       await record('prView', () => reader.prView(ref, candidate));
-      await record('prChecks', () => reader.prChecks(ref, candidate));
+      /**
+       * `gh pr checks` exits non-zero when a branch reports NO checks at all,
+       * which is a normal state for a repository without CI rather than a
+       * schema failure. So a few recent pull requests are tried, and if none
+       * reports a check the surface is recorded as unexercised, with the
+       * reason, instead of as a parse failure it is not.
+       */
+      let exercised = false;
+      for (const n of (all ?? []).slice(0, 5).map((pr) => pr.number)) {
+        try {
+          const value = await reader.prChecks(ref, n);
+          records.push({ surface: 'prChecks', parsed: true, shape: shapeOf(value) });
+          out('  prChecks: parsed');
+          exercised = true;
+          break;
+        } catch {
+          /* no checks on that branch; try the next pull request */
+        }
+      }
+      if (!exercised) {
+        skip('prChecks', 'none of the five most recent pull requests reported a check');
+      }
+      // The feed's own read of the same surface. It answers an empty list for a
+      // pull request with no checks (the normal state of a repository without
+      // CI), so it parses here even where `prChecks` above has nothing to show.
+      await record('feedPrChecks', () => reader.feedPrChecks(ref, candidate));
       await record('prReviews', () => reader.prReviews(ref, candidate));
     }
   }
+
+  // Not scoped to a repository: the authenticated account's review requests.
+  await record('reviewRequests', () => reader.reviewRequests());
 
   const watch = await exerciseWatchLoop(reposFile, reposJson, reader, targets[0]!.slug);
 

@@ -10,6 +10,8 @@
  * contained local mutation.
  */
 
+import { isCommitsApiArgv, isReviewSearchArgv } from './github.js';
+
 export const COMMAND_CLASSES = [
   /** Reads state and changes nothing, anywhere. */
   'read_only',
@@ -60,6 +62,16 @@ export interface CommandPolicyEntry {
   readonly cls: CommandClass;
   /** Why it is classified this way. Read by a human, not by code. */
   readonly note: string;
+  /**
+   * An exact-shape requirement on the WHOLE argv, for a verb whose safe form is
+   * a single fixed shape rather than a family.
+   *
+   * Without it a verb match would clear every argv that begins with the verb --
+   * and `gh api` begins every request, including a POST. With it, an argv that
+   * has the right verb and the wrong shape matches NOTHING and is refused as
+   * unclassified, which is the direction an unreadable form should fail in.
+   */
+  readonly shape?: (argv: readonly string[]) => boolean;
 }
 
 /**
@@ -130,6 +142,19 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
   { bin: 'gh', verb: ['pr', 'checks'], cls: 'read_only', note: 'Check results for one PR.' },
   { bin: 'gh', verb: ['run', 'list'], cls: 'read_only', note: 'Workflow run history.' },
   { bin: 'gh', verb: ['issue', 'list'], cls: 'read_only', note: 'Open issues.' },
+  {
+    bin: 'gh', verb: ['search', 'prs'], cls: 'read_only', shape: isReviewSearchArgv,
+    note:
+      'Open pull requests whose review was requested of the authenticated account, by exactly ' +
+      'one fixed query and field list. Any other search form is unclassified.',
+  },
+  {
+    bin: 'gh', verb: ['api'], cls: 'read_only', shape: isCommitsApiArgv,
+    note:
+      'ONLY `api --method GET repos/{owner}/{repo}/commits?sha=<branch>&per_page=N&page=P`, with ' +
+      'every part validated. There is no `--json` selector for commits, so the whole argv is the ' +
+      'contract; any other method, field, header, host, template or endpoint is unclassified.',
+  },
   {
     bin: 'gh', verb: ['pr', 'create'], cls: 'external_mutation',
     note: 'Creates a pull request; only the approved-action path may run it.',
@@ -320,7 +345,7 @@ export function classifyCommand(
   argv: readonly string[],
 ): CommandPolicyEntry | undefined {
   return [...COMMAND_POLICY]
-    .filter((e) => e.bin === bin && matchesVerb(argv, e.verb))
+    .filter((e) => e.bin === bin && matchesVerb(argv, e.verb) && (e.shape ? e.shape(argv) : true))
     .sort((a, b) => b.verb.length - a.verb.length)[0];
 }
 

@@ -38,6 +38,8 @@ registered.
 | GitHub PR / review / check surfaces | **Blocked** | The watched repository has no pull request; opening one is a GitHub write |
 | CI dependency checker | **Blocked** | Same: `prChecks` has never run against a real PR, so `verified: false` stands |
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
+| GitHub feed: alerts and the daily commit digest (issue #6) | **Unit-tested; read half observed live, delivery half not** | Tests cover baselines, dedup across restart, partial failure, pending-to-failed, reruns, review episodes, routing with fresh visibility, the 09:00 local digest (Manila, DST), catch-up bounds. `pnpm probe:github-feed` ran the real reader and service against `duckycodess/ducky-bot` with the mock transport: see *Detail: the GitHub feed* |
+| `github` channel role (delivery only) | **Unit-tested** | Configured by `DUCKY_DEV_GITHUB_CHANNEL_ID`; no channel is configured here, so no card has reached a real channel |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
 | Channel roles + persistent replies | **Verified for the GPT smoke path; unit-tested elsewhere** | All four roles are configured from owner-supplied ids. The owner confirmed a real reply in the configured GPT guild channel after the transport and policy restart. The other role channels, unconfigured-channel silence and slash-command persistence remain covered by tests or configuration rather than live evidence |
 | Pasted-list task capture (Discord) | **Unit-tested** | Preview, clarification, idempotent save and quote/code refusal covered against the mock transport with an injected clock; no live Discord paste |
@@ -682,6 +684,68 @@ exercised; this says what it does.
   command instead.
 - Redaction at the transport boundary; no secret in the database or logs
 
+## Detail: the GitHub feed (issue #6)
+
+What it does, off by default (`DUCKY_GITHUB_FEED_ENABLED`): reads a **selected
+list** of repositories (the enabled, GitHub-mapped allowlist entries, plus
+`DUCKY_GITHUB_FEED_REPOS`, minus `DUCKY_GITHUB_FEED_EXCLUDE`) and announces, once
+each, a newly opened pull request or issue, a review that requested changes, a
+failed Actions run (by id and rerun attempt) and a failed check on one of the
+five newest open pull requests that is not an Actions run (external CI statuses
+and app check runs, by pull request, head commit, name and completion time).
+With `DUCKY_GITHUB_FEED_REVIEW_REQUESTS`, a review requested of the signed-in
+account personally is also found in any repository it can see. Default-branch
+commits, direct pushes included, are buffered by (repository, sha) and sent as
+ONE digest at the configured local time (`DUCKY_GITHUB_DIGEST_AT`, default
+09:00). Public selected repositories post to the `github` channel; everything
+else goes to the DM. See
+[ADR 0029](decisions/0029-github-feed-and-the-delivery-only-github-channel.md).
+
+Bounds and limits, stated rather than implied:
+
+- Open PR, issue and run lists are 20 deep; commits are read newest-first, 30 per
+  page, at most 3 pages; review requests are the 25 most recently updated;
+  external checks cover five pull requests per pass. Anything beyond is not
+  watched, and a force-push or more new commits than the walk reads is reported
+  in the next digest as possibly incomplete.
+- Review requests have no request timestamp in the search, so a renewed request
+  is recognised only after the PR is seen absent from a read that was not full.
+  While the window is full that cannot be told, and `/status` says so.
+- `gh pr checks` reports the Go zero time (`0001-01-01T00:00:00Z`) for a commit
+  STATUS (reported by review; this host has no pull request with a status to
+  confirm it, and no unrelated repository was queried to find one). An empty,
+  unparseable or pre-1990 timestamp is treated as missing and never moves the
+  watermark. A failing status is then identified by pull request, head, check
+  name and a failure episode, and announced only when that check was previously
+  seen not failing (a failure after pending or passing), the head is new on a
+  pull request already known, or the pull request was created after the checks
+  baseline (judged from its own creation time, so it does not depend on the
+  pull-request unit having run first); an old pull request or head met for the first time is recorded
+  silently. A status that is already failing the first time its head is seen, on
+  a pull request that is neither new nor known, is therefore never announced.
+- If ANY pull request's checks cannot be read, the pass keeps the old watermark
+  and that pull request's old state (so a failure there is not mistaken for
+  history when it is read again), and the baseline is not recorded at all until
+  every one of them reads.
+- Actions-backed checks are announced from the run path only, never twice.
+- The digest waits up to 30 minutes after the slot for a post-slot read of every
+  selected repository, then sends what it has; a slot more than 20 hours old is
+  skipped (its commits stay for the next digest, and are retired 14 days after they were OBSERVED, not by their commit date).
+- Live observation (`pnpm probe:github-feed`, public `duckycodess/ducky-bot`,
+  mock transport, injected clock, in-memory database): history recorded and not
+  announced; three repeated polls announced nothing; the same poll again
+  announced nothing; five real open issues and the two newest commits were
+  treated as new by pre-seeding the cursors (that simulates WHEN the watch
+  began, it is not an observed new event); all five card link buttons and the
+  digest's View commits link returned HTTP 200; zero control buttons; the
+  allowlist table unchanged. The review-request search ran and returned nothing
+  for this account, so its element shape has not been seen live; no failing
+  external check and no new pull request exist to observe; `gh pr checks` here
+  only ever answered "no checks reported". **No real Discord channel or DM
+  received a card.**
+- A paused model quota cannot stop it: the service imports no provider and a
+  test runs it beside a provider that always fails.
+
 ## Native conversation threads (issue #4)
 
 **Built, off by default, and never run against Discord from this worktree.**
@@ -1045,7 +1109,7 @@ stays `false` and `/status` reports `experimental`.
 | Interrupting a live Pi turn | Herdr exposes no verified way to interrupt one without risking a half-written edit, so cancellation aborts our wait *immediately* and then observes the agent. A still-working agent is reported honestly, the writer lock is retained, and the repository stays reserved for the owner. |
 | Approved action execution | **Unit-tested only.** An opt-in same-filesystem performer validates the immutable proposal, allowlisted workspace, branch and GitHub origin before commit/push/PR. The default flag is off; no live external write has been performed here. Production executor routing, issues, deployments, Azure and high-risk actions remain unsupported. |
 | GitHub repository watches | **Now observed against a real repository, in part.** `pnpm probe:gh-live` drives the shipped `GhCliReader` and the watch loop against `duckycodess/ducky-bot` (watch-only, `allowJobs: false`). Five read surfaces — `repoView`, `prList`, `prListAll`, `runList`, `issueList` — returned live responses that the production schemas accepted; the watch loop observed the repository and then produced NOTHING on an identical second pass, which is the deduplication property a watch lives or dies by and which had only ever been tested against a mock. `prView` / `prChecks` / `prReviews` remain **unexercised**: that repository has no pull request, open or closed, and opening one is a GitHub write. Nothing reached Discord — the loop ran through the real composition root with an in-memory database and the mock transport. Previously, and still true of the unexercised surfaces: |
-| GitHub repository watches (the rest) | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH remain unobservable: that needs `gh api`, and `api` is on the forbidden-verb list. |
+| GitHub repository watches (the rest) | **Unit-tested only, and now wider.** The loop reads merges, approvals, requested changes, review comments, commits under review, workflow runs (failure and recovery) and issue activity — all through the frozen read-only argv table, with every `--json` selector recorded from `gh` itself by `pnpm probe:gh`. What is NOT recorded is any response VALUE: **no GitHub repository is configured in this host's allowlist** (`github: null`), so no live watch has run and picking a repository to point at would mean reaching for one nobody selected. Schemas are tolerant for that reason. Recent commits on the DEFAULT BRANCH are now readable, by one exact `gh api --method GET` shape (see the GitHub feed section); `api` stays on the forbidden-verb list for every other table. |
 | Dependency checking | **A real checker exists and is opt-in; it is not verified.** `DUCKY_DEPENDENCY_CHECKER=github` reads CI status through the read-only `gh` surface. It is unit-tested against a mock reader and has never run against a real repository — none is configured here — so it reports `verified: false` and the resolver downgrades its `ready`. Net effect on this host: it can fail a job on a definite CI failure and cannot resume one. The default remains `none`, which only ever answers `pending`. |
 | Repository workflow bridge | **Unit-tested against a stand-in, and that is the whole of it.** 39 behaviour tests plus invariant tests drive `MockFrontDoor`, which records every call: the `--ready` flag, the canonical id reuse, the issue number on a retry. **The installed `workflow.py` has never been invoked by Ducky on this host.** It could not be without creating a GitHub issue on a real repository, and no disposable registered repository exists here to point it at. So: the argv the adapter builds is tested, the policy refusals are tested, the temp-file lifetime is tested, and the end-to-end integration is NOT certified. |
 | Azure deployment | Documented only; nothing provisioned. |
@@ -1081,7 +1145,7 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1620 tests in 110 files**.
+The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic
@@ -1097,7 +1161,8 @@ Probes run in this milestone, with their real outcomes:
 |---|---|
 | `pnpm probe:herdr --with-agent` | Run twice. The FIRST exited 3 — the readiness marker never matched a real pane — which is what corrected the marker. The second exited 0, with the input frame observed 8.16 s after `agent start`. |
 | `pnpm probe:openclaw` | Exits **0**: the full contract recorded, including a successful agent turn and its reply envelope. It exited 2 for two milestones and the exit code moved only when the evidence did. |
-| `pnpm probe:gh` | Exits 0. Field lists recorded for six read-only surfaces, locally and repo-less. |
+| `pnpm probe:gh` | Exits 0. Field lists recorded for seven read-only surfaces (now including `search prs`), locally and repo-less. |
+| `pnpm probe:github-feed` | Exits **0** against the public `duckycodess/ducky-bot` with the mock transport: no gap in what it set out to observe (see *Detail: the GitHub feed* for what that does and does not include). |
 | `pnpm probe:extraction` | Exits **2**. All six PDF/OCR candidates absent, recorded with the reason each would or would not help. Installs nothing, reads no document, enables nothing. |
 | `pnpm probe:discord-gateway` | Exits **0**. READY in 2 276 ms with the privileged MessageContent intent, so the portal toggle is on. Registers no handler, sends nothing, and disconnects immediately. |
 | `pnpm probe:live-job` | **Run three times, all exit 0**, each against its own throwaway database in a directory outside the repository. 162 s / 193 s / 192 s, full evidence gate each time. The development coordinator and executor were left running throughout and were never touched. |

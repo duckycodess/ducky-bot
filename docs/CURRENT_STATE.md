@@ -885,10 +885,16 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**90 files, 1217 tests**) and `pnpm build` all
-pass on this host. See [TESTING.md](TESTING.md) for what each suite guarantees
-and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
-what each step does **not** prove.
+`pnpm typecheck` and `pnpm build` pass on the remote Linux host.
+The unmodified `pnpm test` command passes all **1339 tests in 96 files**.
+Coordinator redaction checks use the current home directory, and placement
+checks validate both shipped example configurations instead of depending on
+a private, gitignored development file. No HOME override or synthetic
+operator configuration is needed. Live Discord, phone and provider integration
+remain separate verification requirements.
+See [TESTING.md](TESTING.md) and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md).
+
+Live probe results below are historical evidence from the original development host; they do not certify the new remote runtime.
 
 Probes run in this milestone, with their real outcomes:
 

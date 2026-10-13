@@ -138,10 +138,10 @@ describe('repository placements', () => {
       }
     });
 
-    it('parses the shipped example configuration so its documented schema cannot drift', () => {
-      // Only the example is shipped. Private, gitignored host configuration
+    it('parses shipped example configurations so their documented schemas cannot drift', () => {
+      // Only examples are shipped. Private, gitignored host configuration
       // must not be a prerequisite for running the repository's tests.
-      for (const file of ['config/repos.example.json']) {
+      for (const file of ['config/repos.example.json', 'config/repos.dev.example.json']) {
         const raw = readFileSync(path.join(REPO_ROOT, file), 'utf8');
         const parsed = RepoAllowlistSchema.safeParse(JSON.parse(raw));
         expect(parsed.success, `${file}: ${parsed.error?.message ?? ''}`).toBe(true);

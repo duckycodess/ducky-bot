@@ -62,6 +62,40 @@ export class BriefingsRepo {
     return Number(res.changes ?? 0) > 0;
   }
 
+  /**
+   * Records a slot the source already settled, so it is not sent again today.
+   *
+   * Written already finished (`delivered`, `skipped` or `abandoned`) and never
+   * `pending`: a row an import created in the pending state would be a send the
+   * import caused. `OR IGNORE` on the slot key makes a repeated import a no-op.
+   * Returns true only when this call created the row.
+   */
+  insertSettled(input: {
+    id: string;
+    discordUserId: string;
+    kind: BriefingSlotKind;
+    dayKey: string;
+    target: BriefingTarget;
+    dueAt: string;
+    status: Exclude<BriefingDeliveryStatus, 'pending'>;
+    settledAt: string;
+  }): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO briefing_deliveries
+           (id, discord_user_id, kind, day_key, target, due_at, status, attempts,
+            last_error_at, delivered_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        input.id, input.discordUserId, input.kind, input.dayKey, input.target, input.dueAt,
+        input.status, input.status === 'delivered' || input.status === 'abandoned' ? 1 : 0,
+        input.status === 'delivered' ? null : input.settledAt,
+        input.status === 'delivered' ? input.settledAt : null, input.settledAt,
+      );
+    return Number(res.changes ?? 0) > 0;
+  }
+
   pending(limit: number): BriefingDeliveryRow[] {
     return this.db
       .prepare(

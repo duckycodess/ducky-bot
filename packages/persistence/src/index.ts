@@ -29,6 +29,7 @@ export * from './repositories/schedule-rules.repo.js';
 export * from './repositories/owner-preferences.repo.js';
 export * from './repositories/assistant-watch.repo.js';
 export * from './runtime-lock.js';
+export * from './backup-check.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';

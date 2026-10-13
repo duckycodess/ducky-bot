@@ -4,6 +4,7 @@ import {
 import { loadExecutorEnv } from './config.js';
 import { CoordinatorClient } from './client.js';
 import { ExecutorLoop } from './loop.js';
+import { checkMemoryHeadroom, defaultCgroupDir } from './memory-headroom.js';
 
 /**
  * A logger that exists before `loadExecutorEnv()` can throw.
@@ -46,9 +47,24 @@ async function main(): Promise<void> {
     herdrReachable: herdrUp,
   });
 
+  // With the guard on, a claim is attempted only when the account's memory
+  // cgroup provably has room; an unreadable or unlimited slice refuses.
+  const MIB = 2 ** 20;
+  const headroomConfig = {
+    cgroupDir: env.DUCKY_MEMORY_CGROUP_DIR ?? defaultCgroupDir(process.getuid?.() ?? 0),
+    engineeringReserveBytes: env.DUCKY_MEMORY_RESERVE_ENGINEERING_MIB * MIB,
+    notificationReserveBytes: env.DUCKY_MEMORY_RESERVE_NOTIFICATIONS_MIB * MIB,
+  };
+  if (env.DUCKY_MEMORY_GUARD === 'cgroup') {
+    log.info('executor.memory_guard', { cgroupDir: headroomConfig.cgroupDir });
+  }
+
   const loop = new ExecutorLoop({
     client,
     orchestrator,
+    ...(env.DUCKY_MEMORY_GUARD === 'cgroup'
+      ? { headroom: () => checkMemoryHeadroom(headroomConfig) }
+      : {}),
     pollWaitMs: env.DUCKY_POLL_WAIT_MS,
     version: env.DUCKY_EXECUTOR_VERSION,
     log: (line) => log.info('executor.loop', { message: line }),

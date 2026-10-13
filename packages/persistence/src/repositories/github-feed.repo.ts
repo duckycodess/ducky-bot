@@ -415,14 +415,16 @@ export class GitHubFeedRepo {
    * across a long run of skipped slots. They are marked consumed (with no
    * target), never deleted: the row is still the memory that the commit was seen.
    */
-  expireOpenCommits(committedBeforeIso: string, atIso: string): number {
+  expireOpenCommits(observedBeforeIso: string, atIso: string): number {
+    // By OBSERVATION time, never commit date: a merge can bring in a commit dated
+    // months ago, and that commit has only just arrived on the branch.
     return Number(
       this.db
         .prepare(
           `UPDATE github_feed_commits SET consumed_at = ?
-            WHERE consumed_at IS NULL AND committed_at < ?`,
+            WHERE consumed_at IS NULL AND observed_at < ?`,
         )
-        .run(atIso, committedBeforeIso).changes,
+        .run(atIso, observedBeforeIso).changes,
     );
   }
 

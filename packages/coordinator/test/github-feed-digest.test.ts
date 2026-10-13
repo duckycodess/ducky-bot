@@ -358,6 +358,24 @@ describe('catch-up after an outage is bounded', () => {
     h.close();
   });
 
+  it('lives by when a commit was OBSERVED, not by its commit date', async () => {
+    // A merge can bring in a commit dated months ago. It has only just arrived on
+    // the branch, so it must reach the next digest rather than expire first.
+    const { h, reader, at, sent } = setup('2026-10-01T00:00:00Z', 'Asia/Manila');
+    reader.commitList.set(DEMO, [commit(1, '2026-09-30T00:00:00Z')]);
+    await at('2026-10-01T00:00:00Z');
+    reader.commitList.set(DEMO, [
+      commit(2, '2026-10-01T00:20:00Z', 'the merge'),
+      commit(3, '2025-12-01T00:00:00Z', 'an old commit the merge brought in'),
+      commit(1, '2026-09-30T00:00:00Z'),
+    ]);
+    await at('2026-10-01T00:30:00Z');
+    expect(h.store.githubFeed.openCommits(DEMO).map((c) => c.headline)).toContain('an old commit the merge brought in');
+    await at('2026-10-01T01:01:00Z');
+    expect(digests(sent())[0]!.text).toContain('an old commit the merge brought in');
+    h.close();
+  });
+
   it('retires commits that no digest ever picked up, so the buffer is bounded', async () => {
     const { h, reader, at } = setup('2026-10-01T00:00:00Z', 'Asia/Manila', { channel: false });
     reader.commitList.set(DEMO, [commit(1, '2026-09-30T00:00:00Z')]);

@@ -87,13 +87,18 @@ an Actions run, is left to the run path so nothing is announced twice.
   that ends and is renewed while the window is full cannot be told from one that
   was pushed out; `/status` reports the window as full.
 - External-check coverage is the five newest open pull requests per pass; an
-  older pull request's external checks are not watched. A failed external status
-  with no timestamp is recorded and cannot be announced.
+  older pull request's external checks are not watched. A commit status reports a
+  placeholder time, so it is treated as undated: its identity is the pull
+  request, head, name and failure episode, and it is announced only on a
+  provable transition or a new head, never for history met for the first time.
+  A pass in which any pull request's checks cannot be read keeps the old
+  watermark.
 - Actions failures on pull request branches are covered by the run path; a
   check-run failure that is not a workflow run is covered by the checks path.
 - Daily digest timing depends on the coordinator interval; the digest waits up to
   30 minutes for a post-slot read of every selected repository, then sends what
-  it has and names any repository it could not read (in the DM only).
+  it has and names any repository it could not read (in the DM only). Unsent
+  commits are retired 14 days after they were observed.
 - Retention keeps what stops history looking new: baseline rows, review-request
   keys, the newest 100 consumed commits per repository, the selected list and the
   cursors.

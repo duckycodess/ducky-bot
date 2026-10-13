@@ -234,8 +234,7 @@ export class GitHubFeedService {
       notes.push(`${bad.length} read${bad.length === 1 ? '' : 's'} failing and retrying with backoff`);
     }
     const unread = this.store.githubFeed.listRepos('active').reduce((n, r) => {
-      const m = /^unread:(\d+)$/.exec(this.store.githubFeed.cursor(r.repoKey, 'checks')?.meta ?? '');
-      return n + (m ? Number(m[1]) : 0);
+      return n + parseCheckState(this.store.githubFeed.cursor(r.repoKey, 'checks')?.meta ?? null).unread;
     }, 0);
     if (unread > 0) notes.push(`${unread} pull request check read${unread === 1 ? '' : 's'} skipped last pass`);
     if (this.config.reviewRequests &&
@@ -275,7 +274,12 @@ export class GitHubFeedService {
     // Claimed BEFORE the reads, so a newly due slot makes every repository due for
     // a commit read in this same tick and the digest need not wait for the next.
     this.claimDigestSlots();
-    for (const unit of feed.dueUnits(nowIso, GITHUB_FEED_UNIT_BATCH, this.config.reviewRequests)) {
+    // The checks unit reads after the pull-request unit, so "this pull request was
+    // announced as opened" is already recorded when a check on it is judged.
+    const rank = (k: string): number => (k === 'checks' ? 1 : 0);
+    const due = feed.dueUnits(nowIso, GITHUB_FEED_UNIT_BATCH, this.config.reviewRequests)
+      .sort((a, b) => rank(a.kind) - rank(b.kind));
+    for (const unit of due) {
       await this.observeUnit(unit, r);
     }
 
@@ -459,17 +463,39 @@ export class GitHubFeedService {
    * `workflow`, or whose link is an Actions run), so a failing workflow is one
    * alert and not two. What is read is bounded: the newest few open pull
    * requests, one `gh pr checks` call each, so an OLDER pull request's external
-   * checks are not watched. A pull request whose checks cannot be read is
-   * skipped and counted in `meta` rather than failing the others; only a pass
-   * that read none of them fails, so it backs off and shows as degraded.
+   * checks are not watched.
    *
-   * Identity is the pull request, its head commit, the check's name and the
-   * time the check completed, so a rerun of the same check on the same commit
-   * that fails again is a new fact, while one failure seen on repeated polls is
-   * one. A check still running is not a failure; it becomes one when it
-   * finishes. Dated by completion, so a failure from before the watch began is
-   * recorded rather than announced even if its pull request only now enters the
-   * window.
+   * ## Two kinds of failure, because `gh` reports two kinds of check
+   *
+   * A check run carries real `startedAt`/`completedAt`. A commit STATUS comes back
+   * with the Go zero time (`0001-01-01T00:00:00Z`) in both, which is a
+   * placeholder and not a time. A timestamp that is empty, unparseable or before
+   * 1990 is therefore MISSING, and a missing one never advances the watermark: a
+   * placeholder compared as a real time would otherwise sit below every real one
+   * and silence status alerts, or the reverse.
+   *
+   * - **Dated** failures are identified by pull request, head commit, check name
+   *   and completion time, and announced when unseen and not older than the
+   *   watermark. A rerun that fails again completes later, so it is a new key.
+   * - **Undated** failures (a status) cannot be dated, so their identity is the
+   *   pull request, head, name and an EPISODE counter, and the decision comes from
+   *   what was seen before: it is announced only when that check on that head was
+   *   previously seen NOT failing (pending or passing, so a failure after a
+   *   pending), or the head was seen without this check failing, or the head is a
+   *   new one for a pull request already known, or the pull request itself was
+   *   announced as opened after the baseline. A pull request or head met for the
+   *   first time WITHOUT any of that (an old one rolling into the window) is
+   *   recorded silently. A status that fails, passes and fails again on the same
+   *   head is a second episode, hence a second key.
+   *
+   * ## When a read fails
+   *
+   * The baseline needs EVERY pull request read, or it is not a baseline at all
+   * (the unit fails and backs off). After it, a pass in which ANY pull request's
+   * checks could not be read keeps the old watermark and the old state for that
+   * pull request, so a failure that finishes earlier than another pull request's
+   * newest completion is not mistaken for history when its pull request is read
+   * again. Keys deduplicate everything the partial pass already announced.
    */
   private async readChecks(unit: GitHubFeedCursorRow, repo: CardRepo, at: string): Promise<UnitRead> {
     const ref = { owner: repo.owner, repo: repo.repo };
@@ -477,9 +503,14 @@ export class GitHubFeedService {
       .slice(0, GITHUB_FEED_MAX_PR_CHECKS);
     const baseline = unit.baselinedAt === null;
     const mark = unit.cursor ?? '';
+    const prior = parseCheckState(unit.meta);
+    const seen: CheckState['seen'] = { ...prior.seen };
+    const knownPrs = new Set(prior.prs);
     let newest = mark;
     let unread = 0;
-    const cands: Cand[] = [];
+    const dated: Cand[] = [];
+    const undated: { key: string; announce: boolean; card: () => GitHubFeedCard }[] = [];
+
     for (const pr of prs) {
       let checks;
       try {
@@ -488,26 +519,74 @@ export class GitHubFeedService {
         unread += 1;
         continue;
       }
-      for (const c of checks) {
+      const head = (pr.headRefOid ?? '').slice(0, 12);
+      const pk = `pr${pr.number}:${head}`;
+      const before = seen[pk];
+      const prKnown = knownPrs.has(pr.number);
+      const after: Record<string, { s: 'f' | 'n'; e: number }> = {};
+
+      for (const c of checks.slice(0, 50)) {
         const actionsBacked = (c.workflow ?? '') !== '' || /\/actions\/runs\/\d+/.test(c.link ?? '');
+        if (actionsBacked) continue;
         const bucket = (c.bucket ?? '').toLowerCase();
-        const stamp = c.completedAt ?? c.startedAt ?? '';
-        if (bucket !== 'pending' && (c.completedAt ?? '') !== '' && !actionsBacked) {
-          newest = newest > stamp ? newest : stamp;
-        }
-        if (actionsBacked || bucket !== 'fail') continue;
+        const done = realStamp(c.completedAt);
+        const stamp = done || realStamp(c.startedAt);
         const id = createHash('sha256').update(c.name).digest('hex').slice(0, 12);
-        cands.push({
-          key: `check_failed:${unit.scope}:pr${pr.number}:${(pr.headRefOid ?? '').slice(0, 12)}:${id}:${stamp}`,
-          kind: 'check_failed', stamp,
-          card: () => externalCheckFailedCard(repo, {
-            number: pr.number, check: c.name, pullTitle: pr.title, ...optional('sha', pr.headRefOid),
-          }, at),
+        const prev = before?.[id];
+        const card = (): GitHubFeedCard => externalCheckFailedCard(repo, {
+          number: pr.number, check: c.name, pullTitle: pr.title, ...optional('sha', pr.headRefOid),
+        }, at);
+
+        // Only a REAL completion time moves the watermark. A pending check, or a
+        // placeholder time, never does.
+        if (bucket !== 'pending' && done !== '') newest = newest > done ? newest : done;
+
+        if (bucket !== 'fail') {
+          after[id] = { s: 'n', e: prev?.e ?? 0 };
+          continue;
+        }
+        if (stamp !== '') {
+          dated.push({
+            key: `check_failed:${unit.scope}:pr${pr.number}:${head}:${id}:${stamp}`,
+            kind: 'check_failed', stamp, card,
+          });
+          after[id] = { s: 'f', e: prev?.e ?? 0 };
+          continue;
+        }
+        // Undated: a new episode starts when it was not already failing.
+        const fresh = prev === undefined || prev.s === 'n';
+        const e = (prev?.e ?? 0) + (fresh ? 1 : 0);
+        after[id] = { s: 'f', e };
+        if (!fresh) continue;
+        const announce = !baseline && (
+          prev?.s === 'n' || before !== undefined || prKnown ||
+          ['pending', 'delivered'].includes(
+            this.store.githubFeed.eventByKey(`pr_opened:${unit.scope}#${pr.number}`)?.status ?? '',
+          )
+        );
+        undated.push({
+          key: `check_failed:${unit.scope}:pr${pr.number}:${head}:${id}:undated:e${e}`, announce, card,
         });
       }
+      delete seen[pk];
+      seen[pk] = after;
+      knownPrs.add(pr.number);
     }
+
     if (prs.length > 0 && unread === prs.length) throw new Error('no pull request checks could be read');
-    return { ...this.sort(unit, cands, baseline, mark, 'selected', newest), meta: `unread:${unread}` };
+    // A baseline that skipped any pull request is not one: it would call the
+    // unread pull request's existing failures new when it is finally read.
+    if (baseline && unread > 0) throw new Error('baseline needs every pull request read');
+
+    const sorted = this.sort(unit, dated, baseline, mark, 'selected', unread > 0 ? mark : newest);
+    const knownKeys = this.store.githubFeed.knownEventKeys(undated.map((u) => u.key));
+    const extra: NewFeedEvent[] = undated.filter((u) => !knownKeys.has(u.key)).map((u) => ({
+      id: randomUUID(), eventKey: u.key, kind: 'check_failed', repoKey: unit.scope, origin: 'selected',
+      cardJson: u.announce ? JSON.stringify(u.card()) : null, status: u.announce ? 'pending' : 'baseline',
+    }));
+    const keep = Object.fromEntries(Object.entries(seen).slice(-60));
+    const state: CheckState = { unread, prs: [...knownPrs].slice(-200), seen: keep };
+    return { ...sorted, events: [...sorted.events, ...extra], meta: JSON.stringify(state) };
   }
 
   /**
@@ -969,6 +1048,42 @@ interface DigestPlan {
 /** `{}` or `{ [key]: value }`, so an absent value is absent rather than `undefined`. */
 function optional<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
   return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
+}
+
+/** What `readChecks` remembers between passes, in the unit's cursor `meta`. */
+interface CheckState {
+  /** Pull requests whose checks could not be read on the last pass. */
+  readonly unread: number;
+  /** Pull requests ever read, so a new head on a KNOWN one is recognisably new. */
+  readonly prs: number[];
+  /** `pr<n>:<head>` -> check-name hash -> failing or not, and its failure episode. */
+  readonly seen: Record<string, Record<string, { s: 'f' | 'n'; e: number }>>;
+}
+
+function parseCheckState(meta: string | null): CheckState {
+  const empty: CheckState = { unread: 0, prs: [], seen: {} };
+  if (!meta) return empty;
+  try {
+    const v = JSON.parse(meta) as Partial<CheckState>;
+    return {
+      unread: typeof v.unread === 'number' ? v.unread : 0,
+      prs: Array.isArray(v.prs) ? v.prs.filter((n): n is number => typeof n === 'number') : [],
+      seen: v.seen && typeof v.seen === 'object' ? v.seen : {},
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * A GitHub timestamp, or '' when it is not a real one. `gh` reports the Go zero
+ * time for a commit status, and an unparseable or pre-1990 value is no better.
+ */
+export function realStamp(v: string | null | undefined): string {
+  if (!v) return '';
+  const t = Date.parse(v);
+  if (Number.isNaN(t) || new Date(t).getUTCFullYear() < 1990) return '';
+  return v;
 }
 
 interface RequestState {

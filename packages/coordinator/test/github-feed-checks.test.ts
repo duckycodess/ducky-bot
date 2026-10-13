@@ -264,3 +264,195 @@ describe('review requests are not announced for old history, and a renewed one i
     h.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review fixes: placeholder timestamps, and a partial read that must not move
+// the watermark past a failure nobody has seen yet.
+// ---------------------------------------------------------------------------
+
+const ZERO = '0001-01-01T00:00:00Z';
+/** What `gh` reports for a commit STATUS: the Go zero time in both fields. */
+const status = (name: string, bucket: 'fail' | 'pending' | 'pass', over: Partial<FeedPrChecks[number]> = {}): FeedPrChecks[number] => ({
+  name, state: bucket === 'fail' ? 'FAILURE' : bucket === 'pass' ? 'SUCCESS' : 'PENDING', bucket,
+  link: 'https://ci.example/s/1', workflow: '', startedAt: ZERO, completedAt: ZERO, ...over,
+});
+const failures = (sent: ReturnType<typeof sentTo>) => sent.filter((s) => s.text.includes('Checks failed'));
+const setChecks = (reader: FeedReader, byPr: Record<number, FeedPrChecks>): void => {
+  reader.checks.set(DEMO, byPr);
+};
+
+describe('placeholder timestamps are missing, not real', () => {
+  it('treats the year-0001 zero time, empty and unparseable values as no time at all', async () => {
+    const { realStamp } = await import('../src/domain/github-feed.service.js');
+    for (const v of [ZERO, '0001-01-01T00:00:00.000Z', '', null, undefined, 'not a time', '1970-01-01T00:00:00Z']) {
+      expect(realStamp(v as string | null | undefined), String(v)).toBe('');
+    }
+    expect(realStamp('2026-10-01T00:12:00Z')).toBe('2026-10-01T00:12:00Z');
+  });
+
+  it('a status that fails after pending is announced, even beside a dated check', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [
+      external('unit', { bucket: 'pass', state: 'SUCCESS', completedAt: '2026-10-01T00:30:00Z' }),
+      status('ci/status', 'pending'),
+    ] });
+    await tick(0);
+    // The dated check's time is the newest real one. A zero-time status must be
+    // judged on what was seen, not on that number.
+    setChecks(reader, { 7: [
+      external('unit', { bucket: 'pass', state: 'SUCCESS', completedAt: '2026-10-01T00:30:00Z' }),
+      status('ci/status', 'fail'),
+    ] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    expect(failures(sent())[0]!.text).toContain('ci/status');
+    // And it is one alert however often it is seen.
+    await tick();
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('a zero-time status never advances the watermark, so a later dated failure still announces', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    setChecks(reader, { 7: [status('ci/status', 'pass'), external('unit', { completedAt: '2026-10-01T00:20:00Z' })] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('failing statuses that already exist at the baseline are history', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/old', 'fail')] });
+    await tick(0);
+    await tick();
+    await tick();
+    expect(failures(sent())).toEqual([]);
+    expect(h.store.githubFeed.listEvents('baseline').some((e) => e.eventKey.includes(':undated:e1'))).toBe(true);
+    h.close();
+  });
+
+  it('a status-only old pull request rolling into the window is recorded silently', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    // PR 5 is OLD (created long before the watch), only now inside the window.
+    reader.prs.set(DEMO, [
+      pr(7, { headRefOid: HEAD }),
+      pr(5, { headRefOid: 'c'.repeat(40), createdAt: '2026-06-01T00:00:00Z' }),
+    ]);
+    setChecks(reader, { 7: [status('ci/status', 'pass')], 5: [status('ci/legacy', 'fail')] });
+    await tick();
+    await tick();
+    expect(failures(sent())).toEqual([]);
+    h.close();
+  });
+
+  it('a pull request opened AFTER the baseline, failing on a status, is announced', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    reader.prs.set(DEMO, [
+      pr(9, { headRefOid: 'd'.repeat(40), createdAt: '2026-10-01T00:10:00Z' }),
+      pr(7, { headRefOid: HEAD }),
+    ]);
+    setChecks(reader, { 7: [status('ci/status', 'pass')], 9: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    expect(failures(sent())[0]!.text).toContain('#9');
+    h.close();
+  });
+
+  it('a NEW head on a known pull request that fails is announced; the old head does not repeat', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    reader.prs.set(DEMO, [pr(7, { headRefOid: 'e'.repeat(40) })]);
+    setChecks(reader, { 7: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    expect(failures(sent())[0]!.text).toContain('Commit eeeeeee');
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('a status that fails, passes and fails again on the SAME head is two announcements', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pending')] });
+    await tick(0);
+    setChecks(reader, { 7: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick();
+    setChecks(reader, { 7: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(2);
+    // Still failing, unchanged: nothing more.
+    await tick();
+    expect(failures(sent())).toHaveLength(2);
+    h.close();
+  });
+});
+
+describe('a partial read does not move the watermark past an unseen failure', () => {
+  it('announces a failure on a pull request whose read failed earlier, once it is readable', async () => {
+    const { h, reader, tick, sent } = setup();
+    reader.prs.set(DEMO, [pr(8, { headRefOid: 'b'.repeat(40) }), pr(7, { headRefOid: HEAD })]);
+    setChecks(reader, { 7: [], 8: [external('unit', { bucket: 'pass', state: 'SUCCESS', completedAt: '2026-09-30T00:00:00Z' })] });
+    await tick(0);
+
+    // PR 7's read fails while PR 8 completes LATER than PR 7's coming failure.
+    const real = reader.feedPrChecks.bind(reader);
+    reader.feedPrChecks = async (ref, n) => {
+      if (n === 7) throw new Error('scripted: unreadable');
+      return real(ref, n);
+    };
+    setChecks(reader, { 7: [external('unit', { completedAt: '2026-10-01T00:12:00Z' })],
+      8: [external('unit', { bucket: 'pass', state: 'SUCCESS', completedAt: '2026-10-01T00:20:00Z' })] });
+    const partial = await tick();
+    expect(partial).toMatchObject({ failed: 0 });
+    expect(failures(sent())).toEqual([]);
+    expect(h.app.status().githubFeed).toMatch(/1 pull request check read skipped/);
+
+    // PR 7 is readable again: its 00:12 failure is NEW, not history.
+    reader.feedPrChecks = real;
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    expect(failures(sent())[0]!.text).toContain('#7');
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('is not a baseline while any pull request is unreadable, and records nothing', async () => {
+    const { h, reader, tick, sent } = setup();
+    reader.prs.set(DEMO, [pr(8, { headRefOid: 'b'.repeat(40) }), pr(7, { headRefOid: HEAD })]);
+    setChecks(reader, { 7: [external('unit', { completedAt: '2026-09-30T00:12:00Z' })], 8: [] });
+    const real = reader.feedPrChecks.bind(reader);
+    reader.feedPrChecks = async (ref, n) => {
+      if (n === 7) throw new Error('scripted: unreadable');
+      return real(ref, n);
+    };
+    const first = await tick(0);
+    expect(first).toMatchObject({ failed: 1 });
+    expect(h.store.githubFeed.cursor(DEMO, 'checks')!.baselinedAt).toBeNull();
+
+    // Once everything is readable THAT is the baseline: the old failure is history.
+    reader.feedPrChecks = real;
+    await tick(40);
+    expect(h.store.githubFeed.cursor(DEMO, 'checks')!.baselinedAt).not.toBeNull();
+    expect(failures(sent())).toEqual([]);
+    h.close();
+  });
+});

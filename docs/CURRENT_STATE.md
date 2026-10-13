@@ -711,11 +711,25 @@ Bounds and limits, stated rather than implied:
 - Review requests have no request timestamp in the search, so a renewed request
   is recognised only after the PR is seen absent from a read that was not full.
   While the window is full that cannot be told, and `/status` says so.
-- A failed external status with no timestamp is recorded and cannot be announced.
+- `gh pr checks` reports the Go zero time (`0001-01-01T00:00:00Z`) for a commit
+  STATUS (reported by review; this host has no pull request with a status to
+  confirm it, and no unrelated repository was queried to find one). An empty,
+  unparseable or pre-1990 timestamp is treated as missing and never moves the
+  watermark. A failing status is then identified by pull request, head, check
+  name and a failure episode, and announced only when that check was previously
+  seen not failing (a failure after pending or passing), the head is new on a
+  pull request already known, or the pull request was announced as opened after
+  the baseline; an old pull request or head met for the first time is recorded
+  silently. A status that is already failing the first time its head is seen, on
+  a pull request that is neither new nor known, is therefore never announced.
+- If ANY pull request's checks cannot be read, the pass keeps the old watermark
+  and that pull request's old state (so a failure there is not mistaken for
+  history when it is read again), and the baseline is not recorded at all until
+  every one of them reads.
 - Actions-backed checks are announced from the run path only, never twice.
 - The digest waits up to 30 minutes after the slot for a post-slot read of every
   selected repository, then sends what it has; a slot more than 20 hours old is
-  skipped (its commits stay for the next digest, retired after 14 days).
+  skipped (its commits stay for the next digest, and are retired 14 days after they were OBSERVED, not by their commit date).
 - Live observation (`pnpm probe:github-feed`, public `duckycodess/ducky-bot`,
   mock transport, injected clock, in-memory database): history recorded and not
   announced; three repeated polls announced nothing; the same poll again
@@ -1130,7 +1144,7 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1770 tests in 121 files**.
+The unmodified `pnpm test` command passes all **1781 tests in 121 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

@@ -46,9 +46,11 @@ Report contradictions rather than picking whichever reads best.
 
 - **Never widen the owner-only surface.** `OWNER_ONLY_COMMANDS` in
   `@ducky/contracts` is the manifest; the router asserts against it at
-  construction. The non-privileged routes are conversation, and the two
-  shared-channel READS named in `SHARED_READABLE_ROUTES` — both narrowed
-  views of commands already on that manifest.
+  construction. Non-owner routes are conversation, participant-scoped
+  Branch/Compact controls in `CONVERSATIONAL_INTERACTION_KINDS`, and the
+  two shared-channel reads in `SHARED_READABLE_ROUTES`. Conversational and
+  owner-only control manifests remain disjoint; shared reads stay narrowed
+  views of commands already on the owner manifest.
 - **Shared visibility is never authorization.** A configured shared channel
   says where information may be shown, never who may act. Non-owner output
   goes through `SharedJobsService` and `shared-presenters.ts`, which accept

@@ -269,7 +269,11 @@ async function run(live: Live): Promise<ProbeOutcome> {
   // certification run must never open a Discord gateway.
   const transport = new MockDiscordTransport();
   live.transport = transport;
-  const app = createApp(process.env, { transport });
+  // Engineering is OFF by default (DUCKY_ENGINEERING_ENABLED), so a claim would
+  // never be answered. This run is the deliberate, marker-guarded certification
+  // of one executor against a disposable repository, so it turns the switch on
+  // for ITS OWN process only; nothing here changes any stored configuration.
+  const app = createApp({ ...process.env, DUCKY_ENGINEERING_ENABLED: '1' }, { transport });
   live.app = app;
 
   const ownerId = app.authz.ownerId;
@@ -313,6 +317,17 @@ async function run(live: Live): Promise<ProbeOutcome> {
       `repository reservations are still held: ${held
         .map((r) => `${r.repo_slug}(${r.reason ?? 'active'})`)
         .join(', ')}. A reserved repository can never be claimed.`,
+    );
+  }
+
+  // The engineering slot is the same kind of blocker as a reservation: while
+  // any job holds it, nothing else can be claimed, so the run would wait for a
+  // job that can never start.
+  const slot = app.store.jobs.admission();
+  if (slot) {
+    throw new Error(
+      `the engineering slot is held by ${slot.repoSlug} (${slot.reason}). ` +
+        'Clear that job first (/job cleanup), so this run measures itself.',
     );
   }
 

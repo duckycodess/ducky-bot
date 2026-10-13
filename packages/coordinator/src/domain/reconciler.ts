@@ -1,5 +1,6 @@
 import {
-  AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
+  AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, ENGINEERING_ATTEMPT_GRACE_MS,
+  EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
   TASK_PREVIEW_SETTLED_TTL_MS, TASK_PREVIEW_SWEEP_BATCH,
   isTerminal,
 } from '@ducky/contracts';
@@ -8,6 +9,8 @@ import type { ApprovalsService } from './approvals.service.js';
 import type { PendingScheduleStore } from './pending-schedules.js';
 
 export interface ReconcileReport {
+  /** Attempts past their deadline that the coordinator itself asked to stop. */
+  attemptsOverdue: number;
   leasesExpired: number;
   reservationsExpired: number;
   approvalsExpired: number;
@@ -53,6 +56,7 @@ export class Reconciler {
 
   run(): ReconcileReport {
     return {
+      attemptsOverdue: this.stopOverdueAttempts(),
       leasesExpired: this.expireLeases(),
       reservationsExpired: this.expireReservations(),
       approvalsExpired: this.expireApprovals(),
@@ -72,6 +76,38 @@ export class Reconciler {
       new Date(now - TASK_PREVIEW_SETTLED_TTL_MS).toISOString(),
       TASK_PREVIEW_SWEEP_BATCH,
     );
+  }
+
+  /**
+   * The coordinator-side backstop for the attempt budget.
+   *
+   * The executor times its own attempt out, supervised, at the persisted
+   * deadline. An attempt still running `ENGINEERING_ATTEMPT_GRACE_MS` past it
+   * has an executor that did not, so the coordinator raises the ordinary
+   * cancellation flag. That reuses the one supervised stop path -- the executor
+   * sees it on its next heartbeat and acknowledges only what it can confirm --
+   * rather than adding a second way to end a turn. Nothing is killed from here.
+   */
+  stopOverdueAttempts(): number {
+    const overdue = this.store.jobs.overdueAttempts(
+      isoPlus(-ENGINEERING_ATTEMPT_GRACE_MS, this.now()),
+    );
+    for (const job of overdue) {
+      withTransaction(this.store.db, () => {
+        this.store.jobs.setCancelRequested(job.id);
+        this.store.jobs.appendEvent(
+          job.id,
+          'attempt_deadline_exceeded',
+          'The attempt budget ran out; cancellation was requested and the executor must confirm the stop.',
+        );
+        this.store.auditLog.record({
+          event: 'job.cancel_requested', actorKind: 'reconciler', actorRef: 'reconciler',
+          subjectKind: 'job', subjectRef: job.publicId,
+          detail: 'attempt deadline exceeded; waiting for the executor to stop',
+        });
+      });
+    }
+    return overdue.length;
   }
 
   /**
@@ -134,7 +170,19 @@ export class Reconciler {
             'lease_expired_exhausted',
             'The executor stopped reporting and no attempts remain. Workspace retained.',
           );
-          this.releaseUnlessOrphan(job.repoSlug);
+          // Same rule as the cancelled branch above: a recorded workspace may
+          // still hold a live agent, so the repository AND the engineering slot
+          // stay blocked for the owner instead of being released on silence.
+          if (this.store.herdrWorkspaces.openForJob(job.id)) {
+            this.store.jobs.markReservationOrphan(job.repoSlug);
+            this.store.jobs.appendEvent(
+              job.id,
+              'reservation_orphaned',
+              `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+            );
+          } else {
+            this.releaseUnlessOrphan(job.repoSlug);
+          }
           return;
         }
         this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired', 'system:reconciler', {
@@ -143,6 +191,12 @@ export class Reconciler {
           leaseId: null,
           leaseExpiresAt: null,
         });
+        // The executor stopped reporting, which is not evidence that its agent
+        // stopped. The engineering slot stays with this job -- no other job can
+        // start beside a possibly-live writer -- and is marked as an
+        // unconfirmed stop until the same job reclaims it and recovery proves
+        // the agent quiet, or the owner clears it.
+        this.store.jobs.markAdmissionUnconfirmed(job.id);
         this.store.jobs.appendEvent(
           job.id,
           'lease_expired',
@@ -231,7 +285,25 @@ export class Reconciler {
             'The repository reservation expired while the job was still open.',
           );
         }
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        // A job that lost its executor mid-attempt holds the engineering slot
+        // as an unconfirmed stop. If its workspace is still open, an agent may
+        // still be writing, so expiry converts the reservation into an orphan
+        // (which keeps the slot) instead of releasing both on a timer.
+        const held = this.store.jobs.admission();
+        if (
+          held?.jobId === job.id &&
+          held.reason === 'unconfirmed_stop' &&
+          this.store.herdrWorkspaces.openForJob(job.id)
+        ) {
+          this.store.jobs.markReservationOrphan(reservation.repoSlug);
+          this.store.jobs.appendEvent(
+            job.id,
+            'reservation_orphaned',
+            `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+          );
+        } else {
+          this.store.jobs.releaseReservation(reservation.repoSlug);
+        }
       });
 
       // The SAME event `expireApprovals()` records. An approval that lapsed on

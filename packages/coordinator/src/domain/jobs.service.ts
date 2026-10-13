@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
-  DEFAULT_MAX_ATTEMPTS, DuckyError, EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
+  DEFAULT_MAX_ATTEMPTS, DuckyError, ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS,
+  EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
@@ -28,6 +29,12 @@ export interface JobsServiceDeps {
   readonly authz: Authorizer;
   readonly allowlist: RepoAllowlist;
   readonly now?: () => Date;
+  /**
+   * Whether engineering jobs run at all, and the budget of one claimed attempt.
+   * Omitting it means DISABLED: no job is submitted and no claim is answered,
+   * which is the fail-closed reading of "nobody said engineering is on".
+   */
+  readonly engineering?: { readonly enabled: boolean; readonly attemptBudgetMs: number };
 }
 
 export interface JobDetail {
@@ -48,8 +55,13 @@ export class JobsService {
   private readonly authz: Authorizer;
   private readonly allowlist: RepoAllowlist;
   private readonly now: () => Date;
+  private readonly engineeringEnabled: boolean;
+  private readonly attemptBudgetMs: number;
 
   constructor(deps: JobsServiceDeps) {
+    this.engineeringEnabled = deps.engineering?.enabled ?? false;
+    this.attemptBudgetMs =
+      deps.engineering?.attemptBudgetMs ?? ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS;
     this.store = deps.store;
     this.authz = deps.authz;
     this.allowlist = deps.allowlist;
@@ -75,6 +87,12 @@ export class JobsService {
     origin: { sharedChannelId?: string | undefined } = {},
   ): JobRow {
     this.authz.requireOwner(actor);
+    if (!this.engineeringEnabled) {
+      throw new DuckyError(
+        'invalid_input',
+        'Engineering jobs are switched off on this runtime (DUCKY_ENGINEERING_ENABLED), so nothing was queued.',
+      );
+    }
     const repo = this.allowlist.resolve(input.repoSlug);
     /**
      * A watch-only mapping is not a job target.
@@ -413,6 +431,10 @@ export class JobsService {
    * this transaction aborts.
    */
   claim(executorId: string, idempotencyKey: string): ClaimResponse | undefined {
+    // Disabled engineering answers no claim, and answers it before the
+    // idempotency cache so a response cached while it was enabled is not
+    // replayed after the operator switched it off.
+    if (!this.engineeringEnabled) return undefined;
     const cached = this.store.db
       .prepare('SELECT response_json FROM idempotency_keys WHERE key = ?')
       .get(`claim:${executorId}:${idempotencyKey}`) as { response_json: string } | undefined;
@@ -432,8 +454,20 @@ export class JobsService {
       );
       if (!acquired) throw new DuckyError('rate_limited', 'Repository reserved by another job.');
 
+      // The Ducky-wide slot. `nextClaimable` already excluded a job while a
+      // different one holds it, so a refusal here is a race lost inside this
+      // transaction and aborts it with no change, exactly like the reservation.
+      if (!this.store.jobs.acquireAdmission(job.id, job.repoSlug)) {
+        throw new DuckyError('rate_limited', 'Another engineering job holds the slot.');
+      }
+
       const leaseId = randomUUID();
       const leaseExpiresAt = isoPlus(LEASE_TTL_MS, this.now());
+      // A reclaim after lease expiry is the SAME attempt: it keeps the deadline
+      // it already had, so a restart cannot grant a fresh budget. A first claim
+      // or a re-queued job starts a new one.
+      const attemptDeadlineAt =
+        job.attemptDeadlineAt ?? isoPlus(this.attemptBudgetMs, this.now());
       this.store.jobs.transition(job.id, 'running', 'claimed', `executor:${executorId}`, {
         leaseId,
         leaseExpiresAt,
@@ -443,6 +477,7 @@ export class JobsService {
         // waiting for the first progress report means the owner never sees a
         // running job with no phase at all.
         workPhase: INITIAL_WORK_PHASE,
+        attemptDeadlineAt,
       });
       this.store.jobs.appendEvent(job.id, 'claimed', 'Picked up by the executor.');
       this.store.auditLog.record({
@@ -473,6 +508,7 @@ export class JobsService {
         publicId: job.publicId,
         leaseId,
         leaseExpiresAt,
+        attemptDeadlineAt,
         payload: {
           repoSlug: repo.slug,
           absolutePath: placement.absolutePath,
@@ -682,7 +718,7 @@ export class JobsService {
     jobId: string,
     leaseId: string,
     reason: ExecutorFailureReason,
-    extra: { detail?: string; workspaceId?: string; agentName?: string } = {},
+    extra: { detail?: string; workspaceId?: string; agentName?: string; quiescent?: boolean } = {},
   ): { state: JobState; orphan: boolean } {
     const job = this.leasedJob(executorId, jobId, leaseId);
 
@@ -692,7 +728,14 @@ export class JobsService {
     // start beside a running agent. Only a failure that happened before any
     // workspace existed can safely release.
     const hasRecordedWorkspace = this.store.herdrWorkspaces.openForJob(job.id) !== undefined;
-    const orphan = ORPHAN_FAILURE_REASONS.includes(reason) || hasRecordedWorkspace;
+    //
+    // The one exception is a timeout whose agent the executor observed idle,
+    // done or absent. That is the same evidence an acknowledged cancellation
+    // rests on, and it is the only way a registered workspace stops blocking
+    // the repository and the engineering slot without the owner's cleanup.
+    const provenQuiet = extra.quiescent === true && reason === 'wall_clock_exceeded';
+    const orphan =
+      ORPHAN_FAILURE_REASONS.includes(reason) || (hasRecordedWorkspace && !provenQuiet);
 
     withTransaction(this.store.db, () => {
       this.store.jobs.transition(job.id, 'failed', reason, `executor:${executorId}`, {

@@ -19,7 +19,7 @@ import {
 } from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveEngineering, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -306,7 +306,7 @@ export function createApp(
   const pending = new PendingScheduleStore();
   const captures = new CapturesService(store, authz);
   const schedules = new SchedulesService({ store, authz, pending, extractor });
-  const jobs = new JobsService({ store, authz, allowlist });
+  const jobs = new JobsService({ store, authz, allowlist, engineering: resolveEngineering(env) });
   const actionPerformer = overrides.actionPerformer ?? new GitActionPerformer({
     allowlist,
     enabled: resolveApprovedActionsEnabled(env),

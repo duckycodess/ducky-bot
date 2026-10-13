@@ -1,11 +1,13 @@
 import {
-  RESERVATION_TTL_MS,
+  PAUSED_STATES, RESERVATION_TTL_MS,
   assertTransition, assertWorkPhaseTransition, isLeaseBearing,
   type JobState, type JobWorkPhase,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { isoPlus, nowIso } from '../db.js';
-import { fromBool, toBool, type JobRow, type OwnerInputRow, type ReservationRow } from './types.js';
+import {
+  fromBool, toBool, type AdmissionRow, type JobRow, type OwnerInputRow, type ReservationRow,
+} from './types.js';
 
 const mapJob = (r: Record<string, unknown>): JobRow => ({
   id: String(r['id']),
@@ -33,6 +35,8 @@ const mapJob = (r: Record<string, unknown>): JobRow => ({
   updatedAt: String(r['updated_at']),
   startedAt: r['started_at'] == null ? null : String(r['started_at']),
   finishedAt: r['finished_at'] == null ? null : String(r['finished_at']),
+  attemptDeadlineAt:
+    r['attempt_deadline_at'] == null ? null : String(r['attempt_deadline_at']),
 });
 
 /**
@@ -51,6 +55,13 @@ const splitActor = (actor: string): [string, string] => {
   if (prefix === 'system' && tail === 'reconciler') return ['reconciler', 'reconciler'];
   return ['system', tail || prefix || 'system'];
 };
+
+const mapAdmission = (r: Record<string, unknown>): AdmissionRow => ({
+  jobId: String(r['job_id']),
+  repoSlug: String(r['repo_slug']),
+  acquiredAt: String(r['acquired_at']),
+  reason: String(r['reason']) as AdmissionRow['reason'],
+});
 
 const mapReservation = (r: Record<string, unknown>): ReservationRow => ({
   repoSlug: String(r['repo_slug']),
@@ -184,6 +195,7 @@ export class JobsRepo {
       startedAt: string | null;
       finishedAt: string | null;
       workPhase: JobWorkPhase | null;
+      attemptDeadlineAt: string | null;
     }> = {},
   ): JobRow {
     const job = this.byId(jobId);
@@ -207,6 +219,15 @@ export class JobsRepo {
     if ('retainedWorkspaceId' in patch) put('retained_workspace_id', patch.retainedWorkspaceId ?? null);
     if ('startedAt' in patch) put('started_at', patch.startedAt ?? null);
     if ('finishedAt' in patch) put('finished_at', patch.finishedAt ?? null);
+
+    // An attempt budget belongs to the attempt. It survives the one move that
+    // is still the SAME attempt (a lease expiry back to waiting_for_executor,
+    // so a reclaim cannot reset it) and is cleared by everything else: a pause
+    // or a terminal state ends the attempt, and a requeue starts a new one.
+    if ('attemptDeadlineAt' in patch) put('attempt_deadline_at', patch.attemptDeadlineAt ?? null);
+    else if (to !== 'running' && !(job.state === 'running' && to === 'waiting_for_executor')) {
+      put('attempt_deadline_at', null);
+    }
 
     // The work phase belongs to a live lease and to nothing else. Leaving a
     // stale `reviewing` on a job that has since been cancelled, paused on a
@@ -241,6 +262,14 @@ export class JobsRepo {
          VALUES (?, 'job.transitioned', ?, ?, 'job', ?, 'ok', ?)`,
       )
       .run(ts, actorKind, actorTail, job.publicId, `${job.state} -> ${to} (${reason})`);
+
+    // A pause is quiescent by contract (the executor released its writer lock
+    // and reported a result before the job could get here), so the engineering
+    // slot is released with it while the repository reservation is kept. The
+    // answered job reacquires the slot at its next claim.
+    if (job.state === 'running' && (PAUSED_STATES as readonly string[]).includes(to)) {
+      this.releaseAdmission(jobId);
+    }
 
     this.refreshReservationForState(job.repoSlug, jobId, to);
     return this.byId(jobId)!;
@@ -379,17 +408,69 @@ export class JobsRepo {
     return Number(res.changes) > 0;
   }
 
+  /**
+   * Releases a repository reservation, and with it the engineering slot of the
+   * SAME job: the slot never outlives its job's reservation, so every existing
+   * release site (terminal result, cancellation, owner cleanup) frees both
+   * without having to remember a second table. An orphaned job never reaches
+   * here, because every caller already skips `orphan_agent` reservations.
+   */
   releaseReservation(repoSlug: string): void {
+    const held = this.reservation(repoSlug);
     this.db.prepare('DELETE FROM repo_reservations WHERE repo_slug = ?').run(repoSlug);
+    if (held) this.releaseAdmission(held.jobId);
   }
 
-  /** Orphan reservations never expire; only an explicit owner cleanup clears them. */
+  /**
+   * Orphan reservations never expire; only an explicit owner cleanup clears them.
+   * The job's engineering slot becomes an unconfirmed stop in the same step, so
+   * an agent that may still be writing keeps blocking ALL engineering work and
+   * not only its own repository.
+   */
   markReservationOrphan(repoSlug: string): void {
+    const held = this.reservation(repoSlug);
     this.db
       .prepare(
         `UPDATE repo_reservations SET reason = 'orphan_agent', expires_at = NULL WHERE repo_slug = ?`,
       )
       .run(repoSlug);
+    if (held) this.markAdmissionUnconfirmed(held.jobId);
+  }
+
+  // ----------------------------------------------------------- admission ----
+
+  admission(): AdmissionRow | undefined {
+    const r = this.db.prepare('SELECT * FROM engineering_admission WHERE slot = 1').get();
+    return r ? mapAdmission(r as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * Takes the single engineering slot for a job, or re-takes it for the job
+   * that already holds it (a reclaim after lease expiry). Returns false when a
+   * DIFFERENT job holds it, and changes nothing.
+   */
+  acquireAdmission(jobId: string, repoSlug: string): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT INTO engineering_admission (slot, job_id, repo_slug, acquired_at, reason)
+         VALUES (1, ?, ?, ?, 'active_attempt')
+         ON CONFLICT(slot) DO UPDATE SET reason = 'active_attempt', acquired_at = excluded.acquired_at
+         WHERE engineering_admission.job_id = excluded.job_id`,
+      )
+      .run(jobId, repoSlug, nowIso());
+    return Number(res.changes) > 0;
+  }
+
+  /** Called only on proof of quiescence. Idempotent. */
+  releaseAdmission(jobId: string): void {
+    this.db.prepare('DELETE FROM engineering_admission WHERE job_id = ?').run(jobId);
+  }
+
+  /** The stop of this job's attempt could not be confirmed; the slot stays held. */
+  markAdmissionUnconfirmed(jobId: string): void {
+    this.db
+      .prepare(`UPDATE engineering_admission SET reason = 'unconfirmed_stop' WHERE job_id = ?`)
+      .run(jobId);
   }
 
   refreshReservationForState(repoSlug: string, jobId: string, state: JobState): void {
@@ -416,12 +497,14 @@ export class JobsRepo {
   // --------------------------------------------------------------- claim ----
 
   /**
+   * The next job an executor may take.
+   *
    * A job is claimable when its repo has no reservation, or the reservation is
    * its own -- which is what lets an answered needs_owner_input job be
-   * re-claimed while still holding the repo against every other job.
-   */
-  /**
-   * The next job an executor may take.
+   * re-claimed while still holding the repo against every other job -- AND no
+   * OTHER job holds the engineering slot. The slot is Ducky-wide within this
+   * database (see migration 27 for its exact scope), so a held slot returns no
+   * claim and leaves the job queued; it never fails or backs the job off.
    *
    * `eligibleSlugs` is the set of repositories the CALLING executor can
    * actually check out, computed by the coordinator from operator
@@ -445,6 +528,7 @@ export class JobsRepo {
          WHERE j.state IN ('queued','waiting_for_executor')
            AND j.cancel_requested = 0
            AND (r.repo_slug IS NULL OR r.job_id = j.id)
+           AND NOT EXISTS (SELECT 1 FROM engineering_admission a WHERE a.job_id <> j.id)
            AND j.repo_slug IN (${placeholders})
          ORDER BY j.created_at ASC
          LIMIT 1`,
@@ -459,6 +543,21 @@ export class JobsRepo {
     this.db
       .prepare('UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?')
       .run(leaseExpiresAt, nowIso(), jobId);
+  }
+
+  /**
+   * Running attempts whose persisted deadline passed more than `graceMs` ago
+   * and which nobody has asked to stop yet. The executor enforces the deadline
+   * locally; this finds the one that did not.
+   */
+  overdueAttempts(cutoff: string): JobRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM jobs WHERE state = 'running' AND cancel_requested = 0
+           AND attempt_deadline_at IS NOT NULL AND attempt_deadline_at < ?`,
+      )
+      .all(cutoff)
+      .map((r) => mapJob(r as Record<string, unknown>));
   }
 
   /**

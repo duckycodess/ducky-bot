@@ -71,7 +71,14 @@ try {
     problems.push(`schema version ${version} is NEWER than this build knows (${latest})`);
   }
 
-  const counts = ['jobs', 'repos', 'tasks', 'reminders', 'schedules', 'captures'].map((table) => {
+  // The engineering slot arrived in migration 27. An older backup legitimately
+  // lacks it and migrates forward, so it is required only from that version on:
+  // a current-schema file without it is a damaged one, and a backup that
+  // silently dropped the slot would restore as "nothing holds engineering".
+  const ENGINEERING_ADMISSION_VERSION = 27;
+  const tables = ['jobs', 'repos', 'tasks', 'reminders', 'schedules', 'captures'];
+  if (version >= ENGINEERING_ADMISSION_VERSION) tables.push('engineering_admission');
+  const counts = tables.map((table) => {
     try {
       const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
       return `${table}=${Number(row.n)}`;

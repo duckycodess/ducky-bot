@@ -210,11 +210,17 @@ describe('repository placements', () => {
       h.app.jobs.submit(h.owner, { repoSlug: 'app2', task: 't', bootstrap: false });
 
       const first = h.app.jobs.claim('wsl-dev', 'k1');
-      const second = h.app.jobs.claim('azure-prod', 'k2');
       expect(first?.payload.repoSlug).toBe('app');
       expect(first?.payload.absolutePath).toBe(WSL);
-      // The second executor gets the OTHER repository -- `app` is reserved --
-      // and it gets that repository's path for ITSELF, not the first host's.
+      // The engineering slot is Ducky-wide, so a second executor gets nothing
+      // while the first attempt holds it, even for a different repository.
+      expect(h.app.jobs.claim('azure-prod', 'k2')).toBeUndefined();
+
+      // Once the first attempt is quiescent the slot frees, and the second
+      // executor gets the OTHER repository -- `app` is still reserved -- with
+      // that repository's path for ITSELF, not the first host's.
+      h.store.jobs.releaseAdmission(first!.jobId);
+      const second = h.app.jobs.claim('azure-prod', 'k3');
       expect(second?.payload.repoSlug).toBe('app2');
       expect(second?.payload.absolutePath).toBe(`${AZURE}-2`);
       h.close();

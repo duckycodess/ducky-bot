@@ -310,6 +310,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         ...(body.detail === undefined ? {} : { detail: body.detail }),
         ...(body.workspaceId === undefined ? {} : { workspaceId: body.workspaceId }),
         ...(body.agentName === undefined ? {} : { agentName: body.agentName }),
+        ...(body.quiescent === undefined ? {} : { quiescent: body.quiescent }),
       });
     }),
   );

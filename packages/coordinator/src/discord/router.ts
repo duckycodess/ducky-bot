@@ -1021,7 +1021,7 @@ export class DuckyRouter {
     }
     if (
       reference.authorId !== undefined &&
-      this.deps.authz.roleOf(reference.authorId) !== 'none'
+      this.deps.authz.mayConverse(reference.authorId)
     ) {
       return { turn: { role: 'user', text: clipped } };
     }

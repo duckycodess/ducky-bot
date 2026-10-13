@@ -5,6 +5,7 @@ import { loadExecutorEnv } from './config.js';
 import { CoordinatorClient } from './client.js';
 import { ExecutorLoop } from './loop.js';
 import { checkMemoryHeadroom, defaultCgroupDir } from './memory-headroom.js';
+import { assertSubscriptionOnlyEnvironment } from '@ducky/contracts';
 
 /**
  * A logger that exists before `loadExecutorEnv()` can throw.
@@ -19,6 +20,11 @@ const bootLog = createLogger({
 });
 
 async function main(): Promise<void> {
+  // The executor spawns the Herdr CLI from this environment, so the same
+  // names-only refusal applies. Partial evidence: agents inherit the Herdr
+  // SERVER's environment, not this one, and that is checked separately in the
+  // runbook.
+  assertSubscriptionOnlyEnvironment(process.env, 'The executor');
   const env = loadExecutorEnv();
 
   // Inherits the boot correlation id, so one run is one id across both phases.

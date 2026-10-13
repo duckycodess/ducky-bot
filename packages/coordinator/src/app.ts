@@ -197,7 +197,11 @@ export function createApp(
   const secrets = resolveProfileSecrets(env);
 
   const store = overrides.store ?? createStoreFromEnv(env, paths);
-  const authz = new Authorizer(loadAuthzConfig(env));
+  const authz = new Authorizer(loadAuthzConfig({
+    OWNER_DISCORD_USER_ID: env.OWNER_DISCORD_USER_ID,
+    CHAT_WHITELIST_USER_IDS: env.CHAT_WHITELIST_USER_IDS,
+    DUCKY_ADDITIONAL_USER_AI_ENABLED: env.DUCKY_ADDITIONAL_USER_AI_ENABLED,
+  }));
   const signer = new ComponentSigner(secrets.componentSigningKey);
 
   const allowlist = RepoAllowlist.fromJson(
@@ -402,7 +406,7 @@ export function createApp(
       // One question only: may this person converse? It decides whether a
       // reply anchor that missed the message cache may cost a REST call, and
       // it grants nothing.
-      (userId) => authz.roleOf(userId) !== 'none',
+      (userId) => authz.mayConverse(userId),
     );
 
   /**

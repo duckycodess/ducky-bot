@@ -162,7 +162,7 @@ export class ConversationThreadPolicy {
     if (context.parentChannelId !== undefined) return false;
     if (!this.parents.has(context.channelId)) return false;
     if (this.shared.touchesSharedChannel(context)) return false;
-    if (this.authz.roleOf(event.userId) === 'none') return false;
+    if (!this.authz.mayConverse(event.userId)) return false;
     return event.messageId !== undefined && DISCORD_SNOWFLAKE.test(event.messageId);
   }
 }
@@ -384,7 +384,7 @@ export class ConversationThreadService {
    * UPDATE matches only a row that is actually closed.
    */
   private resumeIfClosed(threadId: string, userId: string): void {
-    if (this.deps.authz.roleOf(userId) === 'none') return;
+    if (!this.deps.authz.mayConverse(userId)) return;
     try {
       this.deps.store.conversationThreads.reopen(threadId);
     } catch {

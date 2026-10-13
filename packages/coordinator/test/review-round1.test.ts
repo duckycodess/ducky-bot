@@ -153,6 +153,8 @@ describe('workspace registration makes ownership durable', () => {
     expect(() => registerWorkspace(h, c)).not.toThrow();
 
     const other = h.app.jobs.submit(h.owner, { repoSlug: 'other', task: 'b', bootstrap: false });
+    // The engineering slot is not under test; the first attempt ended quietly.
+    h.store.jobs.releaseAdmission(c.jobId);
     const c2 = h.app.jobs.claim(h.executorId, 'k2')!;
     expect(c2.jobId).toBe(other.id);
     expect(() =>

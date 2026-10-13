@@ -56,7 +56,11 @@ registered.
 | Provider session deletion | **Blocked** | `RECORDED_SESSION_DELETION` is null. `pnpm probe:openclaw` exits 2 here because the pinned binary is not installed, so the deletion-capable command surface is unrecorded and `/forget` reports provider deletion as PARTIAL and rotates the session epoch instead |
 | Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
-| Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
+| Engineering slot, attempt deadline, memory guard (issue #8) | **Unit-tested** | One Ducky-wide slot in ONE coordinator database, a persisted 60 minute attempt deadline, a supervised timeout and a fail-closed cgroup headroom check. **Not cross-program:** no supported admission protocol with agent-flow exists, and the development and production databases do not share the slot. Engineering is off by default. See [Remote runtime preparation](#remote-runtime-preparation-issue-8) |
+| Additional-user AI | **Unit-tested, off by default** | `DUCKY_ADDITIONAL_USER_AI_ENABLED` gates plain chat and Branch and Compact for the whitelist; a whitelisted user reaches no provider |
+| Subscription-only environment guard | **Unit-tested, partial evidence** | Refuses a set `*_API_KEY` name in the coordinator or executor environment. Cannot see the provider's profile store or the Herdr server environment, and proves nothing about quota |
+| Remote Linux runtime | **Templates and runbook only** | `deploy/systemd/remote/` and `docs/runbooks/remote-linux-runtime.md`. Nothing installed, enabled or started; no deployment claim |
+| Azure / Tailscale deployment | **Templates only, superseded for the remote host** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision, and decision 0030 selects the existing remote account instead |
 | Repository workflow bridge (`$grill-me` / `$ticket` / `$agentize`) | **Unit-tested** | Off by default. 39 behaviour tests plus invariants drive a recording stand-in for the installed helper. **The real `workflow.py` has never been called from Ducky on this host**, because calling it creates GitHub issues |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
@@ -857,6 +861,59 @@ Both `/forget` and the scheduled pass use the SAME deletion implementation, so
 there is one child-first order and one set of guards rather than two that could
 drift apart.
 
+## Remote runtime preparation (issue #8)
+
+Preparation for the existing remote Linux account. **Not a deployment and not
+evidence of one.** Nothing was installed, enabled, started, probed against a real
+agent or changed on the host.
+
+**Host readbacks** (read-only, taken from this account while preparing this
+change; re-read before relying on them):
+
+| Readback | Value seen |
+|---|---|
+| user slice `MemoryMax` / `MemoryHigh` / `MemorySwapMax` / `TasksMax` | 8589934592 / 7516192768 / 0 / 1536 |
+| cgroup `memory.current` at that moment | about 4.3 GB, with nothing of Ducky running |
+| `Linger` | yes |
+| `devwork-cleanup.timer` | active as a user timer; the system-scope unit of that name was inactive |
+| Tailscale | up on the tailnet; `tailscale serve status` reported no serve config |
+| `herdr`, `pi` | present on `PATH` |
+| `openclaw` | **absent** from `PATH`; no `~/.openclaw-dev` store |
+
+**What the code now does** (all unit-tested, none run live):
+
+- one engineering slot in one coordinator database, kept as an unconfirmed stop
+  across lease expiry and an orphaned agent until the same job reclaims it or the
+  owner runs `/job cleanup`; a pause releases it;
+- a persisted 60 minute claimed-attempt deadline that a reclaim cannot reset, a
+  supervised timeout that reports the phase reached, and a coordinator backstop;
+- an opt-in fail-closed memory headroom check before every claim;
+- engineering and additional-user AI both off by default;
+- a names-only `*_API_KEY` refusal at startup;
+- the stale-temp sweep limited to real directories owned by the running user.
+
+**Reconciling the provider evidence, not overwriting it.** Earlier rows record
+two things that read as opposites: the OpenClaw conversation as **Verified**
+(an owner sign-in with a ChatGPT/Codex subscription, `oauth=1, api_key=0`,
+`probe:openclaw` exiting 0) and provider session deletion as **Blocked** because
+`probe:openclaw` exited 2 with the pinned binary not installed. They were
+observed on different hosts at different times, and both stand as history. Neither
+describes THIS account: `openclaw` is not installed here and no provider profile
+exists, so on this host the provider route, subscription eligibility, quota and
+sign-in are all **unverified**, and the memory-and-environment guard above is not
+a substitute for recording them.
+
+**Unresolved, and blocking acceptance and merge of issue #8:**
+
+| Open | Why |
+|---|---|
+| Cross-program single engineering job | agent-flow exposes only internal worker slots and a singleton lock; no supported external admission protocol, and its state was not touched. The Ducky slot is local to one database and does not cover the other profile either |
+| Stopping a working agent | the recorded Herdr adapter has no supported interruption, so a working agent that outlives its budget is an orphan. Owned-descendant termination needs an authorized real-agent stop probe |
+| Idle or no-result model stop that does not consume retry budget | **not implemented.** The runner still reports an idle turn with no result as an ordinary `no_result` failure, so the quota-pause criterion is not met. No provider quota state exists to build on until a real response is recorded |
+| Supported subscription route and quota on this host | unverified, as above |
+| Herdr session pinned to Ducky, separate from the dispatcher | no setting is recorded in this repository |
+| Discord, Tailscale Serve, logout continuity, phone, a controlled job with a second admission attempt and a timeout | none run |
+
 ## Detail: what the smoke-test evidence actually shows
 
 The owner confirmed one development smoke test: after a controlled restart,
@@ -1145,7 +1202,17 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
+The unmodified `pnpm test` command passes all **1855 tests in 127 files** on the merged
+tree of published main (the GitHub feed, migration 27) and the issue #8
+preparation (engineering admission, migration 28). `pnpm lint`
+(`tsc -p tsconfig.test.json`) and `git diff --check` are clean. `pnpm backup` and
+`pnpm backup:verify` were run, before the merge with main, only against a
+throwaway seeded database in a scratch directory, never the active runtime; that
+copy verified with the `engineering_admission` table present (then schema 27 of
+the pre-merge numbering, now schema 28). That proves state is
+recoverable and nothing about the provider, the network or admission. The
+issue #8 live checks are all unrun: see
+[Remote runtime preparation](#remote-runtime-preparation-issue-8).
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

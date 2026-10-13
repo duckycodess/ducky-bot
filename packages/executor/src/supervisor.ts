@@ -16,6 +16,14 @@ export interface SupervisorDeps {
   readonly phaseDebounceMs?: number;
   /** Reads the phase Pi reports about itself. */
   readonly phaseReader?: PhaseReader;
+  /**
+   * Epoch milliseconds at which the attempt must stop. When it passes, the
+   * same abort signal an owner cancellation raises is raised, and `timedOut`
+   * says which of the two it was.
+   */
+  readonly deadlineAtMs?: number;
+  /** Injected so a test does not wait out a real budget. */
+  readonly now?: () => number;
 }
 
 /**
@@ -38,7 +46,9 @@ export class JobSupervisor {
   readonly #controller = new AbortController();
   #timer: NodeJS.Timeout | undefined;
   #phaseTimer: NodeJS.Timeout | undefined;
+  #deadlineTimer: NodeJS.Timeout | undefined;
   #cancelSeen = false;
+  #timedOut = false;
   #stopped = false;
   #beatInFlight = false;
 
@@ -61,6 +71,11 @@ export class JobSupervisor {
 
   get cancelRequested(): boolean {
     return this.#cancelSeen;
+  }
+
+  /** The attempt budget ran out. Distinct from the owner asking to stop. */
+  get timedOut(): boolean {
+    return this.#timedOut;
   }
 
   /** The phase the coordinator last accepted. Evidence, not a local guess. */
@@ -170,7 +185,27 @@ export class JobSupervisor {
 
     this.#timer = setInterval(() => void tick(), interval);
     this.#timer.unref?.();
+    this.#armDeadline();
     void tick();
+  }
+
+  /**
+   * One timer for the whole attempt, set from the persisted deadline rather
+   * than from "now plus a budget", so a restarted executor resumes the SAME
+   * clock. It aborts the turn and nothing else: stopping what is running, and
+   * saying honestly whether it stopped, is the runner's supervised path.
+   */
+  #armDeadline(): void {
+    const at = this.deps.deadlineAtMs;
+    if (at === undefined || this.#deadlineTimer !== undefined) return;
+    const remaining = Math.max(0, at - (this.deps.now ?? Date.now)());
+    this.#deadlineTimer = setTimeout(() => {
+      if (this.#stopped || this.#controller.signal.aborted) return;
+      this.#timedOut = true;
+      this.deps.log?.(`job ${this.deps.jobId}: attempt budget reached`);
+      this.#controller.abort();
+    }, remaining);
+    this.#deadlineTimer.unref?.();
   }
 
   stop(): void {
@@ -179,5 +214,7 @@ export class JobSupervisor {
     this.#timer = undefined;
     if (this.#phaseTimer) clearTimeout(this.#phaseTimer);
     this.#phaseTimer = undefined;
+    if (this.#deadlineTimer) clearTimeout(this.#deadlineTimer);
+    this.#deadlineTimer = undefined;
   }
 }

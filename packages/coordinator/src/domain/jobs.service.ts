@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
-  DEFAULT_MAX_ATTEMPTS, DuckyError, EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
+  DEFAULT_MAX_ATTEMPTS, DuckyError, ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS,
+  EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
@@ -28,6 +29,12 @@ export interface JobsServiceDeps {
   readonly authz: Authorizer;
   readonly allowlist: RepoAllowlist;
   readonly now?: () => Date;
+  /**
+   * Whether engineering jobs run at all, and the budget of one claimed attempt.
+   * Omitting it means DISABLED: no job is submitted and no claim is answered,
+   * which is the fail-closed reading of "nobody said engineering is on".
+   */
+  readonly engineering?: { readonly enabled: boolean; readonly attemptBudgetMs: number };
 }
 
 export interface JobDetail {
@@ -48,8 +55,13 @@ export class JobsService {
   private readonly authz: Authorizer;
   private readonly allowlist: RepoAllowlist;
   private readonly now: () => Date;
+  private readonly engineeringEnabled: boolean;
+  private readonly attemptBudgetMs: number;
 
   constructor(deps: JobsServiceDeps) {
+    this.engineeringEnabled = deps.engineering?.enabled ?? false;
+    this.attemptBudgetMs =
+      deps.engineering?.attemptBudgetMs ?? ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS;
     this.store = deps.store;
     this.authz = deps.authz;
     this.allowlist = deps.allowlist;
@@ -75,6 +87,12 @@ export class JobsService {
     origin: { sharedChannelId?: string | undefined } = {},
   ): JobRow {
     this.authz.requireOwner(actor);
+    if (!this.engineeringEnabled) {
+      throw new DuckyError(
+        'invalid_input',
+        'Engineering jobs are switched off on this runtime (DUCKY_ENGINEERING_ENABLED), so nothing was queued.',
+      );
+    }
     const repo = this.allowlist.resolve(input.repoSlug);
     /**
      * A watch-only mapping is not a job target.
@@ -186,6 +204,7 @@ export class JobsService {
             ? 'cancelled_awaiting_dependency'
             : 'cancelled_by_owner';
 
+    let kept = false;
     withTransaction(this.store.db, () => {
       if (job.state === 'needs_approval') {
         this.store.approvals.rejectAllPending(job.id, `owner:${actor.discordUserId}`, 'job_cancelled');
@@ -204,9 +223,14 @@ export class JobsService {
         event: 'job.cancelled', actorKind: 'owner', actorRef: AUDIT_OWNER_REF,
         subjectKind: 'job', subjectRef: job.publicId, detail: reason,
       });
-      this.releaseUnlessOrphan(job.repoSlug);
+      kept = !this.releaseUnlessOrphan(job);
     });
-    return { state: 'cancelled', note: 'Cancelled. Any workspace was retained for inspection.' };
+    return {
+      state: 'cancelled',
+      note: kept
+        ? `Cancelled, but the executor stopped reporting and nothing has shown its agent stopped. \`${job.repoSlug}\` and the engineering slot stay held until /job cleanup ${job.publicId}.`
+        : 'Cancelled. Any workspace was retained for inspection.',
+    };
   }
 
   /**
@@ -246,7 +270,7 @@ export class JobsService {
           'owner_input_rounds_exhausted',
           'The maximum number of owner-input rounds was reached.',
         );
-        this.releaseUnlessOrphan(job.repoSlug);
+        this.releaseUnlessOrphan(job);
       });
       return { state: 'failed', note: 'That job already used all of its question rounds.' };
     }
@@ -413,6 +437,10 @@ export class JobsService {
    * this transaction aborts.
    */
   claim(executorId: string, idempotencyKey: string): ClaimResponse | undefined {
+    // Disabled engineering answers no claim, and answers it before the
+    // idempotency cache so a response cached while it was enabled is not
+    // replayed after the operator switched it off.
+    if (!this.engineeringEnabled) return undefined;
     const cached = this.store.db
       .prepare('SELECT response_json FROM idempotency_keys WHERE key = ?')
       .get(`claim:${executorId}:${idempotencyKey}`) as { response_json: string } | undefined;
@@ -432,8 +460,20 @@ export class JobsService {
       );
       if (!acquired) throw new DuckyError('rate_limited', 'Repository reserved by another job.');
 
+      // The Ducky-wide slot. `nextClaimable` already excluded a job while a
+      // different one holds it, so a refusal here is a race lost inside this
+      // transaction and aborts it with no change, exactly like the reservation.
+      if (!this.store.jobs.acquireAdmission(job.id, job.repoSlug)) {
+        throw new DuckyError('rate_limited', 'Another engineering job holds the slot.');
+      }
+
       const leaseId = randomUUID();
       const leaseExpiresAt = isoPlus(LEASE_TTL_MS, this.now());
+      // A reclaim after lease expiry is the SAME attempt: it keeps the deadline
+      // it already had, so a restart cannot grant a fresh budget. A first claim
+      // or a re-queued job starts a new one.
+      const attemptDeadlineAt =
+        job.attemptDeadlineAt ?? isoPlus(this.attemptBudgetMs, this.now());
       this.store.jobs.transition(job.id, 'running', 'claimed', `executor:${executorId}`, {
         leaseId,
         leaseExpiresAt,
@@ -443,6 +483,7 @@ export class JobsService {
         // waiting for the first progress report means the owner never sees a
         // running job with no phase at all.
         workPhase: INITIAL_WORK_PHASE,
+        attemptDeadlineAt,
       });
       this.store.jobs.appendEvent(job.id, 'claimed', 'Picked up by the executor.');
       this.store.auditLog.record({
@@ -473,6 +514,7 @@ export class JobsService {
         publicId: job.publicId,
         leaseId,
         leaseExpiresAt,
+        attemptDeadlineAt,
         payload: {
           repoSlug: repo.slug,
           absolutePath: placement.absolutePath,
@@ -667,7 +709,7 @@ export class JobsService {
         event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
         subjectKind: 'job', subjectRef: job.publicId, detail: 'termination confirmed',
       });
-      this.releaseUnlessOrphan(job.repoSlug);
+      this.releaseUnlessOrphan(job);
     });
     return { state: 'cancelled' };
   }
@@ -682,7 +724,7 @@ export class JobsService {
     jobId: string,
     leaseId: string,
     reason: ExecutorFailureReason,
-    extra: { detail?: string; workspaceId?: string; agentName?: string } = {},
+    extra: { detail?: string; workspaceId?: string; agentName?: string; quiescent?: boolean } = {},
   ): { state: JobState; orphan: boolean } {
     const job = this.leasedJob(executorId, jobId, leaseId);
 
@@ -692,7 +734,14 @@ export class JobsService {
     // start beside a running agent. Only a failure that happened before any
     // workspace existed can safely release.
     const hasRecordedWorkspace = this.store.herdrWorkspaces.openForJob(job.id) !== undefined;
-    const orphan = ORPHAN_FAILURE_REASONS.includes(reason) || hasRecordedWorkspace;
+    //
+    // The one exception is a timeout whose agent the executor observed idle,
+    // done or absent. That is the same evidence an acknowledged cancellation
+    // rests on, and it is the only way a registered workspace stops blocking
+    // the repository and the engineering slot without the owner's cleanup.
+    const provenQuiet = extra.quiescent === true && reason === 'wall_clock_exceeded';
+    const orphan =
+      ORPHAN_FAILURE_REASONS.includes(reason) || (hasRecordedWorkspace && !provenQuiet);
 
     withTransaction(this.store.db, () => {
       this.store.jobs.transition(job.id, 'failed', reason, `executor:${executorId}`, {
@@ -719,7 +768,7 @@ export class JobsService {
           `Repository \`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
         );
       } else {
-        this.releaseUnlessOrphan(job.repoSlug);
+        this.releaseUnlessOrphan(job);
       }
     });
     return { state: 'failed', orphan };
@@ -915,10 +964,34 @@ export class JobsService {
     return ttl == null ? null : isoPlus(ttl, this.now());
   }
 
-  private releaseUnlessOrphan(repoSlug: string): void {
-    const r = this.store.jobs.reservation(repoSlug);
-    if (r && r.reason === 'orphan_agent') return;
-    this.store.jobs.releaseReservation(repoSlug);
+  /**
+   * Releases a job's repository, unless doing so would free a possibly-live
+   * writer. Returns true when it was RELEASED and false when it was kept.
+   *
+   * A job that holds the engineering slot as an `unconfirmed_stop` lost its
+   * executor mid-attempt (lease expiry), and nothing has since proved its agent
+   * quiet. Cancelling it, failing it, or answering it must not turn that silence
+   * into permission: the reservation is converted to an orphan, which keeps the
+   * slot with it, and only quiescence or the owner's `/job cleanup` clears it.
+   *
+   * A paused job holds no slot (a pause is quiescent by contract), so cancelling
+   * one still releases at once, exactly as before.
+   */
+  private releaseUnlessOrphan(job: JobRow): boolean {
+    const r = this.store.jobs.reservation(job.repoSlug);
+    if (r && r.reason === 'orphan_agent') return false;
+    const held = this.store.jobs.admission();
+    if (r && r.jobId === job.id && held?.jobId === job.id && held.reason === 'unconfirmed_stop') {
+      this.store.jobs.markReservationOrphan(job.repoSlug);
+      this.store.jobs.appendEvent(
+        job.id,
+        'reservation_orphaned',
+        `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+      );
+      return false;
+    }
+    this.store.jobs.releaseReservation(job.repoSlug);
+    return true;
   }
 
   private ownedJob(actor: ActorContext, publicId: string): JobRow {

@@ -67,6 +67,20 @@ describe('backup and verify', () => {
     expect(verified.code, verified.out).toBe(0);
     expect(verified.out).toMatch(/integrity: ok/);
     expect(verified.out).toMatch(/captures=1/);
+    // The engineering slot is part of what a current-schema backup must carry.
+    expect(verified.out).toMatch(/engineering_admission=0/);
+  });
+
+  it('refuses a current-schema copy that lost the engineering slot', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-backup-'));
+    const dbPath = seededDb(dir);
+    const db = openDatabase({ location: dbPath });
+    db.exec('DROP TABLE engineering_admission');
+    db.close();
+
+    const verified = run('verify-backup.ts', ['--file', dbPath]);
+    expect(verified.code).toBe(3);
+    expect(verified.out).toMatch(/table engineering_admission is missing/);
   });
 
   it('refuses a file that is not a Ducky database, rather than passing everything', () => {

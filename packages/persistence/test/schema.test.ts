@@ -323,6 +323,81 @@ describe('migration 20: the dead column', () => {
   });
 });
 
+describe('migration 28: engineering admission', () => {
+  const seedJob = (db: ReturnType<typeof fresh>, id: string, slug: string): void => {
+    const store = createStore(db);
+    store.repos.upsert({
+      slug, localPath: `/tmp/${slug}`, allowJobs: true, defaultBranch: 'main',
+      githubOwner: null, githubRepo: null, allowWorktree: true, allowBootstrap: false,
+      bootstrapAllowedEntries: ['.git'], enabled: true,
+    });
+    store.jobs.create({
+      id, publicId: `p${id}`, discordUserId: '1', repoSlug: slug, task: 't', context: null,
+      bootstrap: false, maxAttempts: 1, maxOwnerInputRounds: 3, state: 'queued',
+    });
+  };
+
+  it('is a single structural slot, not a convention', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'two');
+    const store = createStore(db);
+
+    expect(store.jobs.acquireAdmission('a', 'one')).toBe(true);
+    // Re-taking it for the holder is allowed; a different job is refused.
+    expect(store.jobs.acquireAdmission('a', 'one')).toBe(true);
+    expect(store.jobs.acquireAdmission('b', 'two')).toBe(false);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO engineering_admission (slot, job_id, repo_slug, acquired_at, reason)
+           VALUES (2, 'b', 'two', 'now', 'active_attempt')`,
+        )
+        .run(),
+    ).toThrow();
+    expect(() =>
+      db.prepare(`UPDATE engineering_admission SET reason = 'maybe'`).run(),
+    ).toThrow();
+    db.close();
+  });
+
+  it('is never released by releasing somebody else’s reservation, and follows its own', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'two');
+    const store = createStore(db);
+    store.jobs.acquireReservation('one', 'a', null);
+    store.jobs.acquireReservation('two', 'b', null);
+    store.jobs.acquireAdmission('a', 'one');
+
+    store.jobs.releaseReservation('two');
+    expect(store.jobs.admission()?.jobId).toBe('a');
+
+    store.jobs.markReservationOrphan('one');
+    expect(store.jobs.admission()?.reason).toBe('unconfirmed_stop');
+    store.jobs.releaseReservation('one');
+    expect(store.jobs.admission()).toBeUndefined();
+    db.close();
+  });
+
+  it('is refused by the retention guard while held, and named as forbidden', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    const store = createStore(db);
+    db.prepare("UPDATE jobs SET state = 'failed', finished_at = ? WHERE id = 'a'").run('2020-01-01T00:00:00.000Z');
+    store.jobs.acquireAdmission('a', 'one');
+    expect(store.retention.guardJobUnit('a')).toEqual({ ok: false, refusal: 'reservation_held' });
+    db.close();
+  });
+
+  it('carries the attempt deadline column', () => {
+    const db = fresh();
+    const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain('attempt_deadline_at');
+    db.close();
+  });
+});
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {

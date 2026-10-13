@@ -3,6 +3,7 @@ import { buildServer } from './http/server.js';
 import { formatDiagnostics, runStartupDiagnostics } from './diagnostics.js';
 import { sweepStaleTempDirs } from './discord/attachments.js';
 import { createLogger } from '@ducky/adapters';
+import { assertSubscriptionOnlyEnvironment } from '@ducky/contracts';
 
 /**
  * A logger that exists BEFORE configuration is read.
@@ -19,6 +20,10 @@ const bootLog = createLogger({
 });
 
 async function main(): Promise<void> {
+  // Before anything reads configuration or opens a store: a process that could
+  // reach a separately billed API key does not start. Names only, partial
+  // evidence -- see the function for exactly what it does not prove.
+  assertSubscriptionOnlyEnvironment(process.env, 'The coordinator');
   const app = createApp();
   // Every line from here goes through the redactor. Interpolating a raw
   // `(err as Error).message` into stderr -- which is what these sites used to

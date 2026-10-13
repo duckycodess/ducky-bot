@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  DuckyError, JOB_MAX_WALL_CLOCK_MS, RECOVERY_WAIT_MS, isDuckyError,
+  DuckyError, RECOVERY_WAIT_MS, isDuckyError,
   type ClaimResponse, type ExecutorFailureReason,
 } from '@ducky/contracts';
 import {
@@ -12,6 +12,7 @@ import type { CoordinatorClient } from './client.js';
 import { resolveWorkspace } from './workspace.js';
 import { acquireWriterLock } from './single-writer.js';
 import { JobSupervisor } from './supervisor.js';
+import { attemptDeadlineMs } from './attempt-deadline.js';
 
 export interface RunnerDeps {
   readonly client: CoordinatorClient;
@@ -43,7 +44,11 @@ export interface RunnerDeps {
 export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Promise<void> {
   const { client, orchestrator } = deps;
   const log = deps.log ?? (() => {});
-  const started = Date.now();
+
+  // The attempt's own clock, taken from the persisted claim deadline so a
+  // restarted executor or a reclaim resumes the SAME budget instead of getting
+  // a fresh one. Bounded locally even when the claim carries nothing.
+  const deadlineMs = attemptDeadlineMs(claim.attemptDeadlineAt, Date.now());
 
   let resolved;
   try {
@@ -75,9 +80,14 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     client,
     jobId: claim.jobId,
     leaseId: claim.leaseId,
+    deadlineAtMs: deadlineMs,
     ...(deps.heartbeatMs === undefined ? {} : { intervalMs: deps.heartbeatMs }),
     ...(deps.log ? { log: deps.log } : {}),
   });
+  // A budget that is already spent (a reclaim of an attempt that used it all)
+  // must not start a new turn only to abort it: the agent would get a head
+  // start the budget says it does not have.
+  const spentAtStart = Date.now() >= deadlineMs;
 
   /** What was registered when the workspace was created, reused verbatim later. */
   let registered:
@@ -113,7 +123,9 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
           }
         : undefined) ?? deps.recordedWorkspace?.(claim.jobId),
     recoveryRequired: claim.payload.recoveryRequired,
-    promptTimeoutMs: JOB_MAX_WALL_CLOCK_MS,
+    // What is LEFT of the attempt, not a fixed wall clock: the turn must not be
+    // able to wait past the budget the coordinator persisted.
+    promptTimeoutMs: Math.max(1_000, deadlineMs - Date.now()),
     recoveryWaitMs: RECOVERY_WAIT_MS,
     signal: supervisor.signal,
     onPhase: (phase) => supervisor.reportPhase(phase),
@@ -179,13 +191,15 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     // Raced, not awaited to completion. A real turn is a blocking
     // `herdr agent prompt --wait`; waiting it out would mean a cancellation
     // took effect only after the full wall-clock timeout.
-    outcome = await Promise.race([
-      orchestrator.runJob(spec).then((o) => o).catch((err) => {
-        failure = err;
-        return undefined;
-      }),
-      cancelled(supervisor.signal),
-    ]);
+    outcome = spentAtStart
+      ? undefined
+      : await Promise.race([
+          orchestrator.runJob(spec).then((o) => o).catch((err) => {
+            failure = err;
+            return undefined;
+          }),
+          cancelled(supervisor.signal),
+        ]);
   } finally {
     supervisor.stop();
   }
@@ -195,9 +209,18 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   // to resolve at the same moment. Accepting it would complete, and clean up
   // after, work the owner had explicitly stopped. Re-submitting is the owner's
   // call to make.
-  if (supervisor.cancelRequested) {
+  //
+  // The attempt budget runs out through the SAME path: a result that lands after
+  // the budget is not accepted either, because "within budget" has to mean
+  // something. What differs is only the report, below -- a timeout is a failure
+  // the owner did not ask for, not a cancellation they did.
+  const timedOut = spentAtStart || supervisor.timedOut;
+  if (supervisor.cancelRequested || timedOut) {
     if (outcome !== undefined) {
-      log(`job ${claim.publicId}: result discarded, the owner cancelled during the turn`);
+      log(
+        `job ${claim.publicId}: result discarded, ` +
+          (supervisor.cancelRequested ? 'the owner cancelled during the turn' : 'the attempt budget ran out'),
+      );
     }
     let stopped;
     try {
@@ -216,6 +239,32 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     // already registered when the workspace was created, so nothing more needs
     // recording here.
     if (stopped.terminated) lock.release();
+
+    if (!supervisor.cancelRequested) {
+      // Timeout only. The adapter has no supported way to interrupt a working
+      // agent (and sending keystrokes into a live pane is deliberately not
+      // done), so "stopped" here means exactly what `cancel` observed: the
+      // agent is idle, done or gone. Otherwise it is an orphan, and the
+      // repository and the engineering slot stay held for the owner.
+      const phase = supervisor.acceptedPhase;
+      const where = phase === null ? 'before a phase was reported' : `during ${phase}`;
+      const detail = redact(`The attempt budget ran out ${where}. ${stopped.detail}`).slice(0, 400);
+      await client.reportFailure(
+        claim.jobId,
+        claim.leaseId,
+        stopped.terminated ? 'wall_clock_exceeded' : 'orphan_agent_still_working',
+        {
+          detail,
+          ...(stopped.terminated ? { quiescent: true } : {}),
+          ...(stopped.workspaceId === undefined ? {} : { workspaceId: stopped.workspaceId }),
+          ...(stopped.agentName === undefined ? {} : { agentName: stopped.agentName }),
+        },
+      );
+      // An unterminated timeout deliberately keeps the writer lock, like the
+      // cancellation branch: a retry on this host must not start a second
+      // writer beside a live agent.
+      return;
+    }
 
     await client.cancelAck(claim.jobId, {
       leaseId: claim.leaseId,
@@ -263,9 +312,9 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     return;
   }
 
-  if (Date.now() - started > JOB_MAX_WALL_CLOCK_MS) {
+  if (Date.now() > deadlineMs) {
     await client.reportFailure(claim.jobId, claim.leaseId, 'wall_clock_exceeded', {
-      detail: 'The job exceeded its wall-clock budget.',
+      detail: 'The job exceeded its attempt budget.',
     });
     return;
   }

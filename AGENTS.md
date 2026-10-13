@@ -11,7 +11,7 @@ pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
-pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
+pnpm probe:openclaw   # records the OpenClaw surface; exit 0 only when the whole contract incl. a reply is recorded, 2 when any half is unrecorded or the binary is absent (it exited 0 on the original dev host; not run on the remote account, where openclaw is absent)
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
@@ -52,6 +52,16 @@ Report contradictions rather than picking whichever reads best.
   two shared-channel reads in `SHARED_READABLE_ROUTES`. Conversational and
   owner-only control manifests remain disjoint; shared reads stay narrowed
   views of commands already on the owner manifest.
+- **Model access for anyone but the owner is off by default.**
+  `DUCKY_ADDITIONAL_USER_AI_ENABLED` is frozen into the `Authorizer`, and
+  `Authorizer.mayConverse` is the one question every model-reaching path asks,
+  including Branch and Compact. The whitelist names who may be offered chat; it
+  never authorizes it.
+- **The engineering slot is local to one coordinator database.** Never describe
+  it as cross-program or cross-profile safety: agent-flow has no supported
+  shared-admission protocol and the profiles share no state. Engineering is off
+  unless `DUCKY_ENGINEERING_ENABLED` says otherwise, and a slot with an
+  unconfirmed stop is released only by quiescence or an owner's `/job cleanup`.
 - **Shared visibility is never authorization.** A configured shared channel
   says where information may be shown, never who may act. Non-owner output
   goes through `SharedJobsService` and `shared-presenters.ts`, which accept

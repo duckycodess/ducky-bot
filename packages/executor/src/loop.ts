@@ -3,6 +3,7 @@ import { isDuckyError } from '@ducky/contracts';
 import type { PiOrchestrator } from '@ducky/adapters';
 import type { CoordinatorClient } from './client.js';
 import { runClaimedJob } from './runner.js';
+import type { HeadroomVerdict } from './memory-headroom.js';
 
 export interface LoopDeps {
   readonly client: CoordinatorClient;
@@ -13,6 +14,14 @@ export interface LoopDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   /** How often to report structured executor state while a job runs. */
   readonly presenceIntervalMs?: number;
+  /**
+   * Answers whether the account has room for another engineering job. Omitting
+   * it means no check. When present and `ok: false`, no claim is attempted, so
+   * the job stays queued instead of being started into a nearly full slice.
+   */
+  readonly headroom?: () => Promise<HeadroomVerdict>;
+  /** How long to wait before re-checking after a refusal. */
+  readonly headroomRetryMs?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -28,6 +37,8 @@ const PRESENCE_INTERVAL_MS = 30_000;
 export class ExecutorLoop {
   #stopped = false;
   #presence: NodeJS.Timeout | undefined;
+  /** The reason the last claim was withheld, so a long hold logs once. */
+  #heldFor: string | undefined;
   /** Jobs this executor is running right now, reported on every heartbeat. */
   readonly #active = new Set<string>();
   private readonly workspaces = new Map<
@@ -80,7 +91,23 @@ export class ExecutorLoop {
     return [...this.#active];
   }
 
-  async runOnce(): Promise<'claimed' | 'idle'> {
+  async runOnce(): Promise<'claimed' | 'idle' | 'held'> {
+    // Checked BEFORE the claim, because a claim is what starts a job. A refused
+    // check leaves the job queued and the executor heartbeating, which is the
+    // honest state: work is waiting, and nothing has been started that the
+    // account cannot hold.
+    if (this.deps.headroom) {
+      const verdict = await this.deps.headroom();
+      if (!verdict.ok) {
+        if (this.#heldFor !== verdict.reason) {
+          this.#heldFor = verdict.reason;
+          this.deps.log?.(`claim withheld, no memory headroom: ${verdict.reason}`);
+        }
+        return 'held';
+      }
+      if (this.#heldFor !== undefined) this.deps.log?.('memory headroom restored; claiming again');
+      this.#heldFor = undefined;
+    }
     const claim = await this.deps.client.claim(this.deps.pollWaitMs);
     if (!claim) return 'idle';
 
@@ -126,6 +153,7 @@ export class ExecutorLoop {
         const outcome = await this.runOnce();
         backoff = 1000;
         if (outcome === 'idle') await sleep(250);
+        else if (outcome === 'held') await sleep(this.deps.headroomRetryMs ?? 15_000);
       } catch (err) {
         // `ownerMessage` is already safe by construction; an arbitrary error
         // message is not, and this is the one place a non-Ducky error reaches a

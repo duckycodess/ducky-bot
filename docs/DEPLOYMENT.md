@@ -49,6 +49,19 @@ development bot, and production never registers into the development guild.
 The active profile appears in the startup diagnostics and in `/status`, so an
 instance is never ambiguous.
 
+## Remote Linux account (issue 8): the selected placement
+
+The chosen runtime is the existing remote Linux account with Tailscale, a
+registered clone, an account-wide 8 GiB cap, lingering and a cleanup timer. The
+Azure and WSL material below is kept for history; it describes an older
+placement and is **superseded for this host** by
+[decision 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
+Preparation only: nothing is installed or started. The templates are in
+`deploy/systemd/remote/` and the procedure, the readbacks and the list of open
+blockers are in
+[runbooks/remote-linux-runtime.md](runbooks/remote-linux-runtime.md). Engineering
+and additional-user AI stay off by default.
+
 ## Azure templates — written, never executed
 
 [`deploy/azure/`](../deploy/azure/) now carries a Bicep template, a cloud-init

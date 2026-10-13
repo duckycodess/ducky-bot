@@ -144,6 +144,15 @@ export interface JobRow {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** When the current claimed attempt must stop; null outside an attempt. */
+  attemptDeadlineAt: string | null;
+}
+
+export interface AdmissionRow {
+  jobId: string;
+  repoSlug: string;
+  acquiredAt: string;
+  reason: 'active_attempt' | 'unconfirmed_stop';
 }
 
 export interface ReservationRow {

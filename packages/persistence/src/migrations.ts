@@ -1467,4 +1467,37 @@ CREATE INDEX ix_github_feed_digests_settled
   ON github_feed_digests(created_at) WHERE status <> 'pending';
 `,
   },
+  {
+    version: 28,
+    name: 'engineering_admission',
+    sql: `
+-- Ducky-wide engineering admission: at most ONE job may hold an executor
+-- attempt (or an unconfirmed stop of one) at a time, across every repository.
+--
+-- SCOPE, stated exactly: this row lives in ONE coordinator database, so it is
+-- global across the repositories and executors that coordinator serves and
+-- nowhere else. A second profile (development against production), another
+-- coordinator, or the separate agent-flow dispatcher each have their own state
+-- and cannot see it. Cross-program admission is NOT provided by this table.
+--
+-- The single row is structural, not a convention: the primary key is pinned to
+-- 1, so a second concurrent holder is a constraint violation and not a bug a
+-- predicate has to catch. It is released only on proof the attempt is
+-- quiescent; an uncertain stop (lease expiry, orphaned agent) converts it to
+-- \`unconfirmed_stop\` and it then outlives the attempt until the same job
+-- reclaims it or the owner clears the orphan.
+CREATE TABLE engineering_admission (
+  slot        INTEGER PRIMARY KEY CHECK (slot = 1),
+  job_id      TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+  repo_slug   TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  reason      TEXT NOT NULL CHECK (reason IN ('active_attempt','unconfirmed_stop'))
+);
+
+-- The instant a claimed attempt must stop. Set at claim and KEPT across a
+-- lease-expiry reclaim, so a restart cannot grant a fresh budget; cleared when
+-- the attempt ends in a pause or a terminal state.
+ALTER TABLE jobs ADD COLUMN attempt_deadline_at TEXT;
+`,
+  },
 ];

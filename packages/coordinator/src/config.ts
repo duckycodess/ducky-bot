@@ -13,6 +13,7 @@ import {
   CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT, CONVERSATION_CONTEXT_BUDGET_BYTES_MAX,
   CONVERSATION_CONTEXT_BUDGET_BYTES_MIN,
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
+  ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS, ENGINEERING_ATTEMPT_BUDGET_MAX_MS,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   GITHUB_FEED_INTERVAL_DEFAULT_MINUTES, GITHUB_FEED_INTERVAL_MAX_MINUTES,
   GITHUB_FEED_INTERVAL_MIN_MINUTES, GITHUB_FEED_MAX_SELECTED, canonicalRepoKey, parseRepoKey,
@@ -449,6 +450,37 @@ export const EnvSchema = z.object({
   DUCKY_PHONE_PASSCODE_VERIFIER: z.string().optional(),
   DUCKY_DEV_PHONE_PASSCODE_VERIFIER: z.string().optional(),
   DUCKY_PROD_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+
+  /**
+   * Whether this coordinator hands engineering jobs to an executor at all.
+   * Default OFF, and failing closed: while it is off, `/job submit` is refused
+   * and no claim is ever answered.
+   *
+   * The reason is scope. The engineering slot (migration 28) is global within
+   * THIS database only; it does not coordinate with another profile or with the
+   * separate agent-flow dispatcher, and no supported protocol for that exists
+   * yet. A remote runtime that can start a real agent must not be reachable by
+   * accident, so enabling it is an explicit act of the operator.
+   */
+  DUCKY_ENGINEERING_ENABLED: bool(false),
+  /**
+   * The budget for one claimed executor attempt, in minutes. Default 60.
+   * Bounded above by ENGINEERING_ATTEMPT_BUDGET_MAX_MS so a typo cannot turn it
+   * into an unbounded run.
+   */
+  DUCKY_ENGINEERING_ATTEMPT_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(ENGINEERING_ATTEMPT_BUDGET_MAX_MS / 60_000)
+    .default(ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS / 60_000),
+  /**
+   * Whether the configured additional (chat whitelist) users may reach the
+   * model, including its Branch and Compact controls. Default OFF: friend-facing
+   * AI stays disabled until a supported provider and a hosted-use access path
+   * are established, and the whitelist alone grants nothing.
+   */
+  DUCKY_ADDITIONAL_USER_AI_ENABLED: bool(false),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -576,6 +608,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
  * Ids are validated as snowflakes at boot rather than trusted, so a typo
  * fails loudly instead of silently never matching.
  */
+/** The engineering switch and attempt budget for this instance. */
+export const resolveEngineering = (env: Env): { enabled: boolean; attemptBudgetMs: number } => ({
+  enabled: env.DUCKY_ENGINEERING_ENABLED,
+  attemptBudgetMs: env.DUCKY_ENGINEERING_ATTEMPT_MINUTES * 60_000,
+});
+
 export const resolveApprovedActionsEnabled = (env: Env): boolean =>
   env.DUCKY_PROFILE === 'production'
     ? env.DUCKY_PROD_APPROVED_ACTIONS_ENABLED

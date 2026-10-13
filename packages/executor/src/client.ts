@@ -157,7 +157,7 @@ export class CoordinatorClient {
     jobId: string,
     leaseId: string,
     reason: ExecutorFailureReason,
-    extra: { detail?: string; workspaceId?: string; agentName?: string } = {},
+    extra: { detail?: string; workspaceId?: string; agentName?: string; quiescent?: boolean } = {},
   ): Promise<unknown> {
     return this.expectJson(
       await this.post(`/api/v1/executor/jobs/${jobId}/failure`, { leaseId, reason, ...extra }),

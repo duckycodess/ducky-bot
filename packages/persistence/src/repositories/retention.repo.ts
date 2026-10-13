@@ -61,6 +61,9 @@ export class RetentionRepo {
     if (this.exists('SELECT 1 FROM repo_reservations WHERE job_id = ?', jobId)) {
       return { ok: false, refusal: 'reservation_held' };
     }
+    if (this.exists('SELECT 1 FROM engineering_admission WHERE job_id = ?', jobId)) {
+      return { ok: false, refusal: 'reservation_held' };
+    }
     if (this.exists('SELECT 1 FROM herdr_workspaces WHERE job_id = ? AND closed_at IS NULL', jobId)) {
       return { ok: false, refusal: 'workspace_open' };
     }

@@ -98,6 +98,17 @@ export const ClaimResponseSchema = z.strictObject({
   payload: JobPayloadSchema,
   ownerInputs: z.array(OwnerInputSchema).max(16),
   recordedWorkspace: RecordedWorkspaceSchema.nullable(),
+  /**
+   * When this claimed attempt must stop, as an absolute instant.
+   *
+   * Persisted by the coordinator so a restart or a reclaim after lease expiry
+   * cannot reset a live attempt's budget. Optional so a NEW executor that sees
+   * a claim from a coordinator without it applies its own bounded local ceiling
+   * instead of running unbounded. This is not rolling-upgrade compatibility:
+   * this schema is strict, so an OLDER executor rejects a claim that carries the
+   * field. Upgrade the coordinator and executor together.
+   */
+  attemptDeadlineAt: z.string().optional(),
 });
 export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
 
@@ -181,6 +192,13 @@ export const JobFailureRequestSchema = z.strictObject({
   workspaceId: z.string().max(128).optional(),
   agentName: z.string().max(64).optional(),
   workspacePath: z.string().max(4096).optional(),
+  /**
+   * The executor observed the job's agent idle, done or absent. Honoured ONLY
+   * with `wall_clock_exceeded`: it is what lets a timeout whose agent is
+   * provably quiet release the repository and the engineering slot, while any
+   * other failure after a workspace exists keeps both held for the owner.
+   */
+  quiescent: z.boolean().optional(),
 });
 export type JobFailureRequest = z.infer<typeof JobFailureRequestSchema>;
 

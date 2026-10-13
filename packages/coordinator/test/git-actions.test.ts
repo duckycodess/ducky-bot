@@ -23,6 +23,7 @@ const contextFor = (cwd: string): {
     executorId: 'exec-a', retainedWorkspaceId: 'ws-1', originSharedChannelId: null,
     createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:00:00.000Z',
+    attemptDeadlineAt: null,
   },
   approval: {
     id: 'approval-1', jobId: 'job-1', actionIndex: 0, actionKind: 'git_commit',

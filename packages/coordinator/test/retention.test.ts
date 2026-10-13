@@ -42,6 +42,7 @@ const service = (h: ReturnType<typeof makeHarness>, over: Record<string, unknown
       runLogDays: 365,
       conversationOwnerDays: 30,
       conversationOtherDays: 7,
+      closedThreadDays: 14,
       batch: 200,
       ...over,
     },
@@ -264,7 +265,7 @@ describe('schedule retention respects the owner zone', () => {
         pastScheduleDays: 30, auditDays: 90,
         watchEventDays: 90, idempotencyDays: 7, cancelledWatchDays: 365,
         runLogDays: 365, conversationOwnerDays: 30, conversationOtherDays: 7,
-        batch: 200,
+        closedThreadDays: 14, batch: 200,
       },
     });
 
@@ -354,6 +355,7 @@ describe('fixed versus configurable windows', () => {
     DUCKY_RETENTION_IDEMPOTENCY_DAYS: 7,
     DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: 30,
     DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: 7,
+    DUCKY_RETENTION_CLOSED_THREAD_DAYS: 14,
     DUCKY_RETENTION_BATCH: 200,
   };
 

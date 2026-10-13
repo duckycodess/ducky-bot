@@ -117,14 +117,51 @@ export const RATE_LIMITS = {
   unauthenticated: { max: 600, windowMs: 60_000 },
 } as const;
 
+/**
+ * `ownerOnly` says whether a bucket can be charged by anyone but the owner.
+ *
+ * It is declared rather than assumed, because the assumption stopped being
+ * true. Every bucket was owner-only once, and the audit sink relied on that to
+ * record a rate limit as the OWNER's without being told who hit it. Issue #4
+ * gave a conversation participant two controls and a thread, so `interaction`
+ * and `threadCreate` are now reachable by the configured chat user -- and an
+ * audit row attributing their rate limit to the owner would be a false record.
+ *
+ * A new bucket therefore has to state its position. None of this is an
+ * authorization control: authorization has already happened by the time a
+ * bucket is charged, and a limit contains accidents.
+ */
 export const COMMAND_BUCKETS = {
-  capture: { max: 30, windowMs: 60_000 },
-  schedule: { max: 10, windowMs: 60_000 },
-  jobSubmit: { max: 5, windowMs: 60_000 },
-  jobRead: { max: 20, windowMs: 60_000 },
-  interaction: { max: 60, windowMs: 60_000 },
+  capture: { max: 30, windowMs: 60_000, ownerOnly: true },
+  schedule: { max: 10, windowMs: 60_000, ownerOnly: true },
+  jobSubmit: { max: 5, windowMs: 60_000, ownerOnly: true },
+  jobRead: { max: 20, windowMs: 60_000, ownerOnly: true },
+  /**
+   * Every component press. NOT owner-only any more: the conversational
+   * controls (Branch, Compact) share it with every owner control.
+   */
+  interaction: { max: 60, windowMs: 60_000, ownerOnly: false },
   /** /task, /reminder and /briefing. Owner-only, so this is self-protection. */
-  assistant: { max: 30, windowMs: 60_000 },
+  assistant: { max: 30, windowMs: 60_000, ownerOnly: true },
+  /**
+   * Opening a native conversation thread.
+   *
+   * The only bucket here that guards a WRITE INTO SOMEBODY ELSE'S SYSTEM
+   * rather than this one's own work: every thread is an object created in the
+   * owner's guild. Discord rate-limits thread creation itself, and being
+   * refused by it is a worse outcome than refusing ourselves -- a 429 arrives
+   * after the request, costs the bot's shared rate budget, and affects every
+   * other call the client is making.
+   *
+   * Small on purpose. Ten top-level messages a minute in one conversation
+   * channel is already unusual; a hundred is a loop, a raid or a
+   * misconfiguration, and none of those should be allowed to carpet a channel
+   * with threads before anybody notices.
+   *
+   * NOT owner-only: a configured chat user's message opens a thread exactly as
+   * the owner's does, which is the whole point of a shared conversation.
+   */
+  threadCreate: { max: 10, windowMs: 60_000, ownerOnly: false },
 } as const;
 
 // ---- subprocess -------------------------------------------------------------
@@ -232,6 +269,47 @@ export const REMINDER_DELIVERY_BATCH = 25;
  * than retried forever. Recorded, never silently dropped.
  */
 export const REMINDER_MAX_DELIVERY_ATTEMPTS = 8;
+
+// ---- daily assistant: bulk capture and linked reminders --------------------
+/**
+ * A bulk preview is durable, so it survives the restart that an in-memory
+ * draft does not -- which is the whole reason the phone can parse on one
+ * request and save on the next. It is still SHORT-lived: it holds the owner's
+ * own task text before they have agreed to keep it.
+ */
+export const TASK_PREVIEW_TTL_MS = 30 * 60_000;
+/** Pending previews per owner. A queue of drafts would be a trap, not a feature. */
+export const MAX_PENDING_TASK_PREVIEWS_PER_OWNER = 5;
+/**
+ * How long a SETTLED preview (saved or discarded) is kept.
+ *
+ * It carries no item text by then -- saving clears it -- only the public ids
+ * it produced, which is what makes a double press idempotent instead of a
+ * second set of tasks.
+ */
+export const TASK_PREVIEW_SETTLED_TTL_MS = 24 * 60 * 60_000;
+/** Expired previews removed per reconcile pass, so a sweep is never long. */
+export const TASK_PREVIEW_SWEEP_BATCH = 100;
+
+/**
+ * The default reminders a DEADLINE earns, as offsets before it.
+ *
+ * Two for a timed deadline, because a day's notice and an hour's notice answer
+ * different questions. An offset already in the past is skipped rather than
+ * fired immediately: a task saved an hour before it is due must not produce an
+ * instant "due in 24 hours" message.
+ */
+export const TASK_REMINDER_OFFSETS_MS = [24 * 60 * 60_000, 60 * 60_000] as const;
+/**
+ * When a DATE-ONLY deadline is announced: 08:00 on the day itself, in the
+ * owner's zone. A date carries no time, so there is no offset to subtract --
+ * and midnight would be a notification nobody reads.
+ */
+export const TASK_ALL_DAY_REMINDER_HOUR = 8;
+/** How long Snooze postpones a notification. The task's own deadline never moves. */
+export const TASK_SNOOZE_MINUTES = 60;
+/** Cards attached to one bulk save. Discord allows five action rows at most. */
+export const TASK_CARDS_PER_MESSAGE = 4;
 
 // ---- daily assistant: briefing ---------------------------------------------
 /**
@@ -388,3 +466,58 @@ export type DuckyColor = (typeof DUCKY_COLORS)[keyof typeof DUCKY_COLORS];
 export const EMBED_COLOR_MAX = 0xff_ff_ff;
 export const isValidEmbedColor = (v: unknown): v is number =>
   typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= EMBED_COLOR_MAX;
+
+// ---- native thread conversations (issue #4) ---------------------------------
+/**
+ * Discord's own ceiling for a thread name. Ducky builds the name itself from a
+ * fixed prefix and a sanitized excerpt, so this is a clamp on OUR output rather
+ * than a guess about the API.
+ */
+export const THREAD_NAME_MAX = 100;
+/**
+ * How much of the starter message may appear in the thread name.
+ *
+ * The name is visible to everyone who can see the parent channel, including
+ * people who cannot read the thread's later turns, so it is deliberately a
+ * short excerpt rather than the whole first message.
+ */
+export const THREAD_NAME_EXCERPT_MAX = 60;
+/** Seven days, in minutes. The longest auto-archive Discord offers. */
+export const THREAD_AUTO_ARCHIVE_MINUTES = 10_080;
+
+/**
+ * How many BYTES of prompt context one turn may carry.
+ *
+ * A byte budget, not a token budget, and that distinction is the honest part:
+ * no provider on this host reports a token limit, and inventing a token count
+ * from a character count would be a measurement nobody made. Bytes are what
+ * can actually be counted here, so bytes are what is bounded.
+ *
+ * The default is deliberately conservative. A turn whose context cannot be
+ * brought under it is REFUSED rather than silently truncated, because a model
+ * answering from half a conversation it was not told it was missing is worse
+ * than a clear refusal.
+ */
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT = 24_000;
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_MIN = 2_000;
+export const CONVERSATION_CONTEXT_BUDGET_BYTES_MAX = 400_000;
+/** A compact checkpoint is a summary. Past this it is a transcript again. */
+export const CONVERSATION_CHECKPOINT_TEXT_MAX = 4_000;
+/**
+ * How many recent turns a compaction keeps verbatim beside the checkpoint.
+ *
+ * Small on purpose: the checkpoint carries the durable decisions, and the
+ * recent turns carry the thing being talked about right now.
+ */
+export const CONVERSATION_COMPACT_KEEP_TURNS = 10;
+/**
+ * How many turns one thread-scoped read will ever return.
+ *
+ * The stored transcript is unbounded while the thread lives, so every read of
+ * it has to be bounded somewhere; this is that bound. It is far above the
+ * replay window and the compaction keep-count, so nothing a prompt needs is
+ * ever cut off by it.
+ */
+export const CONVERSATION_THREAD_READ_MAX = 2_000;
+/** How much of an explicitly selected reply anchor is carried into context. */
+export const CONVERSATION_ANCHOR_TEXT_MAX = 600;

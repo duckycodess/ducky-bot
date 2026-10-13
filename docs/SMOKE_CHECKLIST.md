@@ -33,6 +33,11 @@ deliberately when you start the coordinator:
   ephemeral, which is the default.
 - `proactive briefings` — names the destination: your DM, the briefing channel,
   or both.
+- `reminder delivery` — whether a task reminder posts in your reminders channel
+  with a mention, or stays a DM. A channel means task titles and deadlines are
+  visible to everyone who can read it.
+- `phone capture` — `off`, or the address it answers on. If it says anything
+  but `off` and you did not intend that, stop.
 
 If `assistant channels` lists a role you did not intend, stop and fix the
 configuration before anyone reads that channel.
@@ -60,6 +65,39 @@ If 1–9 pass, the code is sound. Nothing above has spoken to another system.
 13. **Start the executor** (`pnpm dev:executor`) and watch it authenticate and
     poll. `/status` in Discord — or the diagnostics line — should then show one
     active executor.
+
+---
+
+## The phone capture page — only when you have deliberately enabled it
+
+Skip this entirely if `DUCKY_PHONE_CAPTURE_ENABLED` is unset, which is the
+default. With it unset, `curl -s localhost:8787/app` returns a 404 and that is
+the correct result: the routes are not registered at all.
+
+Enabled, on a tailnet (see `deploy/tailscale/README.md`), from the phone:
+
+14. **Open `http://<tailnet-address>:8787/app`.** You should be asked for the
+    passcode and told nothing else. A wrong one says only that it did not
+    match.
+15. **Unlock, then *Share → Add to Home Screen*.** Open the shortcut: it should
+    start standalone rather than as a browser tab.
+16. **Paste a numbered list** and press *Read it back*. Check the deadlines it
+    shows against what you typed. Nothing is saved at this point — the footer
+    says so. Three controls appear: *Save*, *Edit*, *Discard*.
+17. **Press Edit.** The list comes back into the box in the form Ducky reads
+    (`1. Title (October 13, 11:59 PM)`). Change one deadline, press *Read it
+    back* again, and check it shows the change. Still nothing saved.
+18. **Press Save once.** Then press it again if you can: the second press must
+    report *Already saved*, with the same tasks — and the saved deadline must
+    be the EDITED one. In Discord, `/task list` shows exactly that many new
+    tasks and no duplicates.
+19. **Paste a list with an ambiguous date** such as `1. Thing (10/13)`. It must
+    refuse the whole list, name the line, and save nothing.
+
+What this does **not** prove: that the page is unreachable from outside the
+tailnet. That is a property of your ACL and of the bind address, not of a
+successful tap — check `DUCKY_HTTP_HOST` and the ACL, and remember that
+`tailscale funnel` would undo both.
 
 ---
 
@@ -120,6 +158,10 @@ happens without an explicit flag, and none is implied by any step above.
   real DM.
 - **Not that a reminder or briefing has reached a real DM.** That needs step 3
   of "External writes".
+- **Not that the phone page has ever been opened from a phone.** Steps 14–19
+  are the manual flow, and they need a tailnet this host does not have. Until
+  somebody walks them, the page is covered by tests only and
+  `docs/CURRENT_STATE.md` says exactly that.
 
 The point of this list is to make each of those absences visible, rather than to
 turn a green run into a claim nobody checked.

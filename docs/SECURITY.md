@@ -56,6 +56,12 @@ which job *status* may be shown to people other than the owner. It answers
 
 Nothing about it widens what anyone can do:
 
+- **A pasted task list is closed there entirely.** The owner's own numbered
+  list produces a VISIBLE preview carrying signed controls, and a shared
+  channel has no role -- so the role narrowing alone would have waved it
+  through. The capture path checks the shared-channel policy first and falls
+  through to conversation exactly as it did before the feature existed: no
+  preview, no control, and nothing written down.
 - Every write stays owner-only, re-checked in the router and again in every
   service method.
 - Every owner-only reply stays ephemeral outside a configured role channel.
@@ -171,6 +177,64 @@ active simultaneously and rotation needs no downtime. See
 Revocation has two independent switches: mark the row revoked (immediate, per
 request) and remove the file entry (effective at the next reload).
 
+## The owner's human credential (phone capture)
+
+A SECOND credential, for a different kind of claimant. The executor credential
+authenticates a MACHINE; this one authenticates a PERSON, and the two are
+deliberately not the same material.
+
+| | Executor | Phone |
+|---|---|---|
+| Secret | ≥256-bit random bearer token + HMAC key | a passcode the owner remembers |
+| Stored as | verifier + fingerprint in SQLite | `scrypt$<salt>$<key>` in frozen env config |
+| Hash | `sha256` — correct for high-entropy material | scrypt, N=16384 — correct for something a person types |
+| Presented | signature over the raw body, per request | signed session cookie + CSRF header |
+| Issued | `pnpm executor:issue-credential` | `pnpm phone:passcode` (reads stdin, prints a verifier) |
+
+What holds it up:
+
+- **Off by default, and refused rather than served unsafely.** Three conditions
+  are checked at boot: the flag, a profile-scoped verifier (production never
+  inherits the development one), and a `DUCKY_HTTP_HOST` that is loopback,
+  RFC1918, `100.64.0.0/10` or `fd7a:115c:a1e0::/48`. `0.0.0.0` is refused
+  explicitly — it is not an address, it is every interface. With the flag off
+  the routes are not registered at all.
+- **Constant-time comparison**, and ten attempts per five minutes **keyed on
+  the caller's address**. The server-wide key generator reads
+  `x-ducky-executor-id`, which is right for the executor surface -- that header
+  names a credential the request then has to prove -- and would have been a
+  hole here, where nothing is authenticated yet: varying it would buy a fresh
+  bucket per attempt. The phone routes ignore the header, and a refusal on one
+  of them records no claimed executor id, so an unauthenticated caller cannot
+  write a plausible actor into the audit trail either.
+- **A stateless, bounded, signed session.** No session table to protect. The
+  signing key is derived from the stored verifier, so changing the passcode
+  invalidates every live session by construction.
+- **`HttpOnly`, `SameSite=Strict`, `Path=/app`, bounded `Max-Age`.** `Secure`
+  is set only when the request actually arrived over TLS: a tailnet address is
+  plain HTTP inside an encrypted overlay, and a `Secure` cookie there is
+  silently never stored.
+- **A CSRF token on every state-changing request**, covering what `SameSite`
+  cannot: a cross-site page can make a browser send a cookie, and cannot read
+  the page that holds the token.
+- **It grants exactly what the configured owner already has**, and nothing
+  else. There is no user table; the actor is the owner from frozen
+  configuration, and the surface calls the same owner-only service Discord
+  calls.
+- **Neither credential opens the other's door**, asserted in both directions.
+  The executor routes on the same listener are unchanged and still require
+  their signature — binding to a tailnet address exposes them to that tailnet,
+  which was already true before this page existed.
+- **Nothing is logged.** The passcode arrives in a form body, never a URL, and
+  no handler writes the passcode, the session, or any pasted text.
+- **The form parser belongs to the page alone.** It is registered inside an
+  encapsulated Fastify scope, so the executor routes still accept exactly one
+  content type: their signature covers the raw JSON bytes, and a second body
+  format on that path would be a second way to disagree about what was signed.
+  A test posts a form body to an executor route and expects 415.
+
+See [decisions/0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md).
+
 ### Component signing
 
 `DUCKY_COMPONENT_SIGNING_KEY` is env-only, never stored, and startup fails
@@ -179,6 +243,13 @@ closed if it is missing or short — there is no unsigned fallback. It is
 and row-ownership re-authorization, so compromising this key alone grants
 nothing. Binding the actor id into the signature makes a copied component id
 useless to anyone else.
+
+A task card may be posted in a channel other people can read, so its controls
+are signed over the task's `updated_at` as well. A card whose deadline has
+since moved stops verifying rather than acting on a state the owner is no
+longer looking at. The signature is still defence in depth: a non-owner
+pressing a control in that channel is refused at the router before any handler
+runs, because **visibility is not authorization**.
 
 ## Logging
 
@@ -529,7 +600,7 @@ rules:
   policy; the card reports which policy the registration carries rather than
   implying Ducky controls it.
 
-See [decisions/0025](decisions/0025-exclusive-skill-command-entry-points.md).
+See [decisions/0025](decisions/0028-exclusive-skill-command-entry-points.md).
 
 ## Rate limiting
 
@@ -558,6 +629,20 @@ shared state if it were ever scaled out.
   still refused by a signature bound to the owner, so this is disclosure and
   not privilege escalation. None of that substitutes for choosing the right
   channel. See [decisions/0023](decisions/0023-channel-roles-and-persistent-replies.md).
+- **The phone passcode is the weakest credential in the system**, because it is
+  the only one a person has to remember. What holds: it is off by default;
+  scrypt with expensive parameters and a constant-time compare; ten attempts
+  per five minutes; and the listener it reaches is tailnet-only, refused at
+  boot on anything else. What does not hold: a passcode the owner also uses
+  elsewhere, or one they tell somebody. It grants the owner's own records and
+  nothing more — no job, no repository, no approval.
+- **A reminders channel is a channel.** Configuring
+  `DUCKY_*_REMINDER_CHANNEL_ID` means task titles and deadlines appear there,
+  with the owner's mention, to everyone who can read it. The controls on the
+  card refuse anybody else, so it is disclosure rather than privilege
+  escalation — the same residual risk as any other role channel, and the same
+  mitigation: choose the channel deliberately, or leave it unset and keep the
+  DM.
 - The credential file is the trust root on the coordinator host. Mitigated by
   permission checks, per-executor keys, rotation and immediate revocation; a
   keyring or Key Vault can be swapped in behind the existing port.
@@ -584,3 +669,51 @@ shared state if it were ever scaled out.
 - **A `/forget job` cannot be undone.** The confirm step, the per-entity scope
   and the identical answer for unknown and foreign ids are the mitigations; there
   is no soft-delete and no restore.
+- **A LIVE conversation thread's transcript is unbounded.** Issue #4 asks for
+  the full history of a native thread while the thread exists, so the
+  per-thread row cap that bounded ordinary channels does not apply to one. The
+  longer a conversation runs, the more of somebody's words sit on disk, and the
+  owner approved that trade deliberately.
+
+  What holds: conversation memory is OFF by default; threads are created only
+  in channels an operator NAMED; a thread under a shared channel stores nothing
+  at all; what reaches the model is still bounded by a byte budget; retention
+  removes a thread whole once Ducky has observed it is gone from Discord
+  (`DUCKY_RETENTION_CLOSED_THREAD_DAYS`); and `/forget conversation` deletes
+  every turn at any time. None of that makes the live thread small. See
+  [decisions/0025](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md).
+- **Thread closure is inferred from a signal that can be wrong in both
+  directions.** Ducky learns about a deletion from `Events.ThreadDelete`, which
+  rides the `Guilds` intent the client already requests; a send failing with
+  `Unknown Channel` is the fallback.
+
+  *Missed closure:* a thread deleted while the coordinator was down and never
+  written to again is never observed, so its retention clock never starts and
+  its transcript stays until `/forget conversation` removes it.
+
+  *False closure:* Discord sends `ThreadDelete` to a client that has merely
+  **lost access**, which a permission change is enough to cause. An incoming
+  message from an authorized sender now reopens the mapping, before any turn is
+  replayed or appended, and a native thread's turns are never reachable by the
+  ordinary 7/30-day windows in any case — so a conversation that resumes keeps
+  its full history. What is NOT covered is a falsely closed thread that nobody
+  writes in for the whole `DUCKY_RETENTION_CLOSED_THREAD_DAYS` window (14 days
+  by default) on an instance with retention enabled: silence for that long is
+  indistinguishable from the thread being gone, and it is purged. Retention
+  ships disabled, which makes this narrow rather than unlikely by design.
+- **A guest cannot delete their own conversation.** `/forget` is a write and
+  stays owner-only; widening it would widen the owner-only surface for the sake
+  of a non-owner deletion path. A chat-whitelist user who wants their turns
+  removed has to ask the owner, who can do it for them with `/forget
+  conversation` (their own) or by removing the thread. Their words are subject
+  to the shorter guest retention window in the meantime
+  (`DUCKY_RETENTION_CONVERSATION_OTHER_DAYS`, 7 days by default) wherever a live
+  thread is not holding them.
+- **`/forget conversation` reaches one of two stores, and says so.** The
+  assistant provider keeps its own session transcript which Ducky cannot
+  delete: no deletion contract has been recorded, and the probe that would
+  record one only reads command NAMES. What `/forget` does instead is rotate
+  the session epoch, for the owner and for every other actor a shared thread
+  contaminated, so the old context cannot reappear. That is ORPHANING, not
+  erasure, and the reply uses those words. See
+  [decisions/0024](decisions/0024-two-conversation-stores.md).

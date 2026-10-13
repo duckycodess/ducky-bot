@@ -79,6 +79,20 @@ export interface RetentionPolicy {
    */
   readonly conversationOwnerDays: number;
   readonly conversationOtherDays: number;
+  /**
+   * How long a CLOSED conversation thread and everything in it is kept.
+   *
+   * The counterpart to the rule above it: while a native thread is LIVE its
+   * transcript is kept in full, whatever the two windows above say, because
+   * that is what issue #4 asks for. The bound has to live somewhere, and it
+   * lives here -- once Ducky has observed that the thread is gone from Discord,
+   * its turns, its checkpoint, its participation rows and its provider session
+   * records age out together.
+   *
+   * Shorter than the owner's ordinary conversation window on purpose: a thread
+   * that no longer exists is a conversation nobody can scroll back to anyway.
+   */
+  readonly closedThreadDays: number;
   /** Rows removed per table per pass, so a tick is never long. */
   readonly batch: number;
 }
@@ -103,6 +117,7 @@ export const DEFAULT_RETENTION: RetentionPolicy = Object.freeze({
   runLogDays: 365,
   conversationOwnerDays: 30,
   conversationOtherDays: 7,
+  closedThreadDays: 14,
   batch: 200,
 });
 
@@ -136,6 +151,18 @@ export interface RetentionCounts {
   readonly runLogRowsDeleted: number;
   readonly conversationTurnsDeleted: number;
   /**
+   * Closed conversation threads removed whole, and the rows that went with
+   * them.
+   *
+   * `conversationThreadsSkipped` counts LIVE threads a pass declined to touch.
+   * Reported rather than silent, for the same reason `jobsSkipped` is: "this
+   * pass deliberately left something alone" is a fact an operator reading a
+   * retention report should be able to see.
+   */
+  readonly conversationThreadsDeleted: number;
+  readonly conversationThreadsSkipped: number;
+  readonly conversationThreadRowsDeleted: number;
+  /**
    * Detail rows removed from jobs that are still KEPT. Counted separately from
    * `jobChildRowsDeleted`, which belongs to jobs that went entirely: the two
    * answer different questions, and adding them together would hide the fact
@@ -160,6 +187,9 @@ export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
   idempotencyKeysDeleted: 0,
   runLogRowsDeleted: 0,
   conversationTurnsDeleted: 0,
+  conversationThreadsDeleted: 0,
+  conversationThreadsSkipped: 0,
+  conversationThreadRowsDeleted: 0,
   jobDetailRowsDeleted: 0,
   auditRowsDeleted: 0,
 });
@@ -178,6 +208,7 @@ export const totalRetentionDeletions = (c: RetentionCounts): number =>
   c.idempotencyKeysDeleted +
   c.runLogRowsDeleted +
   c.conversationTurnsDeleted +
+  c.conversationThreadRowsDeleted +
   c.jobDetailRowsDeleted +
   c.auditRowsDeleted;
 

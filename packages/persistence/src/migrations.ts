@@ -1009,6 +1009,163 @@ CREATE INDEX ix_briefing_deliveries_pending
   },
   {
     version: 22,
+    name: 'task_previews_and_linked_reminders',
+    sql: `
+-- A pasted list, held between "show me what you read" and "save it".
+--
+-- DURABLE, unlike the in-memory schedule draft, and for a reason the schedule
+-- surface does not have: the phone parses on one request and saves on the
+-- next, and a preview that lived only in a process would be lost by a restart
+-- between the two taps. The owner's own task text is in here, so the row is
+-- deliberately short-lived (TASK_PREVIEW_TTL_MS) and the reconciler sweeps
+-- expired ones whether or not retention is configured.
+--
+-- \`items_json\` is CLEARED the moment the preview settles. A saved preview
+-- keeps only the public ids it produced -- which is what makes a double press
+-- return the same tasks instead of a second set -- and a discarded one keeps
+-- nothing at all. So no copy of what the owner wrote outlives the decision
+-- they made about it.
+CREATE TABLE task_previews (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  source          TEXT NOT NULL CHECK (source IN ('discord','phone')),
+  status          TEXT NOT NULL CHECK (status IN ('pending','saved','discarded')),
+  item_count      INTEGER NOT NULL CHECK (item_count >= 0),
+  items_json      TEXT,
+  saved_ids_json  TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  expires_at      TEXT NOT NULL,
+  settled_at      TEXT,
+  -- A pending preview always has its items; a settled one never does.
+  CHECK ((status = 'pending') = (items_json IS NOT NULL))
+);
+
+CREATE INDEX ix_task_previews_owner ON task_previews(discord_user_id, status, created_at);
+CREATE INDEX ix_task_previews_expiry ON task_previews(expires_at);
+
+-- Which TASK a reminder belongs to, recorded rather than inferred.
+--
+-- The link has to be a column: deriving it from the reminder's text would mean
+-- matching strings to decide whether to cancel a notification, and two tasks
+-- called "Letters" would then cancel each other's. ON DELETE CASCADE so
+-- \`/forget task\` and retention cannot leave a reminder pointing at a task
+-- that is gone -- the reminder goes with it, occurrences and all.
+--
+-- NULL is the normal case and means exactly what it meant before this column
+-- existed: a free-standing reminder the owner asked for directly, delivered to
+-- their DM.
+ALTER TABLE reminders ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE;
+
+CREATE INDEX ix_reminders_task ON reminders(task_id, status) WHERE task_id IS NOT NULL;
+`,
+  },
+  {
+    version: 23,
+    name: 'native_thread_conversations',
+    sql: `
+-- Native Discord threads as durable conversations (issue #4).
+--
+-- Four tables, and the reason there are four rather than one wide one is that
+-- they have four different lifetimes and four different privacy stories.
+--
+-- Additive in full: \`conversation_turns\` is untouched, and no legacy row is
+-- reinterpreted. A conversation that happened in a parent channel before this
+-- migration keeps its old thread_key and is NOT retroactively claimed as the
+-- history of a child thread -- the two are different conversations and merging
+-- them would replay words from one into the other.
+CREATE TABLE conversation_threads (
+  -- Discord's own thread id, which is also the conversation's thread_key in
+  -- \`conversation_turns\`. One id, so a lookup never has to translate.
+  thread_id          TEXT PRIMARY KEY,
+  parent_channel_id  TEXT NOT NULL,
+  guild_id           TEXT NOT NULL,
+  -- The message the thread was started FROM. UNIQUE is the idempotency
+  -- guarantee: two concurrent starters for one message cannot both create a
+  -- thread, and a retry after a crash finds the existing row instead of
+  -- starting a second conversation.
+  starter_message_id TEXT NOT NULL UNIQUE,
+  started_by         TEXT NOT NULL,
+  origin             TEXT NOT NULL CHECK (origin IN ('starter','branch')),
+  -- Set only for a branch, and only to the thread the anchor came from. It
+  -- records provenance; it is never a path context can be read along.
+  branched_from      TEXT,
+  created_at         TEXT NOT NULL,
+  -- Set when the thread is gone from Discord or deliberately closed. Retention
+  -- consults this and nothing else: a LIVE thread keeps its full transcript.
+  closed_at          TEXT
+);
+CREATE INDEX ix_conversation_threads_parent ON conversation_threads(parent_channel_id);
+CREATE INDEX ix_conversation_threads_closed ON conversation_threads(closed_at);
+
+-- Who has actually taken part in a thread.
+--
+-- EXPLICIT participation, written when somebody speaks, and the only thing
+-- that can produce a proof for a thread-scoped read. Being able to SEE a
+-- thread is not being in it: a reader who never spoke has no row here and
+-- therefore no way to have its context replayed to them.
+CREATE TABLE conversation_participants (
+  thread_id       TEXT NOT NULL,
+  discord_user_id TEXT NOT NULL,
+  first_seen_at   TEXT NOT NULL,
+  last_seen_at    TEXT NOT NULL,
+  PRIMARY KEY (thread_id, discord_user_id)
+);
+
+-- The bounded model context, kept apart from the transcript on purpose.
+--
+-- Compaction writes HERE and never deletes a turn. That separation is the
+-- whole point: the application keeps everything that was said, the provider is
+-- handed a summary plus the recent turns, and the owner can be told truthfully
+-- that compacting removed nothing.
+CREATE TABLE conversation_checkpoints (
+  thread_id     TEXT PRIMARY KEY,
+  summary       TEXT NOT NULL,
+  -- The rowid of the newest turn the summary covers. Turns after it are the
+  -- ones still replayed verbatim.
+  through_rowid INTEGER NOT NULL,
+  turns_covered INTEGER NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+
+-- The provider session identities this instance has caused to exist.
+--
+-- Ducky cannot delete an OpenClaw session (no supported, probed deletion
+-- surface exists -- see ADR 0024), so the honest alternative is to stop using
+-- a contaminated one. The epoch is folded into the provider's session key, so
+-- bumping it produces a different session rather than clearing the old one.
+--
+-- One row per (thread_key, user) because a SHARED thread contaminates one
+-- provider session PER ACTOR, and forgetting the thread has to address every
+-- one of them rather than only the person who asked.
+CREATE TABLE conversation_provider_sessions (
+  thread_key      TEXT NOT NULL,
+  discord_user_id TEXT NOT NULL,
+  epoch           INTEGER NOT NULL DEFAULT 0,
+  rotated_at      TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  PRIMARY KEY (thread_key, discord_user_id)
+);
+CREATE INDEX ix_conversation_provider_sessions_user
+  ON conversation_provider_sessions(discord_user_id);
+
+-- The Discord message a turn came from, so an ANCHOR can be resolved.
+--
+-- Nullable, and null for every row written before this and for every
+-- assistant turn: a reply Ducky sent has no id at the moment it is recorded,
+-- and inventing one would make "that message" ambiguous. A Branch control
+-- carries a message id, and the only thing it can resolve to is a turn in the
+-- thread the presser holds a participation proof for -- so an anchor cannot be
+-- used to reach a conversation somebody is not in.
+ALTER TABLE conversation_turns ADD COLUMN message_id TEXT;
+CREATE INDEX ix_conversation_turns_message
+  ON conversation_turns(thread_key, message_id);
+`,
+  },
+  {
+    version: 24,
     name: 'agent_threads',
     sql: `
 -- The repository-workflow binding for one Discord thread (issue #7).
@@ -1072,7 +1229,7 @@ CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT N
 `,
   },
   {
-    version: 23,
+    version: 25,
     name: 'agent_run_queue_state',
     sql: `
 -- \`run_queued\` was a BOOLEAN, and a boolean cannot say "I do not know".
@@ -1153,7 +1310,7 @@ CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT N
 `,
   },
   {
-    version: 24,
+    version: 26,
     name: 'agent_published_ticket',
     sql: `
 -- The SETTLED ticket this thread last published, kept so the owner can

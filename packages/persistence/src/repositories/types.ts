@@ -63,6 +63,15 @@ export interface ConversationTurnRow {
   threadKey: string;
   role: ConversationRole;
   content: string;
+  /**
+   * The Discord message this turn came from, when there was one.
+   *
+   * Null for every assistant turn (Ducky's reply has no id yet when the turn
+   * is recorded) and for every row written before anchors existed. It is what a
+   * Branch control resolves against, never a key anything is read by on its
+   * own.
+   */
+  messageId: string | null;
   createdAt: string;
 }
 
@@ -325,6 +334,14 @@ export interface ReminderRow {
   firstFireAt: string;
   lastFiredAt: string | null;
   closedAt: string | null;
+  /**
+   * The task this reminder belongs to, or null for a free-standing one.
+   *
+   * A recorded link rather than an inferred one: matching reminder text
+   * against task titles to decide what to cancel would make two tasks with
+   * the same name cancel each other's notifications.
+   */
+  taskId: string | null;
 }
 
 /**
@@ -362,6 +379,41 @@ export interface PendingReminderOccurrenceRow {
   recurrenceKind: RecurrenceKind;
   maxOccurrences: number;
   nextFireAt: string | null;
+  /** Non-null when this occurrence belongs to a task deadline. */
+  taskId: string | null;
+}
+
+/**
+ * A pasted list, between being read back and being kept.
+ *
+ * `items` is present exactly while the preview is `pending`: settling clears
+ * it, so a saved or discarded preview holds no copy of what the owner wrote.
+ * `savedPublicIds` is what makes a retried save idempotent -- the second press
+ * reports the SAME tasks rather than creating another set.
+ */
+export interface TaskPreviewRow {
+  id: string;
+  discordUserId: string;
+  source: TaskPreviewSource;
+  status: TaskPreviewStatus;
+  itemCount: number;
+  items: TaskPreviewItem[] | null;
+  savedPublicIds: string[] | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  settledAt: string | null;
+}
+
+export type TaskPreviewSource = 'discord' | 'phone';
+export type TaskPreviewStatus = 'pending' | 'saved' | 'discarded';
+
+/** One line of a preview, already parsed. Instants are ISO-8601 UTC. */
+export interface TaskPreviewItem {
+  title: string;
+  dueAt: string | null;
+  dueAllDay: boolean;
+  priority: TaskPriority;
 }
 
 /**

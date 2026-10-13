@@ -182,6 +182,52 @@ answer one, not approve an action.
 - **Profile isolation.** Role channels are profile-scoped like every other
   cross-profile setting; production reads its own and never inherits.
 
+## Threads under a role channel
+
+**Superseded in one respect by [ADR 0025](0027-native-thread-conversations-and-the-first-non-owner-controls.md).**
+
+When this ADR was written, a role matched on the channel id alone, and a
+thread's id is not its parent's. So a thread under a role channel had no role:
+replies there fell back to ephemeral, and under `gpt` conversation was silenced
+outright — a thread under the channel designated *for* conversation was the one
+place conversation did not happen.
+
+A thread now **inherits its parent's role**, through `parentChannelId` on the
+incoming context. Both a plain message and a SLASH COMMAND resolve it, through
+one shared helper: they did not at first, and the two then disagreed about the
+same channel, so `/task list` typed in a thread under the task channel fell back
+to ephemeral while a message in that same thread persisted. Everything this ADR says about what a role means is unchanged
+by that: it still answers *where does this output belong, and does it persist*,
+and it still grants nobody anything. A non-owner in an inherited role channel is
+refused exactly as they are in the parent.
+
+### Operator setup for conversation threads
+
+Naming a channel in `DUCKY_*_THREAD_PARENT_CHANNEL_IDS` makes every top-level
+message a person posts in it open one visible thread. The bot needs two
+permissions **in that channel**:
+
+- **Create Public Threads**, or no thread is ever opened;
+- **Send Messages in Threads**, or the thread is opened and the answer cannot be
+  posted in it.
+
+Either missing produces a visible refusal naming the permission, and **no answer
+anywhere** — never a fallback reply in the parent. `GuildMessages` already
+covers messages inside a thread, so no new intent is needed; a **private** thread
+the bot was not added to delivers nothing at all, which is why the feature only
+ever creates public ones.
+
+Recovery, for the three cases that are not simply "it worked":
+
+| What happened | What Ducky does |
+|---|---|
+| The starter message already has a thread (Discord code 160004) | Rejoins it. A thread made from a message carries that message's id, so the conversation continues rather than forking |
+| Discord is rate-limiting thread creation | Refuses visibly and asks for a retry. Nothing is stored and nothing is answered |
+| The thread exists but cannot be posted in | Says so in the parent, and does not publish the answer there |
+
+A channel listed here may not also be a shared channel, a briefing channel or a
+task channel; all three are refused at boot rather than resolved by precedence.
+
 ## The residual risk, stated plainly
 
 **Ducky cannot verify that a configured channel is private.** It has no view of

@@ -31,11 +31,27 @@ export const DEFAULT_ASSISTANT_PERSONA =
  */
 export const STYLE_CONTRACT: readonly string[] = Object.freeze([
   'Be direct and helpful. Lead with the answer.',
-  'Use short Markdown headings when a reply has more than one part. Skip them for a short answer.',
-  'Do not use emojis.',
-  'Keep punctuation plain. Avoid em dashes, exclamation marks and rhetorical questions.',
+  /**
+   * Was: "use short Markdown headings when a reply has more than one part".
+   *
+   * In a chat window that produced a heading on almost every reply, which is
+   * what the owner asked to stop: a conversation reads as a conversation, not
+   * as a document with sections. Paragraphs carry the same structure without
+   * the furniture.
+   */
+  'Write short plain paragraphs. Do not use headings, and do not bold whole sentences; bold at most a few words, and only when something would be missed without it.',
+  'Do not use emojis, middle-dot separators or decorative rules.',
+  'Do not use em dashes. Use a comma, a full stop or a colon.',
+  'Use a numbered list only for things that are genuinely a sequence or a set of questions. When you ask questions, ask every one you can ask now, number them, and give your own recommendation for each rather than only asking.',
+  'Keep punctuation plain. Avoid exclamation marks and rhetorical questions.',
   'Never claim to remember anything that is not in the conversation above. If earlier context was not provided, say so plainly rather than inventing it.',
   'You are text only. Do not take actions, and do not imply that you have taken one or will take one. If something needs a command, name the command and let the person run it.',
+  /**
+   * The controls are real buttons on the reply, so the model must not print
+   * their names as though typing them did something. An action word pretending
+   * to be a control is the exact anti-pattern the issue names.
+   */
+  'Never print an action word as though it were a control. Branch and Compact are buttons Ducky attaches to the reply; do not tell the person to type them.',
 ]);
 
 /** Longest persona this accepts. Bounded so a prompt cannot be grown without limit. */

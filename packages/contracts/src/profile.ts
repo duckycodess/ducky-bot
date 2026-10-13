@@ -74,12 +74,14 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_DEV_SHARED_CHANNEL_IDS',
+    threadParents: 'DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS',
     approvedActions: 'DUCKY_DEV_APPROVED_ACTIONS_ENABLED',
     roleChannels: {
       briefing: 'DUCKY_DEV_BRIEFING_CHANNEL_ID',
       task: 'DUCKY_DEV_TASK_CHANNEL_ID',
       coding: 'DUCKY_DEV_CODING_CHANNEL_ID',
       gpt: 'DUCKY_DEV_GPT_CHANNEL_ID',
+      reminder: 'DUCKY_DEV_REMINDER_CHANNEL_ID',
     },
   },
   production: {
@@ -89,12 +91,14 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_PROD_SHARED_CHANNEL_IDS',
+    threadParents: 'DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS',
     approvedActions: 'DUCKY_PROD_APPROVED_ACTIONS_ENABLED',
     roleChannels: {
       briefing: 'DUCKY_PROD_BRIEFING_CHANNEL_ID',
       task: 'DUCKY_PROD_TASK_CHANNEL_ID',
       coding: 'DUCKY_PROD_CODING_CHANNEL_ID',
       gpt: 'DUCKY_PROD_GPT_CHANNEL_ID',
+      reminder: 'DUCKY_PROD_REMINDER_CHANNEL_ID',
     },
   },
 } as const satisfies Record<
@@ -106,6 +110,13 @@ export const PROFILE_ENV = {
     credentialsFile: string;
     componentKey: string;
     sharedChannels: string;
+    /**
+     * Which channels may sprout native conversation threads. Profile-scoped
+     * for the same reason the shared list is: creating a thread is a WRITE
+     * into a guild, and a development channel id inherited by production would
+     * open threads in the real one.
+     */
+    threadParents: string;
     approvedActions: string;
     roleChannels: Record<ChannelRole, string>;
   }
@@ -119,7 +130,7 @@ export const PROFILE_ENV = {
  * frozen environment configuration and a role channel grants nobody anything.
  * See ADR 0023.
  */
-export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt'] as const;
+export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt', 'reminder'] as const;
 export type ChannelRole = (typeof CHANNEL_ROLES)[number];
 
 /**
@@ -135,6 +146,7 @@ export const UNSCOPED_ROLE_CHANNEL_ENV = {
   task: 'DUCKY_TASK_CHANNEL_ID',
   coding: 'DUCKY_CODING_CHANNEL_ID',
   gpt: 'DUCKY_GPT_CHANNEL_ID',
+  reminder: 'DUCKY_REMINDER_CHANNEL_ID',
 } as const satisfies Record<ChannelRole, string>;
 
 /**

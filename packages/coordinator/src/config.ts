@@ -4,14 +4,17 @@ import {
   BRIEFING_DELIVERY_MODES, assertValidSlotTime, type BriefingDelivery,
 } from './domain/briefing-notifications.service.js';
 import { assertNoChannelRoleConflicts } from './domain/channel-roles.js';
+import { parsePhoneVerifier } from './http/phone-auth.js';
 import {
   CHANNEL_ROLES, UNSCOPED_ROLE_CHANNEL_ENV, type ChannelRole,
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
   CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES,
+  CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT, CONVERSATION_CONTEXT_BUDGET_BYTES_MAX,
+  CONVERSATION_CONTEXT_BUDGET_BYTES_MIN,
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
-  blankToUndefined, resolveConversationMode, resolveDuckyProfile,
+  blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -64,6 +67,24 @@ export const EnvSchema = z.object({
   DUCKY_PROD_SHARED_CHANNEL_IDS: z.string().optional(),
 
   /**
+   * The channels that may sprout NATIVE conversation threads. Default empty,
+   * which is the whole feature switched off.
+   *
+   * Opt-in by name, and it has to be: starting a thread is Ducky WRITING into
+   * the owner's guild on inference, which the roadmap flagged as the thing
+   * that needs an explicit list rather than a boolean. An instance that
+   * configures nothing creates no thread and behaves exactly as it did.
+   *
+   * Profile-scoped like the shared list, and validated at boot: a listed
+   * channel must not also be a shared channel (other people read it) and must
+   * not be a non-conversational role channel (a briefing or task channel is
+   * where output is delivered, not where a chat happens).
+   */
+  DUCKY_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
+  DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
+  DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
+
+  /**
    * The owner's PRIVATE assistant channels, one per role.
    *
    * Distinct from the shared-channel list in what they mean, not just in who
@@ -77,6 +98,20 @@ export const EnvSchema = z.object({
    * its own.
    */
   DUCKY_BRIEFING_CHANNEL_ID: z.string().optional(),
+  /**
+   * Where a task-linked reminder is posted, with the owner's mention.
+   *
+   * Opt-in and profile-scoped like every other channel setting. UNCONFIGURED
+   * MEANS DM, which is exactly what every existing instance already does, so
+   * an upgrade changes nothing until an operator names a channel. Only
+   * reminders that belong to a TASK go there; a free-standing `/reminder add`
+   * stays in the DM it has always used.
+   *
+   * Visibility is not authorization: the cards posted there carry signed
+   * owner-bound controls, and a reader who presses one is refused exactly as
+   * they are anywhere else.
+   */
+  DUCKY_REMINDER_CHANNEL_ID: z.string().optional(),
   DUCKY_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_GPT_CHANNEL_ID: z.string().optional(),
@@ -84,10 +119,12 @@ export const EnvSchema = z.object({
   DUCKY_DEV_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_REMINDER_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_BRIEFING_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_PROD_GPT_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_REMINDER_CHANNEL_ID: z.string().optional(),
 
   // Consequential action execution is separately opt-in per profile. The
   // default is false, so an approval remains a recorded decision unless an
@@ -186,6 +223,19 @@ export const EnvSchema = z.object({
   DUCKY_CONVERSATION_MEMORY_TURNS: z.coerce
     .number().int().min(2).max(CONVERSATION_MEMORY_TURNS_MAX)
     .default(CONVERSATION_MEMORY_TURNS_DEFAULT),
+  /**
+   * How many BYTES of context one conversational turn may carry.
+   *
+   * A byte budget rather than a token one, because no provider on this host
+   * reports a token limit and a token count derived from characters would be a
+   * measurement nobody made. A turn that cannot be brought under it is refused
+   * after compaction, never silently truncated.
+   */
+  DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES: z.coerce
+    .number().int()
+    .min(CONVERSATION_CONTEXT_BUDGET_BYTES_MIN)
+    .max(CONVERSATION_CONTEXT_BUDGET_BYTES_MAX)
+    .default(CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT),
 
   /**
    * Proactive briefings, pushed to the owner's DM. Default OFF.
@@ -314,6 +364,15 @@ export const EnvSchema = z.object({
    */
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: z.coerce.number().int().min(1).default(30),
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: z.coerce.number().int().min(1).default(7),
+  /**
+   * How long a CLOSED conversation thread is kept, with everything in it.
+   *
+   * A LIVE native thread is out of retention's reach entirely -- that is what
+   * issue #4 asks for -- so this is where the bound actually lives. It starts
+   * counting from the moment Ducky observes that the thread is gone from
+   * Discord, not from when the conversation last moved.
+   */
+  DUCKY_RETENTION_CLOSED_THREAD_DAYS: z.coerce.number().int().min(1).default(14),
   DUCKY_RETENTION_BATCH: z.coerce.number().int().min(1).max(10_000).default(200),
 
   /**
@@ -329,6 +388,28 @@ export const EnvSchema = z.object({
    * boundary months later.
    */
   DUCKY_OWNER_TIMEZONE: z.string().max(64).default(DEFAULT_OWNER_TIMEZONE),
+
+  /**
+   * The owner's phone capture page. OFF by default.
+   *
+   * Enabling it is a deliberate act with two further conditions, both checked
+   * at startup rather than at first request: a human credential must be
+   * configured for THIS profile, and the HTTP listener must be bound to a
+   * private address. An instance that fails either refuses to boot instead of
+   * serving the owner's records to whatever the host is attached to.
+   */
+  DUCKY_PHONE_CAPTURE_ENABLED: bool(false),
+  /**
+   * The verifier for the owner's passcode, `scrypt$<salt>$<key>`.
+   *
+   * A VERIFIER, never the passcode: generate one with `pnpm phone:passcode`,
+   * which reads the passcode from stdin so it never reaches a shell history.
+   * Profile-scoped like every other secret, and production never inherits the
+   * unscoped name.
+   */
+  DUCKY_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+  DUCKY_DEV_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+  DUCKY_PROD_PHONE_PASSCODE_VERIFIER: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -551,11 +632,81 @@ export const resolveConversationMemory = (env: Env): {
   enabled: boolean;
   turns: number;
   excludedThreadKeys: readonly string[];
+  contextBudgetBytes: number;
 } => ({
   enabled: env.DUCKY_CONVERSATION_MEMORY_ENABLED,
   turns: env.DUCKY_CONVERSATION_MEMORY_TURNS,
   excludedThreadKeys: resolveSharedChannelIds(env),
+  contextBudgetBytes: env.DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES,
 });
+
+/**
+ * The channels that may sprout native conversation threads, for THIS profile.
+ *
+ * Two boot refusals rather than silent precedence, on the same reasoning
+ * `assertNoChannelRoleConflicts` uses:
+ *
+ * 1. **A shared channel may not be a thread parent.** A shared channel is one
+ *    other people read, and a thread under it is visible to all of them; the
+ *    owner's conversation does not belong there, and memory already refuses to
+ *    store it, so a thread would be a conversation with no continuity in a
+ *    channel chosen for coarse job status.
+ * 2. **A non-conversational role channel may not be one either.** `briefing`
+ *    is where output is delivered and `task` is for personal records; neither
+ *    is a chat. This is what makes "non-chat purpose channels do not spawn
+ *    threads" a configuration property instead of a hope.
+ *
+ * `gpt`, `coding` and an unroled channel are all accepted: the first two are
+ * the conversational roles, and an owner may reasonably want threads in a
+ * channel they have given no role at all.
+ */
+export function resolveThreadParentChannelIds(env: Env): readonly string[] {
+  const names = PROFILE_ENV[env.DUCKY_PROFILE];
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scoped = isProd
+    ? env.DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS
+    : env.DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS;
+  // Production never inherits the unscoped variable.
+  const raw = scoped ?? (isProd ? undefined : env.DUCKY_THREAD_PARENT_CHANNEL_IDS);
+
+  const ids = (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0) return Object.freeze([]);
+
+  const shared = new Set(resolveSharedChannelIds(env));
+  const roles = resolveChannelRoles(env);
+  const byChannel = new Map<string, ChannelRole>();
+  for (const role of CHANNEL_ROLES) {
+    const id = roles[role];
+    if (id !== undefined) byChannel.set(id, role);
+  }
+
+  for (const id of ids) {
+    if (!DISCORD_SNOWFLAKE.test(id)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} contains a value that is not a Discord channel id.`,
+      );
+    }
+    if (shared.has(id)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} names a channel that is also in ${names.sharedChannels}. ` +
+          'A shared channel is one other people read; a conversation thread under it would be ' +
+          'visible to all of them and would store nothing. Pick one.',
+      );
+    }
+    const role = byChannel.get(id);
+    if (role === 'briefing' || role === 'task') {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} names ${names.roleChannels[role]}, which is not a conversation ` +
+          'channel: a briefing channel is where output is delivered and a task channel is for ' +
+          'personal records. Only a chat or coding channel can open conversation threads.',
+      );
+    }
+  }
+  return Object.freeze([...new Set(ids)]);
+}
 
 /**
  * The proactive-briefing schedule, validated.
@@ -594,6 +745,57 @@ export const resolveBriefingSchedule = (env: Env): {
     ...(channelId === undefined ? {} : { channelId }),
   };
 };
+
+/**
+ * The phone capture surface, resolved for THIS profile.
+ *
+ * Returns the parsed credential when it is usable, and a REASON when it is
+ * not -- so `/status` can say "off" or "configured but the listener is public"
+ * rather than leaving the owner to wonder why their shortcut 404s.
+ *
+ * It throws only for a configuration that is dangerous rather than merely
+ * absent: asking for the page while bound to `0.0.0.0` is refused at boot,
+ * because the operator asked for something that would publish their records.
+ */
+export function resolvePhoneCapture(env: Env): {
+  readonly enabled: boolean;
+  readonly reason: string;
+  readonly verifierRaw?: string;
+} {
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scopedName = isProd
+    ? 'DUCKY_PROD_PHONE_PASSCODE_VERIFIER'
+    : 'DUCKY_DEV_PHONE_PASSCODE_VERIFIER';
+  const scoped = blankToUndefined(env[scopedName as keyof Env] as string | undefined);
+  // Production never inherits the unscoped name, exactly like every other secret.
+  const verifierRaw = scoped ?? (isProd ? undefined : blankToUndefined(env.DUCKY_PHONE_PASSCODE_VERIFIER));
+
+  if (!env.DUCKY_PHONE_CAPTURE_ENABLED) {
+    return { enabled: false, reason: 'off — DUCKY_PHONE_CAPTURE_ENABLED is not set' };
+  }
+  if (verifierRaw === undefined) {
+    throw new DuckyError(
+      'invalid_input',
+      `DUCKY_PHONE_CAPTURE_ENABLED needs ${scopedName}. Generate one with \`pnpm phone:passcode\`; ` +
+        'the page is refused rather than served without a credential.',
+    );
+  }
+  if (!isPrivateBindHost(env.DUCKY_HTTP_HOST)) {
+    throw new DuckyError(
+      'invalid_input',
+      'DUCKY_PHONE_CAPTURE_ENABLED requires DUCKY_HTTP_HOST to be a loopback, RFC1918 or ' +
+        'tailnet address. Binding 0.0.0.0 would put your records on every interface this host ' +
+        'has, so it is refused rather than served.',
+    );
+  }
+  // Parsed here so a malformed verifier fails at boot, not at the first tap.
+  parsePhoneVerifier(verifierRaw, scopedName);
+  return {
+    enabled: true,
+    reason: `on — ${env.DUCKY_HTTP_HOST}:${env.DUCKY_HTTP_PORT ?? 'profile default'}/app, tailnet only`,
+    verifierRaw,
+  };
+}
 
 export const cdnHosts = (env: Env): string[] =>
   env.DISCORD_CDN_HOSTS.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);

@@ -568,6 +568,120 @@ proposes a job and creates none; the proposal is deduplicated by
 `(watch, fingerprint)` so it appears once per genuinely new review or new code,
 and stops once the pull request merges.
 
+**coordinator / conversation threads** — one visible thread per qualifying
+starter and no recursion; idempotency on the starter message id and recovery of
+Discord's `MESSAGE_ALREADY_HAS_THREAD`; the seven-day auto-archive; bot, webhook,
+unknown-author, DM, stranger, unconfigured-channel and id-less messages all
+spawn nothing; a shared channel, a briefing channel and a task channel are each
+refused as a thread parent AT BOOT; every creation failure refuses visibly and
+answers nowhere; a thread under the `gpt` channel is answered while an unrelated
+channel stays silent; the extra chat user converses in a thread and is refused
+every owner-only command and the owner's controls; a native thread keeps its
+full transcript past the legacy row cap while an ordinary channel still does
+not; compaction runs automatically inside the byte budget and a turn past it is
+refused before the provider is called; a restart keeps the thread identity and
+its history; participation is issued only to somebody who has spoken.
+
+**coordinator / conversation controls** — the owner-only and conversational
+interaction manifests are disjoint and their union is the registered set; Branch
+and Compact appear as real buttons inside a thread and nowhere else; Compact
+leaves the transcript intact and says so; a non-participant, a copied control
+and a stranger are each refused differently and correctly; a branch is a
+separate thread with a separate provider session, seeded with only the selected
+anchor, leaving the source untouched; an unknown anchor is refused; a reply
+anchors inside its own thread, a cross-thread or unreadable reference is labelled
+and dropped, Ducky's own earlier message is labelled assistant on the
+transport's word, a stranger's is never presented as something Ducky said, an
+unidentifiable author drops the anchor, and opening a thread is rate limited
+while a replayed starter is not charged.
+
+**coordinator / conversation deletion** — `/forget conversation` reports PARTIAL
+and names why the provider cannot be reached; the session epoch rotates so the
+deleted conversation cannot be picked back up; every actor contaminated by a
+SHARED thread is rotated without a row of theirs being deleted; the audit carries
+the deletion and rotation counts and no content; a checkpoint goes with the turns
+it summarized; retention keeps a LIVE thread however old, ages an ordinary
+channel out normally, removes a CLOSED thread whole once past its own window, and
+refuses to purge a live thread even when asked directly. It also reopens a
+falsely closed mapping when an authorized message resumes the conversation and
+does NOT reopen for an unauthorized poster, keeps the full transcript and the
+mapping across the purge window after such a resumption, and never ages a native
+thread's turns out through the ordinary 7/30-day windows whether the thread is
+open or closed.
+
+**coordinator / conversation presentation** — the style contract asks for short
+plain paragraphs and forbids headings, em dashes, middle dots, heavy bold and
+printing an action word as though it were a control, and a persona cannot
+replace it; only explicit workflow commands enter the canonical bridge, and a quoted
+command remains ordinary conversation that creates no job and no task; task lists, reminder lists and briefings carry no timezone suffix and no
+reminder-lead line while the configured zone still drives scheduling.
+
+**coordinator / thread transport** — what lives only in the transport, tested
+against the shapes discord.js really produces rather than invented ones. A
+reply anchor comes from the channel's message cache with no API call, falls back
+to `fetchReference` when it has aged out, returns the reference without text
+when that fails, is never fetched across channels, and treats a forward as not a
+reply. The fetch -- and only the fetch, never the free cache read -- is gated on
+the sender being somebody Ducky would answer, so an unauthorized cache miss
+costs no REST call, and a transport given no predicate fetches for nobody. Only the transport may say a referenced message was Ducky's own, by
+comparing the author against the bot's client id; an unreadable client id yields
+undefined rather than a guess. `Events.ThreadDelete` is registered and routed to
+the thread-gone hook while `ThreadUpdate` deliberately is not, and the requested
+gateway intents are still exactly the four they were, which is the whole reason
+that event was chosen. `message.reply` is called from exactly one place, that
+place sanitizes, the thread-delivery path takes an `OutboundMessage` rather than
+a built payload, and no payload is constructed anywhere without sanitizing
+first. A slash command resolves its thread's parent through the same helper a
+message does, so a command in a thread under a role channel persists while a
+non-owner's reply there still does not.
+
+**adapters / probe deletion surface** — the probe's session-deletion
+classification returns a NOTE in every case and never a blocker, distinguishes
+"OpenClaw names no deletion command" from "the candidates use verbs this
+repository will not build an argv from" from "a usable candidate exists and has
+not been exercised", and leaves `RECORDED_SESSION_DELETION` null in all three.
+
+**contracts / bulk capture** — the owner's own two example lines parse with the
+time on one and no invented time on the other; a numeric date and a day that
+does not exist are REFUSED with a named reason rather than guessed; a yearless
+date resolves to its next occurrence and counts today as today; a quoted or
+fenced list is never a list; a header before the first item is ignored and
+counted while an unnumbered line after it is reported; an all-day deadline is
+not overdue at one second past midnight nor late that evening, and is overdue
+the next local morning; a deadline renders with no timezone label, with the
+year only when it is not the current one; and the private-bind guard accepts
+loopback, RFC1918 and both tailnet ranges while refusing `0.0.0.0`, `::` and
+every public address.
+
+**coordinator / task capture** — a pasted list previews and saves NOTHING until
+Save; one ambiguous line refuses the whole batch and names it; Save is
+idempotent, so a double press reports the same tasks rather than a second set;
+an edit is re-parsed through the same grammar; a batch that would pass the
+open-task cap writes no task, no reminder and leaves the preview intact; a
+settled preview keeps no copy of the owner's text; an expired one saves
+nothing; the reconciler sweeps it whether or not retention is configured; and a
+non-owner reaches none of it.
+
+**coordinator / linked reminders** — a timed deadline schedules 24-hour and
+1-hour notice and a date-only one 08:00 on the day; an offset already past is
+skipped rather than fired; moving a deadline withdraws the old reminders and
+derives new ones; closing a task abandons an undelivered occurrence and keeps a
+delivered one; Snooze moves the notification and provably not `due_at`; linked
+reminders stay out of `/reminder list` and the briefing while still counting
+against the cap; a card posted in a channel carries the owner's mention and
+three real controls that refuse everybody else and stop verifying once the
+deadline moves; a failed send is retried on the next pass; and deleting a task
+takes its reminders with it, counted.
+
+**coordinator / phone capture** — the page does not exist unless it is enabled;
+enabling it with no credential, or on a listener that is not private, refuses
+to BOOT; production never inherits the development credential; a wrong passcode
+issues no session; the cookie is httpOnly, SameSite=Strict and bounded; a
+forged cookie and a missing CSRF token are refused; an executor bearer token
+does not open the page and a phone session does not open the executor routes;
+the parse and the idempotent save behave exactly as the Discord path does; and
+the page renders its preview from data rather than from markup.
+
 **persistence / backup** — the real scripts, run as subprocesses against a real
 temporary database: the copy verifies, is written `0600`, and excludes the
 credential file; a file that is not a Ducky database and a corrupt file are both

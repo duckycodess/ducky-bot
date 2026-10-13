@@ -163,10 +163,19 @@ export class RetentionService {
     // so a failure in one table cannot roll back another's progress.
     withTransaction(this.store.db, () => {
       c.capturesDeleted = r.deleteClosedCaptures(cutoff(p.doneCaptureDays), p.batch);
-      c.tasksDeleted = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      // A closed task takes its own linked reminders with it, counted rather
+      // than cascaded silently: the report says how many records really went.
+      const closedTasks = r.deleteClosedTasks(cutoff(p.closedTaskDays), p.batch);
+      c.tasksDeleted = closedTasks.tasks;
+      c.remindersDeleted += closedTasks.reminders;
+      c.reminderOccurrencesDeleted += closedTasks.occurrences;
+      // `+=`, not `=`: the closed-task pass above has already removed the
+      // reminders those tasks owned, and overwriting here would report them as
+      // never having existed. The two passes count different rows -- a linked
+      // reminder is gone by the time this runs -- so adding cannot double-count.
       const rem = r.deleteClosedReminders(cutoff(p.closedReminderDays), p.batch);
-      c.remindersDeleted = rem.reminders;
-      c.reminderOccurrencesDeleted = rem.occurrences;
+      c.remindersDeleted += rem.reminders;
+      c.reminderOccurrencesDeleted += rem.occurrences;
       // Occurrences of a reminder that is still OPEN, once they are settled.
       c.reminderOccurrencesDeleted += r.deleteSettledOccurrences(
         cutoff(p.closedReminderDays),
@@ -203,6 +212,33 @@ export class RetentionService {
         });
       });
     }
+
+    /**
+     * Closed conversation threads, removed WHOLE.
+     *
+     * Lifecycle-aware rather than age-only, because issue #4 asks for the full
+     * transcript of a thread while it LIVES. So the age windows above skip
+     * every live thread (the SQL excludes them), and the bound is here: once
+     * Ducky has observed that a thread is gone from Discord, its turns, its
+     * checkpoint, its participation rows, its provider session records and its
+     * mapping age out together.
+     *
+     * A live thread is counted as SKIPPED rather than passed over in silence,
+     * on the same reasoning as a skipped job: "this pass deliberately left
+     * something alone" is a fact an operator should be able to read off the
+     * report. There is still no path here that deletes across threads or users
+     * -- `purgeThread` takes one id and refuses a thread that is not closed.
+     */
+    withTransaction(this.store.db, () => {
+      const threads = this.store.conversationThreads;
+      c.conversationThreadsSkipped = threads.countLive();
+      for (const row of threads.closedBefore(cutoff(p.closedThreadDays), p.batch)) {
+        const out = threads.purgeThread(row.threadId);
+        if (!out.deleted) continue;
+        c.conversationThreadsDeleted += 1;
+        c.conversationThreadRowsDeleted += out.rows;
+      }
+    });
 
     withTransaction(this.store.db, () => {
       c.workspacesDeleted = r.deleteClosedWorkspaces(cutoff(p.jobMetadataDays), p.batch);
@@ -262,6 +298,9 @@ export class RetentionService {
         `workspaces ${counts.workspacesDeleted}; ` +
         `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}; ` +
         `conversation turns ${counts.conversationTurnsDeleted}; ` +
+        `closed threads ${counts.conversationThreadsDeleted} ` +
+        `(+${counts.conversationThreadRowsDeleted} rows, ` +
+        `${counts.conversationThreadsSkipped} live kept); ` +
         `job detail rows ${counts.jobDetailRowsDeleted}; audit ${counts.auditRowsDeleted}`,
     });
   }
@@ -289,6 +328,7 @@ export function retentionPolicyFrom(env: {
   DUCKY_RETENTION_IDEMPOTENCY_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: number;
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: number;
+  DUCKY_RETENTION_CLOSED_THREAD_DAYS: number;
   DUCKY_RETENTION_BATCH: number;
   /** Deprecated aliases. */
   DUCKY_RETENTION_TERMINAL_JOBS_DAYS?: number | undefined;
@@ -320,6 +360,7 @@ export function retentionPolicyFrom(env: {
     idempotencyDays: env.DUCKY_RETENTION_IDEMPOTENCY_DAYS,
     conversationOwnerDays: env.DUCKY_RETENTION_CONVERSATION_OWNER_DAYS,
     conversationOtherDays: env.DUCKY_RETENTION_CONVERSATION_OTHER_DAYS,
+    closedThreadDays: env.DUCKY_RETENTION_CLOSED_THREAD_DAYS,
     batch: env.DUCKY_RETENTION_BATCH,
   });
 }

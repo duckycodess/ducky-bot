@@ -8,16 +8,21 @@ import {
   type FrontDoorPort, type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
 import {
-  AUDIT_OWNER_REF, DuckyError,
+  AUDIT_OWNER_REF, COMMAND_BUCKETS, CONVERSATIONAL_ROUTE, DuckyError,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
 import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
+import {
+  ConversationThreadPolicy, ConversationThreadService,
+} from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
+import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
+import type { PhoneCaptureConfig } from './http/phone.js';
 import { commandScopeFor, resolveDiscordProfile, type DiscordProfileConfig } from './discord/profile-config.js';
 import { Authorizer, loadAuthzConfig } from './security/authz.js';
 import { ComponentSigner } from './security/component-signing.js';
@@ -39,6 +44,8 @@ import { ChannelRolePolicy } from './domain/channel-roles.js';
 import { ReplyPersistencePolicy } from './domain/reply-persistence.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
+import { TaskReminderLinker } from './domain/task-reminders.js';
+import { TaskCaptureService } from './domain/task-capture.service.js';
 import { RemindersService } from './domain/reminders.service.js';
 import { BriefingService } from './domain/briefing.service.js';
 import { ReminderNotifier } from './domain/reminder-notifications.service.js';
@@ -114,6 +121,8 @@ export interface App {
   readonly notifier: JobNotifier;
   readonly clock: OwnerClock;
   readonly tasks: TasksService;
+  /** Pasted task lists, from the phone page and from Discord. One path for both. */
+  readonly taskCapture: TaskCaptureService;
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly reminderNotifier: ReminderNotifier;
@@ -124,6 +133,8 @@ export interface App {
   readonly forget: ForgetService;
   /** Bounded conversation continuity. Off unless the operator enabled it. */
   readonly conversationMemory: ConversationMemoryService;
+  /** Native Discord threads as conversations. Off unless a parent is named. */
+  readonly conversationThreads: ConversationThreadService;
   /** Deterministic natural-language intents. Owner-only, provider-free. */
   readonly intents: IntentsService;
   /** The owner-only repository workflow bridge. Off unless configured. */
@@ -135,6 +146,12 @@ export interface App {
   readonly channelRoles: ChannelRolePolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
+  /**
+   * The phone capture surface, or undefined when it is off. `main.ts` hands it
+   * to the HTTP server; undefined means the routes are never registered at
+   * all, rather than registered and refusing.
+   */
+  readonly phone: PhoneCaptureConfig | undefined;
   readonly transport: DiscordTransport;
   readonly credentials: ExecutorCredentialStore;
   readonly conversation: ConversationProvider;
@@ -162,6 +179,18 @@ export function createApp(
   // refuses an unset value and refuses `mock` outright.
   const conversationMode = resolveConversationProvider(env);
   assertModeUsable(conversationMode, env.DUCKY_PROFILE);
+
+  /**
+   * The owner's phone surface, resolved HERE with the other pure configuration
+   * checks and before any filesystem or database work.
+   *
+   * It is the cheapest place for "you asked for the capture page with no
+   * credential" or "...while bound to every interface" to fail, and it must
+   * fail at boot rather than when a phone first taps the shortcut. `enabled`
+   * false leaves `phone` undefined below, which is what stops the routes from
+   * being registered at all.
+   */
+  const phoneSettings = resolvePhoneCapture(env);
 
   // Secrets for THIS profile only. Production never falls back to a shared or
   // development value.
@@ -215,14 +244,32 @@ export function createApp(
   // attached to the SAME instance the router uses.
   const buckets = new CommandBuckets();
   buckets.onExhausted(({ bucket }) => {
+    /**
+     * WHO is attributed, and why it is not always the owner any more.
+     *
+     * Every bucket was owner-only once, so recording a rate limit as the
+     * owner's doing was true without anybody having to be told. Issue #4 gave
+     * a conversation participant two controls and a thread, so `interaction`
+     * and `threadCreate` are reachable by the configured chat user -- and
+     * attributing their limit to the owner would put a false statement in a
+     * long-lived record.
+     *
+     * A shared bucket is therefore recorded as `system` against the
+     * conversation route: the honest answer is "a limit fired on a surface
+     * more than one person can reach", because the sink is handed the BUCKET
+     * and nothing else. It deliberately stays that way -- the fix for a vague
+     * audit row is not to start logging Discord ids.
+     */
+    const ownerOnly = COMMAND_BUCKETS[bucket].ownerOnly;
     try {
       store.auditLog.record({
         event: 'rate_limit.exceeded',
-        actorKind: 'owner',
-        actorRef: AUDIT_OWNER_REF,
+        actorKind: ownerOnly ? 'owner' : 'system',
+        actorRef: ownerOnly ? AUDIT_OWNER_REF : CONVERSATIONAL_ROUTE,
         subjectKind: 'route',
         subjectRef: bucket,
         outcome: 'refused',
+        ...(ownerOnly ? {} : { detail: 'shared surface; the actor is not recorded' }),
       });
     } catch {
       /* a record is never worth failing the limit */
@@ -246,7 +293,9 @@ export function createApp(
     store,
     config: resolveConversationMemory(env),
   });
-  const forget = new ForgetService({ store, authz, memory: conversationMemory });
+  // `conversation` is passed for ONE reason: so `/forget` can report the second
+  // store honestly (ADR 0024). Nothing in ForgetService calls `reply`.
+  const forget = new ForgetService({ store, authz, memory: conversationMemory, conversation });
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
@@ -264,7 +313,14 @@ export function createApp(
   });
   const approvals = new ApprovalsService({ store, authz, performer: actionPerformer });
   const github = new GitHubService(authz, allowlist, githubReader);
-  const tasks = new TasksService({ store, authz, clock });
+  // The deadline-to-notification link, shared by every path that can create or
+  // move a task: one place decides what a deadline owes, so the slash command,
+  // a pasted list and the phone page cannot drift apart.
+  const taskReminderLinker = new TaskReminderLinker({ store, clock });
+  const tasks = new TasksService({ store, authz, clock, linker: taskReminderLinker });
+  const taskCapture = new TaskCaptureService({
+    store, authz, clock, linker: taskReminderLinker,
+  });
   const reminders = new RemindersService({ store, authz, clock });
   const briefing = new BriefingService({ store, authz, clock });
   const reconciler = new Reconciler({ store, approvals, pending });
@@ -334,21 +390,67 @@ export function createApp(
   const replyPersistence = new ReplyPersistencePolicy(channelRoles, authz.ownerId);
   const transport =
     overrides.transport ??
-    transportForProfile(discordProfile, (event) =>
-      replyPersistence.persists({
-        userId: event.userId,
-        kind: event.kind,
-        context: event.kind === 'component' ? undefined : event.context,
-        ...(event.kind === 'command' ? { commandName: event.name } : {}),
-      }),
+    transportForProfile(
+      discordProfile,
+      (event) =>
+        replyPersistence.persists({
+          userId: event.userId,
+          kind: event.kind,
+          context: event.kind === 'component' ? undefined : event.context,
+          ...(event.kind === 'command' ? { commandName: event.name } : {}),
+        }),
+      // One question only: may this person converse? It decides whether a
+      // reply anchor that missed the message cache may cost a REST call, and
+      // it grants nothing.
+      (userId) => authz.roleOf(userId) !== 'none',
     );
+
+  /**
+   * Native conversation threads.
+   *
+   * Off unless an operator NAMES the channels that may sprout one: creating a
+   * thread is Ducky writing into the owner's guild, so it is opt-in per
+   * channel rather than a boolean, and the list is refused at boot if it names
+   * a shared channel or a non-conversational role channel.
+   *
+   * The starter is the TRANSPORT's, handed in as a function so the service
+   * holds no Discord dependency of its own and a test can drive the whole path
+   * with the mock. A transport that cannot create threads leaves the service
+   * refusing rather than pretending.
+   */
+  const conversationThreads = new ConversationThreadService({
+    store,
+    policy: new ConversationThreadPolicy(
+      { parentChannelIds: resolveThreadParentChannelIds(env) },
+      authz,
+      sharedPolicy,
+    ),
+    authz,
+    startThread: transport.startThread ? (req) => transport.startThread!(req) : undefined,
+    // The SAME buckets instance every other surface uses, so a thread opened
+    // here counts against one budget rather than a second private one.
+    chargeThreadCreate: (userId) => buckets.check('threadCreate', userId),
+  });
+  // The decision lives in the domain; the transport only performs it. Absent
+  // on a transport that does not support threads, which leaves routing exactly
+  // as it was.
+  transport.useConversationThreads?.(
+    (event) => conversationThreads.enter({ event }),
+    (threadId) => conversationThreads.observeGone(threadId),
+  );
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });
-  // Reminders go to the owner's DM and nowhere else: no shared policy, no
-  // shared projection service, no channel branch to configure wrongly.
+  // A free-standing reminder goes to the owner's DM and nowhere else. A
+  // reminder that belongs to a TASK may go to a configured channel with the
+  // owner's mention -- the only reminder with a shape worth posting where
+  // somebody else might see it, and even then the controls on it refuse
+  // everybody but the owner.
   const reminderNotifier = new ReminderNotifier({
-    store, transport, ownerId: authz.ownerId, clock,
+    store, transport, ownerId: authz.ownerId, clock, signer,
+    // Opt-in and profile-scoped. Unconfigured means the DM every reminder has
+    // always used, and only TASK-LINKED reminders are ever routed elsewhere.
+    reminderChannelId: channelRoles.channelFor('reminder'),
   });
   // Rides the SAME interval as everything else, holds no provider, and sends to
   // the owner's DM only. Off by default: a briefing is pulled unless somebody
@@ -431,6 +533,17 @@ export function createApp(
     ...(overrides.conversationFetch ? { fetchImpl: overrides.conversationFetch } : {}),
   };
 
+  const phone: PhoneCaptureConfig | undefined =
+    phoneSettings.enabled && phoneSettings.verifierRaw !== undefined
+      ? {
+          verifier: parsePhoneVerifier(phoneSettings.verifierRaw, 'DUCKY_PHONE_PASSCODE_VERIFIER'),
+          sessionKey: phoneSessionKey(phoneSettings.verifierRaw),
+          capture: taskCapture,
+          authz,
+          nowMs: () => clock.nowMs(),
+        }
+      : undefined;
+
   const scope = discordProfile.token ? commandScopeFor(discordProfile) : undefined;
   const status = (): ProviderStatus => ({
     profile: `${discordProfile.profile} (${paths.instanceLabel})`,
@@ -444,8 +557,12 @@ export function createApp(
       ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
       : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
-      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread; /forget conversation deletes them`
+      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread, ` +
+        `or the full transcript of a native thread while it lives; up to ` +
+        `${env.DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES} bytes of context per turn; ` +
+        '/forget conversation deletes them'
       : 'off — nothing you say in conversation is stored',
+    conversationThreads: conversationThreads.describe(),
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
@@ -454,6 +571,10 @@ export function createApp(
     dependencyChecker: dependencies.checkerVerified
       ? `${dependencies.checkerName} (verified)`
       : `${dependencies.checkerName} — dependency waits end at your desk, never auto-resumed`,
+    phoneCapture: phoneSettings.reason,
+    reminderDelivery: channelRoles.channelFor('reminder')
+      ? 'task reminders post in your reminders channel with a mention; everything else is a DM'
+      : 'every reminder is a DM',
     channelRoles: channelRoles.enabled
       ? `${channelRoles.configured.map((c) => c.role).join(', ')} — replies persist there`
       : 'none configured; every owner reply stays ephemeral in a guild',
@@ -478,11 +599,13 @@ export function createApp(
     github,
     githubWatches,
     tasks,
+    taskCapture,
     reminders,
     briefing,
     conversation,
     forget,
     memory: conversationMemory,
+    threads: conversationThreads,
     intents,
     skillBridge,
     buckets,
@@ -522,11 +645,11 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport,
+    approvals, github, githubWatches, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
-    clock, tasks, reminders, briefing, reminderNotifier, briefingNotifier,
+    clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
-    retention, forget, conversationMemory, intents, skillBridge,
+    retention, forget, conversationMemory, conversationThreads, intents, skillBridge,
     close: () => store.db.close(),
   };
 }
@@ -569,9 +692,12 @@ function credentialStoreFor(
 function transportForProfile(
   config: DiscordProfileConfig,
   persists?: (event: Incoming) => boolean,
+  mayConverse?: (userId: string) => boolean,
 ): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
-  return new DiscordJsTransport(config.token, channelAwareSink, undefined, persists);
+  return new DiscordJsTransport(
+    config.token, channelAwareSink, undefined, persists, mayConverse,
+  );
 }
 
 /**

@@ -73,7 +73,28 @@ export class ChannelRolePolicy {
     if (!context) return undefined;
     if (context.guildId === undefined) return undefined;
     if (context.channelId === undefined) return undefined;
-    return this.byChannel.get(context.channelId);
+    const own = this.byChannel.get(context.channelId);
+    if (own !== undefined) return own;
+    /**
+     * A thread INHERITS its parent's role, and nothing more.
+     *
+     * A thread's id is not its parent's, so before this a thread under a role
+     * channel had no role: replies there fell back to ephemeral and, under
+     * `gpt`, conversation was silenced outright -- the exact three constraints
+     * the roadmap recorded against thread continuity.
+     *
+     * Inheriting the ROLE fixes that and widens nothing. A role answers *where
+     * does this output belong, and does it persist*; it has never answered
+     * *who may act*, and `Authorizer` still reads frozen configuration and
+     * nothing else. A non-owner in an inherited role channel is refused
+     * exactly as they are in the parent.
+     *
+     * `parentChannelId` is present only for a thread, so a top-level channel
+     * cannot reach this line.
+     */
+    return context.parentChannelId === undefined
+      ? undefined
+      : this.byChannel.get(context.parentChannelId);
   }
 
   /** Whether a request arrived in one of the owner's configured channels. */

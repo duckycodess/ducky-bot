@@ -4,7 +4,8 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { SHARED_READABLE_ROUTES } from '@ducky/contracts';
 import {
-  GatewayOpenClawProvider, MockConversationProvider, NO_ATTACHMENT_CAPABILITY, attachmentsUsable,
+  GatewayOpenClawProvider, MockConversationProvider, NO_ATTACHMENT_CAPABILITY,
+  NO_SESSION_DELETION, attachmentsUsable,
   type ConversationAttachment, type ConversationCapabilities, type ConversationInput,
   type ConversationProvider, type ConversationReply,
 } from '@ducky/adapters';
@@ -40,6 +41,10 @@ class CapableProvider implements ConversationProvider {
       contentTypes: ['image/png', 'image/jpeg', 'image/webp', 'text/plain'],
       maxBytes: 1024 * 1024,
     },
+    // Attachment support says nothing about deletion support; a provider has
+    // to state each separately, which is why this is required rather than
+    // optional.
+    sessionDeletion: NO_SESSION_DELETION('test stand-in keeps no session'),
   };
 
   /** What the provider actually saw, so a test can assert the metadata flow. */

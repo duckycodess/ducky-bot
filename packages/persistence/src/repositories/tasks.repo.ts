@@ -108,28 +108,90 @@ export class TasksRepo {
       .map((r) => map(r as Record<string, unknown>));
   }
 
-  /** Open tasks whose due instant has already passed. */
-  overdue(ownerId: string, beforeIso: string, limit: number): TaskRow[] {
+  /**
+   * Open tasks that are genuinely late, and the two halves of "late".
+   *
+   * A TIMED deadline is late once its instant has passed: a 09:00 task is
+   * overdue at 17:00, and saying otherwise would be wrong.
+   *
+   * A DATE-ONLY deadline is not. It is stored as that day's midnight because
+   * that is where the civil day begins, but the owner typed a date and meant
+   * the whole of it -- so comparing it to `now` marked every task due TODAY as
+   * overdue from one second past midnight. It is late once the day it names
+   * has ended, which is why the caller passes the start of the current local
+   * day as well: computing that in SQL would need a timezone SQLite does not
+   * have, and would be wrong across a DST boundary.
+   */
+  private static readonly OVERDUE_PREDICATE = `due_at IS NOT NULL AND (
+       (due_all_day = 0 AND due_at < :now)
+    OR (due_all_day = 1 AND due_at < :dayStart)
+  )`;
+
+  overdue(ownerId: string, nowIso: string, dayStartIso: string, limit: number): TaskRow[] {
     return this.db
       .prepare(
         `SELECT * FROM tasks
-         WHERE discord_user_id = ? AND status = 'open'
-           AND due_at IS NOT NULL AND due_at < ?
-         ${ORDER} LIMIT ?`,
+         WHERE discord_user_id = :owner AND status = 'open'
+           AND ${TasksRepo.OVERDUE_PREDICATE}
+         ${ORDER} LIMIT :limit`,
       )
-      .all(ownerId, beforeIso, limit)
+      .all({ owner: ownerId, now: nowIso, dayStart: dayStartIso, limit })
       .map((r) => map(r as Record<string, unknown>));
   }
 
-  countOverdue(ownerId: string, beforeIso: string): number {
+  countOverdue(ownerId: string, nowIso: string, dayStartIso: string): number {
     const r = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM tasks
-         WHERE discord_user_id = ? AND status = 'open'
-           AND due_at IS NOT NULL AND due_at < ?`,
+         WHERE discord_user_id = :owner AND status = 'open'
+           AND ${TasksRepo.OVERDUE_PREDICATE}`,
       )
-      .get(ownerId, beforeIso) as { n: number };
+      .get({ owner: ownerId, now: nowIso, dayStart: dayStartIso }) as { n: number };
     return Number(r.n);
+  }
+
+  /** Scoped to the owner, like every other read here. */
+  byId(ownerId: string, id: string): TaskRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM tasks WHERE discord_user_id = ? AND id = ?')
+      .get(ownerId, id);
+    return r ? map(r as Record<string, unknown>) : undefined;
+  }
+
+  /**
+   * Moves an OPEN task's deadline, and only its owner's.
+   *
+   * Returns whether a row changed, so a caller can tell "already closed" from
+   * "not yours" without a second read -- the same shape `close` uses. The
+   * linked reminders are resynchronized by the service, in the same
+   * transaction: a deadline that moved without its notifications moving would
+   * be worse than one that did not move at all.
+   */
+  updateDue(
+    ownerId: string,
+    id: string,
+    dueAt: string | null,
+    dueAllDay: boolean,
+    atIso: string,
+  ): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE tasks SET due_at = ?, due_all_day = ?, updated_at = ?
+         WHERE id = ? AND discord_user_id = ? AND status = 'open'`,
+      )
+      .run(dueAt, fromBool(dueAllDay), atIso, id, ownerId);
+    return Number(info.changes) === 1;
+  }
+
+  /**
+   * Inserts one task inside a caller's transaction, used by the bulk save.
+   *
+   * Deliberately the SAME statement `insert` runs rather than a second
+   * multi-row one: a batch that validated differently from a single add would
+   * be a second way to write a task, and the bounds would eventually drift.
+   */
+  insertMany(rows: Parameters<TasksRepo['insert']>[0][]): TaskRow[] {
+    return rows.map((row) => this.insert(row));
   }
 
   /** Tasks closed into a given state inside a range. The evening briefing's "done today". */

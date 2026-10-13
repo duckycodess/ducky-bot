@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  MockFrontDoor, NO_ATTACHMENT_CAPABILITY,
+  MockFrontDoor, NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION,
   type ConversationCapabilities, type ConversationProvider, type ConversationReply,
 } from '@ducky/adapters';
 import { isLinkButton, type OutboundMessage } from '../src/discord/message.js';
@@ -12,7 +12,7 @@ import { makeHarness, OWNER } from './helpers.js';
 class VerifiedProvider implements ConversationProvider {
   readonly name = 'recording';
   readonly verified = true;
-  readonly capabilities: ConversationCapabilities = { attachments: NO_ATTACHMENT_CAPABILITY };
+  readonly capabilities: ConversationCapabilities = { attachments: NO_ATTACHMENT_CAPABILITY, sessionDeletion: NO_SESSION_DELETION('test stand-in') };
   async reply(): Promise<ConversationReply> {
     return { text: 'Q1', mock: false };
   }

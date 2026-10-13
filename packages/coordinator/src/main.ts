@@ -53,6 +53,9 @@ async function main(): Promise<void> {
     store: app.store,
     jobs: app.jobs,
     credentials: app.credentials,
+    // Undefined unless the operator enabled it AND the listener is private;
+    // the routes are then never registered rather than registered and refusing.
+    ...(app.phone ? { phone: app.phone } : {}),
   });
 
   await app.transport.start((event) => app.router.handle(event));

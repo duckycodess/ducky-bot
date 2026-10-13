@@ -1,6 +1,9 @@
 import { controlId } from '../src/discord/message.js';
 import { describe, expect, it } from 'vitest';
-import { OWNER_ONLY_COMMANDS } from '@ducky/contracts';
+import {
+  OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
+  isSharedReadableRoute,
+} from '@ducky/contracts';
 import { ComponentSigner } from '../src/security/component-signing.js';
 import { commandPayload } from '../src/discord/register-commands.js';
 import { CHAT, OWNER, implementedResult, makeHarness, secret, replyText } from './helpers.js';
@@ -167,6 +170,39 @@ describe('command registration', () => {
     // command must be DEFINED here as well as routed, and neither list may
     // grow a name the other does not have.
     expect(payload.map((c) => c.name).sort()).toEqual([...OWNER_ONLY_COMMANDS].sort());
+  });
+});
+
+describe('the new task controls are privileged, and only that', () => {
+  it('is on the owner-only interaction manifest, every one of them', () => {
+    for (const kind of ['task_edit', 'task_snooze', 'bulk_save', 'bulk_edit', 'bulk_discard']) {
+      expect(OWNER_ONLY_INTERACTION_KINDS as readonly string[], kind).toContain(kind);
+    }
+  });
+
+  it('is never shared-readable: a card in a channel grants nobody anything', () => {
+    for (const kind of OWNER_ONLY_INTERACTION_KINDS) {
+      expect(isSharedReadableRoute(kind), kind).toBe(false);
+    }
+    // And the shared surface still names exactly the two READS it always did.
+    expect(SHARED_READABLE_ROUTES.map((r) => `${r.command}/${r.subcommand ?? ''}`)).toEqual([
+      'jobs/', 'job/status',
+    ]);
+  });
+
+  it('adds no slash command: the command manifest is unchanged', () => {
+    const h = makeHarness();
+    expect(h.app.router.registeredCommands()).toEqual([...OWNER_ONLY_COMMANDS].sort());
+    h.close();
+  });
+
+  it('registers every one of them in the router', () => {
+    const h = makeHarness();
+    const kinds = h.app.router.registeredComponentKinds();
+    for (const kind of ['task_edit', 'task_snooze', 'bulk_save', 'bulk_edit', 'bulk_discard']) {
+      expect(kinds, kind).toContain(kind);
+    }
+    h.close();
   });
 });
 

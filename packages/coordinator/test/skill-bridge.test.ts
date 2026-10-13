@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  MockFrontDoor, NO_ATTACHMENT_CAPABILITY,
+  MockFrontDoor, NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION,
   type ConversationCapabilities, type ConversationInput, type ConversationProvider,
   type ConversationReply,
 } from '@ducky/adapters';
@@ -25,7 +25,7 @@ const SHARED = '900000000000000055';
 class RecordingProvider implements ConversationProvider {
   readonly name = 'recording';
   readonly verified = true;
-  readonly capabilities: ConversationCapabilities = { attachments: NO_ATTACHMENT_CAPABILITY };
+  readonly capabilities: ConversationCapabilities = { attachments: NO_ATTACHMENT_CAPABILITY, sessionDeletion: NO_SESSION_DELETION('test stand-in') };
   readonly turns: ConversationInput[] = [];
 
   constructor(private readonly answer = 'Q1 - what is the smallest version of this?') {}

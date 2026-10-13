@@ -2,6 +2,16 @@
 
 **Status:** Accepted
 
+**Amended by [ADR 0025](0027-native-thread-conversations-and-the-first-non-owner-controls.md)
+in one respect:** retention of stored conversation turns is now LIFECYCLE-aware
+as well as age-based. A turn belonging to a LIVE native thread is outside every
+window, because issue #4 asks for the full transcript while the thread exists;
+the bound is `DUCKY_RETENTION_CLOSED_THREAD_DAYS`, which starts counting once
+Ducky has observed the thread is gone from Discord. Everything else here holds
+unchanged: only finished things are in scope, a live thread is COUNTED as
+skipped rather than tidied away, `purgeThread` refuses a thread that is not
+closed, and there is still no wipe-all path at any layer.
+
 ## Context
 
 Only two things were ever pruned: `audit_log` at 90 days and `executor_nonces`

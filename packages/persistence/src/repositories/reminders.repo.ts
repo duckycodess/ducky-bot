@@ -20,6 +20,7 @@ const map = (r: Record<string, unknown>): ReminderRow => ({
   firstFireAt: String(r['first_fire_at']),
   lastFiredAt: r['last_fired_at'] == null ? null : String(r['last_fired_at']),
   closedAt: r['closed_at'] == null ? null : String(r['closed_at']),
+  taskId: r['task_id'] == null ? null : String(r['task_id']),
 });
 
 const mapOccurrence = (r: Record<string, unknown>): ReminderOccurrenceRow => ({
@@ -60,13 +61,15 @@ export class RemindersRepo {
     maxOccurrences: number;
     firstFireAt: string;
     createdAt: string;
+    /** The task this belongs to. Omitted means a free-standing reminder. */
+    taskId?: string | null;
   }): ReminderRow {
     this.db
       .prepare(
         `INSERT INTO reminders (id, public_id, discord_user_id, text, recurrence_kind,
            interval_minutes, max_occurrences, fired_count, next_fire_at, status,
-           created_at, updated_at, first_fire_at)
-         VALUES (?,?,?,?,?,?,?,0,?, 'scheduled', ?,?,?)`,
+           created_at, updated_at, first_fire_at, task_id)
+         VALUES (?,?,?,?,?,?,?,0,?, 'scheduled', ?,?,?,?)`,
       )
       .run(
         row.id,
@@ -80,9 +83,11 @@ export class RemindersRepo {
         row.createdAt,
         row.createdAt,
         row.firstFireAt,
+        row.taskId ?? null,
       );
     return {
       ...row,
+      taskId: row.taskId ?? null,
       firedCount: 0,
       nextFireAt: row.firstFireAt,
       status: 'scheduled',
@@ -90,6 +95,60 @@ export class RemindersRepo {
       lastFiredAt: null,
       closedAt: null,
     };
+  }
+
+  /** Every scheduled reminder linked to one task, for the owner who owns it. */
+  scheduledForTask(ownerId: string, taskId: string): ReminderRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM reminders
+          WHERE discord_user_id = ? AND task_id = ? AND status = 'scheduled'
+          ORDER BY next_fire_at ASC`,
+      )
+      .all(ownerId, taskId)
+      .map((r) => map(r as Record<string, unknown>));
+  }
+
+  /**
+   * Stops every pending notification for one task, in one statement.
+   *
+   * Used when a task is closed, when its deadline moves, and before a resync
+   * writes the new offsets. Occurrences already DELIVERED are untouched --
+   * they are a record of a message that really was sent -- while anything
+   * materialized and not yet delivered is abandoned, so a task marked done
+   * cannot go on to tell the owner it is due.
+   *
+   * Returns how many schedules were cancelled; the caller reports counts, never
+   * content.
+   */
+  cancelForTask(ownerId: string, taskId: string, atIso: string): number {
+    const ids = this.db
+      .prepare(
+        `SELECT id FROM reminders
+          WHERE discord_user_id = ? AND task_id = ? AND status = 'scheduled'`,
+      )
+      .all(ownerId, taskId)
+      .map((r) => String((r as Record<string, unknown>)['id']));
+    if (ids.length === 0) return 0;
+
+    const info = this.db
+      .prepare(
+        `UPDATE reminders
+            SET status = 'cancelled', next_fire_at = NULL, closed_at = ?, updated_at = ?
+          WHERE discord_user_id = ? AND task_id = ? AND status = 'scheduled'`,
+      )
+      .run(atIso, atIso, ownerId, taskId);
+
+    this.db
+      .prepare(
+        `UPDATE reminder_occurrences SET abandoned_at = ?
+          WHERE reminder_id IN (SELECT id FROM reminders
+                                 WHERE discord_user_id = ? AND task_id = ?)
+            AND delivered_at IS NULL AND abandoned_at IS NULL`,
+      )
+      .run(atIso, ownerId, taskId);
+
+    return Number(info.changes);
   }
 
   publicIdExists(publicId: string): boolean {
@@ -111,6 +170,17 @@ export class RemindersRepo {
   }
 
   /**
+   * The reminders the owner ASKED FOR, by name.
+   *
+   * Task-linked rows are excluded here and in `scheduledBetween` below, and
+   * that is a deliberate product decision rather than an oversight: a deadline
+   * earns two reminders automatically, so listing them would bury the handful
+   * of reminders the owner actually set under machinery they never typed, and
+   * the briefing would name the same task twice -- once as due and once as a
+   * reminder about being due. When Ducky will speak is Ducky's business; WHAT
+   * it is about is the task card. The cap in `countScheduled` still counts
+   * every row, because a linked reminder spends the same scheduler budget.
+   *
    * Scheduled reminders sort by when they next fire; finished ones have no
    * cursor and sort by when they were created, so the list never mixes a
    * meaningless NULL into the ordering.
@@ -118,9 +188,9 @@ export class RemindersRepo {
   listForOwner(ownerId: string, status: ReminderState | 'all', limit: number): ReminderRow[] {
     const sql =
       status === 'all'
-        ? `SELECT * FROM reminders WHERE discord_user_id = ?
+        ? `SELECT * FROM reminders WHERE discord_user_id = ? AND task_id IS NULL
            ORDER BY (next_fire_at IS NULL), next_fire_at ASC, created_at DESC LIMIT ?`
-        : `SELECT * FROM reminders WHERE discord_user_id = ? AND status = ?
+        : `SELECT * FROM reminders WHERE discord_user_id = ? AND task_id IS NULL AND status = ?
            ORDER BY (next_fire_at IS NULL), next_fire_at ASC, created_at DESC LIMIT ?`;
     const args = status === 'all' ? [ownerId, limit] : [ownerId, status, limit];
     return this.db
@@ -129,12 +199,12 @@ export class RemindersRepo {
       .map((r) => map(r as Record<string, unknown>));
   }
 
-  /** Scheduled reminders whose next occurrence falls inside a range. */
+  /** Free-standing scheduled reminders whose next occurrence is inside a range. */
   scheduledBetween(ownerId: string, startIso: string, endIso: string, limit: number): ReminderRow[] {
     return this.db
       .prepare(
         `SELECT * FROM reminders
-         WHERE discord_user_id = ? AND status = 'scheduled'
+         WHERE discord_user_id = ? AND status = 'scheduled' AND task_id IS NULL
            AND next_fire_at >= ? AND next_fire_at < ?
          ORDER BY next_fire_at ASC LIMIT ?`,
       )
@@ -142,10 +212,28 @@ export class RemindersRepo {
       .map((r) => map(r as Record<string, unknown>));
   }
 
+  /**
+   * EVERY scheduled reminder, linked or not.
+   *
+   * This one is the cap, so it counts the machinery too: a hundred tasks with
+   * deadlines really do occupy the scheduler, and a limit that ignored them
+   * would not be a limit.
+   */
   countScheduled(ownerId: string): number {
     const r = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM reminders WHERE discord_user_id = ? AND status = 'scheduled'`,
+      )
+      .get(ownerId) as { n: number };
+    return Number(r.n);
+  }
+
+  /** What the owner set themselves. Reported by the briefing's totals. */
+  countScheduledUnlinked(ownerId: string): number {
+    const r = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM reminders
+          WHERE discord_user_id = ? AND status = 'scheduled' AND task_id IS NULL`,
       )
       .get(ownerId) as { n: number };
     return Number(r.n);
@@ -233,7 +321,7 @@ export class RemindersRepo {
       .prepare(
         `SELECT o.id, o.reminder_id, o.occurrence_no, o.scheduled_for, o.missed_count,
                 o.attempts, r.public_id, r.discord_user_id, r.text,
-                r.recurrence_kind, r.max_occurrences, r.next_fire_at
+                r.recurrence_kind, r.max_occurrences, r.next_fire_at, r.task_id
            FROM reminder_occurrences o
            JOIN reminders r ON r.id = o.reminder_id
           WHERE o.delivered_at IS NULL AND o.abandoned_at IS NULL
@@ -256,6 +344,7 @@ export class RemindersRepo {
           recurrenceKind: String(r['recurrence_kind']) as RecurrenceKind,
           maxOccurrences: Number(r['max_occurrences']),
           nextFireAt: r['next_fire_at'] == null ? null : String(r['next_fire_at']),
+          taskId: r['task_id'] == null ? null : String(r['task_id']),
         };
       });
   }

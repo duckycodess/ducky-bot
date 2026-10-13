@@ -5,7 +5,7 @@ import {
 import type {
   ConversationInput, ConversationProvider, ConversationReply,
 } from '@ducky/adapters';
-import { NO_ATTACHMENT_CAPABILITY } from '@ducky/adapters';
+import { NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION } from '@ducky/adapters';
 import { CHAT, OWNER, makeHarness, type Harness } from './helpers.js';
 
 /**
@@ -20,7 +20,10 @@ import { CHAT, OWNER, makeHarness, type Harness } from './helpers.js';
 class RecordingProvider implements ConversationProvider {
   readonly name = 'recording';
   readonly verified = false;
-  readonly capabilities = { attachments: NO_ATTACHMENT_CAPABILITY };
+  readonly capabilities = {
+    attachments: NO_ATTACHMENT_CAPABILITY,
+    sessionDeletion: NO_SESSION_DELETION('test stand-in keeps no session'),
+  };
   readonly seen: { text: string; history: readonly { role: string; text: string }[] }[] = [];
 
   async reply(input: ConversationInput): Promise<ConversationReply> {
@@ -215,7 +218,9 @@ describe('/forget conversation deletes, and says what it deleted', () => {
       .all() as { subject_kind: string; subject_ref: string; detail: string }[];
     const row = rows.find((r) => r.subject_kind === 'conversation')!;
     expect(row.subject_ref).toBe('all');
-    expect(row.detail).toBe('rows 2');
+    // Counts only, and now the rotation counts beside the deletion count --
+    // both numbers, neither quoting a word of what went.
+    expect(row.detail).toBe('rows 2; sessions rotated 0+0');
     expect(row.detail).not.toContain('distinctive');
     h.close();
   });

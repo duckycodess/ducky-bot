@@ -5,6 +5,7 @@ export * from './repositories/types.js';
 export * from './repositories/repos.repo.js';
 export * from './repositories/captures.repo.js';
 export * from './repositories/conversations.repo.js';
+export * from './repositories/conversation-threads.repo.js';
 export * from './repositories/schedules.repo.js';
 export * from './repositories/jobs.repo.js';
 export * from './repositories/results.repo.js';
@@ -15,6 +16,7 @@ export * from './repositories/github-watches.repo.js';
 export * from './repositories/audit.repo.js';
 export * from './repositories/notifications.repo.js';
 export * from './repositories/tasks.repo.js';
+export * from './repositories/task-previews.repo.js';
 export * from './repositories/reminders.repo.js';
 export * from './repositories/briefings.repo.js';
 export * from './repositories/dependencies.repo.js';
@@ -26,6 +28,7 @@ import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
 import { CapturesRepo } from './repositories/captures.repo.js';
 import { ConversationsRepo } from './repositories/conversations.repo.js';
+import { ConversationThreadsRepo } from './repositories/conversation-threads.repo.js';
 import { SchedulesRepo } from './repositories/schedules.repo.js';
 import { JobsRepo } from './repositories/jobs.repo.js';
 import { ResultsRepo } from './repositories/results.repo.js';
@@ -36,6 +39,7 @@ import { GitHubWatchesRepo } from './repositories/github-watches.repo.js';
 import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
 import { NotificationsRepo } from './repositories/notifications.repo.js';
 import { TasksRepo } from './repositories/tasks.repo.js';
+import { TaskPreviewsRepo } from './repositories/task-previews.repo.js';
 import { RemindersRepo } from './repositories/reminders.repo.js';
 import { BriefingsRepo } from './repositories/briefings.repo.js';
 import { DependenciesRepo } from './repositories/dependencies.repo.js';
@@ -53,6 +57,13 @@ export interface Store {
    * to delete rows an earlier run stored even after the flag goes off again.
    */
   readonly conversations: ConversationsRepo;
+  /**
+   * Native thread mapping, explicit participation, the compact checkpoint and
+   * the provider session epochs. Separate from `conversations` because turns
+   * are what was SAID and these are the scaffolding around them: nothing here
+   * can delete a turn.
+   */
+  readonly conversationThreads: ConversationThreadsRepo;
   readonly schedules: SchedulesRepo;
   readonly jobs: JobsRepo;
   readonly results: ResultsRepo;
@@ -63,6 +74,12 @@ export interface Store {
   readonly audit: AuthorizedUserAuditRepo;
   readonly notifications: NotificationsRepo;
   readonly tasks: TasksRepo;
+  /**
+   * Pasted-list previews. Present whether or not anything is pending: the
+   * reconciler sweeps expired rows on every pass, so the table is bounded
+   * without retention having to be configured.
+   */
+  readonly taskPreviews: TaskPreviewsRepo;
   readonly reminders: RemindersRepo;
   /** The proactive-briefing outbox. Present whether or not briefings are on. */
   readonly briefings: BriefingsRepo;
@@ -88,6 +105,7 @@ export function createStore(db: Db): Store {
     repos: new ReposRepo(db),
     captures: new CapturesRepo(db),
     conversations: new ConversationsRepo(db),
+    conversationThreads: new ConversationThreadsRepo(db),
     schedules: new SchedulesRepo(db),
     jobs: new JobsRepo(db),
     results: new ResultsRepo(db),
@@ -98,6 +116,7 @@ export function createStore(db: Db): Store {
     audit: new AuthorizedUserAuditRepo(db),
     notifications: new NotificationsRepo(db),
     tasks: new TasksRepo(db),
+    taskPreviews: new TaskPreviewsRepo(db),
     reminders: new RemindersRepo(db),
     briefings: new BriefingsRepo(db),
     dependencies: new DependenciesRepo(db),

@@ -107,7 +107,6 @@ export function tasksList(
       name: `${TASK_STATE_LABEL[t.status]} · ${t.publicId}`,
       value: taskLine(t, tz),
     })),
-    footer: `Times shown in ${tz}.`,
   };
   return { embeds: [embed], rows: buttons, ephemeral: true };
 }
@@ -164,7 +163,6 @@ export function remindersList(
           : `-# ${recurrenceLabel(r)}`,
       ].join('\n'),
     })),
-    footer: `Times shown in ${tz}.`,
   };
   return { embeds: [embed], rows: buttons, ephemeral: true };
 }
@@ -361,7 +359,6 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     embeds: [
       {
         title: `${BRIEFING_TITLE[b.kind]} — ${b.dayKey}`,
-        description: `Times shown in ${tz}.`,
         fields,
         footer: BRIEFING_PROVENANCE,
       },
@@ -389,16 +386,37 @@ export function briefingMessage(b: Briefing): OutboundMessage {
  *   answer is noise the owner reads once. A MOCK reply keeps its marker,
  *   because there the provenance is the point.
  */
-export function conversationReply(text: string, mock: boolean): OutboundMessage {
+export function conversationReply(
+  text: string,
+  mock: boolean,
+  /**
+   * What this turn did that the text itself cannot say.
+   *
+   * `note` carries facts ABOUT the exchange -- a reply anchor that could not
+   * be used, a compaction that ran -- and is deliberately separate from the
+   * model's words: Ducky saying something about its own behaviour must not be
+   * indistinguishable from the assistant saying it.
+   *
+   * `rows` are REAL controls. Printing "type branch to branch" in the message
+   * text would be an action word pretending to be a button, which is exactly
+   * what this build is asked not to do.
+   */
+  extra: { readonly note?: string; readonly rows?: readonly OutboundRow[] } = {},
+): OutboundMessage {
+  const footer = mock ? 'Stand-in reply. No model was consulted.' : extra.note;
   return {
     embeds: [
       {
         title: 'Ducky',
         description: text,
         color: mock ? DUCKY_COLORS.neutral : DUCKY_COLORS.brand,
-        ...(mock ? { footer: 'Stand-in reply. No model was consulted.' } : {}),
+        ...(footer ? { footer } : {}),
+        // A mock reply keeps its own provenance footer, so a note has to go
+        // somewhere it cannot displace it.
+        ...(mock && extra.note ? { fields: [{ name: 'Note', value: extra.note }] } : {}),
       },
     ],
+    ...(extra.rows && extra.rows.length > 0 ? { rows: [...extra.rows] } : {}),
     ephemeral: false,
   };
 }

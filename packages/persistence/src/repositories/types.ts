@@ -307,6 +307,17 @@ export interface TaskRow {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /**
+   * A per-task reminder policy, or null for the native defaults (ADR 0030).
+   * Only a task that arrived with one has one. Absent reads as null.
+   */
+  reminderPolicy?: ReminderPolicy | null;
+}
+
+/** Whether a task reminds at all, and at which offsets (null: the owner's default list). */
+export interface ReminderPolicy {
+  readonly enabled: boolean;
+  readonly offsetsMinutes: readonly number[] | null;
 }
 
 /**

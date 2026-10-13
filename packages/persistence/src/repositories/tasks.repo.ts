@@ -1,6 +1,23 @@
 import type { TaskPriority, TaskState } from '@ducky/contracts';
 import type { Db } from '../db.js';
-import { fromBool, toBool, type TaskRow } from './types.js';
+import { fromBool, toBool, type ReminderPolicy, type TaskRow } from './types.js';
+
+const parsePolicy = (raw: unknown): ReminderPolicy | null => {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(String(raw)) as { enabled?: unknown; offsetsMinutes?: unknown };
+    if (typeof v.enabled !== 'boolean') return null;
+    const offsets =
+      Array.isArray(v.offsetsMinutes) && v.offsetsMinutes.every((n) => Number.isInteger(n) && n > 0)
+        ? (v.offsetsMinutes as number[])
+        : null;
+    return { enabled: v.enabled, offsetsMinutes: offsets };
+  } catch {
+    // A policy nobody can read is the native default, never a task that
+    // silently stops reminding.
+    return null;
+  }
+};
 
 const map = (r: Record<string, unknown>): TaskRow => ({
   id: String(r['id']),
@@ -14,6 +31,7 @@ const map = (r: Record<string, unknown>): TaskRow => ({
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
   closedAt: r['closed_at'] == null ? null : String(r['closed_at']),
+  reminderPolicy: parsePolicy(r['reminder_policy']),
 });
 
 /**
@@ -45,12 +63,14 @@ export class TasksRepo {
     dueAllDay: boolean;
     priority: TaskPriority;
     createdAt: string;
+    /** Omitted means the native defaults. */
+    reminderPolicy?: ReminderPolicy | null;
   }): TaskRow {
     this.db
       .prepare(
         `INSERT INTO tasks (id, public_id, discord_user_id, title, due_at, due_all_day,
-           priority, status, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,'open',?,?)`,
+           priority, status, created_at, updated_at, reminder_policy)
+         VALUES (?,?,?,?,?,?,?,'open',?,?,?)`,
       )
       .run(
         row.id,
@@ -62,9 +82,11 @@ export class TasksRepo {
         row.priority,
         row.createdAt,
         row.createdAt,
+        row.reminderPolicy ? JSON.stringify(row.reminderPolicy) : null,
       );
     return {
       ...row,
+      reminderPolicy: row.reminderPolicy ?? null,
       status: 'open',
       updatedAt: row.createdAt,
       closedAt: null,

@@ -24,3 +24,6 @@ export * from './private-network.js';
 export * from './dependency.js';
 export * from './command-policy.js';
 export * from './audit.js';
+export * from './schedule-rules.js';
+export * from './assistant-watch.js';
+export * from './assistant-import.js';

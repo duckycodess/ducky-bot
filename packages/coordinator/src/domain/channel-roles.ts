@@ -21,7 +21,7 @@ import type { IncomingContext } from '../discord/transport.js';
  * why only public, selected repositories ever reach it (everything else goes to
  * the owner's DM). So nothing the owner says there persists, nothing typed
  * there is answered or stored, and no deterministic or workflow rule fires from
- * it. See `DELIVERY_ONLY_ROLES` and ADR 0025.
+ * it. See `DELIVERY_ONLY_ROLES` and ADR 0029.
  *
  * One channel cannot be both. That is refused at boot rather than resolved by
  * precedence, because whichever way it resolved, the failure would be silent

@@ -141,6 +141,12 @@ export function runStartupDiagnostics(app: App): Diagnostic[] {
       : 'task reminders post in your reminders channel, with your mention',
   );
   add('phone capture', true, app.status().phoneCapture);
+  /**
+   * The feed is a recurring read of GitHub and posts into a channel other people
+   * may read, so what it covers and where it posts is stated at boot. Counts
+   * and destinations only -- never a repository name or a channel id.
+   */
+  add('github feed', true, app.githubFeed.statusLine());
   // Not a warning: refusing to resume a job on an unchecked dependency is the
   // correct state, not a degraded one.
   add(

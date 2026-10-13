@@ -981,17 +981,16 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck` and `pnpm build` pass on this host. `pnpm test` runs **100 files,
-1385 tests**, with 1378 passing and seven failing. The seven fail in a fresh
-worktree and fail identically at the previous commit. Four in
-`outbound.test.ts` and one in `result-intake.test.ts` assert on the literal
-path `/home/tj`, which is what the redactor folds only on the machine whose
-home directory that is; two in `placements.test.ts` read `config/repos.dev.json`,
-which is gitignored host configuration and absent from a clean checkout. None
-of the seven is about behaviour, and none was introduced by the workflow
-bridge. See [TESTING.md](TESTING.md) for what each suite guarantees
-and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md) for what to run, in what order, and
-what each step does **not** prove.
+`pnpm typecheck` and `pnpm build` pass on the remote Linux host.
+The unmodified `pnpm test` command passes all **1385 tests in 100 files**.
+Coordinator redaction checks use the current home directory, and placement
+checks validate both shipped example configurations instead of depending on
+a private, gitignored development file. No HOME override or synthetic
+operator configuration is needed. Live Discord, phone and provider integration
+remain separate verification requirements.
+See [TESTING.md](TESTING.md) and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md).
+
+Live probe results below are historical evidence from the original development host; they do not certify the new remote runtime.
 
 Probes run in this milestone, with their real outcomes:
 

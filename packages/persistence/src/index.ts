@@ -5,6 +5,7 @@ export * from './repositories/types.js';
 export * from './repositories/repos.repo.js';
 export * from './repositories/captures.repo.js';
 export * from './repositories/conversations.repo.js';
+export * from './repositories/conversation-threads.repo.js';
 export * from './repositories/schedules.repo.js';
 export * from './repositories/jobs.repo.js';
 export * from './repositories/results.repo.js';
@@ -26,6 +27,7 @@ import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
 import { CapturesRepo } from './repositories/captures.repo.js';
 import { ConversationsRepo } from './repositories/conversations.repo.js';
+import { ConversationThreadsRepo } from './repositories/conversation-threads.repo.js';
 import { SchedulesRepo } from './repositories/schedules.repo.js';
 import { JobsRepo } from './repositories/jobs.repo.js';
 import { ResultsRepo } from './repositories/results.repo.js';
@@ -53,6 +55,13 @@ export interface Store {
    * to delete rows an earlier run stored even after the flag goes off again.
    */
   readonly conversations: ConversationsRepo;
+  /**
+   * Native thread mapping, explicit participation, the compact checkpoint and
+   * the provider session epochs. Separate from `conversations` because turns
+   * are what was SAID and these are the scaffolding around them: nothing here
+   * can delete a turn.
+   */
+  readonly conversationThreads: ConversationThreadsRepo;
   readonly schedules: SchedulesRepo;
   readonly jobs: JobsRepo;
   readonly results: ResultsRepo;
@@ -88,6 +97,7 @@ export function createStore(db: Db): Store {
     repos: new ReposRepo(db),
     captures: new CapturesRepo(db),
     conversations: new ConversationsRepo(db),
+    conversationThreads: new ConversationThreadsRepo(db),
     schedules: new SchedulesRepo(db),
     jobs: new JobsRepo(db),
     results: new ResultsRepo(db),

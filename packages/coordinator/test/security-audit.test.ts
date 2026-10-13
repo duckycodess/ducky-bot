@@ -150,6 +150,54 @@ describe('rate limits', () => {
     expect(rows[0]!.outcome).toBe('refused');
     // The owner id is never recorded; there is exactly one owner.
     expect(JSON.stringify(rows)).not.toContain(h.owner.discordUserId);
+    // An owner-only bucket IS attributed to the owner, because only they can
+    // reach it. That is the half the shared case below must not inherit.
+    expect(rows[0]!.actorKind).toBe('owner');
+    h.close();
+  });
+
+  it('does NOT attribute a SHARED bucket to the owner', async () => {
+    /**
+     * Every bucket was owner-only once, so recording a rate limit as the
+     * owner's doing was true without anybody being told. Issue #4 gave a
+     * conversation participant a thread and two controls, so `threadCreate`
+     * and `interaction` are reachable by the configured chat user -- and an
+     * audit row saying the owner hit that limit would be a false statement in
+     * a long-lived record.
+     */
+    const PARENT = '950000000000000001';
+    const h = makeHarness({
+      env: {
+        DUCKY_CONVERSATION_MEMORY_ENABLED: 'true',
+        DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS: PARENT,
+      },
+    });
+    await h.transport.start((e) => h.app.router.handle(e));
+
+    for (let i = 0; i < 12; i += 1) {
+      await h.transport.dispatch({
+        kind: 'message',
+        userId: h.chat.discordUserId,
+        text: `message ${i}`,
+        threadKey: PARENT,
+        messageId: `97000000000002${1000 + i}`,
+        authorKind: 'user',
+        context: { channelId: PARENT, guildId: '960000000000000001' },
+      });
+    }
+
+    const rows = events(h, 'rate_limit.exceeded');
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]!.subjectRef).toBe('threadCreate');
+    expect(rows[0]!.actorKind).toBe('system');
+    expect(rows[0]!.actorRef).toBe('conversation');
+    expect(rows[0]!.detail).toMatch(/the actor is not recorded/);
+
+    // Still no id, for either of them. The fix for a vague audit row is not to
+    // start logging Discord ids.
+    const flat = JSON.stringify(rows);
+    expect(flat).not.toContain(h.chat.discordUserId);
+    expect(flat).not.toContain(h.owner.discordUserId);
     h.close();
   });
 });

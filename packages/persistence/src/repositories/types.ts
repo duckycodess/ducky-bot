@@ -63,6 +63,15 @@ export interface ConversationTurnRow {
   threadKey: string;
   role: ConversationRole;
   content: string;
+  /**
+   * The Discord message this turn came from, when there was one.
+   *
+   * Null for every assistant turn (Ducky's reply has no id yet when the turn
+   * is recorded) and for every row written before anchors existed. It is what a
+   * Branch control resolves against, never a key anything is read by on its
+   * own.
+   */
+  messageId: string | null;
   createdAt: string;
 }
 

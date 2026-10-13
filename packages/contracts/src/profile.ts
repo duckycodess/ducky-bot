@@ -74,6 +74,7 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_DEV_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_DEV_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_DEV_SHARED_CHANNEL_IDS',
+    threadParents: 'DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS',
     approvedActions: 'DUCKY_DEV_APPROVED_ACTIONS_ENABLED',
     roleChannels: {
       briefing: 'DUCKY_DEV_BRIEFING_CHANNEL_ID',
@@ -90,6 +91,7 @@ export const PROFILE_ENV = {
     credentialsFile: 'DUCKY_PROD_EXECUTOR_CREDENTIALS_FILE',
     componentKey: 'DUCKY_PROD_COMPONENT_SIGNING_KEY',
     sharedChannels: 'DUCKY_PROD_SHARED_CHANNEL_IDS',
+    threadParents: 'DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS',
     approvedActions: 'DUCKY_PROD_APPROVED_ACTIONS_ENABLED',
     roleChannels: {
       briefing: 'DUCKY_PROD_BRIEFING_CHANNEL_ID',
@@ -108,6 +110,13 @@ export const PROFILE_ENV = {
     credentialsFile: string;
     componentKey: string;
     sharedChannels: string;
+    /**
+     * Which channels may sprout native conversation threads. Profile-scoped
+     * for the same reason the shared list is: creating a thread is a WRITE
+     * into a guild, and a development channel id inherited by production would
+     * open threads in the real one.
+     */
+    threadParents: string;
     approvedActions: string;
     roleChannels: Record<ChannelRole, string>;
   }

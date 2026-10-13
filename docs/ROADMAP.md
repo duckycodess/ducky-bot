@@ -433,54 +433,56 @@ shared output.
 
 ---
 
-## 🔶 Open: Discord threads for conversation continuity
+## ✅ Done, and REVERSED on the owner's instruction: Discord threads for conversation continuity
 
-Assessed, not built. Nothing here changes behaviour and no setting was added.
+**This section proposed the opposite of what was built, and the contradiction is
+recorded here rather than resolved by deleting it.**
 
-**Threads do not work today, and this paragraph used to say they did.** The
-earlier wording claimed a reply in a thread already got its own memory and
-provider session "with no code change", and then listed containment as a
-separate problem below. Those two statements contradict each other, and the
-second one is the true one.
+What it proposed was the narrow version: `DUCKY_THREAD_CONTINUITY=off|follow`,
+where a thread the owner made BY HAND would inherit its parent's role, and
+**"Ducky would still create no thread."** The reasoning was that auto-creating a
+thread is Ducky writing objects into the owner's guild on inference, and that
+this belongs behind an explicit opt-in.
 
-**What is actually true.** The KEYING is free: Ducky keys bounded memory on
-`(user, thread)` and the provider session on `sha256(userId:threadKey)`, and a
-thread has its own channel id, so *if* a reply happened it would be correctly
-scoped. The configured GPT channel itself now delivers replies, but a message
-in a thread under that channel is still silenced because
-`isSilencedConversationChannel` compares the incoming channel id against the
-configured GPT channel id, and a thread's id is not its parent's.
+Issue duckycodess/ducky-bot#4 asks for the wide version, in the owner's own
+words: *each new top-level user message in configured chat/agent conversation
+channels creates exactly one normal visible thread.*
 
-With no `gpt` channel configured a thread does get a reply and its own keying.
-That is a narrow case and not the one anybody means by "thread continuity".
+**The issue wins, because the owner is the person this caution was protecting.**
+The objection was to doing something they had not asked for. Once they ask for
+it, there is nothing left for the caution to protect, and it would be an odd
+kind of safety that refused a feature on the owner's behalf against the owner's
+instruction.
 
-**What is not free**, and why this stays a note:
+What survived is the MECHANISM this section derived. All three constraints were
+real and all three are addressed rather than waved past:
 
-1. **Role channels and threads.** `ChannelRolePolicy` matches on channel id, and
-   a thread's id is not its parent's. A thread under a role channel is not a
-   role channel: replies fall back to ephemeral, and under `gpt` conversation is
-   silenced outright as described above. Fixing it means resolving a thread to
-   its parent, which needs a Discord lookup the transport does not currently
-   make.
-2. **Auto-creating threads is a write.** Ducky would be creating objects in the
-   owner's guild on inference. That belongs behind an explicit opt-in, and the
-   opt-in has to name which channels may sprout threads.
-3. **`GuildMessages` covers thread messages, but the bot must be able to see
-   the thread.** A private thread it was not added to delivers nothing, and the
-   failure is silent — precisely the shape of the bug that already cost a
-   debugging round.
+1. **Role channels and threads.** `ChannelRolePolicy` now falls back to
+   `parentChannelId`, which the transport populates for a thread. No Discord
+   lookup was needed after all: discord.js reports the parent on the channel
+   object. Containment was fixed in the same place, so a thread under the `gpt`
+   channel is no longer silenced.
+2. **Auto-creating threads is a write.** So the opt-in is
+   `DUCKY_*_THREAD_PARENT_CHANNEL_IDS`, a LIST OF CHANNELS and empty by default,
+   exactly as this section said it would have to be. An instance that names none
+   creates no thread.
+3. **A private thread the bot cannot see delivers nothing, silently.** Ducky
+   therefore only ever creates PUBLIC threads, and a creation or delivery
+   failure refuses visibly and answers nowhere rather than falling back into the
+   parent channel.
 
-**A safe opt-in, if it is ever wanted.** `DUCKY_THREAD_CONTINUITY=off|follow`.
-`follow` would mean: when a message arrives in a thread whose PARENT is a
-configured role channel, treat it as that role (so persistence and containment
-behave), and keep the thread's own id as the memory and session key (so
-continuity is naturally scoped). Ducky would still create no thread — the owner
-makes one when they want a side conversation. That is additive, needs no new
-command or interaction kind, and widens no authorization: a thread inherits its
-parent's ROLE, never anybody's rights.
+Two things this section did not anticipate, both forced by the issue's other
+criteria:
 
-Not implemented. Recorded so the next person does not have to re-derive the
-three constraints.
+- **Full history while the thread lives**, which supersedes ADR 0021's per-thread
+  row cap for a native thread and moves the bound onto what is SENT (a byte
+  budget, with compaction and an honest refusal past it).
+- **The first two interaction kinds a non-owner may press**, Branch and Compact,
+  on a positive manifest beside the owner-only one.
+
+Built, documented in
+[ADR 0027](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md),
+and off by default.
 
 ---
 

@@ -7,15 +7,18 @@ import {
   type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
 import {
-  AUDIT_OWNER_REF, DuckyError,
+  AUDIT_OWNER_REF, COMMAND_BUCKETS, CONVERSATIONAL_ROUTE, DuckyError,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 import { RetentionService, retentionPolicyFrom } from './domain/retention.service.js';
 import { ForgetService } from './domain/forget.service.js';
 import { ConversationMemoryService } from './domain/conversation-memory.service.js';
+import {
+  ConversationThreadPolicy, ConversationThreadService,
+} from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -122,6 +125,8 @@ export interface App {
   readonly forget: ForgetService;
   /** Bounded conversation continuity. Off unless the operator enabled it. */
   readonly conversationMemory: ConversationMemoryService;
+  /** Native Discord threads as conversations. Off unless a parent is named. */
+  readonly conversationThreads: ConversationThreadService;
   /** Deterministic natural-language intents. Owner-only, provider-free. */
   readonly intents: IntentsService;
   /** Reported by /status and asserted by tests; off by default. */
@@ -229,14 +234,32 @@ export function createApp(
   // attached to the SAME instance the router uses.
   const buckets = new CommandBuckets();
   buckets.onExhausted(({ bucket }) => {
+    /**
+     * WHO is attributed, and why it is not always the owner any more.
+     *
+     * Every bucket was owner-only once, so recording a rate limit as the
+     * owner's doing was true without anybody having to be told. Issue #4 gave
+     * a conversation participant two controls and a thread, so `interaction`
+     * and `threadCreate` are reachable by the configured chat user -- and
+     * attributing their limit to the owner would put a false statement in a
+     * long-lived record.
+     *
+     * A shared bucket is therefore recorded as `system` against the
+     * conversation route: the honest answer is "a limit fired on a surface
+     * more than one person can reach", because the sink is handed the BUCKET
+     * and nothing else. It deliberately stays that way -- the fix for a vague
+     * audit row is not to start logging Discord ids.
+     */
+    const ownerOnly = COMMAND_BUCKETS[bucket].ownerOnly;
     try {
       store.auditLog.record({
         event: 'rate_limit.exceeded',
-        actorKind: 'owner',
-        actorRef: AUDIT_OWNER_REF,
+        actorKind: ownerOnly ? 'owner' : 'system',
+        actorRef: ownerOnly ? AUDIT_OWNER_REF : CONVERSATIONAL_ROUTE,
         subjectKind: 'route',
         subjectRef: bucket,
         outcome: 'refused',
+        ...(ownerOnly ? {} : { detail: 'shared surface; the actor is not recorded' }),
       });
     } catch {
       /* a record is never worth failing the limit */
@@ -260,7 +283,9 @@ export function createApp(
     store,
     config: resolveConversationMemory(env),
   });
-  const forget = new ForgetService({ store, authz, memory: conversationMemory });
+  // `conversation` is passed for ONE reason: so `/forget` can report the second
+  // store honestly (ADR 0024). Nothing in ForgetService calls `reply`.
+  const forget = new ForgetService({ store, authz, memory: conversationMemory, conversation });
   const extractor = overrides.extractor ?? new DeterministicScheduleExtractor();
   const githubReader = overrides.github ?? new GhCliReader();
 
@@ -338,14 +363,54 @@ export function createApp(
   const replyPersistence = new ReplyPersistencePolicy(channelRoles, authz.ownerId);
   const transport =
     overrides.transport ??
-    transportForProfile(discordProfile, (event) =>
-      replyPersistence.persists({
-        userId: event.userId,
-        kind: event.kind,
-        context: event.kind === 'component' ? undefined : event.context,
-        ...(event.kind === 'command' ? { commandName: event.name } : {}),
-      }),
+    transportForProfile(
+      discordProfile,
+      (event) =>
+        replyPersistence.persists({
+          userId: event.userId,
+          kind: event.kind,
+          context: event.kind === 'component' ? undefined : event.context,
+          ...(event.kind === 'command' ? { commandName: event.name } : {}),
+        }),
+      // One question only: may this person converse? It decides whether a
+      // reply anchor that missed the message cache may cost a REST call, and
+      // it grants nothing.
+      (userId) => authz.roleOf(userId) !== 'none',
     );
+
+  /**
+   * Native conversation threads.
+   *
+   * Off unless an operator NAMES the channels that may sprout one: creating a
+   * thread is Ducky writing into the owner's guild, so it is opt-in per
+   * channel rather than a boolean, and the list is refused at boot if it names
+   * a shared channel or a non-conversational role channel.
+   *
+   * The starter is the TRANSPORT's, handed in as a function so the service
+   * holds no Discord dependency of its own and a test can drive the whole path
+   * with the mock. A transport that cannot create threads leaves the service
+   * refusing rather than pretending.
+   */
+  const conversationThreads = new ConversationThreadService({
+    store,
+    policy: new ConversationThreadPolicy(
+      { parentChannelIds: resolveThreadParentChannelIds(env) },
+      authz,
+      sharedPolicy,
+    ),
+    authz,
+    startThread: transport.startThread ? (req) => transport.startThread!(req) : undefined,
+    // The SAME buckets instance every other surface uses, so a thread opened
+    // here counts against one budget rather than a second private one.
+    chargeThreadCreate: (userId) => buckets.check('threadCreate', userId),
+  });
+  // The decision lives in the domain; the transport only performs it. Absent
+  // on a transport that does not support threads, which leaves routing exactly
+  // as it was.
+  transport.useConversationThreads?.(
+    (event) => conversationThreads.enter({ event }),
+    (threadId) => conversationThreads.observeGone(threadId),
+  );
   const notifier = new JobNotifier({
     store, transport, ownerId: authz.ownerId, signer, sharedPolicy, sharedJobs,
   });
@@ -412,8 +477,12 @@ export function createApp(
       ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
       : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
-      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread; /forget conversation deletes them`
+      ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread, ` +
+        `or the full transcript of a native thread while it lives; up to ` +
+        `${env.DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES} bytes of context per turn; ` +
+        '/forget conversation deletes them'
       : 'off — nothing you say in conversation is stored',
+    conversationThreads: conversationThreads.describe(),
     orchestrator: overrides.herdrVerified ? 'herdr-pi (verified)' : 'herdr-pi (experimental)',
     scheduleExtraction: `${extractor.name} (binary: ${
       extractor.supportsBinary && env.SCHEDULE_BINARY_EXTRACTION_ENABLED ? 'enabled' : 'disabled'
@@ -455,6 +524,7 @@ export function createApp(
     conversation,
     forget,
     memory: conversationMemory,
+    threads: conversationThreads,
     intents,
     buckets,
     onProviderFailure: ({ provider, code }) => {
@@ -497,7 +567,7 @@ export function createApp(
     credentials, conversation, status,
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
-    retention, forget, conversationMemory, intents,
+    retention, forget, conversationMemory, conversationThreads, intents,
     close: () => store.db.close(),
   };
 }
@@ -540,9 +610,12 @@ function credentialStoreFor(
 function transportForProfile(
   config: DiscordProfileConfig,
   persists?: (event: Incoming) => boolean,
+  mayConverse?: (userId: string) => boolean,
 ): DiscordTransport {
   if (!config.token) return new MockDiscordTransport();
-  return new DiscordJsTransport(config.token, channelAwareSink, undefined, persists);
+  return new DiscordJsTransport(
+    config.token, channelAwareSink, undefined, persists, mayConverse,
+  );
 }
 
 /**

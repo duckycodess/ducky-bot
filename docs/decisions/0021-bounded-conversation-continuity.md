@@ -3,6 +3,22 @@
 ## Status
 
 Accepted, and shipped disabled.
+**Partly superseded by [ADR 0027](0027-native-thread-conversations-and-the-first-non-owner-controls.md)**
+for native Discord threads only. Decisions 2, 3 and 4 below are amended there;
+everything else, including the default being off, is unchanged. The amendments:
+
+- **2 (isolation by user id in every WHERE clause)** cannot express a shared
+  conversation, which is what a visible thread is. A thread-scoped read now
+  takes a `ParticipationProof`, obtainable only when a participation row
+  exists, and participation rows are written when somebody SPEAKS. Seeing a
+  thread is not being in it. An ordinary channel or DM still reads per user.
+- **3 (a shared channel is never a conversation store)** is widened: a thread
+  UNDER a shared channel is excluded too.
+- **4 (bounded three ways)** no longer applies the row cap to a native thread.
+  Issue #4 asks for its full transcript while the thread lives, so the bound
+  moved onto what is SENT: a per-turn byte budget, compaction into a separate
+  checkpoint table, and a refusal when a turn cannot be brought under it.
+  Nothing is dropped silently and compaction deletes no stored turn.
 
 ## Context
 

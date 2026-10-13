@@ -49,6 +49,9 @@ registered.
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
 | Approved Git actions | **Unit-tested** | Opt-in flag off; no live external write performed here |
 | Conversation attachments | **Closed by capability** | The recorded OpenClaw turn takes text only; no attachment byte has ever been fetched |
+| Native conversation threads (issue #4) | **Unit-tested** | Off by default: no channel is configured to open one here, and no Discord thread has ever been created from this build. 114 tests cover thread creation, routing, role inheritance, participation, compaction, the controls, anchor attribution, the ThreadDelete path and deletion |
+| Conversation thread live checks | **Blocked** | No `.env`/`.env.development` exists in this worktree, so no development profile, token or guild is configured. Discord thread creation, reply anchoring, the Branch and Compact buttons and a two-store Forget have NOT been exercised against a real guild |
+| Provider session deletion | **Blocked** | `RECORDED_SESSION_DELETION` is null. `pnpm probe:openclaw` exits 2 here because the pinned binary is not installed, so the deletion-capable command surface is unrecorded and `/forget` reports provider deletion as PARTIAL and rotates the session epoch instead |
 | Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
@@ -323,23 +326,24 @@ exercised; this says what it does.
   - `DUCKY_CONVERSATION_MEMORY_ENABLED` defaults to false, and with it off
     Ducky reads and writes no conversation row. The provider-owned OpenClaw
     transcript is a separate store and is reported separately below.
-  - When enabled, turns are stored **scoped to one (user, thread)**. Every
-    repository method takes the user id and puts it in the WHERE clause; there is
-    no `byId`, no `listAll` and no thread-only read, so there is no method that
-    could return another account's words. Two people in the same channel have two
-    histories.
+  - When enabled, ordinary channels and DMs keep histories scoped to one
+    (user, thread). Native Discord threads share their transcript among actual
+    participants: a thread read requires an explicit participation proof, and
+    visibility alone grants no access. Neither path exposes an unrestricted
+    cross-user history read.
   - **A configured shared channel is excluded from both reading and writing.** A
     message event carries no channel context, but its thread key IS the channel
     id, so the two can be compared — and a channel other people can read never
     becomes a store of the owner's words nor a source of replayed context.
-  - Bounded three ways: a replay window (`DUCKY_CONVERSATION_MEMORY_TURNS`,
-    default 10), a hard row cap per thread enforced in the same transaction as
-    the insert, and a per-turn length cap. An over-long turn is stored **visibly
-    truncated** rather than silently halved.
-  - Retention has two windows because the owner and a guest are not the same
-    thing: **30 days** for the owner's own history, **7** for anyone else on the
-    chat whitelist. Both configurable, both only consulted when retention is
-    enabled.
+  - Ordinary channels and DMs use a replay window
+    (`DUCKY_CONVERSATION_MEMORY_TURNS`, default 10), a transactional row cap
+    and a per-turn length cap. Native threads retain their full transcript;
+    checkpoints plus recent turns bound model context by the configured byte
+    budget. An over-long turn is stored visibly truncated.
+  - Ordinary history uses configurable retention windows of 30 days for the
+    owner and 7 days for other chat users when retention is enabled. Native
+    threads bypass those windows: live threads retain their transcript; closed
+    threads are purged whole only after their separate retention window.
   - The `role` column allows `user` and `assistant` only. There is deliberately
     no `system` role: a stored preamble would be configuration masquerading as
     history.
@@ -574,6 +578,50 @@ exercised; this says what it does.
   interaction manifest, which `AGENTS.md` forbids widening; the owner types the
   command instead.
 - Redaction at the transport boundary; no secret in the database or logs
+
+## Native conversation threads (issue #4)
+
+**Built, off by default, and never run against Discord from this worktree.**
+
+A qualifying top-level message in a channel named in
+`DUCKY_*_THREAD_PARENT_CHANNEL_IDS` opens one visible thread, and that thread's
+id becomes the conversation's identity. Nothing is configured here, so nothing
+happens here: the list is empty by default and an instance that names no channel
+behaves exactly as it did before.
+
+What is true of the implementation:
+
+| | |
+|---|---|
+| One thread per starter | Idempotent on the starter message id; Discord's `MESSAGE_ALREADY_HAS_THREAD` recovered by the documented id identity |
+| Failure | Refuses visibly, answers NOWHERE. No fallback into the parent channel |
+| Role | A thread inherits its parent's role, and nobody's rights. `Authorizer` still reads frozen env config |
+| History | Full transcript while the thread lives; the bound is a per-turn BYTE budget, with compaction and a refusal past it |
+| Reads | A thread read takes a participation proof, issued only when a participation row exists |
+| Controls | Branch and Compact, the first two interaction kinds a non-owner may press, on their own positive manifest |
+| Deletion | `/forget conversation` rotates the provider session epoch and reports PARTIAL; retention removes a CLOSED thread whole |
+
+**This reverses the roadmap's own proposal**, which said Ducky would create no
+thread. The owner asked for the opposite in issue #4 and the issue wins; both
+documents now say so, and the reasoning is in
+[ADR 0027](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md).
+
+**What has NOT been verified**, stated rather than implied by the test count:
+
+- no Discord thread has ever been created by this build. There is no `.env` or
+  `.env.development` in the worktree it was written in, so there is no
+  development token, no guild and no configured parent channel;
+- the Branch and Compact buttons have never been rendered by a real client, and
+  no human has pressed one;
+- `probe:openclaw` could not run (the pinned binary is absent), so the provider
+  session-deletion surface is unrecorded and `RECORDED_SESSION_DELETION` stays
+  null;
+- the thread-permission failure paths (Create Public Threads, Send Messages in
+  Threads, rate limiting, `Unknown Channel`) are covered by faked transport
+  outcomes, not by Discord refusing anything;
+- `Events.ThreadDelete` is wired and asserted structurally -- the handler is
+  registered and routed, and the requested gateway intents are still the same
+  four -- but no real thread has been deleted in a guild to see it fire.
 
 ## Retention and deletion (milestone 2E, the substance of it)
 
@@ -890,12 +938,15 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1331 tests in 94 files**.
-Coordinator redaction checks now use the current home directory, and placement
-checks read both shipped example configurations instead of depending on a
-private, gitignored development file. No temporary HOME override or synthetic
-operator configuration is needed. Live phone and Discord validation remain
-separate and unverified.
+The unmodified `pnpm test` command passes all **1453 tests in 100 files**.
+Coordinator redaction checks use the current home directory, and placement
+checks validate both shipped example configurations instead of depending on
+a private, gitignored development file. No HOME override or synthetic
+operator configuration is needed. Live Discord, phone and provider integration
+remain separate verification requirements.
+See [TESTING.md](TESTING.md) and [SMOKE_CHECKLIST.md](SMOKE_CHECKLIST.md).
+
+Live probe results below are historical evidence from the original development host; they do not certify the new remote runtime.
 
 Probes run in this milestone, with their real outcomes:
 

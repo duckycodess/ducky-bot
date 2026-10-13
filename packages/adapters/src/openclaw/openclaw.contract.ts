@@ -42,3 +42,32 @@
  * personal files leaving the host. The recorded turn takes text only.
  */
 export const RECORDED_CONTRACT_VERSION: string | null = '2026.7.1-2';
+
+/**
+ * The recorded SESSION-DELETION contract, and why it is null.
+ *
+ * Same shape and same discipline as `RECORDED_CONTRACT_VERSION` above: a
+ * source constant that an operator cannot set, derived from what a probe
+ * actually observed. `GatewayOpenClawProvider.capabilities.sessionDeletion` is
+ * DERIVED from it, so the capability and the evidence cannot drift.
+ *
+ * It is null because no such evidence exists. `pnpm probe:openclaw` now records
+ * the deletion-capable command surface -- the flag and subcommand NAMES under
+ * `sessions`, `transcripts` and `memory`, never a session value -- and that
+ * recording is the first half. The second half is a verified narrow deletion
+ * plus an INDEPENDENT readback proving the session is gone, and that has not
+ * been performed: the pinned binary is not installed on the host this was
+ * implemented from, so the probe could not run.
+ *
+ * Until both halves exist, `/forget` reports provider deletion as unsupported
+ * and rotates the session epoch instead. Rotation orphans the old session; it
+ * does not erase it. Saying otherwise would be the one thing a deletion path
+ * must never do.
+ *
+ * Note that this is not merely a missing probe run. `ALWAYS_FORBIDDEN_COMMAND_VERBS`
+ * refuses `rm`, `destroy`, `purge` and `drop` in any argv this system builds,
+ * and that list is not going to be relaxed to make a deletion possible. If the
+ * supported surface turns out to need one of those verbs, the honest answer
+ * stays "unsupported".
+ */
+export const RECORDED_SESSION_DELETION: string | null = null;

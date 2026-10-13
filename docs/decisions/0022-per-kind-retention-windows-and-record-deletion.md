@@ -4,6 +4,13 @@
 
 Accepted. Retention still ships **disabled**.
 
+**Amended by [ADR 0027](0027-native-thread-conversations-and-the-first-non-owner-controls.md):**
+one more per-kind window, `closedThreadDays`, for a conversation thread Ducky
+has observed to be gone. It is per-kind for the same reason every other window
+is: a closed thread is not the same kind of thing as a finished task or a past
+schedule entry, and one number for all of them would mean choosing which to get
+wrong.
+
 ## Context
 
 ADR 0020 gave retention two windows: 180 days for anything hanging off a

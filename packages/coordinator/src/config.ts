@@ -10,6 +10,8 @@ import {
   DISCORD_SNOWFLAKE, DUCKY_PROFILES, DuckyError, PROFILE_DEFAULT_CREDENTIALS_FILE,
   PROFILE_DEFAULT_DB_PATH, PROFILE_ENV,
   CONVERSATION_ATTACHMENTS_PER_HOUR, CONVERSATION_MAX_ATTACHMENT_BYTES,
+  CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT, CONVERSATION_CONTEXT_BUDGET_BYTES_MAX,
+  CONVERSATION_CONTEXT_BUDGET_BYTES_MIN,
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
@@ -63,6 +65,24 @@ export const EnvSchema = z.object({
   DUCKY_SHARED_CHANNEL_IDS: z.string().optional(),
   DUCKY_DEV_SHARED_CHANNEL_IDS: z.string().optional(),
   DUCKY_PROD_SHARED_CHANNEL_IDS: z.string().optional(),
+
+  /**
+   * The channels that may sprout NATIVE conversation threads. Default empty,
+   * which is the whole feature switched off.
+   *
+   * Opt-in by name, and it has to be: starting a thread is Ducky WRITING into
+   * the owner's guild on inference, which the roadmap flagged as the thing
+   * that needs an explicit list rather than a boolean. An instance that
+   * configures nothing creates no thread and behaves exactly as it did.
+   *
+   * Profile-scoped like the shared list, and validated at boot: a listed
+   * channel must not also be a shared channel (other people read it) and must
+   * not be a non-conversational role channel (a briefing or task channel is
+   * where output is delivered, not where a chat happens).
+   */
+  DUCKY_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
+  DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
+  DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS: z.string().optional(),
 
   /**
    * The owner's PRIVATE assistant channels, one per role.
@@ -203,6 +223,19 @@ export const EnvSchema = z.object({
   DUCKY_CONVERSATION_MEMORY_TURNS: z.coerce
     .number().int().min(2).max(CONVERSATION_MEMORY_TURNS_MAX)
     .default(CONVERSATION_MEMORY_TURNS_DEFAULT),
+  /**
+   * How many BYTES of context one conversational turn may carry.
+   *
+   * A byte budget rather than a token one, because no provider on this host
+   * reports a token limit and a token count derived from characters would be a
+   * measurement nobody made. A turn that cannot be brought under it is refused
+   * after compaction, never silently truncated.
+   */
+  DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES: z.coerce
+    .number().int()
+    .min(CONVERSATION_CONTEXT_BUDGET_BYTES_MIN)
+    .max(CONVERSATION_CONTEXT_BUDGET_BYTES_MAX)
+    .default(CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT),
 
   /**
    * Proactive briefings, pushed to the owner's DM. Default OFF.
@@ -279,6 +312,15 @@ export const EnvSchema = z.object({
    */
   DUCKY_RETENTION_CONVERSATION_OWNER_DAYS: z.coerce.number().int().min(1).default(30),
   DUCKY_RETENTION_CONVERSATION_OTHER_DAYS: z.coerce.number().int().min(1).default(7),
+  /**
+   * How long a CLOSED conversation thread is kept, with everything in it.
+   *
+   * A LIVE native thread is out of retention's reach entirely -- that is what
+   * issue #4 asks for -- so this is where the bound actually lives. It starts
+   * counting from the moment Ducky observes that the thread is gone from
+   * Discord, not from when the conversation last moved.
+   */
+  DUCKY_RETENTION_CLOSED_THREAD_DAYS: z.coerce.number().int().min(1).default(14),
   DUCKY_RETENTION_BATCH: z.coerce.number().int().min(1).max(10_000).default(200),
 
   /**
@@ -538,11 +580,81 @@ export const resolveConversationMemory = (env: Env): {
   enabled: boolean;
   turns: number;
   excludedThreadKeys: readonly string[];
+  contextBudgetBytes: number;
 } => ({
   enabled: env.DUCKY_CONVERSATION_MEMORY_ENABLED,
   turns: env.DUCKY_CONVERSATION_MEMORY_TURNS,
   excludedThreadKeys: resolveSharedChannelIds(env),
+  contextBudgetBytes: env.DUCKY_CONVERSATION_CONTEXT_BUDGET_BYTES,
 });
+
+/**
+ * The channels that may sprout native conversation threads, for THIS profile.
+ *
+ * Two boot refusals rather than silent precedence, on the same reasoning
+ * `assertNoChannelRoleConflicts` uses:
+ *
+ * 1. **A shared channel may not be a thread parent.** A shared channel is one
+ *    other people read, and a thread under it is visible to all of them; the
+ *    owner's conversation does not belong there, and memory already refuses to
+ *    store it, so a thread would be a conversation with no continuity in a
+ *    channel chosen for coarse job status.
+ * 2. **A non-conversational role channel may not be one either.** `briefing`
+ *    is where output is delivered and `task` is for personal records; neither
+ *    is a chat. This is what makes "non-chat purpose channels do not spawn
+ *    threads" a configuration property instead of a hope.
+ *
+ * `gpt`, `coding` and an unroled channel are all accepted: the first two are
+ * the conversational roles, and an owner may reasonably want threads in a
+ * channel they have given no role at all.
+ */
+export function resolveThreadParentChannelIds(env: Env): readonly string[] {
+  const names = PROFILE_ENV[env.DUCKY_PROFILE];
+  const isProd = env.DUCKY_PROFILE === 'production';
+  const scoped = isProd
+    ? env.DUCKY_PROD_THREAD_PARENT_CHANNEL_IDS
+    : env.DUCKY_DEV_THREAD_PARENT_CHANNEL_IDS;
+  // Production never inherits the unscoped variable.
+  const raw = scoped ?? (isProd ? undefined : env.DUCKY_THREAD_PARENT_CHANNEL_IDS);
+
+  const ids = (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0) return Object.freeze([]);
+
+  const shared = new Set(resolveSharedChannelIds(env));
+  const roles = resolveChannelRoles(env);
+  const byChannel = new Map<string, ChannelRole>();
+  for (const role of CHANNEL_ROLES) {
+    const id = roles[role];
+    if (id !== undefined) byChannel.set(id, role);
+  }
+
+  for (const id of ids) {
+    if (!DISCORD_SNOWFLAKE.test(id)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} contains a value that is not a Discord channel id.`,
+      );
+    }
+    if (shared.has(id)) {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} names a channel that is also in ${names.sharedChannels}. ` +
+          'A shared channel is one other people read; a conversation thread under it would be ' +
+          'visible to all of them and would store nothing. Pick one.',
+      );
+    }
+    const role = byChannel.get(id);
+    if (role === 'briefing' || role === 'task') {
+      throw new DuckyError(
+        'invalid_input',
+        `${names.threadParents} names ${names.roleChannels[role]}, which is not a conversation ` +
+          'channel: a briefing channel is where output is delivered and a task channel is for ' +
+          'personal records. Only a chat or coding channel can open conversation threads.',
+      );
+    }
+  }
+  return Object.freeze([...new Set(ids)]);
+}
 
 /**
  * The proactive-briefing schedule, validated.

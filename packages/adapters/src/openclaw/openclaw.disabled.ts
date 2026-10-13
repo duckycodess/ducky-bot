@@ -1,6 +1,6 @@
 import { DuckyError } from '@ducky/contracts';
 import {
-  NO_ATTACHMENT_CAPABILITY,
+  NO_ATTACHMENT_CAPABILITY, NO_SESSION_DELETION,
   type ConversationCapabilities, type ConversationInput, type ConversationProvider,
   type ConversationReply,
 } from './openclaw.port.js';
@@ -25,6 +25,9 @@ export class DisabledConversationProvider implements ConversationProvider {
   readonly verified = false;
   readonly capabilities: ConversationCapabilities = {
     attachments: NO_ATTACHMENT_CAPABILITY,
+    sessionDeletion: NO_SESSION_DELETION(
+      'this stand-in keeps no session, so there is nothing of yours for it to delete',
+    ),
   };
 
   async reply(_input: ConversationInput): Promise<ConversationReply> {

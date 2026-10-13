@@ -621,3 +621,51 @@ shared state if it were ever scaled out.
 - **A `/forget job` cannot be undone.** The confirm step, the per-entity scope
   and the identical answer for unknown and foreign ids are the mitigations; there
   is no soft-delete and no restore.
+- **A LIVE conversation thread's transcript is unbounded.** Issue #4 asks for
+  the full history of a native thread while the thread exists, so the
+  per-thread row cap that bounded ordinary channels does not apply to one. The
+  longer a conversation runs, the more of somebody's words sit on disk, and the
+  owner approved that trade deliberately.
+
+  What holds: conversation memory is OFF by default; threads are created only
+  in channels an operator NAMED; a thread under a shared channel stores nothing
+  at all; what reaches the model is still bounded by a byte budget; retention
+  removes a thread whole once Ducky has observed it is gone from Discord
+  (`DUCKY_RETENTION_CLOSED_THREAD_DAYS`); and `/forget conversation` deletes
+  every turn at any time. None of that makes the live thread small. See
+  [decisions/0025](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md).
+- **Thread closure is inferred from a signal that can be wrong in both
+  directions.** Ducky learns about a deletion from `Events.ThreadDelete`, which
+  rides the `Guilds` intent the client already requests; a send failing with
+  `Unknown Channel` is the fallback.
+
+  *Missed closure:* a thread deleted while the coordinator was down and never
+  written to again is never observed, so its retention clock never starts and
+  its transcript stays until `/forget conversation` removes it.
+
+  *False closure:* Discord sends `ThreadDelete` to a client that has merely
+  **lost access**, which a permission change is enough to cause. An incoming
+  message from an authorized sender now reopens the mapping, before any turn is
+  replayed or appended, and a native thread's turns are never reachable by the
+  ordinary 7/30-day windows in any case — so a conversation that resumes keeps
+  its full history. What is NOT covered is a falsely closed thread that nobody
+  writes in for the whole `DUCKY_RETENTION_CLOSED_THREAD_DAYS` window (14 days
+  by default) on an instance with retention enabled: silence for that long is
+  indistinguishable from the thread being gone, and it is purged. Retention
+  ships disabled, which makes this narrow rather than unlikely by design.
+- **A guest cannot delete their own conversation.** `/forget` is a write and
+  stays owner-only; widening it would widen the owner-only surface for the sake
+  of a non-owner deletion path. A chat-whitelist user who wants their turns
+  removed has to ask the owner, who can do it for them with `/forget
+  conversation` (their own) or by removing the thread. Their words are subject
+  to the shorter guest retention window in the meantime
+  (`DUCKY_RETENTION_CONVERSATION_OTHER_DAYS`, 7 days by default) wherever a live
+  thread is not holding them.
+- **`/forget conversation` reaches one of two stores, and says so.** The
+  assistant provider keeps its own session transcript which Ducky cannot
+  delete: no deletion contract has been recorded, and the probe that would
+  record one only reads command NAMES. What `/forget` does instead is rotate
+  the session epoch, for the owner and for every other actor a shared thread
+  contaminated, so the old context cannot reappear. That is ORPHANING, not
+  erasure, and the reply uses those words. See
+  [decisions/0024](decisions/0024-two-conversation-stores.md).

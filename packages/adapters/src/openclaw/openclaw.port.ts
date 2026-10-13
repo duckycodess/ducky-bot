@@ -18,8 +18,36 @@ export interface AttachmentCapability {
   readonly maxBytes: number;
 }
 
+/**
+ * Whether this provider can DELETE a conversation session it owns.
+ *
+ * Declared, never inferred, and `supported: false` is the only honest default:
+ * a provider that has not had a deletion command and an independent readback
+ * recorded against it cannot be said to support deletion, and `/forget` must
+ * report partial rather than imply a reach it does not have.
+ *
+ * `reason` is shown to the owner, so it says what is missing and what would
+ * change it -- not "unsupported".
+ */
+export interface SessionDeletionCapability {
+  readonly supported: boolean;
+  /** Why, in words an owner reading `/forget` output can act on. */
+  readonly reason: string;
+}
+
+/** A provider that cannot delete its own sessions. */
+export const NO_SESSION_DELETION = (reason: string): SessionDeletionCapability =>
+  Object.freeze({ supported: false, reason });
+
 export interface ConversationCapabilities {
   readonly attachments: AttachmentCapability;
+  /**
+   * Required rather than optional, so a new provider has to state its position
+   * on deletion instead of defaulting into one. ADR 0024 records that there are
+   * TWO conversation stores and only one of them is Ducky's; this is the field
+   * that stops that fact from being quietly forgotten by the next adapter.
+   */
+  readonly sessionDeletion: SessionDeletionCapability;
 }
 
 /** A capability object for a provider that cannot take attachments at all. */
@@ -98,6 +126,33 @@ export interface ConversationInput {
   readonly userId: string;
   readonly text: string;
   readonly threadKey: string;
+  /**
+   * Which GENERATION of this conversation's provider session to use.
+   *
+   * Folded into whatever key the adapter derives, so bumping it opens a
+   * different session. It exists because Ducky cannot delete an OpenClaw
+   * session: after a `/forget`, the honest thing it CAN do is stop using the
+   * contaminated one, so stale context cannot reappear. Absent means the first
+   * generation, which is every conversation that has never been forgotten.
+   */
+  readonly sessionEpoch?: number | undefined;
+  /**
+   * The compacted form of everything older than `history`.
+   *
+   * Supplied separately rather than prepended to `history` because it is NOT
+   * something anybody said: it is Ducky's own bounded summary, and a provider
+   * must be able to render it as such. ADR 0021's closed `user`/`assistant`
+   * role set is what makes mixing the two impossible by accident.
+   */
+  readonly checkpoint?: string | undefined;
+  /**
+   * One earlier message the sender explicitly replied to.
+   *
+   * Always from the SAME visible thread -- the coordinator refuses a
+   * cross-thread or unreadable reference and labels it unavailable instead of
+   * importing it. It is additional to `history`, never a substitute for it.
+   */
+  readonly reference?: ConversationHistoryTurn | undefined;
   /**
    * Earlier turns of this conversation, oldest first, already bounded by the
    * coordinator. Absent when continuity is disabled, when this is the first

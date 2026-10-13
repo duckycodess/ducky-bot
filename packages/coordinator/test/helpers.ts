@@ -86,6 +86,11 @@ export interface HarnessOptions {
   readonly dependencyChecker?: DependencyChecker;
   /** Replaces the approved-action performer in service-level tests. */
   readonly actionPerformer?: ActionPerformer;
+  /**
+   * Reuses an existing store, which is what a RESTART looks like from the
+   * database's point of view: a second app, the same rows.
+   */
+  readonly store?: Store;
 }
 
 /**
@@ -114,9 +119,10 @@ export class TestClock extends ConfiguredOwnerClock {
 }
 
 export function makeHarness(opts: HarnessOptions = {}, realTransport = false): Harness {
-  const db = openDatabase({ location: ':memory:' });
-  runMigrations(db);
-  const store = createStore(db);
+  const reused = opts.store;
+  const db = reused?.db ?? openDatabase({ location: ':memory:' });
+  if (!reused) runMigrations(db);
+  const store = reused ?? createStore(db);
 
   const executorId = 'exec-a';
   const keyId = 'k1';
@@ -177,7 +183,11 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
     keyId,
     bearer,
     hmac,
-    close: () => db.close(),
+    // A reused store belongs to the harness that opened it, so a restart
+    // harness must not close the database out from under it.
+    close: () => {
+      if (!reused) db.close();
+    },
   };
 }
 

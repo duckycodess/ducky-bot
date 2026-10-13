@@ -1,3 +1,6 @@
+import type {
+  ThreadEntryOutcome, ThreadStartOutcome,
+} from '../domain/conversation-threads.js';
 import type { OutboundMessage, SendTarget } from './message.js';
 
 /**
@@ -15,7 +18,68 @@ export interface IncomingContext {
   readonly channelId: string | undefined;
   /** Absent in a DM. Presence is what distinguishes a guild channel. */
   readonly guildId: string | undefined;
+  /**
+   * The channel a THREAD hangs under, and nothing else.
+   *
+   * Present only when `channelId` is a thread; absent for a top-level channel
+   * and absent in a DM. It exists because a thread's id is not its parent's,
+   * so without it every policy that matches on a configured channel id answers
+   * "no" for a thread under that channel -- which is how a thread under the
+   * configured GPT channel ended up silenced and a thread under a role channel
+   * lost its role.
+   *
+   * **It is routing and presentation input, never an authority of its own.** A
+   * parent channel can make a thread inherit a ROLE (where output belongs,
+   * whether replies persist) and can make it inherit an EXCLUSION (a thread
+   * under a shared channel is still a shared channel for the purposes of
+   * memory). It can never make anybody able to do anything: `Authorizer` reads
+   * frozen configuration and nothing here.
+   */
+  readonly parentChannelId?: string | undefined;
 }
+
+/**
+ * The message a reply points at, as the reader sees it.
+ *
+ * Carried as metadata, resolved later, and never trusted: the router checks
+ * that the referenced message really is in the SAME visible thread before any
+ * of its text is included, and labels it unavailable otherwise. A reference
+ * never changes which conversation a message belongs to.
+ */
+export interface IncomingReference {
+  readonly messageId: string;
+  /** The channel the referenced message lives in, when Discord reported one. */
+  readonly channelId?: string | undefined;
+  /** Absent when the referenced message could not be read back. */
+  readonly text?: string | undefined;
+  /** Who wrote it, when known. */
+  readonly authorId?: string | undefined;
+  /**
+   * Whether DUCKY ITSELF wrote the referenced message.
+   *
+   * Populated by the transport, which is the only layer that knows the bot's
+   * own Discord id, and the ONLY thing that may cause an anchor to be labelled
+   * `assistant`. Everything else is somebody else's words.
+   *
+   * This exists because the first version inferred it: anything not on the
+   * frozen whitelist was treated as Ducky's own output. In a public thread
+   * that is wrong and dangerous -- a stranger can post, the owner can reply to
+   * them, and their text would then reach the model labelled as something the
+   * assistant had said. Absent is treated as "not Ducky", so a transport that
+   * does not populate it loses the anchor rather than mislabelling one.
+   */
+  readonly authorIsSelf?: boolean | undefined;
+}
+
+/**
+ * Who sent a message.
+ *
+ * `bot` and `webhook` are separated because they fail differently: a bot is
+ * another application talking, a webhook is a notification nobody is behind.
+ * Neither starts a conversation thread, and a transport that cannot tell must
+ * say `unknown`, which is treated exactly like a bot.
+ */
+export type IncomingAuthorKind = 'user' | 'bot' | 'webhook' | 'unknown';
 
 /**
  * Attachment METADATA only. Discord-supplied, entirely untrusted, and never
@@ -52,6 +116,23 @@ export interface IncomingMessage {
   readonly text: string;
   readonly threadKey: string;
   /**
+   * The Discord id of THIS message.
+   *
+   * Needed because a native thread is started FROM a message: the id is the
+   * idempotency key for "has this message already sprouted a thread?", and
+   * Discord's own recovery path for `MESSAGE_ALREADY_HAS_THREAD` is that the
+   * thread's id IS the starter message's id. Absent means no thread can be
+   * started from it, which is the fail-closed direction.
+   */
+  readonly messageId?: string | undefined;
+  /**
+   * Whether a person sent this. Absent is treated as `unknown`, so a transport
+   * that does not populate it cannot cause a bot post to start a thread.
+   */
+  readonly authorKind?: IncomingAuthorKind | undefined;
+  /** The message this one replies to, when it replies to one. */
+  readonly reference?: IncomingReference | undefined;
+  /**
    * Where the message arrived, on the same terms as a command.
    *
    * Until this existed a message carried only `threadKey`, which IS the channel
@@ -79,11 +160,44 @@ export type Incoming = IncomingCommand | IncomingComponent | IncomingMessage;
 
 export type IncomingHandler = (event: Incoming) => Promise<OutboundMessage | undefined>;
 
+/**
+ * Decides which conversation a message belongs to, creating a native thread
+ * when it should.
+ *
+ * Installed by the composition root rather than constructed by the transport,
+ * so the DECISION stays in the domain (testable with no Discord) and only the
+ * EFFECT lives here. Absent means no message is ever rerouted, which is how
+ * every instance behaved before threads existed.
+ */
+export type ConversationThreadEntry = (event: IncomingMessage) => Promise<ThreadEntryOutcome>;
+
 export interface DiscordTransport {
   readonly kind: 'real' | 'mock';
   start(handler: IncomingHandler): Promise<void>;
   stop(): Promise<void>;
   send(target: SendTarget, message: OutboundMessage): Promise<void>;
+  /**
+   * Opens a native thread. Absent means this transport cannot, and the thread
+   * service then refuses rather than pretending one was created.
+   */
+  startThread?(input: {
+    readonly channelId: string;
+    readonly messageId?: string | undefined;
+    readonly name: string;
+    readonly autoArchiveMinutes: number;
+  }): Promise<ThreadStartOutcome>;
+  /**
+   * Installs the hook above, and the one that records a thread as GONE.
+   *
+   * Called once, by the composition root. `onGone` fires only on Discord's
+   * `Unknown Channel`, which is the single durable signal that a thread has
+   * been deleted; closing a mapping starts the retention clock and removes
+   * nothing.
+   */
+  useConversationThreads?(
+    enter: ConversationThreadEntry,
+    onGone?: (threadId: string) => void,
+  ): void;
 }
 
 /** What a transport hands to the underlying client after sanitization. */

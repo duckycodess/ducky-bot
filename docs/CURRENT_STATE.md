@@ -978,8 +978,8 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck` and `pnpm build` pass on this host. `pnpm test` runs **99 files,
-1371 tests**, with 1364 passing and seven failing. The seven fail in a fresh
+`pnpm typecheck` and `pnpm build` pass on this host. `pnpm test` runs **100 files,
+1380 tests**, with 1373 passing and seven failing. The seven fail in a fresh
 worktree and fail identically at the previous commit. Four in
 `outbound.test.ts` and one in `result-intake.test.ts` assert on the literal
 path `/home/tj`, which is what the redactor folds only on the machine whose

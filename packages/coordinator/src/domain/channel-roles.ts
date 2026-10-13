@@ -14,6 +14,15 @@ import type { IncomingContext } from '../discord/transport.js';
  * - **A ROLE channel** says *this is the owner's own private channel for a kind
  *   of output, and their replies here persist.*
  *
+ * ## The one role that is NOT private: `github`
+ *
+ * `github` is a DELIVERY-ONLY role, and it inverts the rule above on purpose.
+ * Cards are posted there for anyone who can read the channel, which is exactly
+ * why only public, selected repositories ever reach it (everything else goes to
+ * the owner's DM). So nothing the owner says there persists, nothing typed
+ * there is answered or stored, and no deterministic or workflow rule fires from
+ * it. See `DELIVERY_ONLY_ROLES` and ADR 0025.
+ *
  * One channel cannot be both. That is refused at boot rather than resolved by
  * precedence, because whichever way it resolved, the failure would be silent
  * and the blast radius would be the owner's full task list in a channel
@@ -27,6 +36,19 @@ import type { IncomingContext } from '../discord/transport.js';
  * messages -- that is what configuring a private channel for this means -- and
  * still cannot do anything.
  */
+/**
+ * Roles whose channel is somewhere output is DELIVERED and nothing else.
+ *
+ * Nothing typed in one is read, nothing the owner does there persists, and no
+ * write intent or repository workflow can start from it. It is a list so that
+ * adding to it is a visible act, and so `ReplyPersistencePolicy`, the router and
+ * the intents service cannot drift on what "delivery only" means.
+ */
+export const DELIVERY_ONLY_ROLES: readonly ChannelRole[] = Object.freeze(['github']);
+
+export const isDeliveryOnlyRole = (role: ChannelRole | undefined): boolean =>
+  role !== undefined && DELIVERY_ONLY_ROLES.includes(role);
+
 export class ChannelRolePolicy {
   private readonly byRole: ReadonlyMap<ChannelRole, string>;
   private readonly byChannel: ReadonlyMap<string, ChannelRole>;
@@ -97,6 +119,11 @@ export class ChannelRolePolicy {
       : this.byChannel.get(context.parentChannelId);
   }
 
+  /** Whether a request arrived in a channel that only ever receives output. */
+  isDeliveryOnly(context: IncomingContext | undefined): boolean {
+    return isDeliveryOnlyRole(this.roleOf(context));
+  }
+
   /** Whether a request arrived in one of the owner's configured channels. */
   isRoleChannel(context: IncomingContext | undefined): boolean {
     return this.roleOf(context) !== undefined;
@@ -136,7 +163,8 @@ export function assertNoChannelRoleConflicts(
       throw new Error(
         `${nameOf(role)} names a channel that is also in the shared-channel list. A channel ` +
           'cannot be both: a shared channel shows other people a narrow projection, while a ' +
-          "role channel persists the owner's replies in full. Pick one.",
+          "role channel persists the owner's replies in full (and a GitHub channel is read by " +
+          'whoever the channel admits). Pick one.',
       );
     }
 
@@ -149,4 +177,27 @@ export function assertNoChannelRoleConflicts(
     }
     seen.set(id, role);
   }
+}
+
+/**
+ * The one-line account of what the configured roles do, for `/status` and the
+ * boot diagnostics.
+ *
+ * Names, never ids, and honest about the difference that matters: the roles
+ * where the owner's replies persist, and the delivery-only roles where nothing
+ * the owner types is read and no reply is ever made public.
+ */
+export function describeChannelRoles(
+  configured: readonly { readonly role: ChannelRole }[],
+  persistVerb = 'replies persist there',
+): string {
+  if (configured.length === 0) return 'none configured; every owner reply stays ephemeral in a guild';
+  const persistent = configured.filter((c) => !isDeliveryOnlyRole(c.role)).map((c) => c.role);
+  const delivery = configured.filter((c) => isDeliveryOnlyRole(c.role)).map((c) => c.role);
+  const parts: string[] = [];
+  if (persistent.length > 0) parts.push(`${persistent.join(', ')} — ${persistVerb}`);
+  if (delivery.length > 0) {
+    parts.push(`${delivery.join(', ')} — delivery only: nothing typed there is read, replies stay ephemeral`);
+  }
+  return parts.join('; ');
 }

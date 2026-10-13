@@ -40,7 +40,7 @@ import { Reconciler } from './domain/reconciler.js';
 import { JobNotifier } from './domain/notifications.service.js';
 import { SharedJobsService } from './domain/shared-jobs.service.js';
 import { SharedChannelPolicy } from './domain/shared-visibility.js';
-import { ChannelRolePolicy } from './domain/channel-roles.js';
+import { ChannelRolePolicy, describeChannelRoles } from './domain/channel-roles.js';
 import { ReplyPersistencePolicy } from './domain/reply-persistence.js';
 import { ConfiguredOwnerClock, type OwnerClock } from './domain/owner-clock.js';
 import { TasksService } from './domain/tasks.service.js';
@@ -575,9 +575,7 @@ export function createApp(
     reminderDelivery: channelRoles.channelFor('reminder')
       ? 'task reminders post in your reminders channel with a mention; everything else is a DM'
       : 'every reminder is a DM',
-    channelRoles: channelRoles.enabled
-      ? `${channelRoles.configured.map((c) => c.role).join(', ')} — replies persist there`
-      : 'none configured; every owner reply stays ephemeral in a guild',
+    channelRoles: describeChannelRoles(channelRoles.configured),
     sharedChannels: sharedPolicy.enabled
       ? `${sharedPolicy.configuredChannelIds.length} shared channel(s): job status is visible there`
       : 'none (all job information is owner-only)',

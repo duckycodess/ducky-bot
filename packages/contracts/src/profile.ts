@@ -82,6 +82,7 @@ export const PROFILE_ENV = {
       coding: 'DUCKY_DEV_CODING_CHANNEL_ID',
       gpt: 'DUCKY_DEV_GPT_CHANNEL_ID',
       reminder: 'DUCKY_DEV_REMINDER_CHANNEL_ID',
+      github: 'DUCKY_DEV_GITHUB_CHANNEL_ID',
     },
   },
   production: {
@@ -99,6 +100,7 @@ export const PROFILE_ENV = {
       coding: 'DUCKY_PROD_CODING_CHANNEL_ID',
       gpt: 'DUCKY_PROD_GPT_CHANNEL_ID',
       reminder: 'DUCKY_PROD_REMINDER_CHANNEL_ID',
+      github: 'DUCKY_PROD_GITHUB_CHANNEL_ID',
     },
   },
 } as const satisfies Record<
@@ -129,8 +131,16 @@ export const PROFILE_ENV = {
  * there persist. It says nothing whatever about who may act: authorization is
  * frozen environment configuration and a role channel grants nobody anything.
  * See ADR 0023.
+ *
+ * `github` is the GitHub-updates channel. It is a role rather than a shared
+ * channel for a precise reason: a shared channel shows OTHER PEOPLE a narrowed
+ * projection of the owner's jobs, while this one shows the owner the GitHub
+ * activity they already have access to on GitHub. Anybody who can read the
+ * channel can read what is posted there, which is why a card about a repository
+ * that is private, or that the owner never selected, is never posted there at
+ * all -- it falls back to the owner's DM. See ADR 0025.
  */
-export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt', 'reminder'] as const;
+export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt', 'reminder', 'github'] as const;
 export type ChannelRole = (typeof CHANNEL_ROLES)[number];
 
 /**
@@ -147,6 +157,7 @@ export const UNSCOPED_ROLE_CHANNEL_ENV = {
   coding: 'DUCKY_CODING_CHANNEL_ID',
   gpt: 'DUCKY_GPT_CHANNEL_ID',
   reminder: 'DUCKY_REMINDER_CHANNEL_ID',
+  github: 'DUCKY_GITHUB_CHANNEL_ID',
 } as const satisfies Record<ChannelRole, string>;
 
 /**

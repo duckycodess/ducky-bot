@@ -196,6 +196,11 @@ export class RetentionService {
       const w = r.deleteCancelledWatches(cutoff(p.cancelledWatchDays), p.batch);
       c.watchesDeleted = w.watches;
       c.watchEventsDeleted += w.events;
+      // The feed's finished rows share the watch-event window: they are the same
+      // kind of thing, an alert that was delivered or abandoned.
+      c.feedEventsDeleted = r.deleteSettledFeedEvents(cutoff(p.watchEventDays), p.batch);
+      c.feedCommitsDeleted = r.deleteConsumedFeedCommits(cutoff(p.watchEventDays), p.batch);
+      c.feedDigestsDeleted = r.deleteSettledFeedDigests(cutoff(p.watchEventDays), p.batch);
     });
 
     // Conversation turns, split by who said them: the owner's own history and a
@@ -295,6 +300,8 @@ export class RetentionService {
         `occurrences ${counts.reminderOccurrencesDeleted}; ` +
         `schedules ${counts.schedulesDeleted}; watches ${counts.watchesDeleted}; ` +
         `watch events ${counts.watchEventsDeleted}; ` +
+        `feed events ${counts.feedEventsDeleted}; feed commits ${counts.feedCommitsDeleted}; ` +
+        `feed digests ${counts.feedDigestsDeleted}; ` +
         `workspaces ${counts.workspacesDeleted}; ` +
         `idempotency ${counts.idempotencyKeysDeleted}; run log ${counts.runLogRowsDeleted}; ` +
         `conversation turns ${counts.conversationTurnsDeleted}; ` +

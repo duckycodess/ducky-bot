@@ -1,7 +1,7 @@
 import {
   AGENT_CARD_INTENT_LINES_MAX, AGENT_CARD_LABEL, AGENT_CARD_NEXT, DUCKY_COLORS,
   QUEUE_STATE_LABEL,
-  type AgentCardStatus,
+  type AgentCardStatus, type QueueState,
 } from '@ducky/contracts';
 import type { AgentThreadRow } from '@ducky/persistence';
 import type { OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
@@ -35,6 +35,26 @@ const COLOR_FOR: Record<AgentCardStatus, number> = {
   cancelled: DUCKY_COLORS.neutral,
 };
 
+/**
+ * The durable sentence on the card, which must never contradict Details.
+ *
+ * The per-status copy is written for the ordinary case, and for `failed` that
+ * case is "nothing happened". It is wrong whenever the queue state is
+ * `unknown`: the publisher writes `agent:ready` before it reads it back, so a
+ * failure after that write leaves a label that may well be on the issue.
+ *
+ * The CARD is the surface that matters most here. Details is something the
+ * owner presses for; the card is what sits in the channel and what they read
+ * six hours later, so a card saying "nothing was queued" beside a Details view
+ * saying "unknown" misleads exactly the reader who never pressed.
+ */
+function whatThisMeans(status: AgentCardStatus, queueState: QueueState): string {
+  if (queueState !== 'unknown') return AGENT_CARD_NEXT[status];
+  return (
+    `${QUEUE_STATE_LABEL.unknown} Nothing was started; Ducky never starts a worker.`
+  );
+}
+
 export interface AgentCardControls {
   readonly detailsId?: string;
   readonly cancelId?: string;
@@ -59,11 +79,20 @@ export function agentCard(row: AgentThreadRow, controls: AgentCardControls): Out
     { name: 'Repository', value: row.repository ?? 'not chosen', inline: true },
     { name: 'Status', value: AGENT_CARD_LABEL[status], inline: true },
   ];
-  if (row.issueNumber !== null) {
+  /**
+   * The issue THIS run is working on, which is not the same as the issue the
+   * thread is bound to.
+   *
+   * `issue_url` is cleared when a run starts and set again when that run
+   * learns one, so its presence is the test for "this run has an issue". The
+   * binding (`issue_number`) outlives a run on purpose, and showing it
+   * unconditionally put a stale number on an unrelated card.
+   */
+  if (row.issueNumber !== null && row.issueUrl !== null) {
     fields.push({ name: 'Issue', value: `#${row.issueNumber}`, inline: true });
   }
   if (row.runDetail) fields.push({ name: 'Detail', value: row.runDetail });
-  fields.push({ name: 'What this means', value: AGENT_CARD_NEXT[status] });
+  fields.push({ name: 'What this means', value: whatThisMeans(status, row.queueState) });
 
   return {
     embeds: [{

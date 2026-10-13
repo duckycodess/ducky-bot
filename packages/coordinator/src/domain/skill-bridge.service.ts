@@ -491,7 +491,18 @@ export class SkillBridgeService {
     if (notes.length === 0) {
       const settled = this.settledTicket(actor, event.threadKey, target.repo.repository);
       if (settled && parsed.ready) {
-        return this.authorizeSettled(actor, event, run, target, settled);
+        /**
+         * The scan's completion policy goes with it.
+         *
+         * The single-step path tells the owner what queueing can END in --
+         * whether the dispatcher may merge the resulting pull request -- at
+         * the moment they queue. The two-step reaches the same place by a
+         * different route, so it has to carry the same warning: a policy
+         * stated on only one path is one the owner learns about by accident.
+         */
+        return this.authorizeSettled(
+          actor, event, run, target, settled, found.completionPolicy,
+        );
       }
       if (settled) {
         // A bare `$ticket` NEVER authorizes. It points at the step that does.
@@ -841,6 +852,8 @@ export class SkillBridgeService {
       repository: string;
       alreadyQueued: boolean;
     },
+    /** The registration's completion policy, as the scan just observed it. */
+    completionPolicy: string | undefined,
   ): Promise<OutboundMessage> {
     if (settled.alreadyQueued) {
       // Answered, not attempted. Re-applying a label that is already verified
@@ -921,12 +934,17 @@ export class SkillBridgeService {
         );
       }
       const url = published.url ?? settled.issueUrl ?? undefined;
+      const detail =
+        queueState === 'queued'
+          ? `Authorized the ticket this thread published. ${QUEUE_STATE_LABEL.queued} ` +
+            // The same sentence the single-step path ends on, from the same
+            // observed registration.
+            mergePolicyNote(completionPolicy)
+          : `Authorization did NOT complete. ${QUEUE_STATE_LABEL.unknown}`;
       return this.endRun(
         actor, event, run,
         queueState === 'queued' ? 'queued' : 'published',
-        queueState === 'queued'
-          ? `Authorized the ticket this thread published. ${QUEUE_STATE_LABEL.queued}`
-          : `Authorization did NOT complete. ${QUEUE_STATE_LABEL.unknown}`,
+        detail.slice(0, AGENT_CARD_DETAIL_MAX),
         cards.publicationReply(queueState === 'queued' ? 'queued' : 'published', url),
         queueState,
       );
@@ -1746,15 +1764,24 @@ function publicationDetail(
    * A ticket's prose cannot enforce a merge policy, and an owner who believes
    * it can is the failure this line exists to prevent.
    */
-  if (ready && published.queued) {
-    parts.push(
-      completionPolicy === 'pr_only'
-        ? 'This repository is registered pr_only: the dispatcher stops at a pull request and merges nothing.'
-        : 'This repository is NOT registered pr_only, so the dispatcher may merge the resulting ' +
-          'pull request automatically once its worker signs off. Ducky cannot change that.',
-    );
-  }
+  if (ready && published.queued) parts.push(mergePolicyNote(completionPolicy));
   return parts.join(' ').slice(0, AGENT_CARD_DETAIL_MAX);
+}
+
+/**
+ * What queueing can END in, in one sentence, from the registration itself.
+ *
+ * Shared by both routes to a queued ticket -- the single-step `$ticket
+ * --ready <description>` and the two-step authorization -- because a warning
+ * that exists on one path and not the other is one the owner meets by
+ * accident. Ducky cannot change the policy; it can only say which one it just
+ * queued into.
+ */
+function mergePolicyNote(completionPolicy: string | undefined): string {
+  return completionPolicy === 'pr_only'
+    ? 'This repository is registered pr_only: the dispatcher stops at a pull request and merges nothing.'
+    : 'This repository is NOT registered pr_only, so the dispatcher may merge the resulting ' +
+      'pull request automatically once its worker signs off. Ducky cannot change that.';
 }
 
 function onboardingDetail(

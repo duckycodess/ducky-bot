@@ -133,6 +133,15 @@ unknown, and the same authorization then succeeds on retry; a rebound thread
 is not offered the previous repository's issue; and the stored contract goes
 with `/forget conversation`.
 
+**coordinator / skill bridge card truth** — the durable card is held to the
+same standard as the Details view behind it: it never says "nothing was
+queued" while the stored queue state is `unknown`, it still says so when that
+is actually true, and the two surfaces are asserted to agree; the two-step
+authorization carries the same merge-policy warning the single step does, for
+both a `pr_only` registration and one without, and says nothing about merging
+when the authorization did not complete; and a card links only to the issue
+its own run touched, while the issue binding a retry needs still survives.
+
 **coordinator / workflow invariants** — the bridge and its presenters name no
 `gh` surface, no issue or label API, and no `JobsService`, and spawn nothing
 themselves; `OWNER_ONLY_COMMANDS` is still exactly twelve and no shared route

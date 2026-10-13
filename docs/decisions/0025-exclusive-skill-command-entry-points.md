@@ -62,7 +62,11 @@ leaves a label that may well be on the issue. The stored outcome is therefore
 one of four states rather than a boolean: `not_requested`, `not_queued`
 (stopped before any label could be written), `queued` (applied AND verified),
 `unknown`. The card, the reply and the Details view all read the same state,
-and `unknown` tells the owner to open the issue and look. A false negative
+and `unknown` tells the owner to open the issue and look. The CARD matters
+most of the three: Details is something the owner presses for, and the card is
+what sits in the channel and what they read six hours later, so its per-status
+copy is overridden whenever the queue state is `unknown` rather than left
+saying "nothing was queued". A false negative
 about the one label that authorizes an agent is worse than no answer, because
 the owner stops looking.
 
@@ -96,6 +100,10 @@ The rules around it are what keep it from becoming an implicit authorization:
 - **A failed authorization keeps the settled ticket**, so the same
   authorization can be tried again, and reports the queue state as `unknown`
   because the label may have landed.
+- **It carries the same merge-policy warning the single step does.** Both
+  routes to a queued ticket end on one shared sentence, built from the
+  registration the scan just observed; a warning that exists on one path and
+  not the other is one the owner meets by accident.
 - **The settled ticket belongs to its repository.** After a rebind it is not
   offered: the thread is about something else now.
 - The stored contract is the owner's own words, bounded, one row per thread,

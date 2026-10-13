@@ -254,6 +254,12 @@ exercised; this says what it does.
     complete anyway, the card stays cancelled and the owner is told what was
     created, with the URL. A publication is recorded against the run that made
     it, so a late answer cannot point the next retry at the wrong issue.
+  - **The card never contradicts the Details view.** Its "what this means"
+    copy is per-status, and for a failure that copy says nothing happened --
+    which is wrong whenever the queue state is `unknown`, so the card renders
+    the unknown truth instead. It also links only to the issue its OWN run
+    touched: the issue URL is cleared when a run starts and set again when
+    that run learns one, while the retry binding deliberately survives.
   - **One card, edited in place**, with real controls -- a signed Details, a
     signed Cancel while the run is live, and a "View issue" LINK that carries
     no custom id and whose URL the sanitizer admits only as an exact https

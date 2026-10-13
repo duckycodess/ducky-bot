@@ -350,7 +350,16 @@ export class AgentThreadsRepo {
         `UPDATE agent_threads
             SET run_id = ?, run_command = ?, run_status = ?, run_detail = ?, run_ready = ?,
                 run_queue_state = ?, run_started_at = ?, run_finished_at = NULL,
-                card_channel_id = NULL, card_message_id = NULL, updated_at = ?
+                card_channel_id = NULL, card_message_id = NULL,
+                -- A fresh run has not produced an issue, so it shows no link
+                -- to one. issue_url is what THIS run has learned; issue_number
+                -- is the retry binding and deliberately survives, because a
+                -- retry's whole job is to enrich the issue the previous
+                -- attempt created. Display and binding are different
+                -- questions, and a card that inherited the former offered a
+                -- View issue button pointing at unrelated work.
+                issue_url = NULL,
+                updated_at = ?
           WHERE discord_user_id = ? AND thread_key = ?
             AND (run_id IS NULL OR run_finished_at IS NOT NULL)`,
       )

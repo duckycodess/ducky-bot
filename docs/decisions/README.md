@@ -33,6 +33,7 @@ reverse. Trivial implementation choices do not get one.
 | [0026](0026-deadline-linked-reminders-and-plain-cards.md) | Deadline-linked reminders, and cards that carry only title and deadline |
 | [0027](0027-native-thread-conversations-and-the-first-non-owner-controls.md) | Native thread conversations, and the first controls a non-owner may press |
 | [0028](0028-exclusive-skill-command-entry-points.md) | Three commands are the only way into the repository workflow |
+| [0029](0029-github-feed-and-the-delivery-only-github-channel.md) | A GitHub feed with durable event identity, and a delivery-only github channel |
 
 ## Format
 

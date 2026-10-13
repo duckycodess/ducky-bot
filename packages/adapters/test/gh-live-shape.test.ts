@@ -96,8 +96,27 @@ describe('the recorded live GitHub surface', () => {
     },
   );
 
+  it.runIf(existsSync(path.join(FIXTURES, 'live-feed.json')))(
+    'records a live feed pass that deduplicated, offered only links, and sent no real Discord message',
+    () => {
+      const f = read('live-feed.json');
+      expect(f['realGithubReads']).toBe(true);
+      expect(f['realDiscordMessagesSent']).toBe(0);
+      expect(f['announcedByThreeRepeatedPolls']).toBe(0);
+      expect(f['theSamePollAgainAnnounced']).toBe(0);
+      expect(f['allowlistTableUnchanged']).toBe(true);
+      expect(f['gaps']).toEqual([]);
+      const cards = f['cards'] as { linkButtons: number; controlButtons: number; linkHttpStatuses: number[] };
+      expect(cards.controlButtons).toBe(0);
+      expect(cards.linkButtons).toBeGreaterThan(0);
+      expect(cards.linkHttpStatuses.every((s) => s === 200)).toBe(true);
+      // Said plainly rather than implied: the search returned nothing live.
+      expect((f['reviewRequestSearch'] as { elementShapeObservedLive: boolean }).elementShapeObservedLive).toBe(false);
+    },
+  );
+
   it.runIf(present)('holds nothing that looks like a credential or a path', () => {
-    for (const name of ['live-shape.json', 'live-watch.json']) {
+    for (const name of ['live-shape.json', 'live-watch.json', 'live-feed.json']) {
       const file = path.join(FIXTURES, name);
       if (!existsSync(file)) continue;
       const raw = readFileSync(file, 'utf8');

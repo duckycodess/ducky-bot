@@ -239,7 +239,20 @@ erDiagram
   reminders ||--o{ reminder_occurrences : "one per due occurrence"
   github_watches }o--|| owner : ""
   github_watches ||--o{ github_watch_events : "meaningful changes"
+  github_feed_repos ||--o{ github_feed_cursors : "one per kind; baseline, backoff"
+  github_feed_repos ||--o{ github_feed_events : "UNIQUE event_key = the dedup"
+  github_feed_repos ||--o{ github_feed_commits : "(repo, sha); consumed by a digest"
+  github_feed_digests }o--|| owner : "one slot per owner, local day, target"
 ```
+
+`github_feed_*` references nothing, `repos` included: a selected repository is an
+`owner/repo` identity, not an allowlist entry. `github_feed_events` holds every
+event once, as `baseline` (history seen at first watch, never delivered),
+`pending`, or a settled state; its UNIQUE `event_key` is the whole
+deduplication. A cursor row exists per (scope, kind) and carries its own
+baseline, watermark, backoff and failure count, so one kind failing delays only
+itself. Retention never removes the selected list or a cursor (both are on
+`RETENTION_FORBIDDEN_TABLES`).
 
 `job_results` holds one immutable row per executor turn, keyed by
 `(job_id, lease_id)`, with the sanitized snapshot and the proposed actions. An
@@ -382,6 +395,14 @@ any offset already in the past skipped rather than fired. Closing a task
 withdraws its pending occurrences; moving its deadline re-derives them in the
 same transaction as the move
 (see [decisions/0026](decisions/0026-deadline-linked-reminders-and-plain-cards.md)).
+
+`GitHubFeedService.tick()` rides the same interval. It reads GitHub through the
+read-only `GitHubReader` port (one unit per repository and kind, each with its
+own cursor, baseline and backoff), records what it saw before anything is
+delivered, and delivers from the record: alerts as they are observed, one
+commit digest per local day. It holds no model provider, so a paused
+subscription quota does not stop it. See
+[decisions/0029](decisions/0029-github-feed-and-the-delivery-only-github-channel.md).
 
 The consequence is a worst-case reminder/watch lateness of one
 `DUCKY_RECONCILE_INTERVAL_MS`, visible in configuration rather than hidden in a

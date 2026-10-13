@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-**Amended by [ADR 0025](0025-native-thread-conversations-and-the-first-non-owner-controls.md)
+**Amended by [ADR 0025](0027-native-thread-conversations-and-the-first-non-owner-controls.md)
 in one respect:** retention of stored conversation turns is now LIFECYCLE-aware
 as well as age-based. A turn belonging to a LIVE native thread is outside every
 window, because issue #4 asks for the full transcript while the thread exists;

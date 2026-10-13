@@ -1,4 +1,4 @@
-# ADR 0025 — Native thread conversations, and the first controls a non-owner may press
+# ADR 0027 — Native thread conversations, and the first controls a non-owner may press
 
 **Status:** accepted
 **Supersedes** [ADR 0021](0021-bounded-conversation-continuity.md) §2 and §3 in

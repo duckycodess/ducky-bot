@@ -8,7 +8,7 @@ import { CHAT, OWNER, STRANGER, makeHarness, type Harness } from './helpers.js';
 import type { Incoming } from '../src/discord/transport.js';
 
 /**
- * Two-store deletion (ADR 0024, extended by ADR 0025).
+ * Two-store deletion (ADR 0024, extended by ADR 0027).
  *
  * `/forget conversation` reaches ONE of the two stores. The property under test
  * is that it says so, and that what it can do about the other store -- stop

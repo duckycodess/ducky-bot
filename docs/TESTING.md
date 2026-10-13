@@ -533,6 +533,47 @@ classification returns a NOTE in every case and never a blocker, distinguishes
 repository will not build an argv from" from "a usable candidate exists and has
 not been exercised", and leaves `RECORDED_SESSION_DELETION` null in all three.
 
+**contracts / bulk capture** — the owner's own two example lines parse with the
+time on one and no invented time on the other; a numeric date and a day that
+does not exist are REFUSED with a named reason rather than guessed; a yearless
+date resolves to its next occurrence and counts today as today; a quoted or
+fenced list is never a list; a header before the first item is ignored and
+counted while an unnumbered line after it is reported; an all-day deadline is
+not overdue at one second past midnight nor late that evening, and is overdue
+the next local morning; a deadline renders with no timezone label, with the
+year only when it is not the current one; and the private-bind guard accepts
+loopback, RFC1918 and both tailnet ranges while refusing `0.0.0.0`, `::` and
+every public address.
+
+**coordinator / task capture** — a pasted list previews and saves NOTHING until
+Save; one ambiguous line refuses the whole batch and names it; Save is
+idempotent, so a double press reports the same tasks rather than a second set;
+an edit is re-parsed through the same grammar; a batch that would pass the
+open-task cap writes no task, no reminder and leaves the preview intact; a
+settled preview keeps no copy of the owner's text; an expired one saves
+nothing; the reconciler sweeps it whether or not retention is configured; and a
+non-owner reaches none of it.
+
+**coordinator / linked reminders** — a timed deadline schedules 24-hour and
+1-hour notice and a date-only one 08:00 on the day; an offset already past is
+skipped rather than fired; moving a deadline withdraws the old reminders and
+derives new ones; closing a task abandons an undelivered occurrence and keeps a
+delivered one; Snooze moves the notification and provably not `due_at`; linked
+reminders stay out of `/reminder list` and the briefing while still counting
+against the cap; a card posted in a channel carries the owner's mention and
+three real controls that refuse everybody else and stop verifying once the
+deadline moves; a failed send is retried on the next pass; and deleting a task
+takes its reminders with it, counted.
+
+**coordinator / phone capture** — the page does not exist unless it is enabled;
+enabling it with no credential, or on a listener that is not private, refuses
+to BOOT; production never inherits the development credential; a wrong passcode
+issues no session; the cookie is httpOnly, SameSite=Strict and bounded; a
+forged cookie and a missing CSRF token are refused; an executor bearer token
+does not open the page and a phone session does not open the executor routes;
+the parse and the idempotent save behave exactly as the Discord path does; and
+the page renders its preview from data rather than from markup.
+
 **persistence / backup** — the real scripts, run as subprocesses against a real
 temporary database: the copy verifies, is written `0600`, and excludes the
 credential file; a file that is not a Ducky database and a corrupt file are both

@@ -209,15 +209,55 @@ export class RetentionRepo {
     );
   }
 
-  deleteClosedTasks(cutoffIso: string, limit: number): number {
-    return this.runLimited(
-      `DELETE FROM tasks WHERE id IN (
-         SELECT id FROM tasks
+  /**
+   * Closed tasks, and the reminders that belonged to them.
+   *
+   * The foreign key would cascade both away on its own. They are deleted
+   * EXPLICITLY and child-first anyway, for the same reason
+   * `deleteClosedReminders` does it: a deletion this reports as "1 row" while
+   * silently removing five is a count that lies, and counts are the only thing
+   * a deletion is allowed to record.
+   */
+  deleteClosedTasks(
+    cutoffIso: string,
+    limit: number,
+  ): { tasks: number; reminders: number; occurrences: number } {
+    const ids = this.db
+      .prepare(
+        `SELECT id FROM tasks
           WHERE status IN ('done','cancelled') AND closed_at IS NOT NULL
-            AND closed_at < ? LIMIT ?)`,
-      cutoffIso,
-      limit,
-    );
+            AND closed_at < ?
+          ORDER BY closed_at LIMIT ?`,
+      )
+      .all(cutoffIso, limit)
+      .map((r) => String((r as Record<string, unknown>)['id']));
+    if (ids.length === 0) return { tasks: 0, reminders: 0, occurrences: 0 };
+
+    const linked = this.deleteLinkedReminders(ids);
+    const placeholders = ids.map(() => '?').join(',');
+    const tasks = this.db
+      .prepare(`DELETE FROM tasks WHERE id IN (${placeholders})`)
+      .run(...(ids as never[])).changes as number;
+    return { tasks, ...linked };
+  }
+
+  /** The reminder rows a set of tasks owns, outbox first. */
+  private deleteLinkedReminders(taskIds: readonly string[]): {
+    reminders: number;
+    occurrences: number;
+  } {
+    if (taskIds.length === 0) return { reminders: 0, occurrences: 0 };
+    const placeholders = taskIds.map(() => '?').join(',');
+    const occurrences = this.db
+      .prepare(
+        `DELETE FROM reminder_occurrences WHERE reminder_id IN (
+           SELECT id FROM reminders WHERE task_id IN (${placeholders}))`,
+      )
+      .run(...(taskIds as never[])).changes as number;
+    const reminders = this.db
+      .prepare(`DELETE FROM reminders WHERE task_id IN (${placeholders})`)
+      .run(...(taskIds as never[])).changes as number;
+    return { reminders, occurrences };
   }
 
   /** Cascades `reminder_occurrences` by foreign key, which is why it counts them. */
@@ -411,10 +451,26 @@ export class RetentionRepo {
       .run(id, ownerId).changes as number;
   }
 
-  deleteTaskByPublicId(ownerId: string, publicId: string): number {
-    return this.db
-      .prepare('DELETE FROM tasks WHERE public_id = ? AND discord_user_id = ?')
-      .run(publicId, ownerId).changes as number;
+  /**
+   * One task the owner named, with the reminders it owns.
+   *
+   * Child-first and counted, like every other deletion here: a task that went
+   * while its notifications survived would be a task that goes on talking.
+   */
+  deleteTaskByPublicId(
+    ownerId: string,
+    publicId: string,
+  ): { tasks: number; reminders: number; occurrences: number } {
+    const row = this.db
+      .prepare('SELECT id FROM tasks WHERE public_id = ? AND discord_user_id = ?')
+      .get(publicId, ownerId) as { id: string } | undefined;
+    if (!row) return { tasks: 0, reminders: 0, occurrences: 0 };
+
+    const linked = this.deleteLinkedReminders([row.id]);
+    const tasks = this.db
+      .prepare('DELETE FROM tasks WHERE id = ? AND discord_user_id = ?')
+      .run(row.id, ownerId).changes as number;
+    return { tasks, ...linked };
   }
 
   /**

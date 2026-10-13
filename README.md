@@ -67,6 +67,24 @@ Beside the development controller, Ducky keeps the owner's day:
   reminders and schedule by counting them. No provider is reachable from the
   assembly path, so nothing in a briefing can be generated; a briefing that
   invents a deadline is worse than no briefing.
+- **Paste a list of deadlines, from Discord or from your phone.**
+  `1. ENG 30 Letters (October 13 11:59 PM)` on one line, `2. Speech 30 Letters
+  (October 15)` on the next. Ducky reads it back as a preview with Save, Edit
+  and Discard, and saves nothing until you press Save — once, however many
+  times you press it. A date it will not guess at (`10/13` means two different
+  days to two different people) refuses the whole list and says which line.
+- **A deadline schedules its own reminders**: 24 hours and 1 hour before a
+  timed one, 08:00 on the morning of a date-only one, with any offset already
+  past skipped rather than fired. Done stops them, Edit moves them with the
+  deadline, and Snooze postpones the message without touching the deadline. A
+  date-only task is overdue only once that day has ENDED. See
+  [`docs/decisions/0026`](docs/decisions/0026-deadline-linked-reminders-and-plain-cards.md).
+- **A phone capture page**, off by default, on the coordinator's existing
+  listener and reachable only over a tailnet, behind your own passcode — a
+  human credential, deliberately not the executor's machine one. It refuses to
+  start on a public bind address, and nothing in this repository enables
+  Tailscale Funnel. See
+  [`docs/decisions/0025`](docs/decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md).
 - `/watch add|list|remove` — owner-configured, read-only GitHub repository
   monitoring. It stores normalized snapshots and sends a deduplicated summary
   only when the observed PR/check view changes; it does not write to GitHub.
@@ -74,17 +92,22 @@ Beside the development controller, Ducky keeps the owner's day:
   means. Instants stay stored as UTC and existing schedule rows keep the text
   you typed — the zone is a projection, not storage, so changing it re-renders
   rather than migrates. Times render as Discord timestamps, so each reader sees
-  their own zone. See
+  their own zone — with one deliberate exception: a task CARD shows the
+  deadline you typed, with no timezone label, because that is what you asked
+  for. See
   [`docs/decisions/0014`](docs/decisions/0014-single-owner-timezone-as-a-projection.md).
 
 All of it is owner-only. Tasks, reminders and briefings have no shared
-projection and no shared route.
+projection and no shared route. A task reminder MAY be posted in a reminders
+channel you configure, with your mention — the controls on it are signed to
+you, so a reader there sees a deadline and can do nothing with it.
 
 ## Conversation style, memory and channels
 
 Development can assign one private channel to each role with
 `DUCKY_DEV_BRIEFING_CHANNEL_ID`, `DUCKY_DEV_TASK_CHANNEL_ID`,
-`DUCKY_DEV_CODING_CHANNEL_ID` and `DUCKY_DEV_GPT_CHANNEL_ID`. Ducky treats those
+`DUCKY_DEV_CODING_CHANNEL_ID`, `DUCKY_DEV_GPT_CHANNEL_ID` and
+`DUCKY_DEV_REMINDER_CHANNEL_ID`. Ducky treats those
 ids as policy. It never uses channel names for security decisions. Owner replies
 persist in configured role channels. DMs remain private. Once a GPT channel is
 configured, unrelated guild channels stay silent rather than receiving model

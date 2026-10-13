@@ -119,11 +119,14 @@ export class BriefingService {
     const tasksDueToday = section(
       this.store.tasks.dueBetween(owner, isoOf(today.startMs), isoOf(today.endMs), probe),
     );
-    // Overdue means "due before now", so a task due later today is not yet
-    // late. It is deliberately not "due before today": a 09:00 task at 17:00
-    // is overdue and saying otherwise would be wrong.
-    const tasksOverdue = section(this.store.tasks.overdue(owner, nowIso, probe));
-    const overdueTotal = this.store.tasks.countOverdue(owner, nowIso);
+    // Overdue means "due before now" for a TIMED deadline, so a 09:00 task at
+    // 17:00 is late and saying otherwise would be wrong. A DATE-ONLY deadline
+    // is late only once its day has ended -- the briefing used to list every
+    // task due today as overdue from midnight, which made the section useless
+    // on exactly the mornings it mattered.
+    const dayStartIso = isoOf(today.startMs);
+    const tasksOverdue = section(this.store.tasks.overdue(owner, nowIso, dayStartIso, probe));
+    const overdueTotal = this.store.tasks.countOverdue(owner, nowIso, dayStartIso);
     const tasksClosedToday = section(
       this.store.tasks.closedBetween(owner, 'done', isoOf(today.startMs), isoOf(today.endMs), probe),
     );
@@ -156,7 +159,9 @@ export class BriefingService {
       remindersToday,
       remindersTomorrow,
       openTaskCount: this.store.tasks.countOpen(owner),
-      scheduledReminderCount: this.store.reminders.countScheduled(owner),
+      // The reminders the owner set, not the ones a deadline earned: the
+      // tasks they belong to are already named in their own sections.
+      scheduledReminderCount: this.store.reminders.countScheduledUnlinked(owner),
       empty: forThisKind.every((s) => s.rows.length === 0),
     };
   }

@@ -23,7 +23,7 @@ describe('planOccurrence', () => {
     recurrenceKind: 'interval', intervalMinutes: 60, maxOccurrences: 5, firedCount: 0,
     nextFireAt: '2026-09-01T09:00:00.000Z', status: 'scheduled',
     createdAt: 'c', updatedAt: 'u', firstFireAt: '2026-09-01T09:00:00.000Z',
-    lastFiredAt: null, closedAt: null,
+    lastFiredAt: null, closedAt: null, taskId: null,
   };
   const at = (iso: string) => Date.parse(iso);
 

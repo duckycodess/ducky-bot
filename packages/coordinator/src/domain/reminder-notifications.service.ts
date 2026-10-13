@@ -3,11 +3,13 @@ import {
   REMINDER_DELIVERY_BATCH, REMINDER_MATERIALIZE_BATCH, REMINDER_MAX_DELIVERY_ATTEMPTS,
   type ReminderState,
 } from '@ducky/contracts';
-import type { ReminderRow, Store } from '@ducky/persistence';
+import type { PendingReminderOccurrenceRow, ReminderRow, Store, TaskRow } from '@ducky/persistence';
 import { withTransaction } from '@ducky/persistence';
-import { dmTarget } from '../discord/message.js';
+import { channelTarget, dmTarget, type OutboundMessage, type SendTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
 import { reminderDm } from '../discord/assistant-presenters.js';
+import { taskCard } from '../discord/task-cards.js';
+import type { ComponentSigner } from '../security/component-signing.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
 
 export interface ReminderNotifierDeps {
@@ -19,6 +21,20 @@ export interface ReminderNotifierDeps {
    */
   readonly ownerId: string;
   readonly clock: OwnerClock;
+  /**
+   * Where a TASK-LINKED reminder is posted, when the operator configured one.
+   *
+   * Undefined means the owner's DM, which is what every instance did before
+   * this existed. Only reminders that carry a task link are ever routed here:
+   * a free-standing `/reminder add` has no shared shape and stays private.
+   */
+  readonly reminderChannelId?: string | undefined;
+  /**
+   * Signs the controls on a card. OMITTING IT SENDS THE CARD WITHOUT THEM,
+   * which is the fail-closed direction: a reminder with no buttons is still a
+   * reminder, and an unsigned control would be refused anyway.
+   */
+  readonly signer?: ComponentSigner | undefined;
 }
 
 export interface ReminderTickResult {
@@ -81,6 +97,8 @@ export class ReminderNotifier {
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
   private readonly clock: OwnerClock;
+  private readonly reminderChannelId: string | undefined;
+  private readonly signer: ComponentSigner | undefined;
   private ticking: Promise<ReminderTickResult> | null = null;
 
   constructor(deps: ReminderNotifierDeps) {
@@ -88,6 +106,13 @@ export class ReminderNotifier {
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
     this.clock = deps.clock;
+    this.reminderChannelId = deps.reminderChannelId;
+    this.signer = deps.signer;
+  }
+
+  /** Reported by /status, so the owner can see where reminders actually go. */
+  get channelDelivery(): string | undefined {
+    return this.reminderChannelId;
   }
 
   /**
@@ -177,8 +202,20 @@ export class ReminderNotifier {
         continue;
       }
 
+      // A task-linked occurrence whose task has gone, or has already been
+      // closed, is abandoned rather than sent. The cancel path withdraws these
+      // the moment a task closes, so reaching here means something raced;
+      // telling the owner about a task they already finished would be worse
+      // than a row in the ledger saying it was dropped.
+      const addressed = this.addressed(row);
+      if (!addressed) {
+        this.store.reminders.recordOccurrenceFailure(row.occurrenceId, nowIso, 0);
+        abandoned += 1;
+        continue;
+      }
+
       try {
-        await this.transport.send(dmTarget(this.ownerId), reminderDm(row, this.clock.timeZone));
+        await this.transport.send(addressed.target, addressed.message);
         this.store.reminders.markOccurrenceDelivered(row.occurrenceId, nowIso);
         delivered += 1;
       } catch {
@@ -194,6 +231,73 @@ export class ReminderNotifier {
       }
     }
     return { delivered, failed, abandoned };
+  }
+
+  /**
+   * Where one occurrence goes, and what it says.
+   *
+   * The branch is on the LINK, not on configuration alone: a reminder that
+   * belongs to a task is about a deadline the owner can act on, and that is
+   * the only thing with a shape worth posting in a channel. Everything else
+   * keeps the DM it has always had, so no existing reminder changes where it
+   * is delivered because somebody configured a channel.
+   *
+   * Returning undefined means "do not send this at all".
+   */
+  private addressed(
+    row: PendingReminderOccurrenceRow,
+  ): { target: SendTarget; message: OutboundMessage } | undefined {
+    if (row.taskId === null) {
+      return {
+        target: dmTarget(this.ownerId),
+        message: reminderDm(row, this.clock.timeZone),
+      };
+    }
+
+    const task = this.store.tasks.byId(this.ownerId, row.taskId);
+    if (!task || task.status !== 'open') return undefined;
+
+    const channelId = this.reminderChannelId;
+    const controls = this.controlsFor(task);
+    return {
+      target: channelId === undefined ? dmTarget(this.ownerId) : channelTarget(channelId),
+      message: taskCard(task, {
+        timeZone: this.clock.timeZone,
+        nowMs: this.clock.nowMs(),
+        // The mention is the CONFIGURED owner id, and it is what makes a
+        // channel post reach them at all. It is only added in a channel: a DM
+        // is already addressed to them.
+        ...(channelId === undefined ? {} : { mention: this.ownerId }),
+        ...(controls ? { controls } : {}),
+      }),
+    };
+  }
+
+  /**
+   * The three signed controls on a card.
+   *
+   * Bound to the configured OWNER and to the task's current version, so a
+   * control from a card whose deadline has since moved stops verifying rather
+   * than acting on a state the owner is no longer looking at. Anybody else who
+   * presses one is refused at the router, before any handler runs: a channel
+   * shows information, and showing is not permission.
+   */
+  private controlsFor(task: TaskRow):
+    | { done: string; edit: string; snooze: string }
+    | undefined {
+    const signer = this.signer;
+    if (!signer) return undefined;
+    const sign = (kind: 'task_done' | 'task_edit' | 'task_snooze'): string =>
+      signer.sign({
+        kind,
+        entityId: task.publicId,
+        actorUserId: this.ownerId,
+        // The task's own version. A card posted in a channel stays on screen
+        // after the deadline moves, and its controls must stop acting rather
+        // than operate on a state the owner is no longer looking at.
+        version: task.updatedAt,
+      });
+    return { done: sign('task_done'), edit: sign('task_edit'), snooze: sign('task_snooze') };
   }
 }
 

@@ -40,6 +40,10 @@ registered.
 | GitHub repository watches | **Verified** (observe + deduplicate) | `probe:gh-live` ran the loop twice; the second pass was correctly silent |
 | Multi-executor placements | **Unit-tested** | One host is configured here, so the multi-host path is covered by tests and not by a second machine |
 | Channel roles + persistent replies | **Verified for the GPT smoke path; unit-tested elsewhere** | All four roles are configured from owner-supplied ids. The owner confirmed a real reply in the configured GPT guild channel after the transport and policy restart. The other role channels, unconfigured-channel silence and slash-command persistence remain covered by tests or configuration rather than live evidence |
+| Pasted-list task capture (Discord) | **Unit-tested** | Preview, clarification, idempotent save and quote/code refusal covered against the mock transport with an injected clock; no live Discord paste |
+| Phone capture page (`/app`) | **Unit-tested**; the manual flow is **unverified** | Auth, CSRF, bind refusal, parse and idempotent save covered through the real Fastify instance. No tailnet exists on this host and no phone has opened it — see *Detail: what is covered by tests but not by a live system* |
+| Deadline-linked reminders | **Unit-tested** | Offsets, skipped past offsets, resync on edit, cancel on close, snooze and outage catch-up covered with an injected clock |
+| Task reminder cards in a channel | **Unit-tested** | Mention, controls, refusal of a non-owner and staleness after an edit covered against the mock transport; no channel configured here |
 | Briefing delivery to a channel | **Unit-tested** | Ledger and refusals covered; no channel configured here |
 | Reminder / briefing / watch DMs | **Unit-tested** | Same gateway path no human has exercised |
 | Shared-channel visibility | **Unit-tested** | Off by default; unreachable with no channel configured |
@@ -144,14 +148,58 @@ diagnostics and in `/status`.
 Detail on each capability. The status table above says how far each has been
 exercised; this says what it does.
 
+- **Pasting a list of deadlines, from a phone or from Discord.** Two numbered
+  lines or more, each with an optional parenthesised month-name date and an
+  optional clock time, become a PREVIEW and nothing else until the owner
+  presses Save. One ambiguous line refuses the whole batch with a clarification
+  naming it: `10/13` means two different days to two different people and is
+  never guessed at. Quoted text, fenced code and ordinary prose are never read
+  as a list, a **configured shared channel is closed to the path entirely** --
+  the preview is a visible message with signed controls, and a shared channel
+  is where other people read a narrow job projection -- and a non-owner never
+  reaches the path at all. Saving is
+  all-or-nothing and idempotent on the preview, so a retry or a double tap
+  reports the same tasks rather than creating a second set. **No command was
+  added:** the Discord half is a message the owner pastes, and the three
+  controls are interaction kinds on the existing owner-only manifest.
+- **A deadline now schedules its own reminders.** 24 hours and 1 hour before a
+  timed deadline; 08:00 on the day of a date-only one. An offset already in the
+  past is skipped rather than fired, so saving a task an hour before it is due
+  produces no instant "due in 24 hours". Closing a task withdraws its pending
+  notifications, moving its deadline re-derives them in the same transaction,
+  and Snooze postpones the notification while leaving `due_at` untouched. The
+  link is a column, so two tasks with the same title cannot cancel each other's
+  reminders. See
+  [decisions/0026](decisions/0026-deadline-linked-reminders-and-plain-cards.md).
+- **A date-only task is overdue only once its day has ended.** It used to be
+  overdue from one second past midnight on the day it was due, which made the
+  overdue section wrong every morning. Timed deadlines are unchanged: a 09:00
+  task is late at 17:00.
+- **Task cards carry a title, a deadline and three real buttons** — Done, Edit,
+  Snooze — with no timezone label, no "Reminder: 1 hour before" line and no
+  internal UUID. The deadline is rendered as the owner typed it, which is the
+  one deliberate departure from ADR 0014's Discord timestamps. A card may be
+  posted in a configured reminders channel with the owner's mention; its
+  controls are signed, owner-bound and additionally versioned on the task, so a
+  card whose deadline has moved stops acting.
+- **The phone capture page, off by default.** `/app` on the coordinator's
+  existing listener, behind the owner's own passcode, reachable only when the
+  listener is bound to loopback, RFC1918 or a tailnet range. It refuses to
+  start otherwise. It is a transport in front of the same service Discord
+  uses, and it offers the same three choices: Save, Edit and Discard. Edit puts
+  the list back in the box in the form the parser reads and corrects the SAME
+  preview, so a few rounds of correction leave one draft rather than a trail of
+  them.
+  See
+  [decisions/0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md).
 - Owner-only Discord surface: `/capture`, `/inbox`, `/schedule`, `/job`
   (submit, status, cancel, answer, cleanup, execute), `/jobs`, `/repo status`,
   `/status`, `/task` (add, list, done, cancel), `/reminder` (add, list,
   cancel), `/briefing`, `/watch` (add, list, remove), `/forget` (job,
   conversation). **The manifest is closed:** no command was added by the final
   milestone, and `AGENTS.md` forbids widening the owner-only surface.
-- **The owner's private assistant channels, off by default.** Four roles --
-  `briefing`, `task`, `coding`, `gpt` -- each naming one channel the owner has
+- **The owner's private assistant channels, off by default.** Five roles --
+  `briefing`, `task`, `coding`, `gpt`, `reminder` -- each naming one channel the owner has
   decided is private enough for their own output to live in. Inside them, and
   nowhere else, the owner's replies PERSIST instead of being ephemeral;
   everywhere else, including every unconfigured guild channel, behaviour is
@@ -555,7 +603,7 @@ What is true of the implementation:
 **This reverses the roadmap's own proposal**, which said Ducky would create no
 thread. The owner asked for the opposite in issue #4 and the issue wins; both
 documents now say so, and the reasoning is in
-[ADR 0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md).
+[ADR 0027](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md).
 
 **What has NOT been verified**, stated rather than implied by the test count:
 
@@ -846,6 +894,8 @@ stays `false` and `/status` reports `experimental`.
 | `herdr agent start` / `agent prompt` | **Now exercised, repeatedly, against a real Pi agent** — by `pnpm probe:herdr --with-agent` (contract) and `pnpm probe:live-job` (production path). Five real defects were found and fixed as a result; see [integrations/herdr.md](integrations/herdr.md). The orchestrator nonetheless still reports `experimental`: `DUCKY_HERDR_VERIFIED=1` is a deliberate operator act and this run did not set it. |
 | Cleanup after a completed worktree job | **Keeps the workspace, by design.** `herdr worktree remove` refuses a checkout holding uncommitted work, and a finished job's checkout holds the implementation plus `.ducky/result.json`. Ducky does not force — that would delete the work — so it reports the workspace as kept. The repository reservation IS released, so nothing is blocked; the owner clears the workspace with `/job cleanup`, and the reconciler sweeps a stale one after `HERDR_WORKSPACE_TTL_MS`. |
 | Real Discord gateway | **The gateway accepts this bot, with the privileged intent, measured.** `pnpm probe:discord-gateway --profile development` connected and reached READY in 2 276 ms with `Guilds + GuildMessages + DirectMessages + MessageContent` — so **Message Content is enabled in the portal**, because the gateway refuses the connection outright rather than degrading when it is not. The owner also confirmed one post-fix GPT message round trip through the running coordinator. The probe registers NO handler and answers nothing, deliberately, because a coordinator may be running on the same bot identity and two wired connections would race for the same interaction. Proactive job notifications still lack an owner-initiated live DM test. |
+| The phone capture flow end to end | **Unverified, and blocked on this host.** Every route is exercised through a real Fastify instance -- the passcode, a forged cookie, a missing CSRF token, an executor bearer token on the page, a phone session on the executor routes, the parse, the idempotent save and the boot refusals -- but **no phone has ever opened it**. Tailscale is not installed here, no tailnet address exists, and nothing in this repository installs one. What is therefore untested is the part a browser owns: the home-screen shortcut, the standalone manifest, real cookie handling on iOS/Android, and whether the page is pleasant to use with one hand. Remedy: install Tailscale on both nodes, set `DUCKY_HTTP_HOST` to the tailnet address, enable the page, and walk `docs/SMOKE_CHECKLIST.md`. |
+| Reminder cards in a channel | **Unit-tested only.** Routing, the owner mention, the controls and their refusal for a non-owner are covered against the mock transport. No card has been posted to a real Discord channel on this host, and no channel is configured here. |
 | Reminder DM delivery | **Unit-tested only.** Materialization, collapse, retry, abandonment and DM-only targeting are covered against the mock transport with an injected clock. No reminder has been delivered to a real Discord DM on this host; it uses the same unverified gateway path as job notifications. |
 | Shared-channel delivery | **Unit-tested only.** `channelAwareSink` is covered against a structurally-typed stand-in client, and the sanitization boundary is asserted for a channel send. No message has been delivered to a real Discord channel on this host. |
 | Shared-channel command routing | **Unit-tested only.** Channel/guild/DM context is populated from `discord.js` interaction fields (`channelId`, `guildId`) but has never been exercised by a real interaction, so the DM-versus-guild distinction the whole policy rests on is verified against constructed events, not live traffic. |
@@ -873,6 +923,7 @@ would unblock it.
 | Verified dependency checking | The GitHub CI checker still has never run against a real repository — the watched one has no pull request, so `prChecks` has nothing to check. It reports `verified: false` and the resolver refuses its `ready`. | One recorded live check against a repository with a PR. It can already **fail** a job on a definite CI failure. |
 | Live Discord delivery | **Partially verified.** All twelve commands are registered (read back with `--diff`), the gateway accepts the connection with the MessageContent intent (`probe:discord-gateway`, READY in 2 276 ms), and the owner confirmed one GPT guild-message round trip after the restart. Slash-command delivery, DMs, reminders, briefings, watches and shared-channel posts remain unverified live. | Interaction records that outlive the terminal. The coordinator logs boot diagnostics and nothing else, so the owner-confirmed reply leaves no durable local interaction record. |
 | `/meal` and `/study` as slash commands | `AGENTS.md` forbids widening the owner-only surface. | Nothing here. Both features shipped on the conversation route instead, owner-gated, with no manifest entry. |
+| The phone capture page, on a real phone | **No tailnet exists on this host.** Tailscale is not installed, and installing it is an owner action on two machines. The page refuses to serve on anything but a private address, so there is nowhere for a phone to reach it from. | `tailscale up` on both nodes with the ACL in `deploy/tailscale/README.md`, `DUCKY_HTTP_HOST` set to the tailnet address, `pnpm phone:passcode`, and the manual walk in the smoke checklist. |
 | Azure and Tailscale | Templates only. Nothing has been provisioned and nothing installs Tailscale. | A deliberate owner-run deployment, in the order `deploy/azure/README.md` gives. |
 
 ## Deferred
@@ -886,7 +937,7 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1339 tests in 96 files**.
+The unmodified `pnpm test` command passes all **1453 tests in 100 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

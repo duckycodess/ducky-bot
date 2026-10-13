@@ -6,7 +6,8 @@ import {
   OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
   cleanUntrusted,
   isBriefingKind, isConversationalInteractionKind, isDuckyError, isSharedReadableRoute,
-  isTaskListFilter,
+  isTaskListFilter, looksLikeBulkTaskList,
+  TASK_CARDS_PER_MESSAGE, discordTimestamp,
   type CaptureState, type ConversationalInteractionKind, type OwnerOnlyCommand,
   type OwnerOnlyInteractionKind, type ReminderListFilter, type TaskListFilter,
 } from '@ducky/contracts';
@@ -25,9 +26,12 @@ import { threadNameFor, type ConversationThreadService } from '../domain/convers
 import type { IntentsService } from '../domain/intents.service.js';
 import type { SharedJobsService } from '../domain/shared-jobs.service.js';
 import type { TasksService } from '../domain/tasks.service.js';
+import type { TaskCaptureService, TaskCaptureOutcome } from '../domain/task-capture.service.js';
+import { clarificationMessage, editableListText } from '../domain/task-capture.service.js';
 import type { RemindersService } from '../domain/reminders.service.js';
 import type { BriefingService } from '../domain/briefing.service.js';
 import { conversationReply } from './assistant-presenters.js';
+import { bulkPreview, deadlineLine, taskCard, taskCardRow } from './task-cards.js';
 import { SharedChannelPolicy } from '../domain/shared-visibility.js';
 import { ChannelRolePolicy } from '../domain/channel-roles.js';
 import { ReplyPersistencePolicy } from '../domain/reply-persistence.js';
@@ -58,6 +62,12 @@ export interface RouterDeps {
    * `handleSharedRead`, and no shared route names any of their commands.
    */
   readonly tasks: TasksService;
+  /**
+   * Pasted task lists. OMITTING IT DISABLES THE PATH ENTIRELY: an unwired
+   * router reads no message as a list and offers no preview, which is the same
+   * fail-closed posture `forget` and the shared-visibility wiring take.
+   */
+  readonly taskCapture?: TaskCaptureService;
   readonly reminders: RemindersService;
   readonly briefing: BriefingService;
   readonly conversation: ConversationProvider;
@@ -463,7 +473,8 @@ export class DuckyRouter {
     }
 
     this.deps.authz.requireOwner(actor);
-    const verified = this.deps.signer.verify(customId, actor.discordUserId);
+    const verified =
+      this.deps.signer.verify(customId, actor.discordUserId) ?? this.verifyVersioned(actor, customId);
     if (!verified) return { content: 'That control is no longer valid.', ephemeral: true };
     const handler = this.components.get(verified.kind);
     if (!handler) return { content: 'That control is no longer valid.', ephemeral: true };
@@ -505,6 +516,34 @@ export class DuckyRouter {
   }
 
   /**
+   * A second verification attempt, for controls signed against a task VERSION.
+   *
+   * A task card lives in a channel. If its deadline moves, the card above it
+   * still shows the old one -- so its controls are signed over the task's
+   * `updated_at` as well, and once that changes they stop verifying and the
+   * owner acts on the refreshed card instead of one that no longer describes
+   * anything.
+   *
+   * The kind and entity id are read from the custom id WITHOUT being trusted:
+   * they are used only to look up a candidate version, and the HMAC still has
+   * to match over all four parts. A forged or copied id gets nowhere, and a
+   * control for another account's task finds no version at all because
+   * `versionOf` is owner-scoped.
+   */
+  private verifyVersioned(
+    actor: ActorContext,
+    customId: string,
+  ): { kind: string; entityId: string } | undefined {
+    const segments = customId.split(':');
+    if (segments.length !== 5) return undefined;
+    const [, , kind, entityId] = segments as [string, string, string, string, string];
+    if (!VERSIONED_INTERACTION_KINDS.has(kind)) return undefined;
+    const version = this.deps.tasks.versionOf(actor, entityId);
+    if (version === undefined) return undefined;
+    return this.deps.signer.verify(customId, actor.discordUserId, version);
+  }
+
+  /**
    * The single non-privileged route: conversation, with no tool access.
    *
    * Plain text keeps its Phase 1 authorization exactly: the chat whitelist may
@@ -519,6 +558,27 @@ export class DuckyRouter {
     const attachments = event.attachments ?? [];
 
     if (attachments.length === 0) {
+      /**
+       * A pasted list of deadlines, before anything else looks at the text.
+       *
+       * It runs first because it is the most SPECIFIC reading: two or more
+       * numbered lines, every line numbered, no quote and no code fence. A
+       * message that is not one falls through untouched, which is almost every
+       * message. Quoted text and code blocks are DATA and never a list, and a
+       * non-owner never reaches here at all -- their message is conversation,
+       * exactly as it was before.
+       */
+      const pasted = this.handlePastedList(actor, event);
+      if (pasted) {
+        this.deps.memory?.record(
+          actor,
+          event.threadKey,
+          { userText: event.text, assistantText: pasted.content ?? 'a task preview' },
+          event.context,
+        );
+        return pasted;
+      }
+
       // Deterministic rules FIRST, and only for the owner. A matched intent is
       // answered from stored records or a fixed local table; a matched WRITE is
       // proposed and never applied until the owner confirms in their own words.
@@ -571,6 +631,81 @@ export class DuckyRouter {
       });
     }
     return this.handleConversationAttachment(actor, event, attachments);
+  }
+
+  /**
+   * A message that is a pasted task list, or nothing.
+   *
+   * Returns undefined for anything else, so the message continues to the
+   * deterministic rules and then to the provider exactly as before.
+   *
+   * Role narrowing is the same rule the intents service follows, and it only
+   * ever NARROWS: a DM and an unconfigured channel behave as they always have,
+   * a `task` channel is exactly where a list belongs, and the coding,
+   * briefing, reminder and gpt channels are left alone -- a list pasted into
+   * the channel where reminders are DELIVERED should not quietly become
+   * another list of them.
+   */
+  private handlePastedList(
+    actor: ActorContext,
+    event: Extract<Incoming, { kind: 'message' }>,
+  ): OutboundMessage | undefined {
+    const capture = this.deps.taskCapture;
+    if (!capture) return undefined;
+    if (actor.discordUserId !== this.deps.authz.ownerId) return undefined;
+    /**
+     * A configured SHARED channel is closed to this path entirely, and it is
+     * checked FIRST because it is the only one of these conditions where
+     * getting it wrong discloses something.
+     *
+     * A shared channel exists so other people can read a narrow projection of
+     * job status. A pasted list is the owner's own task text, the preview is a
+     * visible channel message rather than an ephemeral reply, and it carries
+     * signed controls -- so a list pasted there would publish titles and
+     * deadlines to everyone who can read the channel and leave buttons in
+     * their scrollback. A shared channel has no ROLE, so the role check below
+     * would have waved it through.
+     *
+     * Failing closed costs the feature in one channel. Failing open costs the
+     * owner their task list, which is precisely the trade ADR 0012 settles.
+     * The message falls through to conversation exactly as it did before this
+     * feature existed.
+     */
+    if (this.sharedPolicy.isSharedRequest(event.context)) return undefined;
+    const role = this.channelRoles.roleOf(event.context);
+    if (role !== undefined && role !== 'task') return undefined;
+    if (!looksLikeBulkTaskList(event.text)) return undefined;
+
+    try {
+      return this.presentCapture(actor, capture.preview(actor, event.text, 'discord'));
+    } catch (err) {
+      return errorReply(err);
+    }
+  }
+
+  /** One rendering for a preview, however the owner got there. */
+  private presentCapture(actor: ActorContext, outcome: TaskCaptureOutcome): OutboundMessage {
+    const capture = this.deps.taskCapture;
+    switch (outcome.kind) {
+      case 'needs_clarification':
+        return { content: clarificationMessage(outcome.problems), ephemeral: false };
+      case 'empty':
+        return { content: 'I found no tasks in that. Nothing was saved.', ephemeral: false };
+      default: {
+        const sign = (kind: 'bulk_save' | 'bulk_edit' | 'bulk_discard'): string =>
+          this.deps.signer.sign({
+            kind,
+            entityId: outcome.preview.previewId,
+            actorUserId: actor.discordUserId,
+          });
+        return bulkPreview(
+          outcome.preview,
+          { save: sign('bulk_save'), edit: sign('bulk_edit'), discard: sign('bulk_discard') },
+          capture?.timeZone ?? this.deps.tasks.timeZone,
+          this.deps.tasks.nowMs(),
+        );
+      }
+    }
   }
 
   /**
@@ -1295,6 +1430,24 @@ export class DuckyRouter {
       }));
   }
 
+  /**
+   * The signed controls for one task card.
+   *
+   * Signed over the task's `updated_at` as well as the owner id, so a card
+   * whose deadline has since moved stops acting and the owner presses the
+   * refreshed one instead.
+   */
+  private taskCardControls(actor: ActorContext, task: { publicId: string; updatedAt: string }) {
+    const sign = (kind: 'task_done' | 'task_edit' | 'task_snooze'): string =>
+      this.deps.signer.sign({
+        kind,
+        entityId: task.publicId,
+        actorUserId: actor.discordUserId,
+        version: task.updatedAt,
+      });
+    return { done: sign('task_done'), edit: sign('task_edit'), snooze: sign('task_snooze') };
+  }
+
   private watchRows(
     actor: ActorContext,
     rows: readonly { publicId: string; state: string }[],
@@ -1465,6 +1618,127 @@ export class DuckyRouter {
     this.components.set('task_cancel', async (actor, entityId) =>
       assistant.taskClosed(d.tasks.cancel(actor, entityId)),
     );
+    /**
+     * The deadline controls on a task card.
+     *
+     * Each one re-reads the task through the owner-scoped service, so the
+     * signature decides nothing about ownership: it stops a stale or copied
+     * control from being replayed, and the service refuses anything that is
+     * not the owner's own row. A card in a channel other people can read is
+     * therefore information and nothing more.
+     */
+    this.components.set('task_edit', async (actor, entityId, values) => {
+      const typed = values?.['deadline'];
+      if (typed === undefined) {
+        /**
+         * Edit asks Discord for a short form, and the deadline typed there
+         * comes back through this same handler. Reaching here means the form
+         * did not open.
+         *
+         * So this says what is true and offers only what actually works. It
+         * used to invite the owner to "send a new one", which nothing
+         * consumes: there is no pending-edit state and their next message
+         * would be read as ordinary conversation. A promise the code does not
+         * keep is worse than a plain refusal.
+         */
+        const task = d.tasks.get(actor, entityId);
+        return {
+          content:
+            'Nothing changed: the edit box did not open. ' +
+            `${deadlineLine(task, d.tasks.timeZone, d.tasks.nowMs())}. Press Edit again.`,
+          ephemeral: true,
+        };
+      }
+      const { task, sync } = d.tasks.setDeadline(actor, entityId, d.tasks.parseDeadline(typed));
+      return taskCard(task, {
+        timeZone: d.tasks.timeZone,
+        nowMs: d.tasks.nowMs(),
+        heading: sync.scheduled > 0 ? 'Deadline updated.' : 'Deadline updated. Nothing left to remind you about.',
+        controls: this.taskCardControls(actor, task),
+        ephemeral: true,
+      });
+    });
+
+    this.components.set('task_snooze', async (actor, entityId) => {
+      const { task, reminder } = d.tasks.snooze(actor, entityId);
+      return taskCard(task, {
+        timeZone: d.tasks.timeZone,
+        nowMs: d.tasks.nowMs(),
+        // Says plainly that the DEADLINE did not move. A snooze that looked
+        // like a reschedule would be the most damaging kind of convenience.
+        heading:
+          `I will mention this again ${discordTimestamp(reminder.firstFireAt, 'R')}. ` +
+          'The deadline is unchanged.',
+        controls: this.taskCardControls(actor, task),
+        ephemeral: true,
+      });
+    });
+
+    /**
+     * The three preview controls.
+     *
+     * Save is the only one that writes, and it is idempotent on the preview it
+     * names -- a double press replays the same tasks rather than creating a
+     * second set.
+     */
+    this.components.set('bulk_save', async (actor, entityId) => {
+      const capture = d.taskCapture;
+      if (!capture) return { content: 'Task capture is not configured here.', ephemeral: true };
+      const saved = capture.save(actor, entityId);
+      if (saved.tasks.length === 0) {
+        return { content: 'Nothing was saved.', ephemeral: true };
+      }
+      const cards = saved.tasks.slice(0, TASK_CARDS_PER_MESSAGE);
+      return {
+        content: saved.replayed
+          ? `Already saved. The same ${saved.tasks.length} task(s), not a second copy.`
+          : `Saved ${saved.tasks.length} task(s).`,
+        embeds: cards.map(
+          (task) =>
+            taskCard(task, { timeZone: d.tasks.timeZone, nowMs: d.tasks.nowMs() }).embeds![0]!,
+        ),
+        rows: cards.map((task) => taskCardRow(this.taskCardControls(actor, task))),
+        ephemeral: false,
+      };
+    });
+
+    this.components.set('bulk_edit', async (actor, entityId, values) => {
+      const capture = d.taskCapture;
+      if (!capture) return { content: 'Task capture is not configured here.', ephemeral: true };
+      const raw = values?.['items'];
+      if (raw === undefined) {
+        const pending = capture.pendingPreview(actor, entityId);
+        if (!pending) {
+          return { content: 'That list is no longer waiting to be saved.', ephemeral: true };
+        }
+        /**
+         * Same situation as `task_edit`, with one difference that makes a
+         * different answer honest: a numbered list pasted back IS read as a
+         * list, so inviting that works. It starts a NEW preview rather than
+         * correcting this one, and saying so is the whole point -- the owner
+         * should not be left wondering which draft they are about to save.
+         */
+        return {
+          content:
+            'The edit box did not open. Paste this back as a new list to change it. ' +
+            'This preview is untouched, and nothing is saved either way:\n```\n' +
+            editableListText(pending.items, capture.timeZone, d.tasks.nowMs()) +
+            '\n```',
+          ephemeral: true,
+        };
+      }
+      // Re-parsed through the same grammar, so an edit cannot introduce a
+      // deadline the parser would never have produced.
+      return this.presentCapture(actor, capture.correct(actor, entityId, raw));
+    });
+
+    this.components.set('bulk_discard', async (actor, entityId) => {
+      const capture = d.taskCapture;
+      if (!capture) return { content: 'Task capture is not configured here.', ephemeral: true };
+      capture.discard(actor, entityId);
+      return { content: 'Discarded. Nothing was saved.', ephemeral: true };
+    });
+
     this.components.set('reminder_cancel', async (actor, entityId) =>
       assistant.reminderCancelled(d.reminders.cancel(actor, entityId)),
     );
@@ -1602,6 +1876,20 @@ function peekKind(customId: string): string {
   const segments = customId.split(':');
   return segments.length === 5 ? segments[2]! : '';
 }
+
+/**
+ * The kinds whose controls carry a task VERSION.
+ *
+ * Kept beside the router rather than on the contracts manifest because it is
+ * not a permission: every one of these is already on
+ * `OWNER_ONLY_INTERACTION_KINDS`, and this only says which signatures also
+ * expire when the row they describe changes.
+ */
+const VERSIONED_INTERACTION_KINDS: ReadonlySet<string> = new Set([
+  'task_done',
+  'task_edit',
+  'task_snooze',
+]);
 
 export const CONVERSATION_ROUTE_NAME = CONVERSATIONAL_ROUTE;
 

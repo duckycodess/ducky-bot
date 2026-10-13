@@ -184,7 +184,7 @@ answer one, not approve an action.
 
 ## Threads under a role channel
 
-**Superseded in one respect by [ADR 0025](0025-native-thread-conversations-and-the-first-non-owner-controls.md).**
+**Superseded in one respect by [ADR 0025](0027-native-thread-conversations-and-the-first-non-owner-controls.md).**
 
 When this ADR was written, a role matched on the channel id alone, and a
 thread's id is not its parent's. So a thread under a role channel had no role:

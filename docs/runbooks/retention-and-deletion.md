@@ -74,6 +74,20 @@ anybody would want to tune, and every extra knob is another way to misconfigure 
 destructive feature. A test asserts they stay at the defaults whatever the
 environment says.
 
+**A closed task takes its reminders with it.** A deadline schedules its own
+notifications (ADR 0026), so when the task goes the rows that would have talked
+about it go too — child-first and COUNTED, not cascaded silently, so the
+`retention.pruned` row says how many records really went. The same is true of
+`/forget task`.
+
+**Pasted-list previews are not on this table, and that is deliberate.** A
+preview is a draft with a deadline on it rather than a record the owner chose
+to keep: it holds their parsed items only while pending, clears them the moment
+it is saved or discarded, and the RECONCILER removes expired and settled rows
+on every pass. So the table is bounded on every instance, including one with
+retention switched off — which is the opposite of how the other tables behave,
+and is why a preview needs no window.
+
 **A job outlives its own detail.** At 30 days the result snapshot, the job events
 and your answers go; the job row, its transitions and its delivery ledger stay
 until 90. `/job status` on such a job shows its state and timings with no result

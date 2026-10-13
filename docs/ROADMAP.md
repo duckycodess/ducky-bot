@@ -481,7 +481,7 @@ criteria:
   on a positive manifest beside the owner-only one.
 
 Built, documented in
-[ADR 0025](decisions/0025-native-thread-conversations-and-the-first-non-owner-controls.md),
+[ADR 0027](decisions/0027-native-thread-conversations-and-the-first-non-owner-controls.md),
 and off by default.
 
 ---

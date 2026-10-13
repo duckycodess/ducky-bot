@@ -16,6 +16,7 @@ pnpm probe:gh         # records which --json fields this gh supports; local, rep
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
+pnpm phone:passcode                # prints a scrypt verifier for the phone page; reads stdin, contacts nothing
 ```
 
 The two agent probes start a **real Pi agent**. `probe:live-job` refuses to run
@@ -64,6 +65,13 @@ Report contradictions rather than picking whichever reads best.
   shell, mandatory timeout.
 - **All Discord output goes through `sanitizeOutbound`**, called inside the
   transport so it cannot be bypassed by a new presenter.
+- **The phone capture page is tailnet-only and off by default.** It refuses to
+  start without a profile-scoped human credential or on a bind address that is
+  not loopback, RFC1918, `100.64.0.0/10` or `fd7a:115c:a1e0::/48`; with the
+  flag unset its routes are never registered. It is a transport in front of the
+  same owner-only service Discord uses -- never a second write path -- and the
+  owner's passcode is never the executor's machine credential. Nothing here
+  enables Tailscale Funnel.
 - **`discord.js` is imported by exactly one module**, asserted by a test.
 - **The executor never listens**, asserted by a test.
 - **Profiles share no secret.** Token, application id, guild, component signing

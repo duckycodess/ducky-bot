@@ -3,7 +3,7 @@
 ## Status
 
 Accepted, and shipped disabled.
-**Partly superseded by [ADR 0025](0025-native-thread-conversations-and-the-first-non-owner-controls.md)**
+**Partly superseded by [ADR 0025](0027-native-thread-conversations-and-the-first-non-owner-controls.md)**
 for native Discord threads only. Decisions 2, 3 and 4 below are amended there;
 everything else, including the default being off, is unchanged. The amendments:
 

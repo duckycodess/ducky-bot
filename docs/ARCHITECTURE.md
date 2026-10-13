@@ -6,6 +6,7 @@
 flowchart LR
   subgraph U["Untrusted"]
     D[Discord user]
+    PH[owner's phone<br/>tailnet only]
     ATT[attachment bytes]
     REPO[repository content]
   end
@@ -13,6 +14,7 @@ flowchart LR
     TR[Discord transport<br/>sanitizeOutbound]
     AUTH[authz - frozen env config]
     API[Fastify executor API<br/>bearer + HMAC + nonce]
+    PHN[phone capture page /app<br/>passcode + session + CSRF]
     CRED[credential store<br/>runtime only]
     DOM[domain services]
     RSV[(repo_reservations)]
@@ -28,6 +30,7 @@ flowchart LR
     H[[Herdr]] --> PI[[Pi]] --> CC[[Claude writer]]
   end
   D --> TR --> AUTH --> DOM --> DB
+  PH --> PHN --> DOM
   ATT --> TR
   DOM --> RSV
   DOM --> GH
@@ -48,15 +51,22 @@ flowchart LR
    HMAC signature over the raw body, a timestamp, and a single-use nonce.
    Identity is trusted; content is not — everything is redacted and bounded
    before it is stored or shown.
-3. **Coordinator → OpenClaw.** Loopback or tailnet only, enforced in code at
+3. **Owner's phone → coordinator.** A separate, HUMAN credential on the same
+   listener: a scrypt-verified passcode, a signed bounded session cookie and a
+   CSRF token. It authenticates a PERSON and grants exactly what the
+   configured owner already has; it is not the executor's machine credential
+   and neither opens the other's door. The routes exist only when the page is
+   enabled AND the listener is bound to a private address
+   ([ADR 0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md)).
+4. **Coordinator → OpenClaw.** Loopback or tailnet only, enforced in code at
    construction and again at startup.
-4. **Executor → Herdr/Pi.** Same-user local trust; Pi documents that it has no
+5. **Executor → Herdr/Pi.** Same-user local trust; Pi documents that it has no
    sandbox. Containment is the allowlist, the fail-closed bootstrap policy,
    argv-only subprocesses, bounded timeouts and layered writer guards — not
    isolation.
-5. **Repository content → Claude.** Prompt injection is assumed possible. The
+6. **Repository content → Claude.** Prompt injection is assumed possible. The
    approval gate is the control.
-6. **WSL has no inbound surface.** Asserted by a test.
+7. **WSL has no inbound surface.** Asserted by a test.
 
 ## Job lifecycle
 
@@ -223,6 +233,8 @@ erDiagram
   captures }o--|| owner : ""
   schedules }o--|| owner : "only after confirmation"
   tasks }o--|| owner : ""
+  tasks ||--o{ reminders : "deadline offsets, ON DELETE CASCADE"
+  task_previews }o--|| owner : "pasted list, until it is kept or dropped"
   reminders }o--|| owner : ""
   reminders ||--o{ reminder_occurrences : "one per due occurrence"
   github_watches }o--|| owner : ""
@@ -255,6 +267,23 @@ tick advance a recurrence exactly once. Recurrence is bounded by construction:
 `interval_minutes` with `max_occurrences`, enforced by CHECK constraints, and
 there is no cron column
 (see [decisions/0013](decisions/0013-bounded-reminder-recurrence-and-catch-up.md)).
+
+`reminders.task_id` is the recorded link between a deadline and the
+notifications it owes. It is a column rather than an inference from text:
+matching reminder text against task titles would make two tasks with the same
+name cancel each other's notifications. `ON DELETE CASCADE` means a deleted
+task cannot leave a reminder pointing at nothing — though both `/forget task`
+and the retention sweep delete the children explicitly and COUNT them, because
+a deletion that reports "1 row" while removing five is a count that lies.
+
+`task_previews` is the only durable staging area in the system, and it exists
+because the phone parses on one request and saves on the next: an in-memory
+draft would not survive the gap. It holds the owner's parsed items **only while
+pending**, clears them the moment it settles, and keeps the public ids a save
+produced so a retry replays instead of writing a second set. The reconciler
+sweeps expired and settled rows on every pass, so the table is bounded whether
+or not retention is configured
+(see [decisions/0025](decisions/0025-owner-authenticated-phone-capture-on-the-tailnet.md)).
 
 `github_watches` stores the owner's explicit interval and the latest
 normalized, redacted snapshot; `github_watch_events` is a durable owner-DM
@@ -346,6 +375,13 @@ beside `Reconciler.run()` and `JobNotifier.deliverPending()`, and each is
 isolated: a failure in one never blocks the others. A tick materializes what
 has come due, then delivers what is outstanding, and is re-entrancy guarded so
 two overlapping passes cannot both read an occurrence as undelivered.
+
+A task's deadline schedules its own reminders through the same tick: 24 hours
+and 1 hour before a timed deadline, 08:00 on the day of a date-only one, with
+any offset already in the past skipped rather than fired. Closing a task
+withdraws its pending occurrences; moving its deadline re-derives them in the
+same transaction as the move
+(see [decisions/0026](decisions/0026-deadline-linked-reminders-and-plain-cards.md)).
 
 The consequence is a worst-case reminder/watch lateness of one
 `DUCKY_RECONCILE_INTERVAL_MS`, visible in configuration rather than hidden in a

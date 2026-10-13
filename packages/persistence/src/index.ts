@@ -16,6 +16,7 @@ export * from './repositories/github-watches.repo.js';
 export * from './repositories/audit.repo.js';
 export * from './repositories/notifications.repo.js';
 export * from './repositories/tasks.repo.js';
+export * from './repositories/task-previews.repo.js';
 export * from './repositories/reminders.repo.js';
 export * from './repositories/briefings.repo.js';
 export * from './repositories/dependencies.repo.js';
@@ -37,6 +38,7 @@ import { GitHubWatchesRepo } from './repositories/github-watches.repo.js';
 import { AuthorizedUserAuditRepo } from './repositories/audit.repo.js';
 import { NotificationsRepo } from './repositories/notifications.repo.js';
 import { TasksRepo } from './repositories/tasks.repo.js';
+import { TaskPreviewsRepo } from './repositories/task-previews.repo.js';
 import { RemindersRepo } from './repositories/reminders.repo.js';
 import { BriefingsRepo } from './repositories/briefings.repo.js';
 import { DependenciesRepo } from './repositories/dependencies.repo.js';
@@ -70,6 +72,12 @@ export interface Store {
   readonly audit: AuthorizedUserAuditRepo;
   readonly notifications: NotificationsRepo;
   readonly tasks: TasksRepo;
+  /**
+   * Pasted-list previews. Present whether or not anything is pending: the
+   * reconciler sweeps expired rows on every pass, so the table is bounded
+   * without retention having to be configured.
+   */
+  readonly taskPreviews: TaskPreviewsRepo;
   readonly reminders: RemindersRepo;
   /** The proactive-briefing outbox. Present whether or not briefings are on. */
   readonly briefings: BriefingsRepo;
@@ -100,6 +108,7 @@ export function createStore(db: Db): Store {
     audit: new AuthorizedUserAuditRepo(db),
     notifications: new NotificationsRepo(db),
     tasks: new TasksRepo(db),
+    taskPreviews: new TaskPreviewsRepo(db),
     reminders: new RemindersRepo(db),
     briefings: new BriefingsRepo(db),
     dependencies: new DependenciesRepo(db),

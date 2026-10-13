@@ -447,6 +447,66 @@ export const AGENT_CARD_INTENT_LINES_MAX = 10;
 /** Every free-text card field is clamped to this, after it is derived. */
 export const AGENT_CARD_DETAIL_MAX = 1_200;
 
+// ---- github feed (actionable events + the daily commit digest) --------------
+//
+// Every number here exists so that neither a busy repository nor a slow GitHub
+// can turn a background observation into an unbounded loop.
+
+/** Observation units (one repository and one kind of read) attempted per tick. */
+export const GITHUB_FEED_UNIT_BATCH = 12;
+/** List sizes asked of `gh`: the response is bounded before it is parsed. */
+export const GITHUB_FEED_LIST_LIMIT = 20;
+/** Cross-repository review requests fetched per discovery pass. */
+export const GITHUB_FEED_MAX_REVIEW_REQUESTS = 25;
+/**
+ * Open pull requests whose own checks are read per pass, newest first. One
+ * `gh pr checks` call each, so this is the bound on the extra requests; older
+ * pull requests' external checks are NOT covered, and the docs say so.
+ */
+export const GITHUB_FEED_MAX_PR_CHECKS = 5;
+/** Commits per page, and pages walked newest-first before coverage is called truncated. */
+export const GITHUB_FEED_COMMIT_PAGE_SIZE = 30;
+export const GITHUB_FEED_COMMIT_MAX_PAGES = 3;
+/** Alerts delivered per tick. */
+export const GITHUB_FEED_EVENT_BATCH = 10;
+/** Commit lines shown in one repository's digest section, before a visible "and N more". */
+export const GITHUB_FEED_DIGEST_MAX_LINES = 12;
+/** Repository sections in one digest message, which is one Discord message of at most 10 embeds. */
+export const GITHUB_FEED_DIGEST_MAX_SECTIONS = 8;
+/** Characters the digest embeds may spend, kept under Discord's 6000 so nothing is clipped silently. */
+export const GITHUB_FEED_DIGEST_CHAR_BUDGET = 5200;
+/** Repositories the selected list may ever hold. */
+export const GITHUB_FEED_MAX_SELECTED = 50;
+/** Delivery attempts before an alert is abandoned as a record. */
+export const GITHUB_FEED_MAX_DELIVERY_ATTEMPTS = 8;
+/** Polling interval bounds, in minutes. */
+export const GITHUB_FEED_INTERVAL_MIN_MINUTES = 5;
+export const GITHUB_FEED_INTERVAL_MAX_MINUTES = 24 * 60;
+export const GITHUB_FEED_INTERVAL_DEFAULT_MINUTES = 15;
+/** A failing unit backs off exponentially from its interval, to this ceiling. */
+export const GITHUB_FEED_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+/**
+ * How late a daily digest may be and still be sent.
+ *
+ * Past this the day it describes has gone, exactly as a stale briefing's has:
+ * the row is kept as a `skipped` record rather than delivered or dropped. The
+ * commits themselves are NOT lost; they stay unconsumed for the next digest.
+ */
+export const GITHUB_DIGEST_STALE_AFTER_MS = 20 * 60 * 60_000;
+/**
+ * How long past the slot the digest waits for a post-slot commit sweep of every
+ * selected repository, so a commit pushed at 08:58 is not left to tomorrow just
+ * because the poll that would have seen it ran at 09:05.
+ */
+export const GITHUB_DIGEST_SWEEP_GRACE_MS = 30 * 60_000;
+/** Commits never consumed by a digest are dropped from the buffer after this. */
+export const GITHUB_FEED_COMMIT_BUFFER_MAX_AGE_DAYS = 14;
+/** Clamps on stored card text, applied before anything reaches the database. */
+export const GITHUB_FEED_TITLE_MAX = 180;
+export const GITHUB_FEED_DETAIL_MAX = 240;
+/** A link button's href. Kept equal to the sanitizer's own bound so a stored link can never be dropped for length. */
+export const GITHUB_LINK_URL_MAX = 300;
+
 // ---- audit log --------------------------------------------------------------
 /** Every free-text audit detail is redacted and then clamped to this. */
 export const AUDIT_DETAIL_MAX = 300;

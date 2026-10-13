@@ -51,6 +51,9 @@ function allowedInRole(kind: IntentKind, role: ChannelRole | undefined): boolean
      */
     case 'reminder':
       return !isWriteIntent(kind);
+    /** Delivery only: nothing typed in the GitHub channel is a rule's input. */
+    case 'github':
+      return false;
   }
 }
 
@@ -138,7 +141,7 @@ export class IntentsService {
     // intercept ordinary sentences there, which is the opposite of what the
     // channel is for -- including a pending "yes", which belongs to whichever
     // channel proposed it.
-    if (role === 'gpt') return undefined;
+    if (role === 'gpt' || role === 'github') return undefined;
 
     const answer = this.resolvePending(actor, threadKey, text);
     if (answer) return answer;

@@ -1,6 +1,6 @@
 {
   "_note": "Recorded by scripts/probe-gh-live.ts against the SHIPPED GhCliReader. Shapes and key names only -- every leaf is a TYPE, never a value.",
-  "recordedSurfaces": 8,
+  "recordedSurfaces": 15,
   "surfaces": [
     {
       "surface": "repoView",
@@ -26,8 +26,18 @@
       "surface": "prListAll",
       "parsed": true,
       "shape": {
-        "[]": "empty",
-        "length": "0"
+        "[]": {
+          "number": "number",
+          "title": "string",
+          "state": "string",
+          "isDraft": "boolean",
+          "headRefName": "string",
+          "updatedAt": "string",
+          "headRefOid": "string",
+          "mergedAt": "string",
+          "reviewDecision": "string"
+        },
+        "length": "4"
       }
     },
     {
@@ -42,24 +52,219 @@
       "surface": "issueList",
       "parsed": true,
       "shape": {
+        "[]": {
+          "number": "number",
+          "title": "string",
+          "state": "string",
+          "stateReason": "string",
+          "updatedAt": "string",
+          "labels": {
+            "[]": {
+              "name": "string",
+              "id": "string",
+              "description": "string",
+              "color": "string"
+            },
+            "length": "1"
+          }
+        },
+        "length": "5"
+      }
+    },
+    {
+      "surface": "feedPrList",
+      "parsed": true,
+      "shape": {
         "[]": "empty",
         "length": "0"
       }
     },
     {
+      "surface": "feedIssueList",
+      "parsed": true,
+      "shape": {
+        "[]": {
+          "number": "number",
+          "title": "string",
+          "state": "string",
+          "updatedAt": "string",
+          "createdAt": "string",
+          "author": {
+            "login": "string"
+          },
+          "labels": {
+            "[]": {
+              "name": "string",
+              "id": "string",
+              "description": "string",
+              "color": "string"
+            },
+            "length": "1"
+          }
+        },
+        "length": "5"
+      }
+    },
+    {
+      "surface": "feedRunList",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
+    },
+    {
+      "surface": "repoViewForCommits",
+      "parsed": true,
+      "shape": {
+        "name": "string",
+        "defaultBranchRef": {
+          "name": "string"
+        },
+        "isPrivate": "boolean",
+        "updatedAt": "string"
+      }
+    },
+    {
+      "surface": "commits",
+      "parsed": true,
+      "shape": {
+        "[]": {
+          "sha": "string",
+          "commit": {
+            "message": "string",
+            "author": {
+              "name": "string",
+              "date": "string"
+            },
+            "committer": {
+              "date": "string"
+            }
+          },
+          "author": {
+            "login": "string"
+          },
+          "parents": {
+            "[]": {
+              "sha": "string"
+            },
+            "length": "1"
+          }
+        },
+        "length": "30"
+      }
+    },
+    {
       "surface": "prView",
-      "parsed": false,
-      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+      "parsed": true,
+      "shape": {
+        "number": "number",
+        "title": "string",
+        "state": "string",
+        "mergeable": "string",
+        "reviewDecision": "string"
+      }
     },
     {
       "surface": "prChecks",
       "parsed": false,
-      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+      "unexercised": "none of the five most recent pull requests reported a check"
+    },
+    {
+      "surface": "feedPrChecks",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
     },
     {
       "surface": "prReviews",
-      "parsed": false,
-      "unexercised": "duckycodess/ducky-bot has no pull request, open or closed"
+      "parsed": true,
+      "shape": {
+        "number": "number",
+        "title": "string",
+        "state": "string",
+        "headRefOid": "string",
+        "reviewDecision": "string",
+        "mergedAt": "string",
+        "reviews": {
+          "[]": {
+            "id": "string",
+            "author": {
+              "login": "string"
+            },
+            "state": "string",
+            "submittedAt": "string",
+            "body": "string"
+          },
+          "length": "1"
+        },
+        "latestReviews": {
+          "[]": {
+            "id": "string",
+            "author": {
+              "login": "string"
+            },
+            "state": "string",
+            "submittedAt": "string",
+            "body": "string"
+          },
+          "length": "1"
+        },
+        "reviewRequests": {
+          "[]": "empty",
+          "length": "0"
+        },
+        "comments": {
+          "[]": {
+            "author": {
+              "login": "string"
+            },
+            "id": "string",
+            "authorAssociation": "string",
+            "body": "string",
+            "createdAt": "string",
+            "includesCreatedEdit": "boolean",
+            "isMinimized": "boolean",
+            "minimizedReason": "string",
+            "reactionGroups": {
+              "[]": "empty",
+              "length": "0"
+            },
+            "url": "string",
+            "viewerDidAuthor": "boolean"
+          },
+          "length": "1"
+        },
+        "commits": {
+          "[]": {
+            "oid": "string",
+            "messageHeadline": "string",
+            "authoredDate": "string",
+            "authors": {
+              "[]": {
+                "email": "string",
+                "id": "string",
+                "login": "string",
+                "name": "string"
+              },
+              "length": "1"
+            },
+            "committedDate": "string",
+            "messageBody": "string"
+          },
+          "length": "17"
+        }
+      }
+    },
+    {
+      "surface": "reviewRequests",
+      "parsed": true,
+      "shape": {
+        "[]": "empty",
+        "length": "0"
+      }
     }
   ]
 }

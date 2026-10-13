@@ -39,6 +39,12 @@ describe('the command policy', () => {
     // stricter one), so it is refused the other way: unclassified.
     expect(checkCommandAllowed('gh', ['issue', 'create'])?.reason).toBe('unclassified');
     expect(checkCommandAllowed('gh', ['label', 'list'])?.reason).toBe('unclassified');
+    // `api` and `search prs` are classified only in ONE exact shape each, so the
+    // verb alone clears nothing (exhaustive cases: gh-feed-policy.test.ts).
+    expect(checkCommandAllowed('gh', ['api', 'graphql'])?.reason).toBe('unclassified');
+    expect(checkCommandAllowed('gh', ['api', '--method', 'POST', 'repos/acme/demo/issues'])?.reason)
+      .toBe('unclassified');
+    expect(checkCommandAllowed('gh', ['search', 'prs', 'is:open'])?.reason).toBe('unclassified');
     // `release` IS a forbidden verb, and that is checked before the table.
     expect(checkCommandAllowed('gh', ['release', 'list'])?.reason).toBe('forbidden_verb');
   });
@@ -76,6 +82,7 @@ describe('the command policy', () => {
       ['git', ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']],
       ['gh', ['run', 'list', '-R', 'acme/demo', '--limit', '10']],
       ['gh', ['issue', 'list', '-R', 'acme/demo', '--state', 'open']],
+      ['gh', ['api', '--method', 'GET', 'repos/acme/demo/commits?sha=main&per_page=30&page=1']],
       ['herdr', ['agent', 'list']],
       ['herdr', ['agent', 'get', 'ducky-pi-demo']],
       ['herdr', ['agent', 'read', 'ducky-pi-demo', '--source', 'detection']],

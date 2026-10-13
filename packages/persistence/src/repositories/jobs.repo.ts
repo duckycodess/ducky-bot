@@ -503,7 +503,7 @@ export class JobsRepo {
    * its own -- which is what lets an answered needs_owner_input job be
    * re-claimed while still holding the repo against every other job -- AND no
    * OTHER job holds the engineering slot. The slot is Ducky-wide within this
-   * database (see migration 27 for its exact scope), so a held slot returns no
+   * database (see migration 28 for its exact scope), so a held slot returns no
    * claim and leaves the job queued; it never fails or backs the job off.
    *
    * `eligibleSlugs` is the set of repositories the CALLING executor can

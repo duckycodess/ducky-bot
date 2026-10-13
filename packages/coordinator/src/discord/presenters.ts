@@ -326,6 +326,8 @@ export interface ProviderStatus {
   /** Whether anything can actually confirm a dependency, and what happens if not. */
   readonly dependencyChecker: string;
   readonly githubWatches: string;
+  /** The GitHub feed: coverage, destination, and anything currently degraded. */
+  readonly githubFeed: string;
   /**
    * Whether `$grill-me` / `$ticket` / `$agentize` mean anything here, and
    * whether publishing is enabled. Three states rather than two, because
@@ -357,6 +359,7 @@ export function statusEmbed(p: ProviderStatus): OutboundMessage {
           { name: 'Your timezone', value: p.ownerTimezone, inline: true },
           { name: 'Dependency checks', value: p.dependencyChecker },
           { name: 'GitHub watches', value: p.githubWatches, inline: true },
+          { name: 'GitHub feed', value: p.githubFeed },
           { name: 'Repository workflow', value: p.repositoryWorkflow },
           { name: 'Shared visibility', value: p.sharedChannels },
           { name: 'Assistant channels', value: p.channelRoles },

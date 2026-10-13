@@ -15,6 +15,8 @@ import {
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
   ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS, ENGINEERING_ATTEMPT_BUDGET_MAX_MS,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
+  GITHUB_FEED_INTERVAL_DEFAULT_MINUTES, GITHUB_FEED_INTERVAL_MAX_MINUTES,
+  GITHUB_FEED_INTERVAL_MIN_MINUTES, GITHUB_FEED_MAX_SELECTED, canonicalRepoKey, parseRepoKey,
   blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
@@ -116,6 +118,16 @@ export const EnvSchema = z.object({
   DUCKY_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_CODING_CHANNEL_ID: z.string().optional(),
   DUCKY_GPT_CHANNEL_ID: z.string().optional(),
+  /**
+   * Where GitHub updates are posted. DELIVERY ONLY: nothing the owner types
+   * there is read, answered or stored, and a command's reply there stays
+   * ephemeral. Only cards about a repository that is public AND on the selected
+   * list ever land here; everything else goes to the owner's DM. Profile-scoped
+   * like the others, and production never reads the unscoped name.
+   */
+  DUCKY_GITHUB_CHANNEL_ID: z.string().optional(),
+  DUCKY_DEV_GITHUB_CHANNEL_ID: z.string().optional(),
+  DUCKY_PROD_GITHUB_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_BRIEFING_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_TASK_CHANNEL_ID: z.string().optional(),
   DUCKY_DEV_CODING_CHANNEL_ID: z.string().optional(),
@@ -254,6 +266,33 @@ export const EnvSchema = z.object({
    * existing instance already does, so an upgrade changes nothing.
    */
   DUCKY_BRIEFING_DELIVERY: z.enum(BRIEFING_DELIVERY_MODES).default('dm'),
+
+  /**
+   * The GitHub feed: actionable events as they are observed, and one daily
+   * commit digest. Default OFF, because it is a recurring read of GitHub that
+   * nobody asked for yet.
+   *
+   * `REPOS` adds repositories to the selected list by name; `EXCLUDE` keeps a
+   * repository that would otherwise be seeded from the workflow allowlist OFF
+   * the list. Neither touches the repository allowlist, `allowJobs`, or any
+   * write permission: being watched makes a repository nothing else.
+   *
+   * `REVIEW_REQUESTS` is the operator STATING that the account `gh` is signed in
+   * as is the owner's GitHub identity. Review requests are discovered by asking
+   * GitHub for `user-review-requested:@me`, which GitHub resolves to that
+   * account, so without the statement Ducky would be reporting some other
+   * person's review queue as the owner's.
+   */
+  DUCKY_GITHUB_FEED_ENABLED: bool(false),
+  DUCKY_GITHUB_FEED_INTERVAL_MINUTES: z.coerce.number().int()
+    .min(GITHUB_FEED_INTERVAL_MIN_MINUTES)
+    .max(GITHUB_FEED_INTERVAL_MAX_MINUTES)
+    .default(GITHUB_FEED_INTERVAL_DEFAULT_MINUTES),
+  DUCKY_GITHUB_FEED_REPOS: z.string().max(4000).optional(),
+  DUCKY_GITHUB_FEED_EXCLUDE: z.string().max(4000).optional(),
+  DUCKY_GITHUB_FEED_REVIEW_REQUESTS: bool(false),
+  /** Local wall-clock time of the daily commit digest, in `DUCKY_OWNER_TIMEZONE`. */
+  DUCKY_GITHUB_DIGEST_AT: z.string().max(5).default('09:00'),
 
   /**
    * The repository workflow bridge (`$grill-me`, `$ticket`, `$agentize`).
@@ -417,7 +456,7 @@ export const EnvSchema = z.object({
    * Default OFF, and failing closed: while it is off, `/job submit` is refused
    * and no claim is ever answered.
    *
-   * The reason is scope. The engineering slot (migration 27) is global within
+   * The reason is scope. The engineering slot (migration 28) is global within
    * THIS database only; it does not coordinate with another profile or with the
    * separate agent-flow dispatcher, and no supported protocol for that exists
    * yet. A remote runtime that can start a real agent must not be reachable by
@@ -734,12 +773,13 @@ export function resolveThreadParentChannelIds(env: Env): readonly string[] {
       );
     }
     const role = byChannel.get(id);
-    if (role === 'briefing' || role === 'task') {
+    if (role === 'briefing' || role === 'task' || role === 'github') {
       throw new DuckyError(
         'invalid_input',
         `${names.threadParents} names ${names.roleChannels[role]}, which is not a conversation ` +
-          'channel: a briefing channel is where output is delivered and a task channel is for ' +
-          'personal records. Only a chat or coding channel can open conversation threads.',
+          'channel: a briefing channel is where output is delivered, a task channel is for ' +
+          'personal records and a GitHub channel is delivery only. Only a chat or coding ' +
+          'channel can open conversation threads.',
       );
     }
   }
@@ -938,3 +978,48 @@ export const resolveSkillBridge = (env: Env): {
 
   return { enabled, program, interpreter, mutationEnabled, grillSkillPath };
 };
+
+/**
+ * The GitHub feed's configuration, validated.
+ *
+ * Every repository name is checked HERE, at boot, with the same pattern the
+ * reader enforces, so a typo fails at startup instead of becoming a feed that
+ * quietly never observes anything.
+ */
+export function resolveGitHubFeed(env: Env): {
+  enabled: boolean;
+  intervalMinutes: number;
+  explicitRepos: readonly string[];
+  excludedRepos: readonly string[];
+  reviewRequests: boolean;
+  digestAt: string;
+  channelId: string | undefined;
+} {
+  const parse = (raw: string | undefined, name: string): string[] => {
+    const keys: string[] = [];
+    for (const part of (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
+      const parsed = parseRepoKey(part);
+      if (parsed === undefined) {
+        throw new DuckyError('invalid_input', `${name} contains a value that is not an owner/repo name.`);
+      }
+      keys.push(`${parsed.owner}/${parsed.repo}`);
+    }
+    return [...new Map(keys.map((k) => [canonicalRepoKey(k), k])).values()];
+  };
+  const explicitRepos = parse(env.DUCKY_GITHUB_FEED_REPOS, 'DUCKY_GITHUB_FEED_REPOS');
+  if (explicitRepos.length > GITHUB_FEED_MAX_SELECTED) {
+    throw new DuckyError(
+      'invalid_input',
+      `DUCKY_GITHUB_FEED_REPOS names more than ${GITHUB_FEED_MAX_SELECTED} repositories.`,
+    );
+  }
+  return {
+    enabled: env.DUCKY_GITHUB_FEED_ENABLED,
+    intervalMinutes: env.DUCKY_GITHUB_FEED_INTERVAL_MINUTES,
+    explicitRepos,
+    excludedRepos: parse(env.DUCKY_GITHUB_FEED_EXCLUDE, 'DUCKY_GITHUB_FEED_EXCLUDE'),
+    reviewRequests: env.DUCKY_GITHUB_FEED_REVIEW_REQUESTS,
+    digestAt: assertValidSlotTime(env.DUCKY_GITHUB_DIGEST_AT, 'DUCKY_GITHUB_DIGEST_AT'),
+    channelId: resolveChannelRoles(env).github,
+  };
+}

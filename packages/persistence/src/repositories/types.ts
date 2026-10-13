@@ -1,7 +1,7 @@
 import type {
   AgentCardStatus, ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome,
   AuditSubjectKind, CaptureState, ConversationRole, DependencyCheckStatus, DependencyState,
-  DependencyType, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
+  DependencyType, GitHubFeedKind, GitHubFeedTarget, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
   QueueState, SkillCommand, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
@@ -525,4 +525,88 @@ export interface AgentThreadRow {
   cardMessageId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// ---- the GitHub feed --------------------------------------------------------
+
+export const GITHUB_FEED_CURSOR_KINDS = [
+  'prs', 'issues', 'runs', 'checks', 'commits', 'review_requests',
+] as const;
+export type GitHubFeedCursorKind = (typeof GITHUB_FEED_CURSOR_KINDS)[number];
+
+/** The scope of review-request discovery, which belongs to no one repository. */
+export const GITHUB_FEED_DISCOVERY_SCOPE = '@me';
+
+export type GitHubFeedRepoSource = 'seed' | 'explicit';
+export type GitHubFeedRepoState = 'active' | 'cancelled';
+
+export interface GitHubFeedRepoRow {
+  repoKey: string;
+  display: string;
+  source: GitHubFeedRepoSource;
+  state: GitHubFeedRepoState;
+  defaultBranch: string | null;
+  commitGapAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  cancelledAt: string | null;
+}
+
+export interface GitHubFeedCursorRow {
+  scope: string;
+  kind: GitHubFeedCursorKind;
+  baselinedAt: string | null;
+  cursor: string | null;
+  meta: string | null;
+  nextCheckAt: string;
+  failures: number;
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  updatedAt: string;
+}
+
+export type GitHubFeedEventStatus = 'baseline' | 'pending' | 'delivered' | 'abandoned' | 'skipped';
+export type GitHubFeedEventOrigin = 'selected' | 'discovery';
+
+export interface GitHubFeedEventRow {
+  id: string;
+  eventKey: string;
+  kind: GitHubFeedKind;
+  repoKey: string;
+  origin: GitHubFeedEventOrigin;
+  cardJson: string | null;
+  status: GitHubFeedEventStatus;
+  attempts: number;
+  lastAttemptAt: string | null;
+  deliveredAt: string | null;
+  deliveredTo: GitHubFeedTarget | null;
+  createdAt: string;
+}
+
+export interface GitHubFeedCommitRow {
+  repoKey: string;
+  sha: string;
+  branch: string;
+  headline: string;
+  author: string;
+  committedAt: string;
+  observedAt: string;
+  consumedAt: string | null;
+  consumedTarget: GitHubFeedTarget | null;
+}
+
+export type GitHubFeedDigestStatus = 'pending' | 'delivered' | 'abandoned' | 'skipped';
+
+export interface GitHubFeedDigestRow {
+  id: string;
+  discordUserId: string;
+  dayKey: string;
+  target: GitHubFeedTarget;
+  dueAt: string;
+  status: GitHubFeedDigestStatus;
+  attempts: number;
+  lastAttemptAt: string | null;
+  deliveredAt: string | null;
+  note: string | null;
+  createdAt: string;
 }

@@ -14,7 +14,7 @@ Read first, because it shapes everything after it:
   separate agent-flow dispatcher, which has its own slots and no supported
   shared-admission protocol. Turning engineering on before that protocol exists
   means two programs can each start an agent against the one 8 GiB account. See
-  [decision 0029](../decisions/0029-remote-linux-runtime-and-ducky-local-admission.md).
+  [decision 0030](../decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
 - **Additional-user AI stays OFF** (`DUCKY_ADDITIONAL_USER_AI_ENABLED`).
 - Reminders, tasks, briefings and GitHub watches do not depend on the model and
   keep working with both of the above off.

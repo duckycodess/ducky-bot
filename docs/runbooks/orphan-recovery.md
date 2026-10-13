@@ -20,7 +20,7 @@ That is deliberate. A Pi agent may still be running, so the reservation is
 converted to `orphan_agent` — which **never expires** — instead of being
 released.
 
-A held orphan also holds the **engineering slot** (decision 0029): while it is
+A held orphan also holds the **engineering slot** (decision 0030): while it is
 held, no other engineering job is claimed, in any repository. `/job cleanup`
 releases the slot together with the reservation. A lease that expired while a
 workspace was open is treated the same way after its attempts run out. The slot

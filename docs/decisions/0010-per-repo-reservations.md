@@ -1,6 +1,6 @@
 # 0010. Per-repository reservations as the single-writer boundary
 
-**Status:** Accepted. Extended by [0029](0029-remote-linux-runtime-and-ducky-local-admission.md), which adds one engineering slot above these per-repository spans and keeps a slot with an unconfirmed stop.
+**Status:** Accepted. Extended by [0030](0030-remote-linux-runtime-and-ducky-local-admission.md), which adds one engineering slot above these per-repository spans and keeps a slot with an unconfirmed stop.
 
 ## Context
 

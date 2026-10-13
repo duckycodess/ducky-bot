@@ -1,4 +1,4 @@
-# 0029. The remote Linux runtime, and a Ducky-local engineering slot
+# 0030. The remote Linux runtime, and a Ducky-local engineering slot
 
 **Status:** Accepted, with open merge blockers listed below
 
@@ -19,7 +19,7 @@ writing.
 
 ## Decision
 
-**A single engineering slot, local to one coordinator database.** Migration 27
+**A single engineering slot, local to one coordinator database.** Migration 28
 adds `engineering_admission`, one row with its key pinned to 1. Claim takes it
 in the same transaction as the repository reservation. A held slot returns no
 claim, and the job stays `queued`: no failure, no attempt consumed, no backoff.

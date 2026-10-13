@@ -77,6 +77,26 @@ Fill in the env file:
   the DM every reminder has always used. A free-standing `/reminder` never goes
   there. The card carries signed controls bound to you: anybody else in the
   channel sees the deadline and can do nothing with it.
+- `DUCKY_DEV_GITHUB_CHANNEL_ID` — optional, default empty. Where GitHub updates
+  are posted. **Delivery only**: it is read by whoever the channel admits, so an
+  owner command reply there is ephemeral, nothing typed there is read or stored,
+  and no write intent, `$ticket` or model turn starts from it. Only a repository
+  that is public AND on the feed's selected list posts there; everything else
+  goes to your DM. Production reads only `DUCKY_PROD_GITHUB_CHANNEL_ID`. Refused
+  at boot as a shared channel, another role's channel or a thread parent.
+- **The GitHub feed**, off by default (see
+  [ADR 0029](decisions/0029-github-feed-and-the-delivery-only-github-channel.md)):
+  `DUCKY_GITHUB_FEED_ENABLED`; `DUCKY_GITHUB_FEED_INTERVAL_MINUTES` (5 to 1440,
+  default 15); `DUCKY_GITHUB_FEED_REPOS` (extra `owner/repo` names, which are
+  selected and nothing else); `DUCKY_GITHUB_FEED_EXCLUDE` (seeds to leave off);
+  `DUCKY_GITHUB_FEED_REVIEW_REQUESTS` (your statement that the account `gh` is
+  signed in as is you, which turns on the cross-repository review-request
+  search); `DUCKY_GITHUB_DIGEST_AT` (local `HH:MM`, default `09:00`, in
+  `DUCKY_OWNER_TIMEZONE`). The selected list starts as the enabled,
+  GitHub-mapped allowlist repositories. None of these writes to the allowlist.
+  `pnpm probe:github-feed` drives the feed against a real repository from the
+  allowlist file named by `DUCKY_REPOS_FILE`, with an in-memory database and the
+  mock transport; it loads no env file.
 - `DUCKY_PHONE_CAPTURE_ENABLED` + `DUCKY_DEV_PHONE_PASSCODE_VERIFIER` —
   optional, default off. See *The phone capture page* below.
 - `DISCORD_DEV_TOKEN` / `DISCORD_DEV_APP_ID` / `DISCORD_DEV_GUILD_ID` when you

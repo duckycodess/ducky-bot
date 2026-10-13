@@ -1345,6 +1345,130 @@ ALTER TABLE agent_threads ADD COLUMN published_queued INTEGER NOT NULL DEFAULT 0
   },
   {
     version: 27,
+    name: 'github_feed',
+    sql: `
+-- The GitHub feed: actionable events as they are observed, and a daily digest of
+-- default-branch commits. A SECOND reader beside \`github_watches\`, with its own
+-- identity, because the two answer different questions: a watch is "tell me when
+-- this allowlisted repository's snapshot moves", the feed is "tell me the few
+-- things I have to decide about, wherever they are".
+--
+-- NOTHING here references \`repos\`. A selected repository is an owner/repo
+-- identity, not an allowlist entry: being watched must never make a repository
+-- a job target, and a foreign key to \`repos\` would have forced exactly that.
+
+-- The selected list. \`active\` repositories are observed; \`cancelled\` ones are
+-- kept as a TOMBSTONE, because the row is what stops a later reconcile from
+-- re-selecting something that was deliberately taken off the list.
+CREATE TABLE github_feed_repos (
+  repo_key       TEXT PRIMARY KEY,
+  display        TEXT NOT NULL,
+  source         TEXT NOT NULL CHECK (source IN ('seed','explicit')),
+  state          TEXT NOT NULL CHECK (state IN ('active','cancelled')),
+  default_branch TEXT,
+  -- Set when the commit walk could not reach its previous head (a force-push or
+  -- more new commits than the walk is allowed to read). Disclosed in the next
+  -- digest, then cleared.
+  commit_gap_at  TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  cancelled_at   TEXT
+);
+
+-- One row per (scope, kind) unit of observation. \`scope\` is a repo_key, or the
+-- literal '@me' for cross-repository review-request discovery.
+--
+-- \`baselined_at\` is NULL until a read of THIS kind SUCCEEDED and its history was
+-- recorded as already-seen. That is what stops a failed read from becoming an
+-- empty baseline: an unreadable repository has no row that says "history seen".
+-- Failures and backoff live here too, per kind, so one kind failing delays only
+-- itself.
+CREATE TABLE github_feed_cursors (
+  scope           TEXT NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('prs','issues','runs','checks','commits','review_requests')),
+  baselined_at    TEXT,
+  cursor          TEXT,
+  meta            TEXT,
+  next_check_at   TEXT NOT NULL,
+  failures        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  last_success_at TEXT,
+  updated_at      TEXT NOT NULL,
+  PRIMARY KEY (scope, kind)
+);
+CREATE INDEX ix_github_feed_cursors_due ON github_feed_cursors(next_check_at);
+
+-- Every event ever observed, once. \`event_key\` is the identity, and its UNIQUE
+-- constraint IS the deduplication: a repeated poll, an overlapping tick and a
+-- restart all collide on it. 'baseline' rows are history seen at first watch;
+-- they are never delivered, and exist so that history cannot be news later.
+CREATE TABLE github_feed_events (
+  id              TEXT PRIMARY KEY,
+  event_key       TEXT NOT NULL UNIQUE,
+  kind            TEXT NOT NULL CHECK (kind IN
+                    ('pr_opened','issue_opened','review_requested','changes_requested','check_failed')),
+  repo_key        TEXT NOT NULL,
+  origin          TEXT NOT NULL CHECK (origin IN ('selected','discovery')),
+  card_json       TEXT,
+  status          TEXT NOT NULL CHECK (status IN ('baseline','pending','delivered','abandoned','skipped')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  delivered_at    TEXT,
+  delivered_to    TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX ix_github_feed_events_pending
+  ON github_feed_events(created_at) WHERE status = 'pending';
+CREATE INDEX ix_github_feed_events_settled
+  ON github_feed_events(created_at) WHERE status IN ('delivered','abandoned','skipped');
+
+-- Default-branch commits, recorded as they are walked, until a digest consumes
+-- them. (repo, sha) is the identity, so a commit is one row however many times
+-- it is read, and a direct push is exactly as visible as a merged pull request.
+CREATE TABLE github_feed_commits (
+  repo_key        TEXT NOT NULL,
+  sha             TEXT NOT NULL,
+  branch          TEXT NOT NULL,
+  headline        TEXT NOT NULL,
+  author          TEXT NOT NULL,
+  committed_at    TEXT NOT NULL,
+  observed_at     TEXT NOT NULL,
+  consumed_at     TEXT,
+  consumed_target TEXT CHECK (consumed_target IS NULL OR consumed_target IN ('github_channel','owner_dm')),
+  PRIMARY KEY (repo_key, sha)
+);
+CREATE INDEX ix_github_feed_commits_open
+  ON github_feed_commits(repo_key, committed_at) WHERE consumed_at IS NULL;
+CREATE INDEX ix_github_feed_commits_consumed
+  ON github_feed_commits(consumed_at) WHERE consumed_at IS NOT NULL;
+
+-- The daily digest slot ledger. One row per (owner, local day, target): the
+-- unique index makes claiming idempotent across ticks, overlapping passes and a
+-- restart, exactly as \`briefing_deliveries\` does. A stale slot is \`skipped\`,
+-- a record rather than a deletion; the commits it would have carried stay open.
+CREATE TABLE github_feed_digests (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  day_key         TEXT NOT NULL,
+  target          TEXT NOT NULL CHECK (target IN ('github_channel','owner_dm')),
+  due_at          TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN ('pending','delivered','abandoned','skipped')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TEXT,
+  delivered_at    TEXT,
+  note            TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX ux_github_feed_digests_slot
+  ON github_feed_digests(discord_user_id, day_key, target);
+CREATE INDEX ix_github_feed_digests_pending
+  ON github_feed_digests(due_at) WHERE status = 'pending';
+CREATE INDEX ix_github_feed_digests_settled
+  ON github_feed_digests(created_at) WHERE status <> 'pending';
+`,
+  },
+  {
+    version: 28,
     name: 'engineering_admission',
     sql: `
 -- Ducky-wide engineering admission: at most ONE job may hold an executor

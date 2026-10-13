@@ -55,7 +55,7 @@ The chosen runtime is the existing remote Linux account with Tailscale, a
 registered clone, an account-wide 8 GiB cap, lingering and a cleanup timer. The
 Azure and WSL material below is kept for history; it describes an older
 placement and is **superseded for this host** by
-[decision 0029](decisions/0029-remote-linux-runtime-and-ducky-local-admission.md).
+[decision 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
 Preparation only: nothing is installed or started. The templates are in
 `deploy/systemd/remote/` and the procedure, the readbacks and the list of open
 blockers are in

@@ -30,6 +30,13 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'engineering_admission',
   /** Migration bookkeeping. */
   'schema_migrations',
+  /**
+   * The GitHub feed's selected list and its cursors. They are state, not
+   * records: a cursor deleted for being old would make the next read look like
+   * a first watch, and a tombstoned repository deleted would be selected again.
+   */
+  'github_feed_repos',
+  'github_feed_cursors',
 ] as const;
 export type RetentionForbiddenTable = (typeof RETENTION_FORBIDDEN_TABLES)[number];
 
@@ -148,6 +155,15 @@ export interface RetentionCounts {
   readonly schedulesDeleted: number;
   readonly watchesDeleted: number;
   readonly watchEventsDeleted: number;
+  /**
+   * Settled GitHub feed events, consumed commits and finished digest slots.
+   * Never the selected list, a cursor, a baseline row, or a review request
+   * (whose key is the only thing preventing a still-open request from being
+   * announced again).
+   */
+  readonly feedEventsDeleted: number;
+  readonly feedCommitsDeleted: number;
+  readonly feedDigestsDeleted: number;
   readonly workspacesDeleted: number;
   readonly idempotencyKeysDeleted: number;
   readonly runLogRowsDeleted: number;
@@ -185,6 +201,9 @@ export const EMPTY_RETENTION_COUNTS: RetentionCounts = Object.freeze({
   schedulesDeleted: 0,
   watchesDeleted: 0,
   watchEventsDeleted: 0,
+  feedEventsDeleted: 0,
+  feedCommitsDeleted: 0,
+  feedDigestsDeleted: 0,
   workspacesDeleted: 0,
   idempotencyKeysDeleted: 0,
   runLogRowsDeleted: 0,
@@ -206,6 +225,9 @@ export const totalRetentionDeletions = (c: RetentionCounts): number =>
   c.schedulesDeleted +
   c.watchesDeleted +
   c.watchEventsDeleted +
+  c.feedEventsDeleted +
+  c.feedCommitsDeleted +
+  c.feedDigestsDeleted +
   c.workspacesDeleted +
   c.idempotencyKeysDeleted +
   c.runLogRowsDeleted +

@@ -1,0 +1,56 @@
+{
+  "_note": "The GitHub feed driven against live GitHub through the real composition root, with an in-memory database, the mock Discord transport and an injected clock. COUNTS, statuses and booleans only: no title, login, sha, url or message text. The issue and commit cursors were pre-seeded to simulate a watch that started earlier, so real, existing items count as new; that is a simulation of WHEN the watch began, not a live observation of a new event.",
+  "realGithubReads": true,
+  "realDiscordMessagesSent": 0,
+  "selectedRepositories": 1,
+  "firstPass": {
+    "observed": 6,
+    "failed": 0,
+    "recorded": 0,
+    "delivered": 0,
+    "deliveryFailed": 0,
+    "abandoned": 0,
+    "skipped": 0,
+    "digestsDelivered": 0,
+    "digestsSkipped": 2
+  },
+  "baselineRowsRecorded": 5,
+  "announcedByThreeRepeatedPolls": 0,
+  "afterSimulatedEarlierStart": {
+    "recorded": 5,
+    "delivered": 5,
+    "byKind": {
+      "Issue opened": 5
+    }
+  },
+  "theSamePollAgainAnnounced": 0,
+  "cards": {
+    "linkButtons": 5,
+    "controlButtons": 0,
+    "linkHttpStatuses": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  "digest": {
+    "claimedBeforeTheSlot": 0,
+    "deliveredAtTheSlot": 1,
+    "deliveredTotal": 1,
+    "targets": [
+      "channel"
+    ],
+    "viewCommitsLinkStatuses": [
+      200
+    ]
+  },
+  "reviewRequestSearch": {
+    "ran": true,
+    "elementShapeObservedLive": false
+  },
+  "messagesSentToMockTransport": 6,
+  "allowlistTableUnchanged": true,
+  "gaps": []
+}

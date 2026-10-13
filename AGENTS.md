@@ -13,6 +13,7 @@ pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs mod
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
 pnpm probe:openclaw   # records the OpenClaw surface; exit 0 only when the whole contract incl. a reply is recorded, 2 when any half is unrecorded or the binary is absent (it exited 0 on the original dev host; not run on the remote account, where openclaw is absent)
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
+pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
@@ -68,6 +69,13 @@ Report contradictions rather than picking whichever reads best.
   `jobs.detail` or a redaction pass over `JobRow`. Every ambiguous case (no
   context, a DM, an unconfigured channel, an unwired router) fails closed to
   private.
+- **The `github` channel role is delivery only.** Other people may read it, so
+  an owner reply there is always ephemeral, nothing typed there is read, and
+  only a public repository on the feed's selected list is ever posted to it:
+  private, unselected or unverifiable visibility goes to the owner's DM, and
+  visibility is read fresh at send time, never stored. Selection is not the
+  repository allowlist and widens no job or write path. `gh api` and
+  `gh search prs` are each allowed in ONE exact argv shape only.
 - **Authorization never reads the database.** Frozen env config is the sole
   authority; `authorized_user_audit` is an audit trail with no power.
 - **No secret ever reaches SQLite or a log.** The database holds a bearer

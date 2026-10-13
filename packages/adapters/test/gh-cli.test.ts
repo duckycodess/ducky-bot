@@ -6,6 +6,7 @@ describe('gh adapter', () => {
     // Every one of these is a READ, and every `--json` selector inside them was
     // recorded from `gh` itself by `pnpm probe:gh` rather than guessed.
     expect(Object.keys(GH_OPERATIONS).sort()).toEqual([
+      'feedIssueList', 'feedPrList', 'feedRunList',
       'issueList', 'prChecks', 'prList', 'prListAll', 'prReviews', 'prView', 'repoView', 'runList',
     ]);
   });

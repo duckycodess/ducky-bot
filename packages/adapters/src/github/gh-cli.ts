@@ -1,11 +1,13 @@
 import {
-  DuckyError, GH_OWNER_RE, GH_REPO_RE, GH_TIMEOUT_MS,
+  CommitsPageSchema, DuckyError, GH_OWNER_RE, GH_REPO_RE, GH_REVIEW_SEARCH_FIELDS,
+  GH_REVIEW_SEARCH_QUERY, GH_TIMEOUT_MS, GITHUB_FEED_LIST_LIMIT, GITHUB_FEED_MAX_REVIEW_REQUESTS,
   IssueListSchema, PrChecksSchema, PrListSchema, PrReviewsSchema, PrViewSchema, RepoViewSchema,
-  WorkflowRunsSchema,
-  checkCommandAllowed,
+  ReviewRequestSearchSchema, WorkflowRunsSchema,
+  checkCommandAllowed, commitsEndpoint,
 } from '@ducky/contracts';
 import type {
-  IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, WorkflowRuns,
+  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  WorkflowRuns,
 } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
 import { redact } from '../redaction/redact.js';
@@ -15,7 +17,11 @@ export type GhOperation =
   | 'repoView' | 'prList' | 'prView' | 'prChecks'
   // Added by the final milestone. Every one is a READ, and every field selector
   // in it was recorded from `gh` itself by `pnpm probe:gh` rather than guessed.
-  | 'prListAll' | 'prReviews' | 'runList' | 'issueList';
+  | 'prListAll' | 'prReviews' | 'runList' | 'issueList'
+  // The GitHub feed's bounded lists: open items only, newest first, each with
+  // the fields that give an event a stable identity (created time, reviews,
+  // rerun attempt).
+  | 'feedPrList' | 'feedIssueList' | 'feedRunList';
 
 /**
  * The complete set of gh invocations this system can make. Callers pass an
@@ -74,6 +80,53 @@ export const GH_OPERATIONS: Readonly<
     'issue', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'open', '--limit', '20',
     '--json', 'number,title,state,stateReason,updatedAt,labels',
   ],
+  feedPrList: (ref) => [
+    'pr', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'open',
+    '--limit', String(GITHUB_FEED_LIST_LIMIT),
+    '--json',
+    'number,title,state,isDraft,author,createdAt,updatedAt,headRefName,headRefOid,reviewDecision,latestReviews',
+  ],
+  feedIssueList: (ref) => [
+    'issue', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'open',
+    '--limit', String(GITHUB_FEED_LIST_LIMIT),
+    '--json', 'number,title,state,author,createdAt,updatedAt,labels',
+  ],
+  feedRunList: (ref) => [
+    'run', 'list', '-R', `${ref.owner}/${ref.repo}`, '--limit', String(GITHUB_FEED_LIST_LIMIT),
+    '--json',
+    'databaseId,attempt,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,createdAt,updatedAt',
+  ],
+});
+
+/**
+ * The review-request search: not scoped to a repository, so not in the table
+ * above, whose builders all take one. One fixed argv; the central policy
+ * re-checks that exact shape (`isReviewSearchArgv`) before it can run.
+ */
+export const GH_SEARCH_OPERATIONS: Readonly<Record<'reviewRequests', () => readonly string[]>> =
+  Object.freeze({
+    reviewRequests: () => [
+      'search', 'prs', GH_REVIEW_SEARCH_QUERY, '--state', 'open',
+      '--limit', String(GITHUB_FEED_MAX_REVIEW_REQUESTS),
+      '--json', GH_REVIEW_SEARCH_FIELDS,
+    ],
+  });
+
+/**
+ * The ONE `gh api` call this system can make: a GET of a branch's commits.
+ *
+ * `api` is on `FORBIDDEN_GH_VERBS` and stays there -- the argv-table tests still
+ * assert that no operation in `GH_OPERATIONS` contains it. This table is the
+ * single, named exemption, and it is exempt from nothing else: the endpoint is
+ * built by `commitsEndpoint` (which throws on an invalid owner, repo, branch or
+ * page) and the policy gate re-parses the finished argv from scratch.
+ */
+export const GH_API_OPERATIONS: Readonly<
+  Record<'commits', (ref: RepoRef, branch: string, page: number) => readonly string[]>
+> = Object.freeze({
+  commits: (ref, branch, page) => [
+    'api', '--method', 'GET', commitsEndpoint(ref.owner, ref.repo, branch, page),
+  ],
 });
 
 /** Verbs that would mutate GitHub. Asserted absent from the table by a test. */
@@ -95,8 +148,10 @@ export class GhCliReader implements GitHubReader {
     assertRef(ref);
     const build = GH_OPERATIONS[op];
     if (!build) throw new DuckyError('invalid_input', 'Unsupported GitHub lookup.');
-    const argv = build(ref, n);
+    return this.exec(build(ref, n));
+  }
 
+  private async exec(argv: readonly string[]): Promise<unknown> {
     // The frozen table decides what can be CONSTRUCTED; the central policy
     // decides whether what was constructed may RUN in this phase. Two
     // independent gates, so adding a write verb to the table above still does
@@ -154,5 +209,32 @@ export class GhCliReader implements GitHubReader {
 
   async issueList(ref: RepoRef): Promise<IssueList> {
     return IssueListSchema.parse(await this.run('issueList', ref));
+  }
+
+  async feedPrList(ref: RepoRef): Promise<PrList> {
+    return PrListSchema.parse(await this.run('feedPrList', ref));
+  }
+
+  async feedIssueList(ref: RepoRef): Promise<IssueList> {
+    return IssueListSchema.parse(await this.run('feedIssueList', ref));
+  }
+
+  async feedRunList(ref: RepoRef): Promise<WorkflowRuns> {
+    return WorkflowRunsSchema.parse(await this.run('feedRunList', ref));
+  }
+
+  async reviewRequests(): Promise<ReviewRequestSearch> {
+    return ReviewRequestSearchSchema.parse(await this.exec(GH_SEARCH_OPERATIONS.reviewRequests()));
+  }
+
+  async commits(ref: RepoRef, branch: string, page: number): Promise<CommitsPage> {
+    assertRef(ref);
+    let argv: readonly string[];
+    try {
+      argv = GH_API_OPERATIONS.commits(ref, branch, page);
+    } catch {
+      throw new DuckyError('invalid_input', 'That commit lookup is not allowed.');
+    }
+    return CommitsPageSchema.parse(await this.exec(argv));
   }
 }

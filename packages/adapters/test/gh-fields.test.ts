@@ -1,7 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FORBIDDEN_GH_VERBS, GH_OPERATIONS } from '../src/github/gh-cli.js';
+import {
+  FORBIDDEN_GH_VERBS, GH_API_OPERATIONS, GH_OPERATIONS, GH_SEARCH_OPERATIONS,
+} from '../src/github/gh-cli.js';
 
 const FIXTURE = path.resolve(
   import.meta.dirname, '..', 'src', 'github', 'gh.fixtures', 'json-fields.json',
@@ -81,5 +83,27 @@ describe('the gh json selectors are recorded, not guessed', () => {
       if (!argv.includes('list')) continue;
       expect(argv, name).toContain('--limit');
     }
+  });
+
+  it('sends only recorded selectors on the review-request search', () => {
+    if (!data) return;
+    const argv = GH_SEARCH_OPERATIONS.reviewRequests();
+    const recorded = data.surfaces[surfaceOf(argv)];
+    expect(recorded, 'no recorded field list for `gh search prs`').toBeDefined();
+    for (const selector of selectorsOf(argv)) {
+      expect(recorded!.fields, `gh search prs --json ${selector}`).toContain(selector);
+    }
+    // And it is bounded, like every other list.
+    expect(argv).toContain('--limit');
+  });
+
+  it('keeps `api` out of the selector table and in its own named one', () => {
+    // `api` has no --json selector, so it cannot be checked against a recorded
+    // field list; it is exempt from THIS test only because its whole argv is the
+    // contract, asserted in gh-feed-policy.test.ts.
+    for (const build of Object.values(GH_OPERATIONS)) {
+      expect(build({ owner: 'acme', repo: 'demo' }, 1)).not.toContain('api');
+    }
+    expect(Object.keys(GH_API_OPERATIONS)).toEqual(['commits']);
   });
 });

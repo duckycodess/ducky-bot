@@ -1,5 +1,6 @@
 import type {
-  IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, WorkflowRuns,
+  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  WorkflowRuns,
 } from '@ducky/contracts';
 
 export interface RepoRef {
@@ -27,4 +28,22 @@ export interface GitHubReader {
   /** Workflow runs: a failure, and the recovery after one. */
   runList(ref: RepoRef): Promise<WorkflowRuns>;
   issueList(ref: RepoRef): Promise<IssueList>;
+
+  // ---- the GitHub feed's reads -------------------------------------------
+  //
+  // Each is bounded before it is parsed and each is independent of the others,
+  // so one failing never turns another's empty answer into a baseline.
+
+  /** Open pull requests, newest first, with created time and latest reviews. */
+  feedPrList(ref: RepoRef): Promise<PrList>;
+  feedIssueList(ref: RepoRef): Promise<IssueList>;
+  /** Workflow runs with their rerun attempt. */
+  feedRunList(ref: RepoRef): Promise<WorkflowRuns>;
+  /**
+   * Open pull requests, in ANY repository the authenticated account can see,
+   * whose review was requested of that account personally.
+   */
+  reviewRequests(): Promise<ReviewRequestSearch>;
+  /** One page of a branch's commits, newest first. `page` is 1-based and capped. */
+  commits(ref: RepoRef, branch: string, page: number): Promise<CommitsPage>;
 }

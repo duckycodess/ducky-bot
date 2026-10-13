@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type {
-  IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, WorkflowRuns,
+  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  WorkflowRuns,
 } from '@ducky/contracts';
 import type { GitHubReader, RepoRef } from '@ducky/adapters';
 import { TestClock, OWNER, STRANGER, makeHarness } from './helpers.js';
@@ -58,6 +59,28 @@ class MutableGitHubReader implements GitHubReader {
   async issueList(_ref: RepoRef): Promise<IssueList> {
     this.calls.push('issueList');
     return this.issues;
+  }
+
+  // The GitHub feed's reads. A watch never calls them, and the empty answers
+  // keep it that way: a watch test that reached for one would see nothing.
+  async feedPrList(_ref: RepoRef): Promise<PrList> {
+    return [];
+  }
+
+  async feedIssueList(_ref: RepoRef): Promise<IssueList> {
+    return [];
+  }
+
+  async feedRunList(_ref: RepoRef): Promise<WorkflowRuns> {
+    return [];
+  }
+
+  async reviewRequests(): Promise<ReviewRequestSearch> {
+    return [];
+  }
+
+  async commits(): Promise<CommitsPage> {
+    return [];
   }
 }
 

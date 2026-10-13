@@ -4,6 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { GH_OPERATIONS } from '../src/github/gh-cli.js';
 
+/**
+ * The surfaces outside the per-repository table: the commits `gh api` read, the
+ * review-request search, and the repoView re-read the commits surface needs.
+ */
+const EXTRA_SURFACES = ['commits', 'reviewRequests', 'repoViewForCommits'];
+
 const FIXTURES = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../src/github/github.fixtures',
@@ -27,7 +33,8 @@ describe('the recorded live GitHub surface', () => {
   it.runIf(present)('records every surface the reader can reach', () => {
     const fixture = read('live-shape.json');
     const surfaces = fixture['surfaces'] as { surface: string }[];
-    expect(new Set(surfaces.map((s) => s.surface))).toEqual(new Set(Object.keys(GH_OPERATIONS)));
+    expect(new Set(surfaces.map((s) => s.surface))).toEqual(new Set([...Object.keys(GH_OPERATIONS), ...EXTRA_SURFACES]),
+    );
   });
 
   it.runIf(present)('says which surfaces genuinely parsed and which never ran', () => {

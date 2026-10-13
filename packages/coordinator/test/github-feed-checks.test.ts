@@ -456,3 +456,98 @@ describe('a partial read does not move the watermark past an unseen failure', ()
     h.close();
   });
 });
+
+describe('a new pull request is new by its own creation time, not by another unit having run', () => {
+  /** Pushes the pull-request unit's next read far away, as a backoff would. */
+  const holdPrUnit = (h: ReturnType<typeof setup>['h']): void => {
+    h.store.db.prepare(
+      "UPDATE github_feed_cursors SET next_check_at = '2099-01-01T00:00:00.000Z' WHERE scope = ? AND kind = 'prs'",
+    ).run(DEMO);
+  };
+
+  it('announces a failing status on a PR created after the baseline even when the PR unit has not recorded it', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    holdPrUnit(h);
+
+    reader.prs.set(DEMO, [
+      pr(9, { headRefOid: 'd'.repeat(40), createdAt: '2026-10-01T00:10:00Z' }),
+      pr(7, { headRefOid: HEAD }),
+    ]);
+    setChecks(reader, { 7: [status('ci/status', 'pass')], 9: [status('ci/status', 'fail')] });
+    await tick();
+    // The PR unit never ran, so no pr_opened event exists; the check is judged anyway.
+    expect(h.store.githubFeed.eventByKey('pr_opened:acme/demo#9')).toBeUndefined();
+    expect(failures(sent())).toHaveLength(1);
+    expect(failures(sent())[0]!.text).toContain('#9');
+
+    // Once only, however often it is seen, and when the PR unit finally runs.
+    await tick();
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('stays silent for that failure after a restart', async () => {
+    const { h, reader, tick, sent } = setup();
+    const clock = h.app.clock as unknown as { advance(ms: number): void };
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    holdPrUnit(h);
+    reader.prs.set(DEMO, [pr(9, { headRefOid: 'd'.repeat(40), createdAt: '2026-10-01T00:10:00Z' }), pr(7, { headRefOid: HEAD })]);
+    setChecks(reader, { 7: [status('ci/status', 'pass')], 9: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+
+    const { GitHubFeedService } = await import('../src/domain/github-feed.service.js');
+    const restarted = new GitHubFeedService({
+      store: h.store, reader, transport: h.transport, ownerId: OWNER, clock: h.app.clock,
+      allowlist: h.app.allowlist,
+      config: {
+        enabled: true, intervalMinutes: 15, explicitRepos: [], excludedRepos: [],
+        reviewRequests: false, digestAt: '09:00', channelId: CHANNEL,
+      },
+    });
+    restarted.reconcileSelection();
+    for (let i = 0; i < 3; i += 1) {
+      clock.advance(16 * 60_000);
+      await restarted.tick();
+    }
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+
+  it('keeps an OLD pull request rolling in silent when the PR unit is held too', async () => {
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pass')] });
+    await tick(0);
+    holdPrUnit(h);
+    reader.prs.set(DEMO, [
+      pr(7, { headRefOid: HEAD }),
+      pr(5, { headRefOid: 'c'.repeat(40), createdAt: '2026-06-01T00:00:00Z' }),
+    ]);
+    setChecks(reader, { 7: [status('ci/status', 'pass')], 5: [status('ci/legacy', 'fail')] });
+    await tick();
+    await tick();
+    expect(failures(sent())).toEqual([]);
+    h.close();
+  });
+
+  it('announces it when the PR read itself is failing, so the PR unit cannot have recorded it', async () => {
+    // The checks unit reads the same open-PR list, so this models the PR unit
+    // backing off for its own reasons rather than the list being unreadable.
+    const { h, reader, tick, sent } = setup();
+    withPr(reader);
+    setChecks(reader, { 7: [status('ci/status', 'pending')] });
+    await tick(0);
+    holdPrUnit(h);
+    setChecks(reader, { 7: [status('ci/status', 'fail')] });
+    await tick();
+    expect(failures(sent())).toHaveLength(1);
+    h.close();
+  });
+});

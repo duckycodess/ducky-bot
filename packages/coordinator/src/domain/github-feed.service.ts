@@ -274,11 +274,7 @@ export class GitHubFeedService {
     // Claimed BEFORE the reads, so a newly due slot makes every repository due for
     // a commit read in this same tick and the digest need not wait for the next.
     this.claimDigestSlots();
-    // The checks unit reads after the pull-request unit, so "this pull request was
-    // announced as opened" is already recorded when a check on it is judged.
-    const rank = (k: string): number => (k === 'checks' ? 1 : 0);
-    const due = feed.dueUnits(nowIso, GITHUB_FEED_UNIT_BATCH, this.config.reviewRequests)
-      .sort((a, b) => rank(a.kind) - rank(b.kind));
+    const due = feed.dueUnits(nowIso, GITHUB_FEED_UNIT_BATCH, this.config.reviewRequests);
     for (const unit of due) {
       await this.observeUnit(unit, r);
     }
@@ -483,7 +479,7 @@ export class GitHubFeedService {
    *   previously seen NOT failing (pending or passing, so a failure after a
    *   pending), or the head was seen without this check failing, or the head is a
    *   new one for a pull request already known, or the pull request itself was
-   *   announced as opened after the baseline. A pull request or head met for the
+   *   created after this unit's baseline. A pull request or head met for the
    *   first time WITHOUT any of that (an old one rolling into the window) is
    *   recorded silently. A status that fails, passes and fails again on the same
    *   head is a second episode, hence a second key.
@@ -523,6 +519,16 @@ export class GitHubFeedService {
       const pk = `pr${pr.number}:${head}`;
       const before = seen[pk];
       const prKnown = knownPrs.has(pr.number);
+      // Is the PR itself newer than this unit's baseline? Judged from the PR's own
+      // creation time, NOT from whether the pull-request unit has recorded it yet:
+      // that unit may be backing off or scheduled after this one, and a failure
+      // recorded silently here would never be announced by it later. An old PR
+      // rolling into the window was created before the baseline and stays silent.
+      // (The local clock and GitHub's can differ by seconds, so a PR created in
+      // the instant around the baseline may go either way.)
+      const created = Date.parse(realStamp(pr.createdAt));
+      const openedSinceBaseline = !baseline && !Number.isNaN(created) &&
+        created >= Date.parse(unit.baselinedAt ?? '');
       const after: Record<string, { s: 'f' | 'n'; e: number }> = {};
 
       for (const c of checks.slice(0, 50)) {
@@ -559,10 +565,7 @@ export class GitHubFeedService {
         after[id] = { s: 'f', e };
         if (!fresh) continue;
         const announce = !baseline && (
-          prev?.s === 'n' || before !== undefined || prKnown ||
-          ['pending', 'delivered'].includes(
-            this.store.githubFeed.eventByKey(`pr_opened:${unit.scope}#${pr.number}`)?.status ?? '',
-          )
+          prev?.s === 'n' || before !== undefined || prKnown || openedSinceBaseline
         );
         undated.push({
           key: `check_failed:${unit.scope}:pr${pr.number}:${head}:${id}:undated:e${e}`, announce, card,

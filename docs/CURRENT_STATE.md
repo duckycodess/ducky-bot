@@ -718,8 +718,9 @@ Bounds and limits, stated rather than implied:
   watermark. A failing status is then identified by pull request, head, check
   name and a failure episode, and announced only when that check was previously
   seen not failing (a failure after pending or passing), the head is new on a
-  pull request already known, or the pull request was announced as opened after
-  the baseline; an old pull request or head met for the first time is recorded
+  pull request already known, or the pull request was created after the checks
+  baseline (judged from its own creation time, so it does not depend on the
+  pull-request unit having run first); an old pull request or head met for the first time is recorded
   silently. A status that is already failing the first time its head is seen, on
   a pull request that is neither new nor known, is therefore never announced.
 - If ANY pull request's checks cannot be read, the pass keeps the old watermark
@@ -1144,7 +1145,7 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1781 tests in 121 files**.
+The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

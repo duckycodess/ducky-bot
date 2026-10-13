@@ -202,6 +202,10 @@ async function main(): Promise<void> {
       if (!exercised) {
         skip('prChecks', 'none of the five most recent pull requests reported a check');
       }
+      // The feed's own read of the same surface. It answers an empty list for a
+      // pull request with no checks (the normal state of a repository without
+      // CI), so it parses here even where `prChecks` above has nothing to show.
+      await record('feedPrChecks', () => reader.feedPrChecks(ref, candidate));
       await record('prReviews', () => reader.prReviews(ref, candidate));
     }
   }

@@ -1385,7 +1385,7 @@ CREATE TABLE github_feed_repos (
 -- itself.
 CREATE TABLE github_feed_cursors (
   scope           TEXT NOT NULL,
-  kind            TEXT NOT NULL CHECK (kind IN ('prs','issues','runs','commits','review_requests')),
+  kind            TEXT NOT NULL CHECK (kind IN ('prs','issues','runs','checks','commits','review_requests')),
   baselined_at    TEXT,
   cursor          TEXT,
   meta            TEXT,

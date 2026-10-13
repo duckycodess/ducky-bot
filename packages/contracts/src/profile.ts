@@ -125,7 +125,8 @@ export const PROFILE_ENV = {
 >;
 
 /**
- * The private assistant channels an owner may configure.
+ * The assistant channels an owner may configure. Every one is private to the owner
+ * EXCEPT `github`, which is delivery only (see below).
  *
  * A role says WHERE a kind of output belongs and whether the owner's replies
  * there persist. It says nothing whatever about who may act: authorization is
@@ -138,7 +139,7 @@ export const PROFILE_ENV = {
  * activity they already have access to on GitHub. Anybody who can read the
  * channel can read what is posted there, which is why a card about a repository
  * that is private, or that the owner never selected, is never posted there at
- * all -- it falls back to the owner's DM. See ADR 0025.
+ * all -- it falls back to the owner's DM. See ADR 0029.
  */
 export const CHANNEL_ROLES = ['briefing', 'task', 'coding', 'gpt', 'reminder', 'github'] as const;
 export type ChannelRole = (typeof CHANNEL_ROLES)[number];

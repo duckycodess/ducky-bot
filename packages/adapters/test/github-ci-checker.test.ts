@@ -110,7 +110,7 @@ describe('the GitHub CI dependency checker', () => {
     const surface = Object.getOwnPropertyNames(Object.getPrototypeOf(reader));
     for (const method of surface) {
       expect(method, method).toMatch(
-        /^(constructor|repoView|prList|prListAll|prView|prChecks|prReviews|runList|issueList|feedPrList|feedIssueList|feedRunList|reviewRequests|commits)$/,
+        /^(constructor|repoView|prList|prListAll|prView|prChecks|prReviews|runList|issueList|feedPrList|feedIssueList|feedPrChecks|feedRunList|reviewRequests|commits)$/,
       );
     }
   });

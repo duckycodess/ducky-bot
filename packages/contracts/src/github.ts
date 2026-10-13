@@ -121,6 +121,29 @@ export const IssueListSchema = z.array(
 );
 export type IssueList = z.infer<typeof IssueListSchema>;
 
+/**
+ * One check on a pull request, from `gh pr checks --json`, covering BOTH kinds:
+ * a check run (which may belong to an Actions workflow run) and a commit status
+ * posted by an external CI system. Only fields the installed `gh` lists are
+ * named here (`pnpm probe:gh` records them), all optional but the name.
+ *
+ * `workflow` is non-empty for a check backed by an Actions workflow; `link` is
+ * the target URL the CI system chose, so it is never used as a button, only
+ * inspected to recognise an Actions run.
+ */
+export const FeedPrChecksSchema = z.array(
+  z.object({
+    name: z.string(),
+    state: z.string().optional(),
+    bucket: z.string().optional(),
+    link: z.string().nullable().optional(),
+    workflow: z.string().nullable().optional(),
+    startedAt: z.string().nullable().optional(),
+    completedAt: z.string().nullable().optional(),
+  }),
+);
+export type FeedPrChecks = z.infer<typeof FeedPrChecksSchema>;
+
 export const PrChecksSchema = z.array(
   z.object({ name: z.string(), state: z.string().optional(), bucket: z.string().optional() }),
 );
@@ -290,10 +313,14 @@ export const isCommitsApiArgv = (argv: readonly string[]): boolean =>
 
 /** The whole argv of the review-request search. */
 export const isReviewSearchArgv = (argv: readonly string[]): boolean => {
-  if (argv.length !== 9) return false;
-  const limit = Number(argv[6]);
+  if (argv.length !== 13) return false;
+  const limit = Number(argv[10]);
   return argv[0] === 'search' && argv[1] === 'prs' && argv[2] === GH_REVIEW_SEARCH_QUERY &&
-    argv[3] === '--state' && argv[4] === 'open' && argv[5] === '--limit' &&
-    /^\d{1,3}$/.test(argv[6] ?? '') && limit >= 1 && limit <= GITHUB_FEED_MAX_REVIEW_REQUESTS &&
-    argv[7] === '--json' && argv[8] === GH_REVIEW_SEARCH_FIELDS;
+    argv[3] === '--state' && argv[4] === 'open' &&
+    // Freshest first, so the bounded window is the 25 most recently UPDATED
+    // requests and a request that is renewed moves into it.
+    argv[5] === '--sort' && argv[6] === 'updated' && argv[7] === '--order' && argv[8] === 'desc' &&
+    argv[9] === '--limit' &&
+    /^\d{1,3}$/.test(argv[10] ?? '') && limit >= 1 && limit <= GITHUB_FEED_MAX_REVIEW_REQUESTS &&
+    argv[11] === '--json' && argv[12] === GH_REVIEW_SEARCH_FIELDS;
 };

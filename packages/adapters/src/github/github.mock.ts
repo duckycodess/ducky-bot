@@ -1,5 +1,5 @@
 import type {
-  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
   WorkflowRuns,
 } from '@ducky/contracts';
 import type { GitHubReader, RepoRef } from './github.port.js';
@@ -30,6 +30,8 @@ export class MockGitHubReader implements GitHubReader {
       feedPrList?: PrList;
       feedIssueList?: IssueList;
       feedRunList?: WorkflowRuns;
+      /** Keyed by PR number. */
+      feedPrChecks?: Record<number, FeedPrChecks>;
       reviewRequests?: ReviewRequestSearch;
       /** Keyed `branch:page`. */
       commits?: Record<string, CommitsPage>;
@@ -86,6 +88,11 @@ export class MockGitHubReader implements GitHubReader {
   async feedIssueList(ref: RepoRef): Promise<IssueList> {
     this.calls.push({ op: 'feedIssueList', ref });
     return this.fixtures.feedIssueList ?? [];
+  }
+
+  async feedPrChecks(ref: RepoRef, n: number): Promise<FeedPrChecks> {
+    this.calls.push({ op: 'feedPrChecks', ref, n });
+    return this.fixtures.feedPrChecks?.[n] ?? [];
   }
 
   async feedRunList(ref: RepoRef): Promise<WorkflowRuns> {

@@ -521,7 +521,7 @@ export interface AgentThreadRow {
 // ---- the GitHub feed --------------------------------------------------------
 
 export const GITHUB_FEED_CURSOR_KINDS = [
-  'prs', 'issues', 'runs', 'commits', 'review_requests',
+  'prs', 'issues', 'runs', 'checks', 'commits', 'review_requests',
 ] as const;
 export type GitHubFeedCursorKind = (typeof GITHUB_FEED_CURSOR_KINDS)[number];
 

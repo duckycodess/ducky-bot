@@ -1,5 +1,5 @@
 import type {
-  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
   WorkflowRuns,
 } from '@ducky/contracts';
 
@@ -37,6 +37,11 @@ export interface GitHubReader {
   /** Open pull requests, newest first, with created time and latest reviews. */
   feedPrList(ref: RepoRef): Promise<PrList>;
   feedIssueList(ref: RepoRef): Promise<IssueList>;
+  /**
+   * The checks on one pull request: check runs AND external commit statuses.
+   * A pull request with no checks answers an empty list, not an error.
+   */
+  feedPrChecks(ref: RepoRef, number: number): Promise<FeedPrChecks>;
   /** Workflow runs with their rerun attempt. */
   feedRunList(ref: RepoRef): Promise<WorkflowRuns>;
   /**

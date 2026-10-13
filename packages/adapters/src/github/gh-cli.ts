@@ -1,12 +1,12 @@
 import {
-  CommitsPageSchema, DuckyError, GH_OWNER_RE, GH_REPO_RE, GH_REVIEW_SEARCH_FIELDS,
+  CommitsPageSchema, DuckyError, FeedPrChecksSchema, GH_OWNER_RE, GH_REPO_RE, GH_REVIEW_SEARCH_FIELDS,
   GH_REVIEW_SEARCH_QUERY, GH_TIMEOUT_MS, GITHUB_FEED_LIST_LIMIT, GITHUB_FEED_MAX_REVIEW_REQUESTS,
   IssueListSchema, PrChecksSchema, PrListSchema, PrReviewsSchema, PrViewSchema, RepoViewSchema,
   ReviewRequestSearchSchema, WorkflowRunsSchema,
   checkCommandAllowed, commitsEndpoint,
 } from '@ducky/contracts';
 import type {
-  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
   WorkflowRuns,
 } from '@ducky/contracts';
 import { runArgv } from '../process/run.js';
@@ -21,7 +21,7 @@ export type GhOperation =
   // The GitHub feed's bounded lists: open items only, newest first, each with
   // the fields that give an event a stable identity (created time, reviews,
   // rerun attempt).
-  | 'feedPrList' | 'feedIssueList' | 'feedRunList';
+  | 'feedPrList' | 'feedIssueList' | 'feedRunList' | 'feedPrChecks';
 
 /**
  * The complete set of gh invocations this system can make. Callers pass an
@@ -91,6 +91,15 @@ export const GH_OPERATIONS: Readonly<
     '--limit', String(GITHUB_FEED_LIST_LIMIT),
     '--json', 'number,title,state,author,createdAt,updatedAt,labels',
   ],
+  /**
+   * The checks on ONE pull request, external CI included. Every selector is one
+   * the installed `gh` lists (`pnpm probe:gh`); the call reuses the same read
+   * access as every other lookup and asks for nothing broader.
+   */
+  feedPrChecks: (ref, n) => [
+    'pr', 'checks', String(n), '-R', `${ref.owner}/${ref.repo}`,
+    '--json', 'name,state,bucket,link,workflow,startedAt,completedAt',
+  ],
   feedRunList: (ref) => [
     'run', 'list', '-R', `${ref.owner}/${ref.repo}`, '--limit', String(GITHUB_FEED_LIST_LIMIT),
     '--json',
@@ -107,6 +116,7 @@ export const GH_SEARCH_OPERATIONS: Readonly<Record<'reviewRequests', () => reado
   Object.freeze({
     reviewRequests: () => [
       'search', 'prs', GH_REVIEW_SEARCH_QUERY, '--state', 'open',
+      '--sort', 'updated', '--order', 'desc',
       '--limit', String(GITHUB_FEED_MAX_REVIEW_REQUESTS),
       '--json', GH_REVIEW_SEARCH_FIELDS,
     ],
@@ -152,6 +162,24 @@ export class GhCliReader implements GitHubReader {
   }
 
   private async exec(argv: readonly string[]): Promise<unknown> {
+    const res = await this.execRaw(argv);
+    if (res.code !== 0) {
+      // stderr can echo tokens or absolute paths; never surface it raw
+      throw new DuckyError('not_found', `GitHub lookup failed: ${redact(res.stderr).slice(0, 200)}`);
+    }
+    return this.parse(res.stdout);
+  }
+
+  private parse(stdout: string): unknown {
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      throw new DuckyError('not_found', 'GitHub returned an unreadable response.');
+    }
+  }
+
+  /** Policy-checked, spawned, and NOT yet judged on its exit code. */
+  private async execRaw(argv: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> {
     // The frozen table decides what can be CONSTRUCTED; the central policy
     // decides whether what was constructed may RUN in this phase. Two
     // independent gates, so adding a write verb to the table above still does
@@ -168,15 +196,7 @@ export class GhCliReader implements GitHubReader {
         NO_COLOR: '1',
       },
     });
-    if (res.code !== 0) {
-      // stderr can echo tokens or absolute paths; never surface it raw
-      throw new DuckyError('not_found', `GitHub lookup failed: ${redact(res.stderr).slice(0, 200)}`);
-    }
-    try {
-      return JSON.parse(res.stdout);
-    } catch {
-      throw new DuckyError('not_found', 'GitHub returned an unreadable response.');
-    }
+    return res;
   }
 
   async repoView(ref: RepoRef): Promise<RepoView> {
@@ -217,6 +237,29 @@ export class GhCliReader implements GitHubReader {
 
   async feedIssueList(ref: RepoRef): Promise<IssueList> {
     return IssueListSchema.parse(await this.run('feedIssueList', ref));
+  }
+
+  /**
+   * The checks on one pull request.
+   *
+   * `gh pr checks` has two exit behaviours that are NOT failures of the read:
+   * a pull request with no checks at all exits non-zero with a "no checks
+   * reported" message (observed live), and the CLI documents exit code 8 for
+   * pending checks. So a non-zero exit is trusted as an answer only when stdout
+   * is a JSON list, or the message says there are no checks; anything else is a
+   * real failure and throws.
+   */
+  async feedPrChecks(ref: RepoRef, number: number): Promise<FeedPrChecks> {
+    assertRef(ref);
+    if (!Number.isInteger(number) || number <= 0) {
+      throw new DuckyError('invalid_input', 'That pull request number is not valid.');
+    }
+    const res = await this.execRaw(GH_OPERATIONS.feedPrChecks(ref, number));
+    if (res.code === 0) return FeedPrChecksSchema.parse(this.parse(res.stdout));
+    const body = res.stdout.trim();
+    if (body.startsWith('[')) return FeedPrChecksSchema.parse(this.parse(body));
+    if (/no checks reported/i.test(res.stderr)) return [];
+    throw new DuckyError('not_found', `GitHub lookup failed: ${redact(res.stderr).slice(0, 200)}`);
   }
 
   async feedRunList(ref: RepoRef): Promise<WorkflowRuns> {

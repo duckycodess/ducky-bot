@@ -152,7 +152,8 @@ describe('the review-request search', () => {
 
   it('has one exact, bounded, read-only shape that the policy accepts', () => {
     expect(GOOD).toEqual([
-      'search', 'prs', 'user-review-requested:@me', '--state', 'open', '--limit', '25',
+      'search', 'prs', 'user-review-requested:@me', '--state', 'open',
+      '--sort', 'updated', '--order', 'desc', '--limit', '25',
       '--json', GH_REVIEW_SEARCH_FIELDS,
     ]);
     expect(checkCommandAllowed('gh', GOOD)).toBeUndefined();
@@ -171,11 +172,17 @@ describe('the review-request search', () => {
       swap(2, 'user-review-requested:someone-else'),
       swap(2, 'user-review-requested:@me org:acme'),
       swap(4, 'all'),
-      swap(6, '26'),
-      swap(6, '1000'),
-      swap(6, '0'),
-      swap(8, `${GH_REVIEW_SEARCH_FIELDS},body`),
-      swap(8, 'number'),
+      swap(5, '--sorted'),
+      swap(6, 'created'),
+      swap(6, 'best-match'),
+      swap(8, 'asc'),
+      swap(10, '26'),
+      swap(10, '1000'),
+      swap(10, '0'),
+      swap(12, `${GH_REVIEW_SEARCH_FIELDS},body`),
+      swap(12, 'number'),
+      // The old, unsorted shape is no longer an accepted form.
+      ['search', 'prs', 'user-review-requested:@me', '--state', 'open', '--limit', '25', '--json', GH_REVIEW_SEARCH_FIELDS],
       [...GOOD, '--web'],
       [...GOOD, '--jq', '.'],
       [...GOOD, '--owner', 'x'],

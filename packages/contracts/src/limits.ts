@@ -440,6 +440,12 @@ export const GITHUB_FEED_UNIT_BATCH = 12;
 export const GITHUB_FEED_LIST_LIMIT = 20;
 /** Cross-repository review requests fetched per discovery pass. */
 export const GITHUB_FEED_MAX_REVIEW_REQUESTS = 25;
+/**
+ * Open pull requests whose own checks are read per pass, newest first. One
+ * `gh pr checks` call each, so this is the bound on the extra requests; older
+ * pull requests' external checks are NOT covered, and the docs say so.
+ */
+export const GITHUB_FEED_MAX_PR_CHECKS = 5;
 /** Commits per page, and pages walked newest-first before coverage is called truncated. */
 export const GITHUB_FEED_COMMIT_PAGE_SIZE = 30;
 export const GITHUB_FEED_COMMIT_MAX_PAGES = 3;

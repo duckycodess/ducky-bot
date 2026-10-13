@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
-  CommitsPage, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
+  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
   WorkflowRuns,
 } from '@ducky/contracts';
 import type { GitHubReader, RepoRef } from '@ducky/adapters';
@@ -72,6 +72,10 @@ class MutableGitHubReader implements GitHubReader {
   }
 
   async feedRunList(_ref: RepoRef): Promise<WorkflowRuns> {
+    return [];
+  }
+
+  async feedPrChecks(): Promise<FeedPrChecks> {
     return [];
   }
 

@@ -3,6 +3,7 @@ import { buildServer } from './http/server.js';
 import { formatDiagnostics, runStartupDiagnostics } from './diagnostics.js';
 import { sweepStaleTempDirs } from './discord/attachments.js';
 import { createLogger } from '@ducky/adapters';
+import { takeCoordinatorLock } from './runtime-lock.js';
 
 /**
  * A logger that exists BEFORE configuration is read.
@@ -20,6 +21,15 @@ const bootLog = createLogger({
 
 async function main(): Promise<void> {
   const app = createApp();
+  // The sole writer of this database, mechanically. An importer cannot run while
+  // this is held, and this will not start while an import is in progress.
+  let lock: ReturnType<typeof takeCoordinatorLock>;
+  try {
+    lock = takeCoordinatorLock(app.store.db);
+  } catch (err) {
+    app.close();
+    throw err;
+  }
   // Every line from here goes through the redactor. Interpolating a raw
   // `(err as Error).message` into stderr -- which is what these sites used to
   // do -- puts whatever the error happened to quote into the log.
@@ -63,6 +73,12 @@ async function main(): Promise<void> {
   log.info('http.listening', { host: app.env.DUCKY_HTTP_HOST, port: app.paths.httpPort });
 
   const timer = setInterval(() => {
+    // Refresh the claim on the database. If it was taken over, this process is no
+    // longer the writer and must stop at once rather than race whoever is.
+    if (!lock.heartbeat()) {
+      log.error('runtime_lock.lost', {});
+      process.exit(1);
+    }
     try {
       app.reconciler.run();
       if (app.credentials.reloadIfChanged()) {
@@ -143,6 +159,7 @@ async function main(): Promise<void> {
     await app.githubFeed.waitForIdle();
     await app.transport.stop();
     await server.close();
+    lock.release();
     app.close();
     process.exit(0);
   };

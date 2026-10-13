@@ -472,6 +472,50 @@ may be shown rather than around who may act.
   its own reads with a generic message and exponential backoff; no stderr, path
   or credential is recorded, and `/status` reports the degraded coverage.
 
+## The private-assistant migration
+
+Importing the owner's private assistant is the one place Ducky is handed a large
+body of personal data at once, so every rule here is mechanical rather than a
+promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-capabilities.md).
+
+- **Offline and not a route.** The importer is a CLI. No Discord command, phone
+  route or transport reaches it, and nothing it calls can send a message.
+- **Applying is gated by facts, not flags.** The database, the document and the
+  backup must be outside the repository; the document must be `0600` in a `0700`
+  directory; the backup must pass SQLite's integrity check and match the live
+  database table for table at that moment; and the shared `runtime_lock` must be
+  obtainable. The coordinator holds that lock while it runs and the importer
+  cannot take it from a live holder (same host: the process exists; another
+  host: a fresh heartbeat), including an equal pid on another host and a second
+  handle in the same process. The coordinator refuses to start during an import.
+- **Frozen configuration is the only authority.** The owner, profile and
+  timezone come from the profile's configuration; a document naming another
+  owner is a hard stop. Imported preferences live in `owner_preferences`,
+  which authorization never reads, apply only when the profile sets
+  `DUCKY_IMPORTED_PREFERENCES`, narrow briefings but never enable them, and never
+  replace an explicitly configured time (a disagreement refuses the import).
+- **Reports say counts and rule names.** An unknown key in a document is refused
+  without naming it; a rejected value is never quoted; the CLI prints no title,
+  id, repository, preference or path.
+- **Identity survives deletion, content does not.** The correlation ledger keeps a
+  content fingerprint only while its record exists. Deleting the record, by
+  Forget, retention or a foreign-key cascade, turns the row into an identity-only
+  tombstone by trigger, so a re-import cannot resurrect it and nothing about
+  what was deleted remains. Retention never touches the ledger.
+- **Notification-only targets are not an authorization.** They never reference
+  `repos`, never set `allow_jobs`, and never reach an executor. Their alerts go to
+  the owner's DM and their digest to the owner's briefing, never to the shared
+  GitHub feed channel, and when an imported target observes a repository the
+  native feed's card for the same fact is retired rather than sent twice. Titles
+  are scrubbed of links, addresses and @mentions before they are stored.
+- **One new outbound request, to one host.** The briefing weather is a key-less
+  read over HTTPS from `api.open-meteo.com` only, built from numbers and constants
+  (no owner text is ever sent), with a timeout, a body ceiling and a cache, and
+  it runs only when a location is configured and an imported preference asks for
+  it. No `gh` shape was added: AGENTS.md still permits `gh api` and
+  `gh search prs` in one exact shape each, and the typed watch reader that the
+  shipped build uses observes nothing.
+
 ## Egress and redaction
 
 `sanitizeOutbound` is the single choke point and is called as the **first

@@ -16,6 +16,7 @@ pnpm probe:gh         # records which --json fields this gh supports; local, rep
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
+pnpm import:assistant --db <db> --file <doc.json>   # validate a migration document (a dry run); --verify compares, --backup <db> --apply writes
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
 pnpm phone:passcode                # prints a scrypt verifier for the phone page; reads stdin, contacts nothing
 ```
@@ -88,6 +89,21 @@ Report contradictions rather than picking whichever reads best.
   key and executor credential file are all per profile. Production reads none
   of the unscoped or development variables.
 - Nothing in Phase 1 commits, pushes, deploys, or mutates a cloud resource.
+- **The private-assistant import is offline and mechanical.** It is a CLI, never
+  a Discord or phone route, and it applies only against an explicit database,
+  document and backup outside the repository, a backup that matches the live
+  database table for table, and the shared runtime lock (`runtime_lock`), which
+  it cannot take while a live coordinator holds the database. No acknowledgement
+  flag stands in for any of these. Imported records live in the correlation
+  ledger, whose rows retention never touches; deleting a record leaves an
+  identity-only tombstone by trigger.
+- **Notification-only watch targets are not engineering watches.**
+  `assistant_watch_targets` never references `repos`, never sets `allow_jobs`
+  and is never touched by the ordinary watch's allowlist rules. They tell the
+  owner (DM and briefing digest) and nothing else, they are observed through a
+  typed reader port within a fixed call budget, and the shipped reader observes
+  nothing: the existing `gh` shapes cannot see releases or closing times and this
+  work adds no `gh` shape.
 - **No wipe-all deletion path, at any layer.** `FORGET_TARGETS` cannot express
   one and `RETENTION_FORBIDDEN_TABLES` names what retention may never touch;
   both are asserted by tests that scan the source. Retention only ever removes

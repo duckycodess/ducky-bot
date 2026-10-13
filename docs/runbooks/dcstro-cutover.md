@@ -1,6 +1,6 @@
 # DCStro assistant migration and cutover (issue #9)
 
-Status: preparation with public capabilities under construction, not a completed migration. A supplied assistant-only private snapshot is available outside this repository. Its private SQLite backup was restored to a separate scratch copy; integrity, foreign keys, schema and aggregate table counts matched. This verifies that snapshot, which is stale. It does not verify live DCStro, its restoration configuration, deployment configuration or academic-module health. Nothing has been imported, disabled, deleted or deployed.
+Status: the public capabilities are implemented and unit-tested; the migration is not performed and no operational gate has been verified. A supplied assistant-only private snapshot is available outside this repository. Its private SQLite backup was restored to a separate scratch copy; integrity, foreign keys, schema and aggregate table counts matched. This verifies that snapshot, which is stale. It does not verify live DCStro, its restoration configuration, deployment configuration or academic-module health. Nothing has been imported, disabled, deleted or deployed.
 
 The owner decided on 2026-10-13 for **full parity**: all existing owner-scoped behavior is preserved, with no finite schedule horizon, no unapproved subset of notification watches and no silent checkpoint reset. No product choice about omission, normalization or a reduced migration is open. What is missing is capability and evidence; a fact that is not available offline is an evidence blocker, never permission to drop or normalize a record. The design is in [ADR 0030](../decisions/0030-private-assistant-migration-and-parity-capabilities.md).
 
@@ -15,7 +15,7 @@ The owner ID comes only from the selected profile's frozen config, never a CLI o
 ## Resume plan
 
 1. A private, read-only behavioral audit of the supplied snapshot and source is complete and lives in 0600 evidence outside this repository. Its facts are generic behavior requirements, summarized in ADR 0030. Live state after the snapshot date is not covered and remains a gate.
-2. The public capabilities needed for full parity are implemented in this branch from those requirements, never by translating private code: a strict interchange contract; durable identity and tombstones; task and reminder state with per-task reminder policy; indefinite weekly schedules with dated exceptions; owner-scoped preferences; bounded notification-only watch targets with typed checkpoints and an explicit transition; a shared runtime liveness lock; and an explicit offline importer with a counts-only verification.
+2. The public capabilities needed for full parity are implemented in this branch from those requirements, never by translating private code: a strict interchange contract; durable identity and tombstones; task and reminder state with per-task reminder policy; indefinite weekly schedules with dated exceptions; owner-scoped preferences; bounded notification-only watch targets with typed checkpoints and an explicit transition; a shared runtime liveness lock; and an explicit offline importer with a counts-only verification. What is NOT implemented is listed under *Required capabilities and the blockers that remain* and in `docs/CURRENT_STATE.md`.
 3. Synthetic fixtures cover each supported boundary and the negative, unsupported cases. Run relevant tests, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` and `git diff --check`. No formatter is configured in this base; follow existing formatting. Get independent review of the exact pushed head.
 4. The operational gates below stay required and blocked until operator evidence exists. No mock test, synthetic reader or runbook-only change certifies this issue's outcome.
 
@@ -29,6 +29,20 @@ These replace the earlier list of choices. Each is a capability this branch adds
 - **Watch targets** are notification-only, independent of the engineering allowlist, capped at a fixed public 1000, and observed within 20 read calls per tick and 2400 per rolling hour. Throughput is a budget; no fixed full-sweep latency is claimed.
 - **Blockers** the existing reader seams cannot observe: release publication, the closing time of a pull request or an issue, and discovery of new repositories. AGENTS.md permits `gh api` and `gh search prs` in one exact shape each and this work adds no new shape. An import whose present watch category needs an unsupported surface is refused and reported; this is a required blocker, never bypassed by a second HTTP or subprocess path, and a synthetic reader is not evidence of a live bridge. Lifting it needs an explicit owner-approved constraint change, an ADR and pinned tests.
 - **Meals**: the issue's migration categories name tasks, reminders, captures, preferences, schedules and GitHub watches. Meal suggestions, restrictions and history are not a category, are not imported and remain in the source backup. A preference that would include meals is refused. Confirm with the owner before retiring the module if that is not intended.
+
+## Running the importer
+
+`pnpm import:assistant` (`import:assistant:prod` for the production profile) is an offline CLI. It reads the frozen profile configuration (owner, timezone, briefing times, weather, imported-preference selection) and compares a document with it; it writes none of that configuration.
+
+```bash
+pnpm import:assistant --db <private-db> --file <document.json>                 # validate only: the same code as --apply, rolled back
+pnpm import:assistant --db <private-db> --file <document.json> --verify        # counts-only comparison with what is stored
+pnpm import:assistant --db <private-db> --file <document.json> --backup <backup.db> --apply
+```
+
+`--apply` refuses unless all of the following hold: the database, document and backup are outside this repository; the document is `0600` in a `0700` directory; the backup passes SQLite's integrity check and has the same row count as the live database in every table right now (take it with `pnpm backup`, with the coordinator stopped, immediately beforehand); the database has no pending migrations; the shared runtime lock can be taken, which it cannot while a live coordinator holds the database; and every rule of the importer passes. Output is counts and rule names. Exit codes: 0 passed; 2 refused before the document was read (paths, permissions, configuration, schema); 3 the document or backup was refused; 4 a live process holds the database.
+
+A rehearsal uses a separate, disposable database with the mock transport and no Discord token. The importer is not a rehearsal of Discord delivery and says nothing about it.
 
 ## Import invariants
 

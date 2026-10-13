@@ -58,6 +58,13 @@ registered.
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
 | Repository workflow bridge (`$grill-me` / `$ticket` / `$agentize`) | **Unit-tested** | Off by default. 39 behaviour tests plus invariants drive a recording stand-in for the installed helper. **The real `workflow.py` has never been called from Ducky on this host**, because calling it creates GitHub issues |
+| Private-assistant migration: contract, atomic importer, correlation ledger (issue #9) | **Unit-tested; nothing has ever been imported** | Strict whole-document validation, one-transaction apply, repeat-import, conflict, capacity, owner-mismatch and backup/lock gating covered against real files outside the repository. No live source, live target database or production profile was touched. See *Detail: the private-assistant migration* |
+| Indefinite weekly schedules with dated exceptions | **Unit-tested** | Rules are computed for a requested window, never materialized: thirty years out, leap days, DST weeks, replaced batches, exception targeting, owner scoping, Forget and retention covered through the real briefing |
+| Imported task reminder policy and preferences | **Unit-tested** | Disabled, custom, default-deferring and deadline-fallback policies through Done, Edit and Snooze; preferences apply only when `DUCKY_IMPORTED_PREFERENCES` is set |
+| Notification-only watch targets: observation engine, budget, digest, alerts | **Unit-tested with a scripted reader** | Boundary rules, held partial reads, resume after a restart, fair oldest-due scheduling and the 20-per-tick / 2400-per-hour budget are covered. **No real reader exists for this surface** (next row) |
+| Notification-only watch targets: observing a real repository | **Blocked** | The shipped reader observes nothing. The existing `gh` shapes cannot see release publication or a pull request's or an issue's closing time, and repository discovery has no shape; AGENTS.md allows `gh api` and `gh search prs` in one exact shape each and none was added. An import with watch targets is refused until a reader declares every kind. Needs an owner-approved constraint change, an ADR and pinned tests |
+| Briefing weather | **Unit-tested; no live request made** | Parsing, caching, failure-to-null and the fixed host are covered with an injected `fetch`. No request to Open-Meteo has been made from this host |
+| Shared runtime lock (coordinator and importer) | **Unit-tested** | Refusal of any live holder (including an equal pid on another host), crash recovery and takeover covered. The wiring in `main.ts` has not been run against a live process |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
 ## The development profile is configured and the current process loaded it
@@ -1142,10 +1149,62 @@ deployment; automatic GitHub or Azure writes; arbitrary shell; browser
 automation; container sandboxing; concurrent implementation writers; executor-
 routed production actions; issue/deploy/Azure performers.
 
+## Detail: the private-assistant migration
+
+Issue #9 retires the owner's private assistant module only after its records and
+accepted behavior work in Ducky. The owner chose **full parity** on 2026-10-13.
+The design is [ADR 0030](decisions/0030-private-assistant-migration-and-parity-capabilities.md)
+and the procedure is [runbooks/dcstro-cutover.md](runbooks/dcstro-cutover.md).
+
+**What exists and is covered by tests:** the `ducky-assistant-import/v1` contract
+and its content-free failure report; `pnpm import:assistant` (validate, `--verify`,
+`--apply` behind a matching backup and the runtime lock); the permanent correlation
+ledger with trigger-written tombstones; indefinite weekly schedules and dated
+exceptions integrated with the briefing, `/forget` and retention; a per-task
+reminder policy that survives Done, Edit and Snooze; scoped, non-authoritative
+preferences with lookahead, captures, GitHub-digest and weather briefing sections;
+notification-only watch targets with typed checkpoints, held partial reads,
+separate alert and digest settlement and a fixed call budget; and the
+`/watch list targets` / `/watch remove` owner controls.
+
+**What does not exist, or was not done, and is therefore still required:**
+
+- **A real typed reader.** Release publication, closing times and repository
+  discovery cannot be observed through the existing seams, so the shipped reader
+  declares nothing and an import with watch targets fails closed.
+- **Every operational gate in the runbook.** No fresh live source backup or
+  restoration configuration, no private source-to-target parity, no live synthetic
+  notification or Done/Edit/Snooze/non-owner check, no reverse-delta rollback
+  bridge, no cutover and no module retirement. Nothing was imported, deployed,
+  stopped or changed on any real system.
+- **A rollback-delta export.** The importer reads a document and writes; nothing
+  yet exports Ducky-side changes back toward the source. The rollback bridge stays
+  a required, unproven gate.
+
+**Known differences from the source's behavior, stated rather than hidden:**
+
+- A requested-changes alert omits the source's "areas mentioned", which needed
+  per-pull-request file and comment reads the reader seams do not provide.
+- A morning briefing that came due and was never sent is skipped by Ducky's
+  existing six-hour staleness rule rather than the source's "after the evening time".
+- Ducky has no command to roll back to a replaced schedule batch; the batch is kept
+  as inert data and can be seen and deleted.
+- The source polled the 40 most recently pushed repositories per cycle; Ducky
+  reads every target fairly within its budget, so coverage is wider and latency per
+  repository is bounded by the budget, not a fixed cycle. No full-sweep latency is
+  claimed.
+- A briefing requested through the natural-language `briefing` intent is assembled
+  without the weather section, which needs a network read; `/briefing` and pushed
+  briefings include it.
+- Source priorities or categories Ducky cannot represent (`urgent`, categories),
+  AI wording, meals and a paused global watch switch are refused by validation, not
+  normalized. Meals are not one of the issue's migration categories, and are
+  retained in the source backup; confirm that is intended before retiring the module.
+
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
+The unmodified `pnpm test` command passes all **2062 tests in 133 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

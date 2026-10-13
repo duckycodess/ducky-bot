@@ -326,23 +326,24 @@ exercised; this says what it does.
   - `DUCKY_CONVERSATION_MEMORY_ENABLED` defaults to false, and with it off
     Ducky reads and writes no conversation row. The provider-owned OpenClaw
     transcript is a separate store and is reported separately below.
-  - When enabled, turns are stored **scoped to one (user, thread)**. Every
-    repository method takes the user id and puts it in the WHERE clause; there is
-    no `byId`, no `listAll` and no thread-only read, so there is no method that
-    could return another account's words. Two people in the same channel have two
-    histories.
+  - When enabled, ordinary channels and DMs keep histories scoped to one
+    (user, thread). Native Discord threads share their transcript among actual
+    participants: a thread read requires an explicit participation proof, and
+    visibility alone grants no access. Neither path exposes an unrestricted
+    cross-user history read.
   - **A configured shared channel is excluded from both reading and writing.** A
     message event carries no channel context, but its thread key IS the channel
     id, so the two can be compared — and a channel other people can read never
     becomes a store of the owner's words nor a source of replayed context.
-  - Bounded three ways: a replay window (`DUCKY_CONVERSATION_MEMORY_TURNS`,
-    default 10), a hard row cap per thread enforced in the same transaction as
-    the insert, and a per-turn length cap. An over-long turn is stored **visibly
-    truncated** rather than silently halved.
-  - Retention has two windows because the owner and a guest are not the same
-    thing: **30 days** for the owner's own history, **7** for anyone else on the
-    chat whitelist. Both configurable, both only consulted when retention is
-    enabled.
+  - Ordinary channels and DMs use a replay window
+    (`DUCKY_CONVERSATION_MEMORY_TURNS`, default 10), a transactional row cap
+    and a per-turn length cap. Native threads retain their full transcript;
+    checkpoints plus recent turns bound model context by the configured byte
+    budget. An over-long turn is stored visibly truncated.
+  - Ordinary history uses configurable retention windows of 30 days for the
+    owner and 7 days for other chat users when retention is enabled. Native
+    threads bypass those windows: live threads retain their transcript; closed
+    threads are purged whole only after their separate retention window.
   - The `role` column allows `user` and `assistant` only. There is deliberately
     no `system` role: a stored preamble would be configuration masquerading as
     history.

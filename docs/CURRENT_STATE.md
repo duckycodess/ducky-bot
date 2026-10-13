@@ -214,6 +214,22 @@ exercised; this says what it does.
     followed; a pointer to a pointer refuses. `$grill-me` also refuses without
     a `verified` provider. Plain replies continue an open interview, and they
     are read BEFORE the coding channel's ordinary conversation silence.
+  - **A queue outcome has four states, not two.** `not_requested`,
+    `not_queued`, `queued` and `unknown`. The publisher writes `agent:ready`
+    and then reads it back, so a failure after that write leaves a label that
+    may well be there; reporting it as "nothing was queued" is a false
+    negative about the only label that authorizes an agent, and the owner
+    stops looking. `unknown` says to open the issue and check.
+  - **The publication binding is released on success.** The canonical id and
+    issue number exist for RETRIES; keeping them after a success meant the
+    next, different `$ticket` in the thread rewrote the previous issue with an
+    unrelated contract.
+  - **A repository is addressed with `owner/name` as the leading token, or
+    not at all.** A bare slug is a word in a sentence, and matching one in the
+    prose silently retargeted the thread.
+  - **An abandoned run is ended by the next command in its thread**, bounded
+    by `STALE_RUN_AFTER_MS`, so a coordinator crash cannot make a thread
+    permanently unusable. A merely slow run is never swept.
   - **Classification is named, never chosen.** `$ticket --label <name>` is
     repeatable and bounded; with none, nothing is classified. `agent:*` is
     refused before a spawn, and a requested label the publisher did not read
@@ -949,7 +965,7 @@ routed production actions; issue/deploy/Azure performers.
 
 ## Verification
 
-`pnpm typecheck`, `pnpm test` (**97 files, 1337 tests**) and `pnpm build` all
+`pnpm typecheck`, `pnpm test` (**98 files, 1355 tests**) and `pnpm build` all
 pass on this host, with one standing caveat recorded honestly: seven tests fail
 in a FRESH worktree and fail identically at the previous commit. Four in
 `outbound.test.ts` and one in `result-intake.test.ts` assert on the literal

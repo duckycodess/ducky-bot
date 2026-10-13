@@ -127,7 +127,7 @@ describe('cancelling a run that is already in flight', () => {
     // The cancellation stands. A run the owner stopped must not come back as
     // queued because a subprocess happened to finish afterwards.
     expect(row.runStatus).toBe('cancelled');
-    expect(row.runQueued).toBe(false);
+    expect(row.queueState).not.toBe('queued');
     for (const card of cards(h)) {
       expect(cardText(card)).not.toMatch(/Queued for implementation/);
     }

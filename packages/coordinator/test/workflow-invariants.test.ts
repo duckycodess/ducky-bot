@@ -174,6 +174,29 @@ describe('the bridge configuration fails closed and keeps the profiles apart', (
     ).toThrow(/workflow bridge is not/i);
   });
 
+  it('scopes the interpreter per profile like every other helper setting', () => {
+    const resolved = resolveSkillBridge(loadEnv({
+      OWNER_DISCORD_USER_ID: '100000000000000001',
+      DUCKY_PROFILE: 'production',
+      DUCKY_PROD_COMPONENT_SIGNING_KEY: 'x'.repeat(43),
+      DUCKY_PROD_SKILL_BRIDGE_ENABLED: '1',
+      DUCKY_PROD_WORKFLOW_HELPER: '/prod/workflow.py',
+      // A development interpreter is a development host's python, and
+      // production must not run its publisher under one.
+      DUCKY_DEV_WORKFLOW_PYTHON: '/dev/bin/python3',
+      DUCKY_WORKFLOW_PYTHON: '/shared/bin/python3',
+    } as NodeJS.ProcessEnv));
+    expect(resolved.interpreter).toBe('python3');
+
+    const dev = resolveSkillBridge(loadEnv({
+      ...base,
+      DUCKY_DEV_SKILL_BRIDGE_ENABLED: '1',
+      DUCKY_DEV_WORKFLOW_HELPER: '/dev/workflow.py',
+      DUCKY_DEV_WORKFLOW_PYTHON: '/dev/bin/python3',
+    } as NodeJS.ProcessEnv));
+    expect(dev.interpreter).toBe('/dev/bin/python3');
+  });
+
   it('never lets production inherit a development helper', () => {
     const resolved = resolveSkillBridge(loadEnv({
       OWNER_DISCORD_USER_ID: '100000000000000001',

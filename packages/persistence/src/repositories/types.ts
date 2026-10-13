@@ -2,7 +2,7 @@ import type {
   AgentCardStatus, ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome,
   AuditSubjectKind, CaptureState, ConversationRole, DependencyCheckStatus, DependencyState,
   DependencyType, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
-  SkillCommand, TaskPriority, TaskState,
+  QueueState, SkillCommand, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -439,8 +439,14 @@ export interface AgentThreadRow {
   runDetail: string | null;
   /** Whether the owner typed `--ready` on the run that produced this card. */
   runReady: boolean;
-  /** Whether the exact `agent:ready` label was applied AND verified. */
-  runQueued: boolean;
+  /**
+   * What is KNOWN about the `agent:ready` label after this run.
+   *
+   * Four states rather than a boolean, because a publisher that wrote the
+   * label and then failed to read it back leaves a state no boolean can
+   * express. See migration 23.
+   */
+  queueState: QueueState;
   runStartedAt: string | null;
   runFinishedAt: string | null;
   cardChannelId: string | null;

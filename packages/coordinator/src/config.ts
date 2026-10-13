@@ -230,8 +230,17 @@ export const EnvSchema = z.object({
   DUCKY_WORKFLOW_HELPER: z.string().optional(),
   DUCKY_DEV_WORKFLOW_HELPER: z.string().optional(),
   DUCKY_PROD_WORKFLOW_HELPER: z.string().optional(),
-  /** The interpreter the helper runs under. A bare name or an absolute path. */
-  DUCKY_WORKFLOW_PYTHON: z.string().default('python3'),
+  /**
+   * The interpreter the helper runs under. A bare name or an absolute path.
+   *
+   * Profile-scoped like everything else here: a development interpreter is a
+   * development host's python, and a production publisher must not be run
+   * under one. The unscoped name stays accepted for a single-profile
+   * development box; production reads only its own.
+   */
+  DUCKY_WORKFLOW_PYTHON: z.string().optional(),
+  DUCKY_DEV_WORKFLOW_PYTHON: z.string().optional(),
+  DUCKY_PROD_WORKFLOW_PYTHON: z.string().optional(),
   DUCKY_WORKFLOW_MUTATION_ENABLED: bool(false),
   DUCKY_DEV_WORKFLOW_MUTATION_ENABLED: bool(false),
   DUCKY_PROD_WORKFLOW_MUTATION_ENABLED: bool(false),
@@ -648,6 +657,11 @@ export const resolveSkillBridge = (env: Env): {
     blankToUndefined(env.DUCKY_DEV_WORKFLOW_HELPER),
     blankToUndefined(env.DUCKY_WORKFLOW_HELPER),
   );
+  const interpreter = scoped(
+    blankToUndefined(env.DUCKY_PROD_WORKFLOW_PYTHON),
+    blankToUndefined(env.DUCKY_DEV_WORKFLOW_PYTHON),
+    blankToUndefined(env.DUCKY_WORKFLOW_PYTHON),
+  ) ?? 'python3';
   const grillSkillPath = scoped(
     blankToUndefined(env.DUCKY_PROD_WORKFLOW_GRILL_SKILL),
     blankToUndefined(env.DUCKY_DEV_WORKFLOW_GRILL_SKILL),
@@ -682,11 +696,5 @@ export const resolveSkillBridge = (env: Env): {
     );
   }
 
-  return {
-    enabled,
-    program,
-    interpreter: env.DUCKY_WORKFLOW_PYTHON,
-    mutationEnabled,
-    grillSkillPath,
-  };
+  return { enabled, program, interpreter, mutationEnabled, grillSkillPath };
 };

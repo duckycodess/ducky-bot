@@ -150,3 +150,30 @@ describe('classification is named by the owner, never chosen', () => {
     expect(parseSkillCommand('$grill-me --label bug')?.labels).toEqual([]);
   });
 });
+
+describe('a quoted line after the command is data too', () => {
+  /**
+   * Recognition already refuses a message whose FIRST token is quoted. The
+   * flag scan has to apply the same rule to every later line, or quoting
+   * somebody who mentioned `--ready` authorizes a queue in their name.
+   */
+  it('ignores --ready on a quoted line', () => {
+    expect(parseSkillCommand('$ticket add a health endpoint\n> and then --ready')?.ready)
+      .toBe(false);
+    expect(parseSkillCommand('$ticket fix it\n>>> --ready please')?.ready).toBe(false);
+    expect(parseSkillCommand('$ticket fix it\n  > --ready')?.ready).toBe(false);
+  });
+
+  it('ignores --label on a quoted line', () => {
+    expect(parseSkillCommand('$ticket fix it\n> use --label bug')?.labels).toEqual([]);
+  });
+
+  it('keeps a quoted line out of the intent text', () => {
+    const parsed = parseSkillCommand('$ticket add a health endpoint\n> someone else said this');
+    expect(parsed?.args).toBe('add a health endpoint');
+  });
+
+  it('still honours a flag the owner typed on an unquoted later line', () => {
+    expect(parseSkillCommand('$ticket add a health endpoint\n--ready')?.ready).toBe(true);
+  });
+});

@@ -95,14 +95,41 @@ function firstTokenIsQuoted(raw: string): boolean {
 }
 
 /**
- * Removes code spans and fenced blocks before flag scanning.
+ * Removes everything that is somebody else's words before the flag scan.
  *
- * `--ready` inside a pasted command line is somebody describing the flag, not
- * the owner authorizing a queue. Scanning the stripped text means the only way
- * to queue is to type the flag in the clear.
+ * Two kinds, and the second was missed at first with real consequences.
+ *
+ * CODE: `--ready` inside a pasted command line is somebody describing the
+ * flag, not the owner authorizing a queue.
+ *
+ * QUOTES: recognition already refuses a message whose FIRST token is quoted,
+ * but the scan ran over every later line unchanged -- so quoting somebody who
+ * had written `--ready` authorized a queue in their name. A quote is data
+ * wherever it appears in the message, not only at the top, and that has to be
+ * true of the argument text as well as of the flags: a quoted line must not
+ * become part of what the ticket says the work IS.
  */
-const stripCode = (s: string): string =>
-  s.replace(/```[\s\S]*?```/g, ' ').replace(/~~~[\s\S]*?~~~/g, ' ').replace(/`[^`\n]*`/g, ' ');
+const stripQuoted = (s: string): string =>
+  s
+    // A fenced block is somebody's pasted output, wherever it sits.
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/~~~[\s\S]*?~~~/g, ' ')
+    // Any line whose first non-space character is `>`: a Discord quote, a
+    // block quote, or a nested one.
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*>/.test(line))
+    .join('\n');
+
+/**
+ * Additionally removes inline code, for the FLAG scan only.
+ *
+ * An inline code span is still the owner's own writing -- `` `parseWhen` ``
+ * in a sentence is them naming a function, and dropping it would quietly
+ * remove a word from the ticket they are writing. It is simply not a place a
+ * flag can be typed, so it is stripped where flags are read and kept where
+ * intent is read.
+ */
+const stripInlineCode = (s: string): string => s.replace(/`[^`\n]*`/g, ' ');
 
 /**
  * Reads one message as a workflow command, or declines to.
@@ -124,9 +151,14 @@ export function parseSkillCommand(text: string): ParsedSkillCommand | undefined 
   const token = match[1]!;
   if (!isSkillCommand(token)) return undefined;
 
-  const rest = (match[2] ?? '').slice(0, SKILL_COMMAND_ARGS_MAX);
-  const scannable = stripCode(rest);
-  const tokens = scannable.split(/\s+/).filter(Boolean);
+  /**
+   * The owner's OWN words only, for both the flags and the intent.
+   *
+   * One stripped string feeds both, so there is no way for a line to be
+   * ignored by the flag scan and still reach the ticket body, or the reverse.
+   */
+  const rest = stripQuoted((match[2] ?? '').slice(0, SKILL_COMMAND_ARGS_MAX));
+  const tokens = stripInlineCode(rest).split(/\s+/).filter(Boolean);
 
   // Recognised only for the command that defines them, and only as bare
   // tokens outside code.
@@ -251,4 +283,25 @@ export const AGENT_CARD_NEXT: Record<AgentCardStatus, string> = {
   needs_input: 'Answer in this thread, then run the command again.',
   failed: 'Nothing was queued and nothing was started.',
   cancelled: 'Nothing further will happen for this request.',
+};
+
+/**
+ * What is known about the `agent:ready` label after a `$ticket` run.
+ *
+ * Four states, not a boolean, because a boolean cannot say "I do not know" --
+ * and that is exactly the state a publisher that wrote the label and then
+ * failed to read it back leaves behind. Reporting that as "not queued" is a
+ * false negative about the one label that authorizes an agent to start work.
+ */
+export const QUEUE_STATES = ['not_requested', 'not_queued', 'queued', 'unknown'] as const;
+export type QueueState = (typeof QUEUE_STATES)[number];
+
+/** What each state means to the owner, written out because the words matter. */
+export const QUEUE_STATE_LABEL: Record<QueueState, string> = {
+  not_requested: 'Not requested. The issue, if any, is unqueued.',
+  not_queued: 'Not applied. The run stopped before any label could be written.',
+  queued: 'agent:ready is applied and was verified on the issue.',
+  unknown:
+    'UNKNOWN. The label may have been applied before the failure and could not be confirmed. ' +
+    'Open the issue and check for agent:ready before assuming either way.',
 };

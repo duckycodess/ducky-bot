@@ -238,7 +238,7 @@ describe('$ticket publishes through the installed helper only', () => {
     const publish = door.calls.find((c) => c.kind === 'publish')!;
     expect(publish.input['ready']).toBe(false);
     expect(replyText(reply)).toMatch(/not queued/i);
-    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.runQueued).toBe(false);
+    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.queueState).not.toBe('queued');
     expect(cardText(cards(h).at(-1))).toContain('does not authorize implementation');
     h.close();
   });
@@ -248,7 +248,7 @@ describe('$ticket publishes through the installed helper only', () => {
     const reply = await say(h, '$ticket --ready add a health endpoint');
 
     expect(door.calls.find((c) => c.kind === 'publish')!.input['ready']).toBe(true);
-    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.runQueued).toBe(true);
+    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.queueState).toBe('queued');
     expect(replyText(reply)).toMatch(/not evidence that a worker started/i);
     // The word that must never appear for a queued ticket.
     expect(cardText(cards(h).at(-1))).not.toMatch(/"Running/);
@@ -280,8 +280,16 @@ describe('$ticket publishes through the installed helper only', () => {
     h.close();
   });
 
-  it('reuses the canonical id and the issue on a retry', async () => {
-    const { h, door } = await boot();
+  it('reuses the canonical id and the issue while the publication has not succeeded', async () => {
+    /**
+     * The binding exists for RETRIES. While a publication keeps failing, the
+     * same canonical id and the same issue number go back, so the helper
+     * enriches rather than opening a second issue.
+     */
+    const door = new MockFrontDoor({
+      publish: { ok: false, issue: 41, url: 'https://github.com/acme/demo/issues/41', error: 'transient' },
+    });
+    const { h } = await boot({ door });
     await say(h, '$ticket add a health endpoint');
     const first = door.calls.find((c) => c.kind === 'publish')!.input;
     const uuid = h.store.agentThreads.get(OWNER, 'dm-1')!.ticketUuid;
@@ -291,9 +299,29 @@ describe('$ticket publishes through the installed helper only', () => {
 
     expect(second['id']).toBe(first['id']);
     expect(second['id']).toBe(uuid);
-    // And the retry names the issue the first run created, so the helper
-    // enriches it rather than opening a second one.
     expect(second['issue']).toBe(41);
+    h.close();
+  });
+
+  it('releases the binding once a publication succeeds', async () => {
+    /**
+     * ...and releases it the moment one succeeds. Keeping it meant the next,
+     * DIFFERENT ticket in the thread inherited the issue and rewrote it with
+     * an unrelated contract.
+     */
+    const { h, door } = await boot();
+    await say(h, '$ticket add a health endpoint');
+    const row = h.store.agentThreads.get(OWNER, 'dm-1')!;
+
+    expect(row.ticketUuid).toBeNull();
+    expect(row.issueNumber).toBeNull();
+    // The URL survives, because the card's View issue link is about what this
+    // run produced rather than about what the next one should enrich.
+    expect(row.issueUrl).toBe('https://github.com/acme/demo/issues/41');
+
+    await say(h, '$ticket add a logout endpoint');
+    const second = door.calls.filter((c) => c.kind === 'publish')[1]!.input;
+    expect(second['issue']).toBeUndefined();
     h.close();
   });
 
@@ -305,10 +333,13 @@ describe('$ticket publishes through the installed helper only', () => {
     const reply = await say(h, '$ticket --ready add a health endpoint');
 
     expect(replyText(reply)).toMatch(/not enabled in existing dispatcher/);
-    expect(replyText(reply)).toMatch(/nothing was queued and nothing was started/i);
+    // Never queued, never started -- and, because the owner HAD asked and the
+    // publisher writes the label before it reads it back, never a flat
+    // "nothing was queued" either. See the review suite for that distinction.
+    expect(replyText(reply)).toMatch(/nothing was started/i);
     const row = h.store.agentThreads.get(OWNER, 'dm-1')!;
     expect(row.runStatus).toBe('failed');
-    expect(row.runQueued).toBe(false);
+    expect(row.queueState).not.toBe('queued');
     h.close();
   });
 
@@ -318,7 +349,7 @@ describe('$ticket publishes through the installed helper only', () => {
     const door = new MockFrontDoor({ publish: { queued: false, queueVerified: false } });
     const { h } = await boot({ door });
     await say(h, '$ticket --ready add a health endpoint');
-    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.runQueued).toBe(false);
+    expect(h.store.agentThreads.get(OWNER, 'dm-1')?.queueState).not.toBe('queued');
     expect(cardText(cards(h).at(-1))).toContain('did NOT complete');
     h.close();
   });

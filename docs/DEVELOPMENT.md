@@ -64,8 +64,9 @@ Fill in the env file:
   - `DUCKY_DEV_WORKFLOW_HELPER` — the ABSOLUTE path to the installed Agent Flow
     front door (`workflow.py`). There is no default and no search: a helper
     Ducky located on its own would be a program nobody chose to run. Enabling
-    the bridge without this fails at boot. `DUCKY_WORKFLOW_PYTHON` selects the
-    interpreter and defaults to `python3`.
+    the bridge without this fails at boot. `DUCKY_DEV_WORKFLOW_PYTHON` selects the
+    interpreter and defaults to `python3`; it is profile-scoped like the rest,
+    because a development interpreter is a development host's python.
   - `DUCKY_DEV_WORKFLOW_MUTATION_ENABLED` — whether publishing and onboarding
     may run. Separate on exactly the terms `DUCKY_APPROVED_ACTIONS_ENABLED` is
     separate: creating a GitHub issue is an external write. With it off,

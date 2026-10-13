@@ -1,4 +1,4 @@
-import type { AgentCardStatus, SkillCommand } from '@ducky/contracts';
+import type { AgentCardStatus, QueueState, SkillCommand } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { fromBool, toBool, type AgentThreadRow } from './types.js';
 
@@ -31,7 +31,7 @@ const map = (r: Record<string, unknown>): AgentThreadRow => ({
   runStatus: r['run_status'] == null ? null : (String(r['run_status']) as AgentCardStatus),
   runDetail: r['run_detail'] == null ? null : String(r['run_detail']),
   runReady: toBool(r['run_ready']),
-  runQueued: toBool(r['run_queued']),
+  queueState: String(r['run_queue_state'] ?? 'not_requested') as QueueState,
   runStartedAt: r['run_started_at'] == null ? null : String(r['run_started_at']),
   runFinishedAt: r['run_finished_at'] == null ? null : String(r['run_finished_at']),
   cardChannelId: r['card_channel_id'] == null ? null : String(r['card_channel_id']),
@@ -160,6 +160,29 @@ export class AgentThreadsRepo {
       .run(nowIso, ownerId, threadKey);
   }
 
+  /**
+   * Clears the publication BINDING after a run that genuinely published.
+   *
+   * The binding -- the canonical id and the issue number -- is what makes a
+   * RETRY enrich the same issue instead of opening a second one. Once a
+   * publication has actually succeeded there is nothing left to retry, and
+   * keeping it meant the next, DIFFERENT `$ticket` in the thread inherited it
+   * and rewrote the previous issue with an unrelated contract. That is a
+   * silent, destructive edit to work somebody may already be acting on.
+   *
+   * The issue URL is deliberately kept: the card's "View issue" link is about
+   * what this run produced, which is a different question from what the next
+   * run should enrich.
+   */
+  clearPublicationBinding(ownerId: string, threadKey: string, runId: string, nowIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE agent_threads SET ticket_uuid = NULL, issue_number = NULL, updated_at = ?
+          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
+      )
+      .run(nowIso, ownerId, threadKey, runId);
+  }
+
   /** The canonical id for this thread's publication, minted once and reused. */
   setTicketUuid(ownerId: string, threadKey: string, uuid: string, nowIso: string): void {
     this.db
@@ -232,13 +255,16 @@ export class AgentThreadsRepo {
       .prepare(
         `UPDATE agent_threads
             SET run_id = ?, run_command = ?, run_status = ?, run_detail = ?, run_ready = ?,
-                run_queued = 0, run_started_at = ?, run_finished_at = NULL,
+                run_queue_state = ?, run_started_at = ?, run_finished_at = NULL,
                 card_channel_id = NULL, card_message_id = NULL, updated_at = ?
           WHERE discord_user_id = ? AND thread_key = ?
             AND (run_id IS NULL OR run_finished_at IS NOT NULL)`,
       )
       .run(
         run.runId, run.command, run.status, run.detail, fromBool(run.ready),
+        // A fresh run starts from what the OWNER asked for, never from what
+        // the previous one ended up knowing.
+        run.ready ? 'not_queued' : 'not_requested',
         nowIso, nowIso, ownerId, threadKey,
       );
     return Number(result.changes) > 0 ? this.get(ownerId, threadKey)! : undefined;
@@ -280,7 +306,8 @@ export class AgentThreadsRepo {
       status: AgentCardStatus;
       /** Omitted or null: unchanged. */
       detail?: string | null;
-      queued?: boolean;
+      /** Omitted: unchanged. `unknown` is a real answer, not a missing one. */
+      queueState?: QueueState;
       finished?: boolean;
     },
     nowIso: string,
@@ -290,7 +317,7 @@ export class AgentThreadsRepo {
         `UPDATE agent_threads
             SET run_status = ?,
                 run_detail = COALESCE(?, run_detail),
-                run_queued = COALESCE(?, run_queued),
+                run_queue_state = COALESCE(?, run_queue_state),
                 run_finished_at = CASE WHEN ? = 1 THEN ? ELSE run_finished_at END,
                 updated_at = ?
           WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?
@@ -299,7 +326,7 @@ export class AgentThreadsRepo {
       .run(
         patch.status,
         patch.detail ?? null,
-        patch.queued === undefined ? null : fromBool(patch.queued),
+        patch.queueState ?? null,
         fromBool(patch.finished ?? false),
         nowIso,
         nowIso,
@@ -328,6 +355,47 @@ export class AgentThreadsRepo {
           WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?`,
       )
       .run(card.channelId, card.messageId, nowIso, ownerId, threadKey, runId);
+  }
+
+  /**
+   * Ends a run that outlived its budget, and says what is unknown about it.
+   *
+   * A coordinator that is killed mid-call leaves `run_finished_at` NULL
+   * forever, and the single-writer gate then refuses every later command in
+   * that thread -- a crash during one `$ticket` would make the thread
+   * permanently unusable. This is the bounded recovery: one statement,
+   * driven off the row's own start time, with no timer and no second
+   * scheduler.
+   *
+   * The queue state it leaves behind is the honest one. A `$ticket --ready`
+   * that vanished mid-publish may have applied the label; nothing here can
+   * tell, so it says `unknown` rather than guessing in either direction.
+   */
+  expireStaleRun(
+    ownerId: string,
+    threadKey: string,
+    beforeIso: string,
+    detail: string,
+    nowIso: string,
+  ): AgentThreadRow | undefined {
+    const before = this.get(ownerId, threadKey);
+    if (!before?.runId || before.runFinishedAt !== null) return undefined;
+    const startedAt = before.runStartedAt ?? before.updatedAt;
+    if (startedAt > beforeIso) return undefined;
+
+    const result = this.db
+      .prepare(
+        `UPDATE agent_threads
+            SET run_status = 'failed',
+                run_detail = ?,
+                run_queue_state = CASE WHEN run_ready = 1 THEN 'unknown' ELSE run_queue_state END,
+                run_finished_at = ?,
+                updated_at = ?
+          WHERE discord_user_id = ? AND thread_key = ? AND run_id = ?
+            AND run_finished_at IS NULL`,
+      )
+      .run(detail, nowIso, nowIso, ownerId, threadKey, before.runId);
+    return Number(result.changes) > 0 ? this.get(ownerId, threadKey) : undefined;
   }
 
   /** Owner-scoped, like everything else. A run id alone finds nothing. */

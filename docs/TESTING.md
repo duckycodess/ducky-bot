@@ -53,7 +53,10 @@ in FIRST position; a fenced block, a quote prefix, an inline code span, a
 mid-sentence mention and a near-miss token (`$ticketing`, `$ticket:`) all mean
 nothing; `ticket it`, `queue it`, `implement this` and `make this agent ready`
 are ordinary English; `--ready` is read only as a bare token, only on
-`$ticket`, and never from inside a code span; `--label` is repeatable,
+`$ticket`, never from inside a code span, and never from a QUOTED line
+anywhere in the message -- quoting somebody who wrote `--ready` must not
+authorize a queue in their name, and a quoted line stays out of the intent
+text too; `--label` is repeatable,
 de-duplicated, bounded, removed from the intent text along with its value, and
 names nothing for a trailing flag or a flag-shaped value; and the card
 vocabulary never labels a queued ticket as running or a published one as
@@ -105,6 +108,18 @@ with "…"` redirect to the file that carries the method, never sending the
 pointer itself; it refuses when the redirect target is missing and when a
 pointer points at another pointer; and a usable installed skill still opens the
 interview with the method in its instructions.
+
+**coordinator / skill bridge review findings** — the five defects an
+independent review found, each covered by a test written to fail first: a
+publisher failure or timeout after `--ready` reports the queue state as
+UNKNOWN and tells the owner to check, never as "nothing was queued", while a
+failure before any label still reports a true negative; a successful
+publication releases its binding so the next, different ticket does not rewrite
+the previous issue, and a retry before success still reuses both id and issue;
+a run abandoned by a crash is swept by the next command in its thread while a
+merely slow one is left alone; and a repository is bound only by an explicit
+leading `owner/name`, with prose that merely mentions a slug changing nothing
+and an unaddressed ambiguous thread asking.
 
 **coordinator / workflow invariants** — the bridge and its presenters name no
 `gh` surface, no issue or label API, and no `JobsService`, and spawn nothing

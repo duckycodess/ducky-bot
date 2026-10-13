@@ -55,6 +55,41 @@ before a spawn, so a classification can never become the label that authorizes
 implementation, and a label the owner asked for that the publisher did not read
 back fails the run rather than being reported as a published ticket.
 
+**A queue outcome can be UNKNOWN, and says so.** The installed publisher
+applies `agent:ready` and then reads it back, so a failure after that write --
+a read-back error, a subprocess timeout, a coordinator that died mid-call --
+leaves a label that may well be on the issue. The stored outcome is therefore
+one of four states rather than a boolean: `not_requested`, `not_queued`
+(stopped before any label could be written), `queued` (applied AND verified),
+`unknown`. The card, the reply and the Details view all read the same state,
+and `unknown` tells the owner to open the issue and look. A false negative
+about the one label that authorizes an agent is worse than no answer, because
+the owner stops looking.
+
+**The publication binding is released the moment a publication succeeds.** The
+canonical id and the issue number exist so a RETRY enriches the same issue;
+once a publication has succeeded there is nothing to retry, and keeping them
+meant the next -- DIFFERENT -- `$ticket` in that thread inherited them and
+rewrote the previous issue with an unrelated contract. The issue URL is kept
+for the card's link, which is a different question. The cost is that
+authorizing an already-published issue means sending `$ticket --ready` with the
+description again, and that is the right trade against a silent destructive
+edit to work somebody may already be acting on.
+
+**A repository is addressed, never merely mentioned.** Only `owner/name`, and
+only as the leading token of the arguments. A bare slug is a word people say in
+sentences: matching one anywhere in the prose meant "fix the widgets rendering"
+silently retargeted the whole thread. The addressing token is also removed from
+the intent, so it cannot become the first words of the ticket's goal.
+
+**An abandoned run is ended on use, not left forever.** A coordinator killed
+mid-call leaves a run that never finished, and the single-writer gate would
+then refuse every later command in that thread -- one crash, one permanently
+unusable thread. The next command in the thread sweeps it, bounded by
+`STALE_RUN_AFTER_MS` (ten times the publish timeout, so a merely slow run is
+never swept). Its outcome is reported as `unknown` when queueing had been
+asked for: nothing here can know what the vanished call did.
+
 **Ducky publishes nothing itself.** No `gh issue create`, no label API, no
 Beads edge. The bridge calls the installed front door through a typed port and
 reads structured fields back. A test asserts the service and its presenters

@@ -69,7 +69,18 @@ export class MockFrontDoor implements FrontDoorPort {
   }
 
   async validate(spec: TicketSpec, _signal?: AbortSignal): Promise<FrontDoorValidation> {
-    this.calls.push({ kind: 'validate', input: { id: spec.id, repository: spec.repository } });
+    // The title and goal are recorded so a test can assert what the ticket
+    // actually SAYS, not merely that a spec was handed over.
+    this.calls.push({
+      kind: 'validate',
+      input: {
+        id: spec.id,
+        repository: spec.repository,
+        title: spec.title,
+        goal: spec.goal,
+        acceptance_criteria: [...spec.acceptance_criteria],
+      },
+    });
     return { ok: true, id: spec.id, error: undefined, ...this.script.validate };
   }
 

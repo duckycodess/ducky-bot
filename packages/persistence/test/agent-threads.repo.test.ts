@@ -176,12 +176,12 @@ describe('the card on a thread', () => {
 
     expect(
       store.agentThreads.updateRun(
-        OWNER, 't1', 'a00001', { status: 'queued', queued: true, finished: true }, NOW,
+        OWNER, 't1', 'a00001', { status: 'queued', queueState: 'queued', finished: true }, NOW,
       ),
     ).toBeUndefined();
     const row = store.agentThreads.get(OWNER, 't1')!;
     expect(row.runStatus).toBe('cancelled');
-    expect(row.runQueued).toBe(false);
+    expect(row.queueState).not.toBe('queued');
   });
 
   it('records a publication only onto the run that made it', () => {
@@ -214,10 +214,12 @@ describe('the card on a thread', () => {
     store.agentThreads.updateRun(OWNER, 't1', 'a99999', { status: 'cancelled' }, NOW);
     expect(store.agentThreads.get(OWNER, 't1')!.runStatus).toBe('publishing');
 
-    store.agentThreads.updateRun(OWNER, 't1', 'a00001', { status: 'queued', queued: true, finished: true }, NOW);
+    store.agentThreads.updateRun(
+      OWNER, 't1', 'a00001', { status: 'queued', queueState: 'queued', finished: true }, NOW,
+    );
     const row = store.agentThreads.get(OWNER, 't1')!;
     expect(row.runStatus).toBe('queued');
-    expect(row.runQueued).toBe(true);
+    expect(row.queueState).toBe('queued');
     expect(row.runFinishedAt).not.toBeNull();
   });
 

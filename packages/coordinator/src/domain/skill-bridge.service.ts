@@ -1,10 +1,11 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import {
-  AGENT_CARD_DETAIL_MAX, GRILL_SESSION_TTL_MS,
+  AGENT_CARD_DETAIL_MAX, GRILL_SESSION_TTL_MS, QUEUE_STATE_LABEL, STALE_RUN_AFTER_MS,
   DuckyError, isTicketRepository, newPublicAgentRunId, newUuid, parseSkillCommand,
   preflightTicketSpec,
-  type AgentCardStatus, type ParsedSkillCommand, type SkillCommand, type TicketSpec,
+  type AgentCardStatus, type ParsedSkillCommand, type QueueState, type SkillCommand,
+  type TicketSpec,
 } from '@ducky/contracts';
 import type { ConversationProvider, FrontDoorInspection, FrontDoorPort } from '@ducky/adapters';
 import type { AgentThreadRow, Store } from '@ducky/persistence';
@@ -132,6 +133,18 @@ export class SkillBridgeService {
      */
     if (!this.deps.authz.isOwner(actor)) return undefined;
 
+    /**
+     * Recover an abandoned run before deciding anything else.
+     *
+     * A coordinator killed mid-call leaves a run that never finished, and the
+     * single-writer gate would then refuse every later command in this thread
+     * -- one crash, one permanently unusable thread. Swept HERE, on use,
+     * rather than on a timer: there is one place that decides, it decides
+     * from the row's own start time, and it costs one read on a path that
+     * already reads the row. The same shape the intent proposals use.
+     */
+    await this.expireAbandonedRun(actor, event);
+
     const parsed = parseSkillCommand(event.text);
     if (!parsed) return this.continueGrill(actor, event);
 
@@ -239,9 +252,9 @@ export class SkillBridgeService {
 
     // The owner's own opening words, if they typed any, are the first thing
     // the interview is about -- and the first thing `$ticket` will read back.
-    if (parsed.args !== '') {
+    if (target.intent !== '') {
       this.deps.store.agentThreads.appendNote(
-        actor.discordUserId, event.threadKey, parsed.args, this.now(),
+        actor.discordUserId, event.threadKey, target.intent, this.now(),
       );
     }
     /**
@@ -257,7 +270,9 @@ export class SkillBridgeService {
       this.now(),
     );
     this.releaseRun(actor, event.threadKey);
-    return this.grillTurn(actor, event, scanned, parsed.args || 'Start the interview.', skill, found);
+    return this.grillTurn(
+      actor, event, scanned, target.intent || 'Start the interview.', skill, found,
+    );
   }
 
   /**
@@ -446,14 +461,18 @@ export class SkillBridgeService {
           : {}),
       });
     } catch (err) {
-      return this.failRun(actor, event, run, err);
+      // Before any publish attempt: no label can exist, so this is a true
+      // negative rather than an unknown.
+      return this.failRun(actor, event, run, err, { queueState: 'not_queued' });
     }
     if (!this.stillLive(actor, event.threadKey, run.runId)) {
       this.releaseRun(actor, event.threadKey);
       return this.stoppedReply();
     }
 
-    const notes = this.settledIntent(actor, event.threadKey, parsed.args);
+    // The repository token, when one was typed, has already been removed: it
+    // is addressing, not a statement about what the work is.
+    const notes = this.settledIntent(actor, event.threadKey, target.intent);
     if (notes.length === 0) {
       const asked = this.deps.store.agentThreads.updateRun(
         actor.discordUserId, event.threadKey, run.runId,
@@ -475,7 +494,12 @@ export class SkillBridgeService {
 
     const spec = this.buildSpec(actor, event.threadKey, target.repo.repository, notes, found);
     const problem = preflightTicketSpec(spec);
-    if (problem) return this.failRun(actor, event, run, new DuckyError('invalid_input', problem));
+    if (problem) {
+      return this.failRun(
+        actor, event, run, new DuckyError('invalid_input', problem),
+        { queueState: 'not_queued' },
+      );
+    }
 
     // No new detail: what the scan found still reads true, and `updateRun`
     // treats an omitted detail as unchanged.
@@ -502,10 +526,11 @@ export class SkillBridgeService {
         return this.failRun(
           actor, event, publishing,
           new DuckyError('invalid_input', validated.error ?? 'the canonical schema refused it'),
+          { queueState: 'not_queued' },
         );
       }
     } catch (err) {
-      return this.failRun(actor, event, publishing, err);
+      return this.failRun(actor, event, publishing, err, { queueState: 'not_queued' });
     }
     /**
      * The LAST point at which cancelling still prevents something.
@@ -528,6 +553,7 @@ export class SkillBridgeService {
           'not_enabled_in_phase1',
           'the ticket is valid, but publishing is not enabled on this instance, so no issue was created',
         ),
+        { queueState: 'not_queued' },
       );
     }
 
@@ -553,10 +579,21 @@ export class SkillBridgeService {
       });
 
       if (!published.ok) {
+        /**
+         * The publisher ran and refused. Whether a label landed depends on
+         * how far it got, and its answer cannot tell us: the helper applies
+         * `agent:ready` and THEN verifies it, and its failure path resets
+         * `queued` to false either way. So a run that ASKED to queue reports
+         * `unknown`, and one that did not asked for no label at all.
+         */
         return this.failRun(
           actor, event, publishing,
           new DuckyError('invalid_input', published.error ?? 'the publisher refused it'),
-          published.url ?? undefined,
+          {
+            queueState: parsed.ready ? 'unknown' : 'not_requested',
+            ...(published.issue === undefined ? {} : { issueNumber: published.issue }),
+            ...(published.url === undefined ? {} : { issueUrl: published.url }),
+          },
         );
       }
 
@@ -597,31 +634,53 @@ export class SkillBridgeService {
        * neither is evidence that a worker started -- the card's own copy says
        * that, and Ducky never observes a worker at all.
        */
-      const status: AgentCardStatus =
-        parsed.ready && published.queued && published.queueVerified ? 'queued' : 'published';
+      const queueState = queueStateFrom(parsed.ready, published);
+      const status: AgentCardStatus = queueState === 'queued' ? 'queued' : 'published';
       const detail = publicationDetail(published, parsed.ready, found.completionPolicy);
       // A label the owner asked for that did not land is a failure, not a
       // detail: the publisher verifies its own read-back, and reporting the
       // ticket as published while a requested classification is missing would
       // be a partial success dressed as a whole one.
       if (parsed.labels.length > 0 && !published.classificationVerified) {
+        // The publication itself succeeded, so what is known about the QUEUE
+        // is what the publisher reported -- not a blanket negative.
         return this.failRun(
           actor, event, publishing,
           new DuckyError(
             'invalid_input',
             'the issue exists but a classification label you asked for was not verified on it',
           ),
-          published.url ?? undefined,
+          {
+            queueState: queueStateFrom(parsed.ready, published),
+            ...(published.issue === undefined ? {} : { issueNumber: published.issue }),
+            ...(published.url === undefined ? {} : { issueUrl: published.url }),
+          },
         );
       }
       const done = this.deps.store.agentThreads.updateRun(
         actor.discordUserId, event.threadKey, run.runId,
-        { status, detail, queued: status === 'queued', finished: true },
+        { status, detail, queueState, finished: true },
         this.now(),
       );
       // A published ticket settles the thread's intent, so the notes do not
       // leak into the NEXT ticket as if they had been said about it.
       this.deps.store.agentThreads.clearNotes(actor.discordUserId, event.threadKey, this.now());
+      /**
+       * And the publication BINDING goes with them.
+       *
+       * The canonical id and the issue number exist so a RETRY enriches the
+       * same issue instead of opening a second one. Once a publication has
+       * succeeded there is nothing left to retry, and keeping them meant the
+       * next -- DIFFERENT -- `$ticket` in this thread inherited them and
+       * rewrote the previous issue with an unrelated contract. A silent
+       * destructive edit to work somebody may already be acting on is the
+       * worst thing this surface could do, and it is worth the cost: to
+       * authorize an issue after publishing it, send `$ticket --ready` with
+       * the description, which is one message rather than a lost ticket.
+       */
+      this.deps.store.agentThreads.clearPublicationBinding(
+        actor.discordUserId, event.threadKey, run.runId, this.now(),
+      );
       this.deps.store.agentThreads.setGrilling(
         actor.discordUserId, event.threadKey, false, this.now(),
       );
@@ -630,7 +689,15 @@ export class SkillBridgeService {
       if (done) await this.showCard(actor, event, done, { fresh: true });
       return cards.publicationReply(status, published.url ?? undefined);
     } catch (err) {
-      return this.failRun(actor, event, publishing, err);
+      /**
+       * The helper never answered -- a subprocess timeout, a kill, a crash in
+       * the bridge itself. This is the case the review called out most
+       * sharply: there is NO result to read, so after `--ready` the only
+       * honest thing to say about the label is that nobody knows.
+       */
+      return this.failRun(actor, event, publishing, err, {
+        queueState: parsed.ready ? 'unknown' : 'not_requested',
+      });
     }
   }
 
@@ -673,9 +740,12 @@ export class SkillBridgeService {
         repository: target.repo.repository,
       });
       if (!onboarded.ok) {
+        // Onboarding never applies agent:ready, so there is no queue to be
+        // uncertain about.
         return this.failRun(
           actor, event, run,
           new DuckyError('invalid_input', onboarded.error ?? 'onboarding did not complete'),
+          { queueState: 'not_requested' },
         );
       }
       if (!this.stillLive(actor, event.threadKey, run.runId)) {
@@ -704,7 +774,7 @@ export class SkillBridgeService {
         ephemeral: false,
       };
     } catch (err) {
-      return this.failRun(actor, event, run, err);
+      return this.failRun(actor, event, run, err, { queueState: 'not_requested' });
     }
   }
 
@@ -807,7 +877,7 @@ export class SkillBridgeService {
     actor: ActorContext,
     threadKey: string,
     args: string,
-  ): { repo: WorkflowRepository } | { ask: OutboundMessage } {
+  ): { repo: WorkflowRepository; intent: string } | { ask: OutboundMessage } {
     const configured = this.deps.repositories();
     if (configured.length === 0) {
       return {
@@ -817,12 +887,13 @@ export class SkillBridgeService {
       };
     }
 
-    const named = this.namedIn(args, configured);
-    if (named) {
+    const addressed = this.addressedIn(args, configured);
+    if (addressed) {
       this.deps.store.agentThreads.bindRepository(
-        actor.discordUserId, threadKey, named.repository, named.checkoutRoot, this.now(),
+        actor.discordUserId, threadKey,
+        addressed.repo.repository, addressed.repo.checkoutRoot, this.now(),
       );
-      return { repo: named };
+      return { repo: addressed.repo, intent: addressed.rest };
     }
 
     const row = this.deps.store.agentThreads.get(actor.discordUserId, threadKey);
@@ -830,7 +901,7 @@ export class SkillBridgeService {
       const bound = configured.find((r) => r.repository === row.repository);
       // A binding to a repository that is no longer configured is not honoured:
       // configuration is the authority and a stored row is a convenience.
-      if (bound) return { repo: bound };
+      if (bound) return { repo: bound, intent: args };
     }
 
     if (configured.length === 1) {
@@ -838,33 +909,45 @@ export class SkillBridgeService {
       this.deps.store.agentThreads.bindRepository(
         actor.discordUserId, threadKey, only.repository, only.checkoutRoot, this.now(),
       );
-      return { repo: only };
+      return { repo: only, intent: args };
     }
 
     return { ask: cards.chooseRepository(configured.map((r) => r.repository)) };
   }
 
   /**
-   * A repository named in the command's own argument text.
+   * A repository ADDRESSED by the command, as opposed to mentioned by it.
    *
-   * Either the full `owner/name` or the configured slug. Matching is exact:
-   * a near miss asks rather than resolving to the closest thing, because the
-   * closest thing is still the wrong working tree.
+   * Two rules, and both exist because the first version had neither:
+   *
+   * 1. **`owner/name` only.** A bare slug is a word. `demo`, `widgets` and
+   *    `folio` are things people say in sentences, and matching one anywhere
+   *    in the prose silently rebound the thread -- so "fix the widgets
+   *    rendering" retargeted the whole workflow at `acme/widgets`.
+   * 2. **Leading position only.** Addressing is something you do at the start
+   *    of a command, not something a sentence happens to contain. A repository
+   *    named three clauses in is being talked about.
+   *
+   * Anything else is not a target, and the caller then uses the binding or
+   * ASKS. Guessing here points a real agent at the wrong working tree, which
+   * is the same reasoning that made the repository part of the old coding
+   * grammar rather than something inferred.
    */
-  private namedIn(
+  private addressedIn(
     args: string,
     configured: readonly WorkflowRepository[],
-  ): WorkflowRepository | undefined {
-    for (const token of args.split(/\s+/).filter(Boolean).slice(0, 8)) {
-      const lowered = token.toLowerCase();
-      if (isTicketRepository(token)) {
-        const match = configured.find((r) => r.repository.toLowerCase() === lowered);
-        if (match) return match;
-      }
-      const bySlug = configured.find((r) => r.slug === lowered);
-      if (bySlug) return bySlug;
-    }
-    return undefined;
+  ): { repo: WorkflowRepository; rest: string } | undefined {
+    const match = /^(\S+)([\s\S]*)$/.exec(args.trimStart());
+    if (!match) return undefined;
+    const token = match[1]!;
+    if (!isTicketRepository(token)) return undefined;
+    const repo = configured.find((r) => r.repository.toLowerCase() === token.toLowerCase());
+    // A well-formed `owner/name` that is not configured is still not a target.
+    // The caller asks, and the reply names only what IS configured.
+    if (!repo) return undefined;
+    // The target is addressing, not part of what the work IS: left in, it
+    // would become the first words of the ticket's goal and title.
+    return { repo, rest: (match[2] ?? '').trim() };
   }
 
   // ---- spec synthesis ------------------------------------------------------
@@ -965,6 +1048,50 @@ export class SkillBridgeService {
      */
     this.#aborts.set(this.#key(actor, event.threadKey), new AbortController());
     return { ...row, runId };
+  }
+
+  /**
+   * Ends a run that outlived its budget, and shows the owner what is unknown.
+   *
+   * The outcome is deliberately NOT guessed. A `$ticket --ready` that vanished
+   * mid-publish may have applied the label, so the queue state becomes
+   * `unknown` and the card says to go and look. Claiming either "queued" or
+   * "nothing happened" would be inventing a fact about somebody's repository.
+   */
+  private async expireAbandonedRun(
+    actor: ActorContext,
+    event: { threadKey: string; context?: IncomingContext },
+  ): Promise<void> {
+    const live = this.deps.store.agentThreads.liveRun(actor.discordUserId, event.threadKey);
+    if (!live) return;
+
+    /**
+     * The detail is composed BEFORE the sweep, because only the row that is
+     * about to end knows whether queueing had been asked for -- and a run
+     * that asked leaves a label nobody can account for.
+     */
+    const detail =
+      'Abandoned: the coordinator stopped while this run was in flight. ' +
+      'Whatever the helper had already done still stands.' +
+      (live.runReady ? ` ${QUEUE_STATE_LABEL.unknown}` : '');
+
+    const cutoff = new Date(this.deps.clock.nowMs() - STALE_RUN_AFTER_MS).toISOString();
+    const expired = this.deps.store.agentThreads.expireStaleRun(
+      actor.discordUserId,
+      event.threadKey,
+      cutoff,
+      detail,
+      this.now(),
+    );
+    if (!expired) return;
+    // The in-memory abort handle did not survive the restart either.
+    this.releaseRun(actor, event.threadKey);
+    this.deps.audit?.({
+      command: expired.runCommand ?? '$ticket',
+      outcome: 'failed',
+      status: 'failed',
+    });
+    await this.showCard(actor, event, expired, { fresh: true });
   }
 
   /**
@@ -1111,7 +1238,21 @@ export class SkillBridgeService {
     event: { threadKey: string; context?: IncomingContext },
     row: AgentThreadRow,
     err: unknown,
-    partialUrl?: string,
+    /**
+     * What is KNOWN about the queue after this failure, and the issue the
+     * publisher may already have created.
+     *
+     * `queueState` is required of every caller rather than defaulted,
+     * because the default used to be "not queued" and that is a claim: a
+     * publisher that wrote `agent:ready` and then failed to read it back
+     * leaves a label that may well be on the issue, and saying otherwise
+     * sends the owner away from an authorized ticket.
+     */
+    outcome: {
+      queueState: QueueState;
+      issueNumber?: number | undefined;
+      issueUrl?: string | undefined;
+    } = { queueState: 'not_queued' },
   ): Promise<OutboundMessage> {
     const reason = failureReason(err);
     /**
@@ -1125,10 +1266,31 @@ export class SkillBridgeService {
       this.releaseRun(actor, event.threadKey);
       return this.stoppedReply();
     }
+    /**
+     * MINOR 7: an issue the failed attempt DID create is remembered.
+     *
+     * The publisher reports a partial result -- it created the issue and then
+     * something later went wrong -- and without recording the number the
+     * retry opened a second issue for the same work.
+     */
+    if (row.runId && (outcome.issueNumber !== undefined || outcome.issueUrl !== undefined)) {
+      this.deps.store.agentThreads.setPublication(
+        actor.discordUserId, event.threadKey, row.runId,
+        { issueNumber: outcome.issueNumber ?? null, issueUrl: outcome.issueUrl ?? null },
+        this.now(),
+      );
+    }
     const failed = row.runId
       ? this.deps.store.agentThreads.updateRun(
           actor.discordUserId, event.threadKey, row.runId,
-          { status: 'failed', detail: reason, queued: false, finished: true },
+          {
+            status: 'failed',
+            detail: `${reason}${
+              outcome.queueState === 'unknown' ? ` ${QUEUE_STATE_LABEL.unknown}` : ''
+            }`,
+            queueState: outcome.queueState,
+            finished: true,
+          },
           this.now(),
         )
       : undefined;
@@ -1139,10 +1301,26 @@ export class SkillBridgeService {
       status: 'failed',
     });
     if (failed) await this.showCard(actor, event, failed, { fresh: true });
+
+    /**
+     * The sentence the review found wrong, now derived from what is known.
+     *
+     * "Nothing was queued and nothing was started" is true only when the run
+     * stopped before any label could be written. After an attempt it is a
+     * false negative, so the unknown case says so and tells the owner to go
+     * and look -- there is no honest way to answer it from here.
+     */
+    const queueLine =
+      outcome.queueState === 'unknown'
+        ? 'The agent:ready label may have been applied before the failure and could NOT be ' +
+          'confirmed. Open the issue and check for agent:ready before assuming either way. ' +
+          'Nothing was started; Ducky never starts a worker.'
+        : 'Nothing was queued and nothing was started.';
+
     return {
       content:
-        `That did not complete: ${reason}. Nothing was queued and nothing was started.` +
-        (partialUrl ? `\n${partialUrl}` : ''),
+        `That did not complete: ${reason}. ${queueLine}` +
+        (outcome.issueUrl ? `\n${outcome.issueUrl}` : ''),
       ephemeral: false,
     };
   }
@@ -1219,6 +1397,22 @@ function redirectTarget(text: string): string | undefined {
   const match = /^Call the Skill tool with ["`\u2018\u201c]([a-z0-9][a-z0-9-]{0,63})["`\u2019\u201d]\.?$/i
     .exec(body);
   return match?.[1];
+}
+
+/**
+ * What is known about the label after a publisher run that ANSWERED.
+ *
+ * `queued` needs both halves: the owner asked, and the publisher applied the
+ * label and read it back. An answer that says it asked but did not verify is
+ * not a negative -- the write happens before the read -- so it is `unknown`.
+ */
+function queueStateFrom(
+  ready: boolean,
+  published: { queued: boolean; queueVerified: boolean },
+): QueueState {
+  if (!ready) return 'not_requested';
+  if (published.queued && published.queueVerified) return 'queued';
+  return 'unknown';
 }
 
 const targetId = (target: SendTarget): string =>

@@ -1,5 +1,6 @@
 import {
   AGENT_CARD_INTENT_LINES_MAX, AGENT_CARD_LABEL, AGENT_CARD_NEXT, DUCKY_COLORS,
+  QUEUE_STATE_LABEL,
   type AgentCardStatus,
 } from '@ducky/contracts';
 import type { AgentThreadRow } from '@ducky/persistence';
@@ -111,11 +112,16 @@ export function agentDetails(row: AgentThreadRow): OutboundMessage {
     { name: 'Status', value: AGENT_CARD_LABEL[status], inline: true },
     {
       name: 'Queue authorization',
-      value: row.runQueued
-        ? 'agent:ready is applied and was verified on the issue.'
-        : row.runReady
-          ? 'You asked for it, and it was not applied. Nothing is authorized.'
-          : 'Not requested. The issue, if any, is unqueued.',
+      /**
+       * Read straight from the stored state rather than reconstructed from
+       * two booleans.
+       *
+       * The old version answered "Nothing is authorized" whenever the owner
+       * had asked and the row did not say queued -- which is the one case
+       * where Ducky genuinely cannot know, because the publisher writes the
+       * label before it reads it back.
+       */
+      value: QUEUE_STATE_LABEL[row.queueState],
     },
     {
       name: 'Worker',

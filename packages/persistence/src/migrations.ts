@@ -1071,4 +1071,85 @@ CREATE TABLE agent_threads (
 CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
 `,
   },
+  {
+    version: 23,
+    name: 'agent_run_queue_state',
+    sql: `
+-- \`run_queued\` was a BOOLEAN, and a boolean cannot say "I do not know".
+--
+-- The installed publisher applies \`agent:ready\` and THEN reads it back. A
+-- failure after that write -- a read-back error, a network fault, our own
+-- subprocess timeout, a coordinator that died mid-call -- leaves a state where
+-- the label may well be on the issue and nothing here can tell. The boolean
+-- made every one of those read as false, so the card and the Details view both
+-- asserted "nothing was queued" about the one label that authorizes an agent
+-- to start work. A false negative there is worse than no answer: the owner
+-- stops looking.
+--
+-- Four states, because there are four genuinely different things to say:
+--   not_requested -- the owner did not ask. No label was attempted.
+--   not_queued    -- the run failed BEFORE any label could be written.
+--   queued        -- applied AND verified on the issue by the publisher.
+--   unknown       -- the attempt may have landed. Go and look.
+--
+-- A rebuild rather than an ALTER: the boolean has to go, or the next reader
+-- gets two sources of truth and picks the convenient one. Nothing carries a
+-- foreign key to agent_threads (checked), so dropping it breaks no child.
+--
+-- Existing rows map exactly: a true becomes \`queued\`, and a false becomes
+-- \`not_requested\` or \`not_queued\` depending on whether the owner had asked.
+-- No row is invented into \`unknown\`: that state is a report about a specific
+-- failure, and backfilling it would be claiming doubt nobody observed.
+CREATE TABLE agent_threads_v2 (
+  discord_user_id  TEXT NOT NULL,
+  thread_key       TEXT NOT NULL,
+  repository       TEXT,
+  checkout_root    TEXT,
+  grilling         INTEGER NOT NULL DEFAULT 0,
+  grill_started_at TEXT,
+  intent_notes     TEXT NOT NULL DEFAULT '[]',
+  ticket_uuid      TEXT,
+  issue_number     INTEGER,
+  issue_url        TEXT,
+  run_id           TEXT,
+  run_command      TEXT
+    CHECK (run_command IS NULL OR run_command IN ('$grill-me','$ticket','$agentize')),
+  run_status       TEXT
+    CHECK (run_status IS NULL OR run_status IN
+      ('scanning','grilling','publishing','published','queued','onboarding','onboarded',
+       'needs_input','failed','cancelled')),
+  run_detail       TEXT,
+  run_ready        INTEGER NOT NULL DEFAULT 0,
+  run_queue_state  TEXT NOT NULL DEFAULT 'not_requested'
+    CHECK (run_queue_state IN ('not_requested','not_queued','queued','unknown')),
+  run_started_at   TEXT,
+  run_finished_at  TEXT,
+  card_channel_id  TEXT,
+  card_message_id  TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, thread_key)
+);
+
+INSERT INTO agent_threads_v2
+  (discord_user_id, thread_key, repository, checkout_root, grilling, grill_started_at,
+   intent_notes, ticket_uuid, issue_number, issue_url, run_id, run_command, run_status,
+   run_detail, run_ready, run_queue_state, run_started_at, run_finished_at,
+   card_channel_id, card_message_id, created_at, updated_at)
+  SELECT discord_user_id, thread_key, repository, checkout_root, grilling, grill_started_at,
+         intent_notes, ticket_uuid, issue_number, issue_url, run_id, run_command, run_status,
+         run_detail, run_ready,
+         CASE WHEN run_queued = 1 THEN 'queued'
+              WHEN run_ready = 1 THEN 'not_queued'
+              ELSE 'not_requested' END,
+         run_started_at, run_finished_at,
+         card_channel_id, card_message_id, created_at, updated_at
+    FROM agent_threads;
+
+DROP TABLE agent_threads;
+ALTER TABLE agent_threads_v2 RENAME TO agent_threads;
+
+CREATE INDEX ix_agent_threads_run ON agent_threads(run_id) WHERE run_id IS NOT NULL;
+`,
+  },
 ];

@@ -258,8 +258,24 @@ export const EnvSchema = z.object({
    * typo fails at boot rather than at 07:00.
    */
   DUCKY_BRIEFING_ENABLED: bool(false),
-  DUCKY_BRIEFING_MORNING_AT: z.string().max(5).default('07:30'),
-  DUCKY_BRIEFING_EVENING_AT: z.string().max(5).default('20:30'),
+  // No default here: whether the operator SET a time is information. An imported
+  // preference may replace the documented default, but never an explicit value.
+  DUCKY_BRIEFING_MORNING_AT: z.string().max(5).optional(),
+  DUCKY_BRIEFING_EVENING_AT: z.string().max(5).optional(),
+  /**
+   * Whether this profile applies the owner's IMPORTED preferences (briefing
+   * slot enablement and times, weekends, lookahead, captures, weather). Off by
+   * default. Preferences are presentation and scheduling only: they never
+   * decide who may do anything, and frozen configuration always wins.
+   */
+  DUCKY_IMPORTED_PREFERENCES: bool(false),
+  /**
+   * Where the briefing's weather comes from. All three or none: a forecast for
+   * somewhere nobody named would be worse than no forecast. Never stored data.
+   */
+  DUCKY_WEATHER_LATITUDE: z.coerce.number().min(-90).max(90).optional(),
+  DUCKY_WEATHER_LONGITUDE: z.coerce.number().min(-180).max(180).optional(),
+  DUCKY_WEATHER_LOCATION: z.string().min(1).max(80).optional(),
   /**
    * Where a proactive briefing goes. `dm` is the default and is what every
    * existing instance already does, so an upgrade changes nothing.
@@ -754,10 +770,16 @@ export function resolveThreadParentChannelIds(env: Env): readonly string[] {
  * Both times are checked here, at startup, for the same reason the timezone is:
  * a briefing that fired at an hour nobody configured would be worse than none.
  */
+export const BRIEFING_DEFAULT_MORNING_AT = '07:30';
+export const BRIEFING_DEFAULT_EVENING_AT = '20:30';
+
 export const resolveBriefingSchedule = (env: Env): {
   enabled: boolean;
   morningAt: string;
   eveningAt: string;
+  /** True when the operator set the time, so an imported preference must not replace it. */
+  morningExplicit: boolean;
+  eveningExplicit: boolean;
   delivery: BriefingDelivery;
   channelId?: string | undefined;
 } => {
@@ -779,10 +801,44 @@ export const resolveBriefingSchedule = (env: Env): {
 
   return {
     enabled: env.DUCKY_BRIEFING_ENABLED,
-    morningAt: assertValidSlotTime(env.DUCKY_BRIEFING_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT'),
-    eveningAt: assertValidSlotTime(env.DUCKY_BRIEFING_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT'),
+    morningAt: assertValidSlotTime(
+      env.DUCKY_BRIEFING_MORNING_AT ?? BRIEFING_DEFAULT_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT',
+    ),
+    eveningAt: assertValidSlotTime(
+      env.DUCKY_BRIEFING_EVENING_AT ?? BRIEFING_DEFAULT_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT',
+    ),
+    morningExplicit: env.DUCKY_BRIEFING_MORNING_AT !== undefined,
+    eveningExplicit: env.DUCKY_BRIEFING_EVENING_AT !== undefined,
     delivery,
     ...(channelId === undefined ? {} : { channelId }),
+  };
+};
+
+/** Whether this profile applies the owner's imported preferences. Off by default. */
+export const resolveImportedPreferences = (env: Env): boolean => env.DUCKY_IMPORTED_PREFERENCES;
+
+/**
+ * The weather location, or undefined when none is configured.
+ *
+ * All three variables or none: a forecast for coordinates nobody named, or with
+ * a name that does not belong to them, would be wrong with confidence.
+ */
+export const resolveWeather = (
+  env: Env,
+): { latitude: number; longitude: number; location: string } | undefined => {
+  const parts = [env.DUCKY_WEATHER_LATITUDE, env.DUCKY_WEATHER_LONGITUDE, env.DUCKY_WEATHER_LOCATION];
+  const set = parts.filter((p) => p !== undefined).length;
+  if (set === 0) return undefined;
+  if (set !== 3) {
+    throw new DuckyError(
+      'invalid_input',
+      'DUCKY_WEATHER_LATITUDE, DUCKY_WEATHER_LONGITUDE and DUCKY_WEATHER_LOCATION go together: set all three or none.',
+    );
+  }
+  return {
+    latitude: env.DUCKY_WEATHER_LATITUDE!,
+    longitude: env.DUCKY_WEATHER_LONGITUDE!,
+    location: env.DUCKY_WEATHER_LOCATION!,
   };
 };
 

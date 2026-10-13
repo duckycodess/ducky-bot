@@ -179,6 +179,13 @@ describe('task and reminder consistency', () => {
     expect(rules(bad((d) => { d['reminders'][0]['deliveredAt'] = '2026-10-05T14:59:00Z'; }))).toContain('reminders:delivered_at_mismatch');
   });
 
+  it('refuses custom offsets on an all-day deadline rather than inventing a time of day', () => {
+    expect(rules(bad((d) => { d['tasks'][1]['reminderPolicy'] = { enabled: true, offsetsMinutes: [60] }; })))
+      .toContain('tasks:all_day_with_offsets_unsupported');
+    // Disabled, or deferring to the default list, is fine.
+    expect(bad((d) => { d['tasks'][1]['reminderPolicy'] = { enabled: false, offsetsMinutes: null }; }).ok).toBe(true);
+  });
+
   it('keeps an offset reminder and a snooze distinct', () => {
     expect(rules(bad((d) => { d['reminders'][0]['kind'] = 'snooze'; }))).toContain('reminders:offset_mismatch');
   });

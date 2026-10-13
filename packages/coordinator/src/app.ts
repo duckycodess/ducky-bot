@@ -19,7 +19,7 @@ import {
 } from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -30,6 +30,7 @@ import { RepoAllowlist } from './domain/allowlist.js';
 import { CapturesService } from './domain/captures.service.js';
 import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
+import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
 import { JobsService } from './domain/jobs.service.js';
 import { ApprovalsService } from './domain/approvals.service.js';
 import { type ActionPerformer } from './domain/action-performer.js';
@@ -319,13 +320,20 @@ export function createApp(
   // The deadline-to-notification link, shared by every path that can create or
   // move a task: one place decides what a deadline owes, so the slash command,
   // a pasted list and the phone page cannot drift apart.
-  const taskReminderLinker = new TaskReminderLinker({ store, clock });
+  // Imported preferences are applied only when the profile says so, and they
+  // never decide who may do anything: authorization reads frozen config alone.
+  const ownerPreferences = new OwnerPreferencesService({
+    store, ownerId: authz.ownerId, enabled: resolveImportedPreferences(env),
+  });
+  const taskReminderLinker = new TaskReminderLinker({
+    store, clock, defaultOffsetsMinutes: () => ownerPreferences.defaultReminderOffsets(),
+  });
   const tasks = new TasksService({ store, authz, clock, linker: taskReminderLinker });
   const taskCapture = new TaskCaptureService({
     store, authz, clock, linker: taskReminderLinker,
   });
   const reminders = new RemindersService({ store, authz, clock });
-  const briefing = new BriefingService({ store, authz, clock });
+  const briefing = new BriefingService({ store, authz, clock, prefs: ownerPreferences });
   const reconciler = new Reconciler({ store, approvals, pending });
   // Deterministic rules over the owner's own messages: no provider, no new
   // command, and no inferred write applied without an explicit confirmation.
@@ -458,9 +466,10 @@ export function createApp(
   // Rides the SAME interval as everything else, holds no provider, and sends to
   // the owner's DM only. Off by default: a briefing is pulled unless somebody
   // deliberately asks for it to be pushed.
+  const briefingSchedule = resolveBriefingSchedule(env);
   const briefingNotifier = new BriefingNotifier({
     store, transport, ownerId: authz.ownerId, clock, briefing,
-    config: resolveBriefingSchedule(env),
+    config: briefingSchedule, prefs: ownerPreferences,
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
@@ -568,7 +577,7 @@ export function createApp(
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     conversationAttachments: attachmentAvailability(conversation, conversationAttachments),
     proactiveBriefings: briefingNotifier.enabled
-      ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
+      ? `on — ${briefingSchedule.morningAt} and ${briefingSchedule.eveningAt} in ${clock.timeZone}, to your DM`
       : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
       ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread, ` +

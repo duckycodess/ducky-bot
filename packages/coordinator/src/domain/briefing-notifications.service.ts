@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   BRIEFING_DELIVERY_BATCH, BRIEFING_MAX_DELIVERY_ATTEMPTS, BRIEFING_STALE_AFTER_MS,
-  instantOfZonedWallClock, zonedDateKey, zonedParts,
+  instantOfZonedWallClock, weekdayOfCivilDate, zonedDateKey, zonedParts,
+  type ImportedPreferences,
 } from '@ducky/contracts';
 import type { BriefingSlotKind, Store, BriefingTarget } from '@ducky/persistence';
 import { channelTarget, dmTarget, type SendTarget } from '../discord/message.js';
@@ -9,6 +10,7 @@ import type { DiscordTransport } from '../discord/transport.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
 import type { OwnerClock } from './owner-clock.js';
 import type { BriefingService } from './briefing.service.js';
+import type { OwnerPreferencesService } from './owner-preferences.service.js';
 import type { ActorContext } from '../security/authz.js';
 
 export interface BriefingScheduleConfig {
@@ -30,6 +32,13 @@ export interface BriefingScheduleConfig {
   readonly delivery: BriefingDelivery;
   /** The configured briefing channel, when one is. */
   readonly channelId?: string | undefined;
+  /**
+   * True when the operator SET the slot time. An imported preference may replace
+   * the documented default but never an explicit value: that disagreement is a
+   * parity conflict the importer refuses, not something resolved here silently.
+   */
+  readonly morningExplicit?: boolean | undefined;
+  readonly eveningExplicit?: boolean | undefined;
 }
 
 export interface BriefingNotifierDeps {
@@ -40,6 +49,8 @@ export interface BriefingNotifierDeps {
   readonly clock: OwnerClock;
   readonly briefing: BriefingService;
   readonly config: BriefingScheduleConfig;
+  /** Imported preferences, when the profile selected them. Never an authority. */
+  readonly prefs?: OwnerPreferencesService | undefined;
 }
 
 export interface BriefingTickResult {
@@ -87,9 +98,11 @@ export class BriefingNotifier {
   private readonly clock: OwnerClock;
   private readonly briefing: BriefingService;
   private readonly config: BriefingScheduleConfig;
+  private readonly prefs: OwnerPreferencesService | undefined;
   private ticking: Promise<BriefingTickResult> | null = null;
 
   constructor(deps: BriefingNotifierDeps) {
+    this.prefs = deps.prefs;
     this.store = deps.store;
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
@@ -145,11 +158,14 @@ export class BriefingNotifier {
     const tz = this.clock.timeZone;
     const dayKey = zonedDateKey(nowMs, tz);
 
+    // Imported preferences narrow what the configuration allows, and replace a
+    // documented default time; they never turn briefings ON (that is the
+    // operator's flag) and never replace a time the operator set explicitly.
+    const prefs = this.prefs?.effective();
+    if (prefs && !prefs.weekendBriefings && weekdayOfCivilDate(dayKey) >= 5) return 0;
+
     let claimed = 0;
-    for (const [kind, at] of [
-      ['morning', this.config.morningAt],
-      ['evening', this.config.eveningAt],
-    ] as const) {
+    for (const [kind, at] of this.slots(prefs)) {
       const dueMs = slotInstantMs(dayKey, at, tz);
       if (dueMs === undefined || dueMs > nowMs) continue;
       // One row PER TARGET. Two rows for `both`, so the DM and the channel
@@ -226,6 +242,16 @@ export class BriefingNotifier {
       }
     }
     return { delivered, failed, abandoned, skippedStale };
+  }
+
+  /** The slots that may fire today, and when, after preferences are applied. */
+  private slots(prefs: ImportedPreferences | undefined): readonly (readonly ['morning' | 'evening', string])[] {
+    const morningAt = !this.config.morningExplicit && prefs ? prefs.morningTime : this.config.morningAt;
+    const eveningAt = !this.config.eveningExplicit && prefs ? prefs.eveningTime : this.config.eveningAt;
+    const out: (readonly ['morning' | 'evening', string])[] = [];
+    if (prefs?.morningEnabled ?? true) out.push(['morning', morningAt]);
+    if (prefs?.eveningEnabled ?? true) out.push(['evening', eveningAt]);
+    return out;
   }
 
   /** The targets a due slot is claimed for, from configuration. */

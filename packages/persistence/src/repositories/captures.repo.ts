@@ -51,6 +51,14 @@ export class CapturesRepo {
     return Number(r.n);
   }
 
+  /** Open captures, for the owner. The briefing's "unresolved" count. */
+  countOpen(ownerId: string): number {
+    const r = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM captures WHERE discord_user_id = ? AND status = 'open'`)
+      .get(ownerId) as { n: number };
+    return Number(r.n);
+  }
+
   setStatus(id: string, status: CaptureState): void {
     this.db
       .prepare('UPDATE captures SET status = ?, updated_at = ? WHERE id = ?')

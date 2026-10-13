@@ -884,10 +884,7 @@ export class DuckyRouter {
           describes: `${c.status} · ${c.content}`,
         }));
       case 'schedule':
-        return d.schedules.list(actor, 10).map((row) => ({
-          id: row.id.slice(0, 8),
-          describes: `${row.startsAt} · ${row.title}`,
-        }));
+        return d.schedules.listRecords(actor, 10);
     }
   }
 

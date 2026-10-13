@@ -337,6 +337,12 @@ function semanticChecks(doc: AssistantImportDocument, bag: IssueBag): void {
     if (closed !== (t.closedAt !== null)) bag.add('tasks', 'closed_at_mismatch');
     if (t.createdAt > t.updatedAt) bag.add('tasks', 'updated_before_created');
     if (t.closedAt !== null && t.closedAt < t.createdAt) bag.add('tasks', 'closed_before_created');
+    // An all-day deadline has no time of day an offset could be subtracted from;
+    // its reminder is the morning of the day. A custom offset list on one would
+    // have to be invented into something, so it is refused instead.
+    if (t.due?.kind === 'date' && t.reminderPolicy?.offsetsMinutes) {
+      bag.add('tasks', 'all_day_with_offsets_unsupported');
+    }
   }
 
   // ---- reminders ----------------------------------------------------------

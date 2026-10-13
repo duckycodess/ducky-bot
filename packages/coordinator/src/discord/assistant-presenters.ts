@@ -5,7 +5,8 @@ import {
   type ReminderState, type TaskPriority,
 } from '@ducky/contracts';
 import type {
-  GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleRow, TaskRow,
+  GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleExceptionRow,
+  ScheduleRow, TaskRow,
 } from '@ducky/persistence';
 import type { Briefing, BriefingSection } from '../domain/briefing.service.js';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
@@ -320,6 +321,39 @@ export function briefingMessage(b: Briefing): OutboundMessage {
   const reminderText = (r: ReminderRow): string =>
     `${r.nextFireAt ? discordWhen(r.nextFireAt, tz, 't') : 'unscheduled'} · ${short(r.text, 90)}`;
 
+  // What changed about the day's classes, in the owner's own terms: the course
+  // or label it targets ("All classes" when it targets neither) and what happened.
+  const exceptionText = (e: ScheduleExceptionRow): string =>
+    `${short(e.courseCode ?? e.label ?? 'All classes', 80)}: ${e.kind}` +
+    (e.note ? ` · ${short(e.note, 80)}` : '');
+
+  /** Lookahead and captures exist only when an imported preference asked for them. */
+  const extras = (): void => {
+    if (b.lookahead && b.lookahead.tasks.rows.length > 0) {
+      add(
+        `Next ${b.lookahead.days} day${b.lookahead.days === 1 ? '' : 's'}`,
+        b.lookahead.tasks,
+        taskText,
+      );
+    }
+    if (b.captures && b.captures.total > 0) {
+      if (b.captures.listed) {
+        const more = b.captures.total - b.captures.rows.length;
+        fields.push({
+          name: 'Quick-capture review',
+          value:
+            bullets(b.captures.rows.map((c) => short(c.content, 110))) +
+            (more > 0 ? `\n-# and ${more} more in the inbox` : ''),
+        });
+      } else {
+        fields.push({
+          name: 'Quick-capture inbox',
+          value: `${b.captures.total} unresolved item${b.captures.total === 1 ? '' : 's'}`,
+        });
+      }
+    }
+  };
+
   const overflowNote = (b: Briefing): string | undefined =>
     b.overdueTotal > b.tasksOverdue.rows.length
       ? `\n-# and ${b.overdueTotal - b.tasksOverdue.rows.length} more overdue`
@@ -330,13 +364,17 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     add('Still open, due today', b.tasksDueToday, taskText);
     add('Overdue', b.tasksOverdue, taskText, overflowNote(b));
     add('Tomorrow', b.scheduleTomorrow, scheduleText);
+    if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
     add('Reminders tomorrow', b.remindersTomorrow, reminderText);
+    extras();
   } else {
     add('Today', b.scheduleToday, scheduleText);
+    if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
     add('Due today', b.tasksDueToday, taskText);
     add('Overdue', b.tasksOverdue, taskText, overflowNote(b));
     add('Reminders still to come today', b.remindersToday, reminderText);
     if (b.kind === 'today') add('Completed today', b.tasksClosedToday, taskText);
+    extras();
   }
 
   if (fields.length === 0) {

@@ -168,7 +168,9 @@ active weather preference with no configured location is a refusal.
   (`boundary_known`); a baseline or a source cursor stays strict.
 - **Private sections stay private.** The capture inbox and the repository digest go
   only into the owner's DM copy, and the importer refuses preferences that want
-  them with a channel delivery. Native feed suppression covers only kinds an
+  them with a channel delivery. A briefing the owner ASKS for follows the same
+  rule: they are included only when the reply is a DM or guaranteed ephemeral, never
+  in a role channel, where replies persist (ADR 0023). Native feed suppression covers only kinds an
   imported surface sees in full.
 
 ## What this ADR deliberately does not do
@@ -216,6 +218,13 @@ active weather preference with no configured location is a refusal.
   produce: a fresh live backup and configuration, private semantic and count
   parity, a live synthetic notification and control check, a proven
   reverse-delta rollback and an operator cutover.
+
+- Migration 29 introduces the runtime lock, which a build that predates it cannot
+  honour: the coordinator must be stopped before migrations, and a scratch database
+  migrated from an earlier, unpublished revision of 29 must be recreated.
+- The engine reads runs and releases as one window that always closes; a real reader
+  must page them or prove it returns everything newer than the cursor. Required
+  blocker; unreachable while the shipped reader declares nothing.
 
 ## Follow-up
 

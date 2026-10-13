@@ -653,6 +653,9 @@ export class DuckyRouter {
         event.threadKey,
         event.text,
         this.channelRoles.roleOf(event.context),
+        // A message reply is a channel message unless this is a DM. The owner's
+        // capture inbox and repository digest are only ever put in a DM.
+        { privateReply: event.context?.guildId === undefined },
       );
       if (handled) {
         // Recorded like any other exchange, so a follow-up question still has
@@ -1470,7 +1473,15 @@ export class DuckyRouter {
       // An unrecognised value falls back to the time-of-day default rather
       // than erroring: the owner asked for a briefing either way.
       const kind = isBriefingKind(raw) ? raw : undefined;
-      return assistant.briefingMessage(await d.briefing.assemble(actor, kind));
+      // The owner's capture inbox and repository digest are put in the reply only
+      // when that reply is GUARANTEED private. A reply in one of the owner's role
+      // channels persists (ADR 0023) and can be read by anyone who can read the
+      // channel, so there they are left out; the same rule the transport uses to
+      // choose ephemerality decides it, so the two cannot drift apart.
+      const privateReply = !this.replyPersistence.persists({
+        userId: actor.discordUserId, context: e.context, kind: 'command', commandName: 'briefing',
+      });
+      return assistant.briefingMessage(await d.briefing.assemble(actor, kind, { includePrivate: privateReply }));
     });
   }
 

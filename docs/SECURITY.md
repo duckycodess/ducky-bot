@@ -493,7 +493,9 @@ promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-ca
   is fresh. A live holder is never replaced, including by an equal pid on another
   host or a second handle in the same process; a row from an earlier boot or a
   replaced pid is recovered. A source namespace is pinned once the ledger has seen
-  one. The coordinator refuses to start during an import.
+  one. The coordinator refuses to start during an import. The lock protects only
+  builds that take it: a coordinator from an older build does not know the table, so
+  it must be stopped before migrations are applied.
 - **Frozen configuration is the only authority.** The owner, profile and
   timezone come from the profile's configuration; a document naming another
   owner is a hard stop. Imported preferences live in `owner_preferences`,
@@ -513,7 +515,10 @@ promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-ca
   the owner's DM and their digest to the owner's briefing, never to the shared
   GitHub feed channel. The capture inbox and the repository digest appear only in
   the owner's DM copy of a briefing, never in a channel copy, and the importer
-  refuses preferences that want them with a channel delivery. When an imported target
+  refuses preferences that want them with a channel delivery. The same holds for a
+  briefing the owner asks for: `/briefing` and "brief me" include them only in a DM or
+  a reply that is guaranteed ephemeral, never in a role channel (where replies
+  persist) or a guild message reply. When an imported target
   observes a repository the native feed's duplicate card is retired, but only for
   pull requests, issues and change requests, which an imported surface sees in full. Titles
   are scrubbed of links, addresses and @mentions before they are stored.

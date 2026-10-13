@@ -47,3 +47,4 @@ Full parity is settled. These are not proposed exclusions: each blocks cutover a
 - [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics.
 - [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM.
 - [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp.
+- [ ] 5.9 Paging (or a proof of completeness) for the workflow-runs and releases surfaces in a real reader, since the engine treats each as one window that always closes.

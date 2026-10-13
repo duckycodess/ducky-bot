@@ -63,6 +63,7 @@ registered.
 | Imported task reminder policy and preferences | **Unit-tested** | Disabled, custom, default-deferring and deadline-fallback policies through Done, Edit and Snooze; preferences apply only when `DUCKY_IMPORTED_PREFERENCES` is set |
 | Notification-only watch targets: observation engine, budget, digest, alerts | **Unit-tested with a scripted reader** | Boundary rules, atomic checkpoint commits (fault-injected), held partial reads, resume after a restart, fair oldest-due scheduling and the 20-per-tick / 2400-per-hour budget are covered. Captures and the repository digest go only into the owner's DM copy of a briefing. **No real reader exists for this surface** (next row) |
 | Notification-only watch targets: observing a real repository | **Blocked** | The shipped reader observes nothing. The existing `gh` shapes cannot see release publication or a pull request's or an issue's closing time, and repository discovery has no shape; AGENTS.md allows `gh api` and `gh search prs` in one exact shape each and none was added. An import with watch targets is refused until a reader declares every kind. Needs an owner-approved constraint change, an ADR and pinned tests |
+| Private imported sections in owner-requested briefings | **Unit-tested** | `/briefing` and "brief me" put the capture inbox and repository digest in the reply only when it is a DM or a guaranteed-ephemeral command reply; in a role channel (where replies persist) and in a guild message reply they are left out, while the native tasks, schedule and reminders are unchanged |
 | Briefing weather | **Unit-tested; no live request made** | Parsing, caching, failure-to-null, the fixed host, refused redirects and a streamed size ceiling are covered with an injected `fetch`. The natural-language `brief me` includes it. No request to Open-Meteo has been made from this host |
 | Shared runtime lock (coordinator and importer) | **Unit-tested** | The lock records the boot and the process start, so a reused pid, an earlier boot, a second handle in the same process and an equal pid on another host are each judged on what they are. The coordinator takes it right after migrations, before any other write, and beats on its own fixed period. The `main.ts` wiring has not been run against a live process |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
@@ -1167,6 +1168,12 @@ notification-only watch targets with typed checkpoints, held partial reads,
 separate alert and digest settlement and a fixed call budget; and the
 `/watch list targets` / `/watch remove` owner controls.
 
+**Upgrade notes.** Migration 29 introduces the runtime lock, which a coordinator from an
+older build does not know; stop the coordinator before migrations, and never start an
+older build against a migrated database. A scratch database migrated to 29 from an
+earlier revision of this branch must be recreated, because that unpushed migration
+was revised.
+
 **What does not exist, or was not done, and is therefore still required** (see also *Required parity blockers* below):
 
 - **A real typed reader.** Release publication, closing times and repository
@@ -1216,13 +1223,21 @@ fail-closed form of the blocker, not a decision to drop it.
   releases once Ducky has processed the boundary. A late REVIEW at exactly the
   cursor is not, and a cursor that came from the source or a baseline stays strict
   (re-reading its boundary could announce history).
+- **The real reader's paging precondition for runs and releases.** The engine treats
+  the workflow-runs and releases surfaces as one bounded read that always closes its
+  window (`reachedCursor` is true for them, and they have no page cursor), which is
+  only sound if the reader returns EVERY run or release newer than the cursor in that
+  one read. A real reader must either page them, with the same held-read and resume
+  machinery commits, pull requests and issues use, or prove that guarantee. Until one
+  exists the shipped reader declares no capability, so this path is unreachable now;
+  it is a required blocker, not a property to assume when a reader is written.
 - **A real typed reader, the rollback-delta export and every operational gate**
   (above).
 
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2129 tests in 136 files**.
+The unmodified `pnpm test` command passes all **2138 tests in 137 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

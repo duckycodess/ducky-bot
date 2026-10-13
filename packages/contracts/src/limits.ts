@@ -626,7 +626,10 @@ export const ASSISTANT_WATCH_CALLS_PER_HOUR = 2_400;
 /** How often a healthy surface is re-read, so a quiet one costs little. */
 export const ASSISTANT_WATCH_INTERVAL_MINUTES = 15;
 export const ASSISTANT_WATCH_BACKOFF_MAX_MS = 6 * 60 * 60_000;
-export const ASSISTANT_WATCH_MAX_PAGES = 3;
+/** Pages one read may span before it is blocked as unbounded; one page is one unit of work. */
+export const ASSISTANT_WATCH_MAX_PAGES = 50;
+/** Open pull requests whose reviews one pulls page reads, so a unit's cost is bounded. */
+export const ASSISTANT_WATCH_PAGE_SIZE = 10;
 export const ASSISTANT_WATCH_EVENT_BATCH = 10;
 export const ASSISTANT_WATCH_ALERT_MAX_ATTEMPTS = 5;
 /** Digested and abandoned events older than this are pruned; settlement is kept. */

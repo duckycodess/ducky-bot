@@ -148,6 +148,31 @@ describe('the interchange document', () => {
     expect(rules(bad((d) => { d['tasks'][1]['due'] = { kind: 'date', date: '2026-02-30' }; })).length).toBeGreaterThan(0);
   });
 
+  it('refuses an instant on a day the calendar does not have, rather than moving it', () => {
+    for (const impossible of [
+      '2026-02-30T00:00:00Z', '2026-02-31T10:00:00Z', '2027-02-29T00:00:00Z', '2100-02-29T00:00:00Z',
+      '2026-04-31T00:00:00Z', '2026-13-01T00:00:00Z', '2026-00-10T00:00:00Z', '2026-06-00T00:00:00Z',
+      '2026-06-10T24:00:00Z', '2026-06-10T23:60:00Z', '2026-06-10T23:59:60Z',
+    ]) {
+      const v = bad((d) => { d['tasks'][0]['createdAt'] = impossible; });
+      expect(v.ok, impossible).toBe(false);
+      // Content-free: the rejected value is never repeated in the report.
+      expect(JSON.stringify(v), impossible).not.toContain(impossible);
+    }
+    // A real leap day and a real end of month are fine.
+    for (const real of ['2028-02-29T23:59:59Z', '2026-04-30T00:00:00.5Z', '2100-03-01T00:00:00Z']) {
+      expect(bad((d) => { d['exportedAt'] = real; }).ok, real).toBe(true);
+    }
+  });
+
+  it('applies the same calendar check to every instant, including a watch cursor and a due instant', () => {
+    expect(rules(bad((d) => { d['watch']['targets'][0]['checkpoints'][0]['cursor'] = '2026-02-30T10:00:00Z'; })))
+      .toContain('watch:cursor_not_an_instant');
+    expect(bad((d) => { d['tasks'][0]['due'] = { kind: 'instant', at: '2026-02-30T10:00:00Z' }; }).ok).toBe(false);
+    expect(bad((d) => { d['reminders'][0]['fireAt'] = '2026-09-31T10:00:00Z'; }).ok).toBe(false);
+    expect(bad((d) => { d['exportedAt'] = '2026-02-30T00:00:00Z'; }).ok).toBe(false);
+  });
+
   it('does not let a date-only deadline pose as a midnight instant', () => {
     const v = validateAssistantImport(baseDoc());
     expect(v.ok).toBe(true);

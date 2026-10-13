@@ -41,3 +41,5 @@ export * from './frontdoor/frontdoor.port.js';
 export * from './frontdoor/frontdoor.cli.js';
 export * from './frontdoor/frontdoor.disabled.js';
 export * from './frontdoor/frontdoor.mock.js';
+export * from './weather/weather.port.js';
+export * from './weather/open-meteo.js';

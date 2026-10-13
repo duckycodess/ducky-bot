@@ -381,7 +381,11 @@ export class GitHubWatchService {
   private freshPublicId(): string {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const id = newPublicWatchId();
-      if (!this.store.githubWatches.publicIdExists(id)) return id;
+      // The handle namespace is shared with notification-only targets, so one
+      // handle names exactly one watch whichever kind it is.
+      if (!this.store.githubWatches.publicIdExists(id) && !this.store.assistantWatch.publicIdExists(id)) {
+        return id;
+      }
     }
     throw new DuckyError('invalid_input', 'Could not allocate a repository watch id. Try again.');
   }

@@ -7,7 +7,10 @@ import type {
 } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
+import type { WeatherReport } from '@ducky/adapters';
+import type { AssistantWatchService, WatchDigest } from './assistant-watch.service.js';
 import type { OwnerPreferencesService } from './owner-preferences.service.js';
+import type { WeatherBriefing } from './weather-briefing.js';
 import { scheduleWindow } from './schedule-window.js';
 
 export interface BriefingServiceDeps {
@@ -19,6 +22,14 @@ export interface BriefingServiceDeps {
    * native briefing exactly as it was: no section below is ever added by default.
    */
   readonly prefs?: OwnerPreferencesService | undefined;
+  /**
+   * The notification-only targets, for the GitHub digest an imported preference
+   * asks for. A getter, because the service is wired after this one and only
+   * ever read while a briefing is being built.
+   */
+  readonly watch?: (() => AssistantWatchService | undefined) | undefined;
+  /** The forecast, when a location is configured. */
+  readonly weather?: WeatherBriefing | undefined;
 }
 
 /**
@@ -71,6 +82,14 @@ export interface Briefing {
   readonly captures?:
     | { readonly total: number; readonly rows: readonly CaptureRow[]; readonly listed: boolean }
     | undefined;
+  /** The forecast for the day this briefing is about, when one was asked for and fetched. */
+  readonly weather?: WeatherReport | undefined;
+  /**
+   * What happened in the owner's watched repositories since the last briefing.
+   * A digest is a read: carrying it settles nothing, and the notifier settles
+   * `eventIds` only after the briefing has actually been sent.
+   */
+  readonly github?: WatchDigest | undefined;
   readonly openTaskCount: number;
   readonly scheduledReminderCount: number;
   /** True when every section is empty: the presenter says so plainly. */
@@ -95,8 +114,12 @@ export class BriefingService {
   private readonly authz: Authorizer;
   private readonly clock: OwnerClock;
   private readonly prefs: OwnerPreferencesService | undefined;
+  private readonly watch: (() => AssistantWatchService | undefined) | undefined;
+  private readonly weather: WeatherBriefing | undefined;
 
   constructor(deps: BriefingServiceDeps) {
+    this.watch = deps.watch;
+    this.weather = deps.weather;
     this.store = deps.store;
     this.authz = deps.authz;
     this.clock = deps.clock;
@@ -117,7 +140,26 @@ export class BriefingService {
     return zonedParts(this.clock.nowMs(), this.clock.timeZone).hour < 12 ? 'morning' : 'evening';
   }
 
-  build(actor: ActorContext, kind?: BriefingKind): Briefing {
+  /**
+   * `build` plus the one thing that needs the network: the forecast, when an
+   * imported preference asks for it and a location is configured. A failed
+   * fetch leaves the briefing without a weather section, never without a
+   * briefing.
+   */
+  async assemble(actor: ActorContext, kind?: BriefingKind): Promise<Briefing> {
+    this.authz.requireOwner(actor);
+    const resolved = kind ?? this.defaultKind();
+    const prefs = this.prefs?.effective();
+    const weather =
+      prefs?.includeWeather && this.weather ? ((await this.weather.forecastFor(resolved)) ?? undefined) : undefined;
+    return this.build(actor, resolved, { weather });
+  }
+
+  build(
+    actor: ActorContext,
+    kind?: BriefingKind,
+    extras: { readonly weather?: WeatherReport | undefined } = {},
+  ): Briefing {
     this.authz.requireOwner(actor);
     const owner = actor.discordUserId;
     const resolved = kind ?? this.defaultKind();
@@ -194,6 +236,8 @@ export class BriefingService {
           }
         : undefined;
 
+    const github = prefs?.includeGithub ? this.watch?.()?.digest() : undefined;
+
     const forThisKind =
       resolved === 'evening'
         ? [scheduleTomorrow, tasksDueToday, tasksOverdue, tasksClosedToday, remindersTomorrow]
@@ -216,6 +260,8 @@ export class BriefingService {
       scheduleExceptions,
       lookahead,
       captures,
+      weather: extras.weather,
+      github,
       openTaskCount: this.store.tasks.countOpen(owner),
       // The reminders the owner set, not the ones a deadline earned: the
       // tasks they belong to are already named in their own sections.

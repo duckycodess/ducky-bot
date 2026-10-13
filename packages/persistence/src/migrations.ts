@@ -1609,6 +1609,13 @@ CREATE TABLE assistant_watch_events (
   id              TEXT PRIMARY KEY,
   target_id       TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
   kind            TEXT NOT NULL,
+  -- The surface that had to be read to see this event. A held event was found
+  -- while a surface read was still incomplete: it is real, but it is not
+  -- deliverable until the read finishes and the cursor commits, so an unfinished
+  -- page can never announce half of a window.
+  surface         TEXT NOT NULL CHECK (surface IN
+                    ('commits','pulls','issues','runs','releases','default_branch')),
+  held            INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0,1)),
   identity        TEXT NOT NULL,
   occurred_at     TEXT NOT NULL,
   payload_json    TEXT NOT NULL,

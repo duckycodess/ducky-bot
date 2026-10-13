@@ -110,6 +110,11 @@ async function main(): Promise<void> {
     app.githubWatches.tick().catch((err: unknown) => {
       log.error('github_watches.tick_failed', { err });
     });
+    // Notification-only targets ride the same interval, inside their own call
+    // budget, and tell the owner alone. They are not engineering watches.
+    app.assistantWatch.tick().catch((err: unknown) => {
+      log.error('assistant_watch.tick_failed', { err });
+    });
     // The GitHub feed is one more bounded observation on the same interval. It
     // reads GitHub and posts cards; it consults no model, so a paused
     // subscription quota changes nothing about it.
@@ -134,6 +139,7 @@ async function main(): Promise<void> {
     await app.briefingNotifier.waitForIdle();
     await app.dependencies.waitForIdle();
     await app.githubWatches.waitForIdle();
+    await app.assistantWatch.waitForIdle();
     await app.githubFeed.waitForIdle();
     await app.transport.stop();
     await server.close();

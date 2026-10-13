@@ -27,7 +27,9 @@ export type RuntimeLockOutcome =
  * the mechanical answer: one row, naming who may write this database right now.
  *
  * A holder is LIVE when, on the same host, its process still exists; from
- * another host, when its heartbeat is fresh. A crashed holder is therefore
+ * another host, when its heartbeat is fresh. A live holder is never replaced:
+ * not by an equal pid on another host, not by a second handle in the same
+ * process. A crashed holder is therefore
  * recovered at once on the same machine and within `RUNTIME_LOCK_STALE_MS`
  * elsewhere, rather than blocking everything until somebody deletes a row.
  */
@@ -97,9 +99,12 @@ export function acquireRuntimeLock(
         String(row['host']) === host
           ? alive(Number(row['pid']))
           : nowMs() - Date.parse(String(row['heartbeat_at'])) <= RUNTIME_LOCK_STALE_MS;
-      if (live && Number(row['pid']) !== pid) {
-        return { ok: false, heldBy: String(row['holder']) as RuntimeHolder };
-      }
+      // Any live holder refuses, whoever asks: another host that happens to share
+      // a pid, a second handle in this very process, an importer against a
+      // coordinator. There is deliberately no re-entrant path, because "it is me"
+      // is exactly what a second coordinator in the same process would claim
+      // while the first is still writing.
+      if (live) return { ok: false, heldBy: String(row['holder']) as RuntimeHolder };
       db.prepare('DELETE FROM runtime_lock WHERE id = 1').run();
     }
     db.prepare(

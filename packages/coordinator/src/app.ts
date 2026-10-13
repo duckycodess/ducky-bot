@@ -3,7 +3,8 @@ import {
   DisabledConversationProvider, DisabledFrontDoor, FrontDoorCli, MemoryCredentialStore,
   MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
-  GitHubCiDependencyChecker, UnavailableDependencyChecker,
+  GitHubCiDependencyChecker, UnavailableDependencyChecker, OpenMeteoWeather,
+  type WeatherPort,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
   type FrontDoorPort, type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
@@ -19,7 +20,7 @@ import {
 } from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveWeather, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -31,6 +32,11 @@ import { CapturesService } from './domain/captures.service.js';
 import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
 import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
+import { WeatherBriefing } from './domain/weather-briefing.js';
+import { AssistantWatchService, IMPORT_COVERS_NATIVE } from './domain/assistant-watch.service.js';
+import {
+  UnavailableAssistantWatchReader, type AssistantWatchReader,
+} from './domain/assistant-watch.reader.js';
 import { JobsService } from './domain/jobs.service.js';
 import { ApprovalsService } from './domain/approvals.service.js';
 import { type ActionPerformer } from './domain/action-performer.js';
@@ -73,6 +79,15 @@ export interface AppOverrides {
   readonly credentials?: ExecutorCredentialStore;
   readonly conversation?: ConversationProvider;
   readonly github?: GitHubReader;
+  /**
+   * The typed reader for notification-only watch targets. Production gets
+   * `UnavailableAssistantWatchReader`, which observes nothing: the existing
+   * reader seams cannot see releases or closing times, and this build adds no
+   * argv shape that could. Tests inject one that can, to prove the engine.
+   */
+  readonly assistantWatchReader?: AssistantWatchReader;
+  /** Test override for the forecast. Production reads Open-Meteo, and only if a location is configured. */
+  readonly weather?: WeatherPort;
   readonly extractor?: ScheduleExtractionProvider;
   readonly transport?: DiscordTransport;
   readonly allowlistJson?: string;
@@ -119,6 +134,8 @@ export interface App {
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly githubWatches: GitHubWatchService;
+  /** Notification-only watch targets: owner-private, budgeted, never an engineering watch. */
+  readonly assistantWatch: AssistantWatchService;
   /** Actionable GitHub events and the daily commit digest. Off unless enabled. */
   readonly githubFeed: GitHubFeedService;
   readonly reconciler: Reconciler;
@@ -333,7 +350,18 @@ export function createApp(
     store, authz, clock, linker: taskReminderLinker,
   });
   const reminders = new RemindersService({ store, authz, clock });
-  const briefing = new BriefingService({ store, authz, clock, prefs: ownerPreferences });
+  // The forecast: only when a location is configured, over one fixed HTTPS host.
+  const weatherPlace = resolveWeather(env);
+  const weather = weatherPlace
+    ? new WeatherBriefing(overrides.weather ?? new OpenMeteoWeather(), {
+        ...weatherPlace, timeZone: clock.timeZone,
+      })
+    : undefined;
+  const briefing = new BriefingService({
+    store, authz, clock, prefs: ownerPreferences, weather,
+    // Wired below, after the transport exists; only read while a briefing is built.
+    watch: () => assistantWatch,
+  });
   const reconciler = new Reconciler({ store, approvals, pending });
   // Deterministic rules over the owner's own messages: no provider, no new
   // command, and no inferred write applied without an explicit confirmation.
@@ -466,10 +494,16 @@ export function createApp(
   // Rides the SAME interval as everything else, holds no provider, and sends to
   // the owner's DM only. Off by default: a briefing is pulled unless somebody
   // deliberately asks for it to be pushed.
+  // Rides the SAME interval, holds no model provider and addresses the owner's
+  // DM only. Its targets are not engineering watches: nothing reads `repos`.
+  const assistantWatch = new AssistantWatchService({
+    store, authz, transport, ownerId: authz.ownerId, clock,
+    reader: overrides.assistantWatchReader ?? new UnavailableAssistantWatchReader(),
+  });
   const briefingSchedule = resolveBriefingSchedule(env);
   const briefingNotifier = new BriefingNotifier({
     store, transport, ownerId: authz.ownerId, clock, briefing,
-    config: briefingSchedule, prefs: ownerPreferences,
+    config: briefingSchedule, prefs: ownerPreferences, watch: assistantWatch,
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
@@ -483,6 +517,13 @@ export function createApp(
   const githubFeed = new GitHubFeedService({
     store, reader: githubReader, transport, ownerId: authz.ownerId, clock, allowlist,
     config: resolveGitHubFeed(env),
+    // An imported target's typed observation takes precedence for the events it
+    // covers, so the owner hears about each once. Job reads and authorization
+    // are untouched.
+    coveredByImport: (repoKey, kind) => {
+      const surface = IMPORT_COVERS_NATIVE[kind];
+      return surface !== undefined && store.assistantWatch.observes(repoKey, surface);
+    },
   });
   githubFeed.reconcileSelection();
 
@@ -606,7 +647,8 @@ export function createApp(
       ? 'enabled only after owner approval and /job execute'
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
-    githubWatches: `${store.githubWatches.countActive(authz.ownerId)} active`,
+    githubWatches:
+      `${store.githubWatches.countActive(authz.ownerId)} active; ${assistantWatch.statusLine()}`,
     githubFeed: githubFeed.statusLine(),
     repositoryWorkflow: skillBridge.describe(),
   });
@@ -620,6 +662,7 @@ export function createApp(
     approvals,
     github,
     githubWatches,
+    assistantWatch,
     tasks,
     taskCapture,
     reminders,
@@ -667,7 +710,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
+    approvals, github, githubWatches, assistantWatch, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,

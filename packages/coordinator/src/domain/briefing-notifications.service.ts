@@ -10,6 +10,7 @@ import type { DiscordTransport } from '../discord/transport.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
 import type { OwnerClock } from './owner-clock.js';
 import type { BriefingService } from './briefing.service.js';
+import type { AssistantWatchService } from './assistant-watch.service.js';
 import type { OwnerPreferencesService } from './owner-preferences.service.js';
 import type { ActorContext } from '../security/authz.js';
 
@@ -51,6 +52,8 @@ export interface BriefingNotifierDeps {
   readonly config: BriefingScheduleConfig;
   /** Imported preferences, when the profile selected them. Never an authority. */
   readonly prefs?: OwnerPreferencesService | undefined;
+  /** Settles the digest events a delivered briefing carried. */
+  readonly watch?: AssistantWatchService | undefined;
 }
 
 export interface BriefingTickResult {
@@ -99,10 +102,12 @@ export class BriefingNotifier {
   private readonly briefing: BriefingService;
   private readonly config: BriefingScheduleConfig;
   private readonly prefs: OwnerPreferencesService | undefined;
+  private readonly watch: AssistantWatchService | undefined;
   private ticking: Promise<BriefingTickResult> | null = null;
 
   constructor(deps: BriefingNotifierDeps) {
     this.prefs = deps.prefs;
+    this.watch = deps.watch;
     this.store = deps.store;
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
@@ -221,7 +226,7 @@ export class BriefingNotifier {
 
       try {
         const actor: ActorContext = { discordUserId: this.ownerId, role: 'owner' };
-        const body = this.briefing.build(actor, row.kind);
+        const body = await this.briefing.assemble(actor, row.kind);
         const to = this.targetFor(row.target);
         if (!to) {
           // The channel was configured when this row was claimed and is not
@@ -235,6 +240,11 @@ export class BriefingNotifier {
         await this.transport.send(to, briefingMessage(body));
         this.store.briefings.markDelivered(row.id, nowIso);
         delivered += 1;
+        // The digest is settled only now, after it was SENT, and only once no
+        // other copy of this slot (a DM and a channel) is still waiting to say it.
+        if (body.github && body.github.eventIds.length > 0 && !this.copyStillPending(row)) {
+          this.watch?.markDigested(body.github.eventIds);
+        }
       } catch {
         this.store.briefings.recordFailure(row.id, nowIso, BRIEFING_MAX_DELIVERY_ATTEMPTS);
         if (row.attempts + 1 >= BRIEFING_MAX_DELIVERY_ATTEMPTS) abandoned += 1;
@@ -242,6 +252,15 @@ export class BriefingNotifier {
       }
     }
     return { delivered, failed, abandoned, skippedStale };
+  }
+
+  /** Whether another target's copy of the same slot has yet to be delivered. */
+  private copyStillPending(row: { kind: BriefingSlotKind; dayKey: string; target: BriefingTarget }): boolean {
+    return this.targets().some(
+      (t) =>
+        t !== row.target &&
+        this.store.briefings.bySlot(this.ownerId, row.kind, row.dayKey, t)?.status === 'pending',
+    );
   }
 
   /** The slots that may fire today, and when, after preferences are applied. */

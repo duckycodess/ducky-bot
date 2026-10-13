@@ -1,3 +1,4 @@
+import { weatherAdvice } from '@ducky/adapters';
 import {
   BRIEFING_PROVENANCE, BRIEFING_TITLE, REMINDER_STATE_LABEL, TASK_STATE_LABEL,
   discordTimestamp, discordWhen, formatZoned, parseStoredWallClock,
@@ -6,9 +7,10 @@ import {
 } from '@ducky/contracts';
 import type {
   GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleExceptionRow,
-  ScheduleRow, TaskRow,
+  ScheduleRow, TaskRow, WatchEventWithTarget, WatchTargetRow,
 } from '@ducky/persistence';
 import type { Briefing, BriefingSection } from '../domain/briefing.service.js';
+import { bareRepoName } from '../domain/assistant-watch.engine.js';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
 
 /**
@@ -213,6 +215,67 @@ export function watchAdded(row: GitHubWatchRow): OutboundMessage {
   };
 }
 
+/**
+ * A requested-changes alert for a notification-only target.
+ *
+ * Private by construction: it carries a bare repository name, a number and
+ * scrubbed text, never a person's name or a link. The shared GitHub channel is
+ * not a destination for this message, and its only caller addresses the owner's
+ * DM.
+ */
+export function assistantWatchAlert(event: WatchEventWithTarget): OutboundMessage {
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  const number = typeof payload['number'] === 'number' ? ` · PR #${payload['number']}` : '';
+  const title = typeof payload['title'] === 'string' ? payload['title'] : '';
+  const summary = typeof payload['summary'] === 'string' && payload['summary'] !== ''
+    ? payload['summary']
+    : 'A reviewer requested revisions on this pull request.';
+  return {
+    embeds: [{
+      title: 'Requested changes',
+      description: [`${bareRepoName(event.display)}${number}`, title ? short(title, 140) : '', '', short(summary, 600)]
+        .filter((l, i) => l !== '' || i === 2)
+        .join('\n'),
+      fields: [{ name: 'When', value: discordTimestamp(event.occurredAt, 'f') || 'unknown' }],
+      color: DUCKY_COLORS.attention,
+    }],
+    ephemeral: false,
+  };
+}
+
+export function assistantWatchCancelled(row: WatchTargetRow): OutboundMessage {
+  return { content: `Repository watch \`${row.publicId}\` cancelled.`, ephemeral: true };
+}
+
+/** The notification targets, one page, as counts and bare repository names. */
+export function assistantWatchesList(
+  rows: readonly WatchTargetRow[],
+  counts: { active: number; cancelled: number; targets: number },
+  page: number,
+  pageSize: number,
+): OutboundMessage {
+  if (counts.targets === 0) return { content: 'No notification-only watch targets.', ephemeral: true };
+  if (rows.length === 0) {
+    return { content: `No targets on page ${page + 1}.`, ephemeral: true };
+  }
+  const pages = Math.max(1, Math.ceil(counts.targets / pageSize));
+  return {
+    embeds: [{
+      title: `Notification targets (${counts.active} active, ${counts.cancelled} cancelled)`,
+      description: rows
+        .map((r) => `\`${r.publicId}\` ${r.display} · ${r.state}`)
+        .join('\n'),
+      footer: `Page ${page + 1} of ${pages}. Read-only: these only tell you what happened; they grant nothing.`,
+    }],
+    ephemeral: true,
+  };
+}
+
 export function watchCancelled(row: GitHubWatchRow): OutboundMessage {
   return { content: `Repository watch \`${row.publicId}\` cancelled.`, ephemeral: true };
 }
@@ -282,6 +345,14 @@ const scheduleLine = (e: ScheduleRow, tz: string): string =>
     .filter(Boolean)
     .join(' · ');
 
+/** Cuts text to a limit on a line boundary, and says so. Embed fields are bounded. */
+const fit = (text: string, max: number): string => {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 40);
+  const at = cut.lastIndexOf('\n');
+  return `${at > 0 ? cut.slice(0, at) : cut}\n-# …and more not shown`;
+};
+
 const bullets = (lines: readonly string[]): string =>
   lines.map((l) => `• ${l}`).join('\n');
 
@@ -327,6 +398,49 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     `${short(e.courseCode ?? e.label ?? 'All classes', 80)}: ${e.kind}` +
     (e.note ? ` · ${short(e.note, 80)}` : '');
 
+  /** The forecast, as a fact: a label, the numbers it has, the place, and one fixed note. */
+  const weatherField = (): void => {
+    const w = b.weather;
+    if (!w) return;
+    const temp = w.temperatureC === null ? '' : ` · ${Math.round(w.temperatureC)}°C`;
+    const range =
+      w.highC !== null && w.lowC !== null ? `${Math.round(w.lowC)}° to ${Math.round(w.highC)}°` : '';
+    const rain = w.rainChance === null ? '' : `${w.rainChance}% chance of rain`;
+    const advice = weatherAdvice(w);
+    fields.push({
+      name: b.kind === 'evening' ? "Tomorrow's weather" : 'Weather',
+      value:
+        `**${w.label}**${temp}\n-# ${[range, rain, short(w.location, 60)].filter(Boolean).join(' · ')}` +
+        (advice ? `\n${advice}` : ''),
+    });
+  };
+
+  /**
+   * What happened in the watched repositories. Bounded to fit one embed field;
+   * a cut is said, never silent. The lines were scrubbed when they were
+   * recorded, and carry no person's name and no link.
+   */
+  const githubFields = (): void => {
+    const g = b.github;
+    if (!g) return;
+    if (g.empty) {
+      fields.push({ name: 'GitHub', value: 'Nothing new since the last digest.' });
+      return;
+    }
+    const lines: string[] = [];
+    for (const r of g.repos) {
+      lines.push(`**${short(r.name, 60)}**`);
+      for (const l of r.lines) lines.push(`-# ${short(l, 120)}`);
+    }
+    if (g.truncatedRepos > 0) {
+      lines.push(`-# ${g.truncatedRepos} quieter repositor${g.truncatedRepos === 1 ? 'y' : 'ies'} not shown`);
+    }
+    fields.push({ name: 'GitHub', value: fit(lines.join('\n'), 1000) });
+    if (g.attention.length > 0) {
+      fields.push({ name: 'GitHub needs attention', value: fit(bullets(g.attention), 1000) });
+    }
+  };
+
   /** Lookahead and captures exist only when an imported preference asked for them. */
   const extras = (): void => {
     if (b.lookahead && b.lookahead.tasks.rows.length > 0) {
@@ -365,9 +479,12 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     add('Overdue', b.tasksOverdue, taskText, overflowNote(b));
     add('Tomorrow', b.scheduleTomorrow, scheduleText);
     if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
+    weatherField();
     add('Reminders tomorrow', b.remindersTomorrow, reminderText);
     extras();
+    githubFields();
   } else {
+    weatherField();
     add('Today', b.scheduleToday, scheduleText);
     if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
     add('Due today', b.tasksDueToday, taskText);
@@ -375,6 +492,7 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     add('Reminders still to come today', b.remindersToday, reminderText);
     if (b.kind === 'today') add('Completed today', b.tasksClosedToday, taskText);
     extras();
+    githubFields();
   }
 
   if (fields.length === 0) {

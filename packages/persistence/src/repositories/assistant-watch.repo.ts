@@ -1,5 +1,5 @@
 import {
-  WATCH_ALERT_KINDS, type WatchEventKind, type WatchSurface,
+  WATCH_ALERT_KINDS, WATCH_EVENT_SURFACE, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 
@@ -37,6 +37,8 @@ export interface WatchEventRow {
   readonly id: string;
   readonly targetId: string;
   readonly kind: WatchEventKind;
+  readonly surface: WatchSurface;
+  readonly held: boolean;
   readonly identity: string;
   readonly occurredAt: string;
   readonly payloadJson: string;
@@ -93,6 +95,8 @@ const mapEvent = (r: Record<string, unknown>): WatchEventRow => ({
   id: String(r['id']),
   targetId: String(r['target_id']),
   kind: String(r['kind']) as WatchEventKind,
+  surface: String(r['surface']) as WatchSurface,
+  held: Number(r['held']) === 1,
   identity: String(r['identity']),
   occurredAt: String(r['occurred_at']),
   payloadJson: String(r['payload_json']),
@@ -103,6 +107,17 @@ const mapEvent = (r: Record<string, unknown>): WatchEventRow => ({
   digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
   createdAt: String(r['created_at']),
 });
+
+/** An event the engine observed, ready to be recorded. */
+export interface ObservedEventWrite {
+  readonly id: string;
+  readonly kind: WatchEventKind;
+  readonly identity: string;
+  readonly occurredAt: string;
+  readonly payloadJson: string;
+  /** Settled at birth: an event that is already known must not be announced. */
+  readonly settled: boolean;
+}
 
 const ALERT_LIST = WATCH_ALERT_KINDS.map((k) => `'${k}'`).join(',');
 
@@ -271,6 +286,7 @@ export class AssistantWatchRepo {
            FROM assistant_watch_checkpoints c
            JOIN assistant_watch_targets t ON t.id = c.target_id
           WHERE t.state = 'active' AND c.blocked_reason IS NULL AND c.next_due_at <= ?
+            AND c.surface != 'ci_state'
           ORDER BY c.next_due_at ASC, c.target_id ASC, c.surface ASC
           LIMIT ?`,
       )
@@ -288,9 +304,10 @@ export class AssistantWatchRepo {
 
   /**
    * Commits one finished surface read: the cursor moves, the state becomes
-   * 'ready', pending progress clears, and the new events are recorded -- all
-   * under a compare-and-set on what the caller read. If anything else moved the
-   * checkpoint in between nothing is written and this returns undefined.
+   * 'ready', pending progress clears, the new events are recorded and every event
+   * HELD by this read's earlier pages is released -- all under a compare-and-set
+   * on what the caller read. If anything else moved the checkpoint in between,
+   * nothing is written and this returns undefined.
    *
    * `OR IGNORE` on the event key IS the deduplication: an identity seen twice is
    * recorded once, whichever pass saw it first.
@@ -302,15 +319,9 @@ export class AssistantWatchRepo {
     cursor: string;
     nextDueAt: string;
     atIso: string;
-    events: readonly {
-      id: string;
-      kind: WatchEventKind;
-      identity: string;
-      occurredAt: string;
-      payloadJson: string;
-      /** Settled at birth: an event that is already known must not be announced. */
-      settled: boolean;
-    }[];
+    events: readonly ObservedEventWrite[];
+    /** A second checkpoint that moves with this one (CI state moves with runs). */
+    alsoSet?: { surface: WatchSurface; cursor: string };
   }): number | undefined {
     const moved = this.db
       .prepare(
@@ -321,25 +332,33 @@ export class AssistantWatchRepo {
       )
       .run(input.cursor, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);
     if (Number(moved.changes) !== 1) return undefined;
-    let inserted = 0;
-    for (const e of input.events) {
-      const res = this.db
+    const inserted = this.insertObserved(input.targetId, input.events, input.atIso, false);
+    this.db
+      .prepare(
+        `UPDATE assistant_watch_events SET held = 0
+          WHERE target_id = ? AND surface = ? AND held = 1`,
+      )
+      .run(input.targetId, input.surface);
+    if (input.alsoSet) {
+      this.db
         .prepare(
-          `INSERT OR IGNORE INTO assistant_watch_events
-             (id, target_id, kind, identity, occurred_at, payload_json, origin,
-              alerted_at, digested_at, created_at)
-           VALUES (?,?,?,?,?,?, 'observed', ?, ?, ?)`,
+          `INSERT INTO assistant_watch_checkpoints
+             (target_id, surface, state, cursor, next_due_at, updated_at)
+           VALUES (?, ?, 'ready', ?, ?, ?)
+           ON CONFLICT(target_id, surface) DO UPDATE SET
+             state = 'ready', cursor = excluded.cursor, updated_at = excluded.updated_at`,
         )
-        .run(
-          e.id, input.targetId, e.kind, e.identity, e.occurredAt, e.payloadJson,
-          e.settled ? input.atIso : null, e.settled ? input.atIso : null, input.atIso,
-        );
-      inserted += Number(res.changes);
+        .run(input.targetId, input.alsoSet.surface, input.alsoSet.cursor, input.nextDueAt, input.atIso);
     }
     return inserted;
   }
 
-  /** Durable progress through a multi-page read; the committed cursor stays put. */
+  /**
+   * Durable progress through a multi-page read; the committed cursor stays put.
+   *
+   * Events found so far are recorded HELD, so they survive a restart without
+   * being announced before the read is complete.
+   */
   savePending(input: {
     targetId: string;
     surface: WatchSurface;
@@ -348,6 +367,7 @@ export class AssistantWatchRepo {
     pendingPage: number;
     nextDueAt: string;
     atIso: string;
+    events?: readonly ObservedEventWrite[];
   }): boolean {
     const info = this.db
       .prepare(
@@ -359,7 +379,53 @@ export class AssistantWatchRepo {
         input.pendingCursor, input.pendingPage, input.nextDueAt, input.atIso,
         input.targetId, input.surface, input.expectedUpdatedAt,
       );
-    return Number(info.changes) === 1;
+    if (Number(info.changes) !== 1) return false;
+    this.insertObserved(input.targetId, input.events ?? [], input.atIso, true);
+    return true;
+  }
+
+  private insertObserved(
+    targetId: string,
+    events: readonly ObservedEventWrite[],
+    atIso: string,
+    held: boolean,
+  ): number {
+    let inserted = 0;
+    for (const e of events) {
+      const res = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO assistant_watch_events
+             (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin,
+              alerted_at, digested_at, created_at)
+           VALUES (?,?,?,?,?,?,?,?, 'observed', ?, ?, ?)`,
+        )
+        .run(
+          e.id, targetId, e.kind, WATCH_EVENT_SURFACE[e.kind], held ? 1 : 0, e.identity, e.occurredAt,
+          e.payloadJson, e.settled ? atIso : null, e.settled ? atIso : null, atIso,
+        );
+      inserted += Number(res.changes);
+    }
+    return inserted;
+  }
+
+  /**
+   * Whether an ACTIVE imported target is observing a surface for a repository,
+   * so a native proactive event the same observation would produce can be
+   * suppressed. A surface that is unbaselined or blocked is not observing, and
+   * suppressing on its behalf would lose the notification.
+   */
+  observes(repoKey: string, surface: WatchSurface): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM assistant_watch_targets t
+             JOIN assistant_watch_checkpoints c ON c.target_id = t.id
+            WHERE t.repo_key = ? AND t.state = 'active' AND c.surface = ?
+              AND c.blocked_reason IS NULL AND c.state IN ('imported','ready')
+            LIMIT 1`,
+        )
+        .get(repoKey, surface) !== undefined
+    );
   }
 
   /** A failed read. The cursor and the pending progress are untouched. */
@@ -418,13 +484,13 @@ export class AssistantWatchRepo {
     this.db
       .prepare(
         `INSERT INTO assistant_watch_events
-           (id, target_id, kind, identity, occurred_at, payload_json, origin,
+           (id, target_id, kind, surface, identity, occurred_at, payload_json, origin,
             alerted_at, digested_at, created_at)
-         VALUES (?,?,?,?,?,?, 'imported', ?, ?, ?)`,
+         VALUES (?,?,?,?,?,?,?, 'imported', ?, ?, ?)`,
       )
       .run(
-        row.id, row.targetId, row.kind, row.identity, row.occurredAt, row.payloadJson,
-        row.alertedAt, row.digestedAt, row.createdAt,
+        row.id, row.targetId, row.kind, WATCH_EVENT_SURFACE[row.kind], row.identity, row.occurredAt,
+        row.payloadJson, row.alertedAt, row.digestedAt, row.createdAt,
       );
   }
 
@@ -444,17 +510,18 @@ export class AssistantWatchRepo {
   }
 
   /** Alerts not yet sent, for ACTIVE targets, oldest first. */
-  pendingAlerts(limit: number): WatchEventWithTarget[] {
+  pendingAlerts(ownerId: string, limit: number): WatchEventWithTarget[] {
     return this.db
       .prepare(
         `SELECT e.*, t.display, t.discord_user_id
            FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.state = 'active' AND e.kind IN (${ALERT_LIST})
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0
+            AND e.kind IN (${ALERT_LIST})
             AND e.alerted_at IS NULL AND e.alert_abandoned_at IS NULL
           ORDER BY e.occurred_at ASC, e.id ASC LIMIT ?`,
       )
-      .all(limit)
+      .all(ownerId, limit)
       .map((raw) => {
         const r = raw as Record<string, unknown>;
         return { ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']) };
@@ -493,17 +560,18 @@ export class AssistantWatchRepo {
    * as an alert and must not appear twice). An alert that was sent, or whose
    * alert was abandoned, is digest-eligible: the digest is the safety net.
    */
-  undigested(limit: number): WatchEventWithTarget[] {
+  undigested(ownerId: string, limit: number): WatchEventWithTarget[] {
     return this.db
       .prepare(
         `SELECT e.*, t.display, t.discord_user_id
            FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.state = 'active' AND e.digested_at IS NULL AND e.kind != 'review_pending'
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0
+            AND e.digested_at IS NULL AND e.kind != 'review_pending'
             AND NOT (e.kind IN (${ALERT_LIST}) AND e.alerted_at IS NULL AND e.alert_abandoned_at IS NULL)
           ORDER BY t.display ASC, e.occurred_at ASC, e.id ASC LIMIT ?`,
       )
-      .all(limit)
+      .all(ownerId, limit)
       .map((raw) => {
         const r = raw as Record<string, unknown>;
         return { ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']) };

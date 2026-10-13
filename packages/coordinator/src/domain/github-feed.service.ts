@@ -56,6 +56,15 @@ export interface GitHubFeedDeps {
   /** Read only, to seed the selected list. Nothing here ever writes to it. */
   readonly allowlist: RepoAllowlist;
   readonly config: GitHubFeedConfig;
+  /**
+   * Whether an imported notification-only target already observes this kind of
+   * event for a repository, so announcing it here as well would say it twice.
+   *
+   * It decides ONE thing -- that a native proactive card is skipped -- and it
+   * changes no job read and no authorization. Omitted means nothing is
+   * suppressed.
+   */
+  readonly coveredByImport?: ((repoKey: string, kind: GitHubFeedKind) => boolean) | undefined;
 }
 
 export interface GitHubFeedTickResult {
@@ -129,6 +138,7 @@ export class GitHubFeedService {
   private readonly clock: OwnerClock;
   private readonly allowlist: RepoAllowlist;
   private readonly config: GitHubFeedConfig;
+  private readonly coveredByImport: GitHubFeedDeps['coveredByImport'];
   private readonly visibility = new Map<string, { at: number; isPrivate: boolean }>();
   private ticking: Promise<GitHubFeedTickResult> | null = null;
   /** One open-PR read per repository per tick, shared by the `prs` and `checks` units. */
@@ -142,6 +152,7 @@ export class GitHubFeedService {
     this.clock = deps.clock;
     this.allowlist = deps.allowlist;
     this.config = deps.config;
+    this.coveredByImport = deps.coveredByImport;
   }
 
   get enabled(): boolean {
@@ -777,6 +788,14 @@ export class GitHubFeedService {
       const selected = repo?.state === 'active';
       // An alert about a repository that is no longer on the list is retired, not sent.
       if (event.origin === 'selected' && !selected) {
+        feed.markEventSkipped(event.id, at);
+        r.skipped += 1;
+        continue;
+      }
+      // The imported typed observation takes precedence for the events it
+      // covers: the owner hears about it once, privately, and the shared channel
+      // card for the same fact is retired rather than sent.
+      if (this.coveredByImport?.(event.repoKey, event.kind)) {
         feed.markEventSkipped(event.id, at);
         r.skipped += 1;
         continue;

@@ -381,26 +381,26 @@ describe('notification-only watch targets', () => {
     });
 
     it('keeps a waiting alert out of the digest so it never appears twice', () => {
-      expect(store.assistantWatch.pendingAlerts(10).map((e) => e.id)).toEqual(['e-alert']);
-      expect(store.assistantWatch.undigested(10).map((e) => e.id)).toEqual(['e-digest']);
+      expect(store.assistantWatch.pendingAlerts(OWNER, 10).map((e) => e.id)).toEqual(['e-alert']);
+      expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id)).toEqual(['e-digest']);
     });
 
     it('lets the digest carry an alert once it was sent, or its alert was abandoned', () => {
       expect(store.assistantWatch.markAlerted('e-alert', T0)).toBe(true);
       expect(store.assistantWatch.markAlerted('e-alert', T0)).toBe(false);
-      expect(store.assistantWatch.undigested(10).map((e) => e.id).sort()).toEqual(['e-alert', 'e-digest']);
+      expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id).sort()).toEqual(['e-alert', 'e-digest']);
       store.assistantWatch.markDigested(['e-alert'], T0);
-      expect(store.assistantWatch.undigested(10).map((e) => e.id)).toEqual(['e-digest']);
+      expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id)).toEqual(['e-digest']);
     });
 
     it('abandons an alert after repeated failures and hands it to the digest', () => {
       for (let i = 0; i < 3; i += 1) store.assistantWatch.recordAlertFailure('e-alert', T0, 3);
-      expect(store.assistantWatch.pendingAlerts(10)).toEqual([]);
-      expect(store.assistantWatch.undigested(10).map((e) => e.id)).toContain('e-alert');
+      expect(store.assistantWatch.pendingAlerts(OWNER, 10)).toEqual([]);
+      expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id)).toContain('e-alert');
     });
 
     it('never shows a silent marker, and settles it by itself', () => {
-      expect(store.assistantWatch.undigested(10).map((e) => e.id)).not.toContain('e-marker');
+      expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id)).not.toContain('e-marker');
       expect(store.assistantWatch.settleSilent(T0)).toBe(1);
       expect(store.assistantWatch.settleSilent(T0)).toBe(0);
     });
@@ -416,8 +416,8 @@ describe('notification-only watch targets', () => {
 
     it('excludes a cancelled target from alerts and digests', () => {
       store.assistantWatch.cancel(OWNER, 'w1', T0);
-      expect(store.assistantWatch.pendingAlerts(10)).toEqual([]);
-      expect(store.assistantWatch.undigested(10)).toEqual([]);
+      expect(store.assistantWatch.pendingAlerts(OWNER, 10)).toEqual([]);
+      expect(store.assistantWatch.undigested(OWNER, 10)).toEqual([]);
     });
   });
 
@@ -487,9 +487,39 @@ describe('the shared runtime lock', () => {
     expect(acquireRuntimeLock(db, 'coordinator', { host: 'h1', pid: 300 }).ok).toBe(true);
   });
 
-  it('lets the same process re-acquire its own lock', () => {
-    expect(acquireRuntimeLock(db, 'coordinator', { ...same, isPidAlive: () => true }).ok).toBe(true);
-    expect(acquireRuntimeLock(db, 'coordinator', { ...same, isPidAlive: () => true }).ok).toBe(true);
+  it('refuses a second handle in the SAME process while the first is live', () => {
+    const a = acquireRuntimeLock(db, 'coordinator', { ...same, isPidAlive: () => true });
+    expect(a.ok).toBe(true);
+    expect(acquireRuntimeLock(db, 'coordinator', { ...same, isPidAlive: () => true })).toEqual({
+      ok: false, heldBy: 'coordinator',
+    });
+    expect(acquireRuntimeLock(db, 'importer', { ...same, isPidAlive: () => true })).toEqual({
+      ok: false, heldBy: 'coordinator',
+    });
+    // The first handle still owns it.
+    if (a.ok) expect(a.handle.held()).toBe(true);
+  });
+
+  it('refuses an EQUAL pid on a DIFFERENT host while the holder heartbeat is fresh', () => {
+    let now = Date.parse(T0);
+    const clock = () => now;
+    const a = acquireRuntimeLock(db, 'coordinator', { host: 'h1', pid: 4242, nowMs: clock });
+    expect(a.ok).toBe(true);
+    now += 60_000;
+    expect(acquireRuntimeLock(db, 'importer', { host: 'h2', pid: 4242, nowMs: clock })).toEqual({
+      ok: false, heldBy: 'coordinator',
+    });
+    if (a.ok) expect(a.handle.held()).toBe(true);
+    // Only a stale heartbeat from another host lets it go.
+    now += 4 * 60_000;
+    expect(acquireRuntimeLock(db, 'importer', { host: 'h2', pid: 4242, nowMs: clock }).ok).toBe(true);
+  });
+
+  it('recovers a dead same-host holder even when the new process reuses its pid', () => {
+    acquireRuntimeLock(db, 'coordinator', { ...same, isPidAlive: () => true });
+    // The old process is gone; a new one happens to have been given pid 100.
+    const b = acquireRuntimeLock(db, 'importer', { ...same, isPidAlive: () => false });
+    expect(b.ok).toBe(true);
   });
 });
 

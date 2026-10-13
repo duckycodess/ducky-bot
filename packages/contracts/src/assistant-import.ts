@@ -37,13 +37,32 @@ export const ASSISTANT_IMPORT_SCHEMA_ID = 'ducky-assistant-import/v1' as const;
 
 const SourceId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/);
 
-const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+const UTC_INSTANT = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+
+/**
+ * Whether text is a real UTC instant: the right shape AND a real calendar date
+ * and time of day.
+ *
+ * `Date.parse` is not enough on its own. It will happily accept shapes that
+ * `Date` then normalises into a different day, so `2026-02-30T00:00:00Z` would
+ * quietly become March 2nd and a deadline would move without anybody having said
+ * so. The date is therefore checked against the calendar, and the clock fields
+ * are range-checked, before any parsing.
+ */
+export function isUtcInstant(s: string): boolean {
+  if (s.length > 32) return false;
+  const m = UTC_INSTANT.exec(s);
+  if (!m) return false;
+  const [hour, minute, second] = [Number(m[2]), Number(m[3]), Number(m[4])];
+  if (!isCivilDate(m[1]!) || hour > 23 || minute > 59 || second > 59) return false;
+  return !Number.isNaN(Date.parse(s));
+}
+
 /** An explicit UTC instant, normalised so equal instants compare equal as text. */
 const Instant = z
   .string()
   .max(32)
-  .regex(UTC_INSTANT)
-  .refine((s) => !Number.isNaN(Date.parse(s)), 'instant')
+  .refine(isUtcInstant, 'instant')
   .transform((s) => new Date(s).toISOString());
 
 const CivilDate = z.string().refine(isCivilDate, 'civil_date');
@@ -419,7 +438,7 @@ function semanticChecks(doc: AssistantImportDocument, bag: IssueBag): void {
       for (const c of t.checkpoints) {
         if (
           (TIME_CURSOR_SURFACES as readonly string[]).includes(c.surface) &&
-          !UTC_INSTANT.test(c.cursor)
+          !isUtcInstant(c.cursor)
         ) {
           bag.add('watch', 'cursor_not_an_instant');
         }

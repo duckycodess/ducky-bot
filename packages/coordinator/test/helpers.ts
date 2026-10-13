@@ -78,6 +78,8 @@ export interface HarnessOptions {
   readonly assistantWatchReader?: AssistantWatchReader;
   /** The forecast. Omitted means Open-Meteo, which only runs if a location is configured. */
   readonly weather?: WeatherPort;
+  /** Take the shared runtime lock as the coordinator does. Off for tests that model a restart. */
+  readonly holdRuntimeLock?: boolean;
   /**
    * Drives the daily assistant's clock. Reminder materialization, due dates
    * and briefing day boundaries are all read through this, so a test can move
@@ -179,6 +181,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       github: opts.github ?? new MockGitHubReader(),
       ...(opts.assistantWatchReader ? { assistantWatchReader: opts.assistantWatchReader } : {}),
       ...(opts.weather ? { weather: opts.weather } : {}),
+      ...(opts.holdRuntimeLock ? { holdRuntimeLock: true } : {}),
     },
   );
 

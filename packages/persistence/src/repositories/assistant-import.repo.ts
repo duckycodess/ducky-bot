@@ -98,6 +98,19 @@ export class AssistantImportRepo {
     return r ? mapIdentity(r as Record<string, unknown>) : undefined;
   }
 
+  /**
+   * Every source namespace the ledger has ever seen. Identities are scoped by
+   * namespace, so a mistyped one would look like a brand-new source and import
+   * everything a second time; the importer pins to what is already here.
+   */
+  namespaces(): string[] {
+    return (
+      this.db
+        .prepare('SELECT DISTINCT namespace FROM assistant_import_identities ORDER BY namespace')
+        .all() as { namespace: string }[]
+    ).map((r) => r.namespace);
+  }
+
   recordLive(row: {
     namespace: string;
     category: IdentityCategory;

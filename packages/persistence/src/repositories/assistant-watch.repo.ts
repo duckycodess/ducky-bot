@@ -2,6 +2,7 @@ import {
   WATCH_ALERT_KINDS, WATCH_EVENT_SURFACE, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
+import { atomically } from '../db.js';
 
 export type WatchCheckpointState = 'unbaselined' | 'imported' | 'ready';
 
@@ -26,6 +27,8 @@ export interface WatchCheckpointRow {
   readonly cursor: string | null;
   readonly pendingCursor: string | null;
   readonly pendingPage: number;
+  /** Whether items exactly at the cursor were processed here; see the migration. */
+  readonly boundaryKnown: boolean;
   readonly nextDueAt: string;
   readonly failures: number;
   readonly lastError: string | null;
@@ -84,6 +87,7 @@ const mapCheckpoint = (r: Record<string, unknown>): WatchCheckpointRow => ({
   cursor: r['cursor'] == null ? null : String(r['cursor']),
   pendingCursor: r['pending_cursor'] == null ? null : String(r['pending_cursor']),
   pendingPage: Number(r['pending_page']),
+  boundaryKnown: Number(r['boundary_known']) === 1,
   nextDueAt: String(r['next_due_at']),
   failures: Number(r['failures']),
   lastError: r['last_error'] == null ? null : String(r['last_error']),
@@ -216,6 +220,10 @@ export class AssistantWatchRepo {
    * export finds the identity live and leaves it cancelled.
    */
   cancel(ownerId: string, id: string, atIso: string): boolean {
+    return atomically(this.db, () => this.cancelInner(ownerId, id, atIso));
+  }
+
+  private cancelInner(ownerId: string, id: string, atIso: string): boolean {
     const info = this.db
       .prepare(
         `UPDATE assistant_watch_targets
@@ -322,15 +330,30 @@ export class AssistantWatchRepo {
     events: readonly ObservedEventWrite[];
     /** A second checkpoint that moves with this one (CI state moves with runs). */
     alsoSet?: { surface: WatchSurface; cursor: string };
+    /** The new boundary flag. Omitted leaves it as it was (the cursor did not move). */
+    boundaryKnown?: boolean;
   }): number | undefined {
+    // The cursor, the state, the events, the released holds and the second
+    // checkpoint change together or not at all: a failure anywhere leaves the
+    // checkpoint exactly as it was, so a crash can never advance a cursor past
+    // events that were not recorded.
+    return atomically(this.db, () => this.commitObservationInner(input));
+  }
+
+  private commitObservationInner(input: Parameters<AssistantWatchRepo['commitObservation']>[0]): number | undefined {
     const moved = this.db
       .prepare(
         `UPDATE assistant_watch_checkpoints
             SET state = 'ready', cursor = ?, pending_cursor = NULL, pending_page = 0,
+                boundary_known = COALESCE(?, boundary_known),
                 next_due_at = ?, failures = 0, last_error = NULL, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
-      .run(input.cursor, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);
+      .run(
+        input.cursor,
+        input.boundaryKnown === undefined ? null : input.boundaryKnown ? 1 : 0,
+        input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt,
+      );
     if (Number(moved.changes) !== 1) return undefined;
     const inserted = this.insertObserved(input.targetId, input.events, input.atIso, false);
     this.db
@@ -369,6 +392,10 @@ export class AssistantWatchRepo {
     atIso: string;
     events?: readonly ObservedEventWrite[];
   }): boolean {
+    return atomically(this.db, () => this.savePendingInner(input));
+  }
+
+  private savePendingInner(input: Parameters<AssistantWatchRepo['savePending']>[0]): boolean {
     const info = this.db
       .prepare(
         `UPDATE assistant_watch_checkpoints
@@ -412,19 +439,21 @@ export class AssistantWatchRepo {
    * Whether an ACTIVE imported target is observing a surface for a repository,
    * so a native proactive event the same observation would produce can be
    * suppressed. A surface that is unbaselined or blocked is not observing, and
-   * suppressing on its behalf would lose the notification.
+   * suppressing on its behalf would lose the notification. So is one whose last
+   * read FAILED: while it is failing it observes nothing, however healthy it was.
    */
-  observes(repoKey: string, surface: WatchSurface): boolean {
+  observes(ownerId: string, repoKey: string, surface: WatchSurface): boolean {
     return (
       this.db
         .prepare(
           `SELECT 1 FROM assistant_watch_targets t
              JOIN assistant_watch_checkpoints c ON c.target_id = t.id
-            WHERE t.repo_key = ? AND t.state = 'active' AND c.surface = ?
-              AND c.blocked_reason IS NULL AND c.state IN ('imported','ready')
+            WHERE t.discord_user_id = ? AND t.repo_key = ? AND t.state = 'active'
+              AND c.surface = ? AND c.blocked_reason IS NULL AND c.failures = 0
+              AND c.state IN ('imported','ready')
             LIMIT 1`,
         )
-        .get(repoKey, surface) !== undefined
+        .get(ownerId, repoKey, surface) !== undefined
     );
   }
 
@@ -600,7 +629,9 @@ export class AssistantWatchRepo {
   }
 
   /**
-   * Empties the CONTENT of settled events and keeps their identity.
+   * Empties the CONTENT of events that will never be shown, and keeps their
+   * identity: settled ones, ones held by a read that never closed, and ones
+   * belonging to a target cancelled long ago.
    *
    * Deleting the row would make the identity forgettable and let the same event
    * be announced again; keeping the identity and dropping the text keeps the
@@ -611,9 +642,13 @@ export class AssistantWatchRepo {
       this.db
         .prepare(
           `UPDATE assistant_watch_events SET payload_json = '{}'
-            WHERE digested_at IS NOT NULL AND digested_at < ? AND payload_json != '{}'`,
+            WHERE payload_json != '{}' AND (
+              (digested_at IS NOT NULL AND digested_at < :before)
+              OR (held = 1 AND created_at < :before)
+              OR target_id IN (SELECT id FROM assistant_watch_targets
+                                WHERE state = 'cancelled' AND cancelled_at < :before))`,
         )
-        .run(beforeIso).changes,
+        .run({ before: beforeIso }).changes,
     );
   }
 

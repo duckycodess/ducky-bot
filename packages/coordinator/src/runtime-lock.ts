@@ -1,4 +1,4 @@
-import { DuckyError } from '@ducky/contracts';
+import { DuckyError, RUNTIME_LOCK_HEARTBEAT_MS } from '@ducky/contracts';
 import { acquireRuntimeLock, type Db, type RuntimeLockHandle } from '@ducky/persistence';
 
 /**
@@ -22,4 +22,53 @@ export function takeCoordinatorLock(db: Db): RuntimeLockHandle {
     );
   }
   return out.handle;
+}
+
+export interface HeartbeatTimers {
+  readonly set: (fn: () => void, ms: number) => unknown;
+  readonly clear: (handle: unknown) => void;
+}
+
+/**
+ * Keeps the lock fresh on a timer of its OWN.
+ *
+ * The reconcile interval is operator-configurable and can be set longer than the
+ * lock's stale window, which would let a perfectly healthy coordinator lose its
+ * lock between two reconciles; the heartbeat period is fixed and short instead.
+ * When a beat finds the lock has been taken over, `onLost` runs once and the
+ * timer stops: this process is no longer the writer and must not go on as one.
+ * Returns a function that stops the timer.
+ */
+export function startLockHeartbeat(
+  handle: RuntimeLockHandle,
+  onLost: () => void,
+  timers: HeartbeatTimers = {
+    set: (fn, ms) => {
+      const t = setInterval(fn, ms);
+      t.unref();
+      return t;
+    },
+    clear: (h) => clearInterval(h as NodeJS.Timeout),
+  },
+  everyMs: number = RUNTIME_LOCK_HEARTBEAT_MS,
+): () => void {
+  let stopped = false;
+  const timer = timers.set(() => {
+    if (stopped) return;
+    let alive = false;
+    try {
+      alive = handle.heartbeat();
+    } catch {
+      alive = false;
+    }
+    if (!alive) {
+      stopped = true;
+      timers.clear(timer);
+      onLost();
+    }
+  }, everyMs);
+  return () => {
+    stopped = true;
+    timers.clear(timer);
+  };
 }

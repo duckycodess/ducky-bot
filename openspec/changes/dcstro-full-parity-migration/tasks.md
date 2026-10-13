@@ -34,3 +34,16 @@
 - [ ] 4.6 After successful stable observation, separately reviewed module-only retirement in private source repository.
 
 Unchecked operational evidence is required and blocks merge readiness for issue #9; public/mock checks cannot satisfy it.
+
+## 5. Required parity blockers (unsupported source behavior)
+
+Full parity is settled. These are not proposed exclusions: each blocks cutover and retirement until supported and proven, and Ducky refuses the corresponding input meanwhile.
+
+- [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests.
+- [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch.
+- [ ] 5.3 The requested-changes alert's "areas mentioned".
+- [ ] 5.4 The source's morning-briefing staleness rule.
+- [ ] 5.5 Rollback control between schedule batches.
+- [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics.
+- [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM.
+- [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp.

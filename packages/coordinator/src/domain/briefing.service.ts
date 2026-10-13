@@ -146,20 +146,34 @@ export class BriefingService {
    * fetch leaves the briefing without a weather section, never without a
    * briefing.
    */
-  async assemble(actor: ActorContext, kind?: BriefingKind): Promise<Briefing> {
+  async assemble(
+    actor: ActorContext,
+    kind?: BriefingKind,
+    opts: { readonly includePrivate?: boolean } = {},
+  ): Promise<Briefing> {
     this.authz.requireOwner(actor);
     const resolved = kind ?? this.defaultKind();
     const prefs = this.prefs?.effective();
     const weather =
       prefs?.includeWeather && this.weather ? ((await this.weather.forecastFor(resolved)) ?? undefined) : undefined;
-    return this.build(actor, resolved, { weather });
+    return this.build(actor, resolved, { weather, includePrivate: opts.includePrivate ?? true });
   }
 
   build(
     actor: ActorContext,
     kind?: BriefingKind,
-    extras: { readonly weather?: WeatherReport | undefined } = {},
+    extras: {
+      readonly weather?: WeatherReport | undefined;
+      /**
+       * Whether the sections that carry the owner's private imported data (the
+       * capture inbox and the watched-repository digest) may appear. False for a
+       * copy bound for a channel, which other people might read; the owner's DM
+       * and the ephemeral `/briefing` reply keep the default.
+       */
+      readonly includePrivate?: boolean;
+    } = {},
   ): Briefing {
+    const includePrivate = extras.includePrivate ?? true;
     this.authz.requireOwner(actor);
     const owner = actor.discordUserId;
     const resolved = kind ?? this.defaultKind();
@@ -224,7 +238,7 @@ export class BriefingService {
           }
         : undefined;
     const captures =
-      prefs && prefs.includeCaptures
+      prefs && prefs.includeCaptures && includePrivate
         ? {
             total: this.store.captures.countOpen(owner),
             // The evening review lists items; the morning one reports the count.
@@ -236,7 +250,7 @@ export class BriefingService {
           }
         : undefined;
 
-    const github = prefs?.includeGithub ? this.watch?.()?.digest() : undefined;
+    const github = prefs?.includeGithub && includePrivate ? this.watch?.()?.digest() : undefined;
 
     const forThisKind =
       resolved === 'evening'

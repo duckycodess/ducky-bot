@@ -94,7 +94,9 @@ Report contradictions rather than picking whichever reads best.
   document and backup outside the repository, a backup that matches the live
   database table for table, and the shared runtime lock (`runtime_lock`), which
   it cannot take while a live coordinator holds the database. No acknowledgement
-  flag stands in for any of these. Imported records live in the correlation
+  flag stands in for any of these. The owner's capture inbox and repository
+  digest appear only in a briefing's DM copy, never a channel copy. Imported
+  records live in the correlation
   ledger, whose rows retention never touches; deleting a record leaves an
   identity-only tombstone by trigger.
 - **Notification-only watch targets are not engineering watches.**

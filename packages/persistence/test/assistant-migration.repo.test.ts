@@ -35,9 +35,16 @@ describe('a task keeps its reminder policy', () => {
     expect(a2.reminderPolicy).toBeNull();
   });
 
-  it('reads an unreadable policy as the native default, never as silence', () => {
+  it('reads an unreadable policy as SILENT, never as the default that would start reminding', () => {
     task('a3');
-    db.prepare(`UPDATE tasks SET reminder_policy = 'not json' WHERE id = 'a3'`).run();
+    for (const bad of ['not json', '{"enabled":"yes"}', '{"enabled":true,"offsetsMinutes":[0]}', '{"enabled":true,"offsetsMinutes":"60"}']) {
+      db.prepare(`UPDATE tasks SET reminder_policy = ? WHERE id = 'a3'`).run(bad);
+      expect(store.tasks.byId(OWNER, 'a3')!.reminderPolicy, bad).toEqual({ enabled: false, offsetsMinutes: null });
+    }
+    // A well-formed one is untouched, and absence is still the native default.
+    db.prepare(`UPDATE tasks SET reminder_policy = '{"enabled":true,"offsetsMinutes":null}' WHERE id = 'a3'`).run();
+    expect(store.tasks.byId(OWNER, 'a3')!.reminderPolicy).toEqual({ enabled: true, offsetsMinutes: null });
+    db.prepare(`UPDATE tasks SET reminder_policy = NULL WHERE id = 'a3'`).run();
     expect(store.tasks.byId(OWNER, 'a3')!.reminderPolicy).toBeNull();
   });
 

@@ -18,7 +18,9 @@ import { ConversationMemoryService } from './domain/conversation-memory.service.
 import {
   ConversationThreadPolicy, ConversationThreadService,
 } from './domain/conversation-threads.js';
-import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
+import {
+  createStore, openDatabase, runMigrations, type RuntimeLockHandle, type Store,
+} from '@ducky/persistence';
 import {
   cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveWeather, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
@@ -33,6 +35,7 @@ import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
 import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
 import { WeatherBriefing } from './domain/weather-briefing.js';
+import { takeCoordinatorLock } from './runtime-lock.js';
 import { AssistantWatchService, IMPORT_COVERS_NATIVE } from './domain/assistant-watch.service.js';
 import {
   UnavailableAssistantWatchReader, type AssistantWatchReader,
@@ -86,6 +89,13 @@ export interface AppOverrides {
    * argv shape that could. Tests inject one that can, to prove the engine.
    */
   readonly assistantWatchReader?: AssistantWatchReader;
+  /**
+   * Take the shared runtime lock as THE writer of this database, immediately
+   * after migrations and before anything else is written. Set by `main.ts` only:
+   * tests build many apps over one store to model a restart, and each of those
+   * would otherwise refuse the one before it.
+   */
+  readonly holdRuntimeLock?: boolean;
   /** Test override for the forecast. Production reads Open-Meteo, and only if a location is configured. */
   readonly weather?: WeatherPort;
   readonly extractor?: ScheduleExtractionProvider;
@@ -167,6 +177,8 @@ export interface App {
   readonly channelRoles: ChannelRolePolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
+  /** The shared runtime lock this app holds, when it was asked to. `main.ts` refreshes and releases it. */
+  readonly runtimeLock: RuntimeLockHandle | undefined;
   /**
    * The phone capture surface, or undefined when it is off. `main.ts` hands it
    * to the HTTP server; undefined means the routes are never registered at
@@ -218,6 +230,18 @@ export function createApp(
   const secrets = resolveProfileSecrets(env);
 
   const store = overrides.store ?? createStoreFromEnv(env, paths);
+  // The sole-writer claim comes BEFORE the first write below (the configuration
+  // mirrors, the feed's selected list): a second coordinator that is refused must
+  // leave no trace of itself in the database it was refused.
+  let runtimeLock: RuntimeLockHandle | undefined;
+  if (overrides.holdRuntimeLock) {
+    try {
+      runtimeLock = takeCoordinatorLock(store.db);
+    } catch (err) {
+      if (!overrides.store) store.db.close();
+      throw err;
+    }
+  }
   const authz = new Authorizer(loadAuthzConfig(env));
   const signer = new ComponentSigner(secrets.componentSigningKey);
 
@@ -522,7 +546,7 @@ export function createApp(
     // are untouched.
     coveredByImport: (repoKey, kind) => {
       const surface = IMPORT_COVERS_NATIVE[kind];
-      return surface !== undefined && store.assistantWatch.observes(repoKey, surface);
+      return surface !== undefined && store.assistantWatch.observes(authz.ownerId, repoKey, surface);
     },
   });
   githubFeed.reconcileSelection();
@@ -715,7 +739,11 @@ export function createApp(
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
     retention, forget, conversationMemory, conversationThreads, intents, skillBridge,
-    close: () => store.db.close(),
+    runtimeLock,
+    close: () => {
+      runtimeLock?.release();
+      store.db.close();
+    },
   };
 }
 

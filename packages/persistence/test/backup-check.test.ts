@@ -73,3 +73,57 @@ describe('a backup is a copy of THIS database as it stands', () => {
     expect(compareBackupToLive(db, file).ok).toBe(true);
   });
 });
+
+describe('a backup has the same CONTENT, not just the same number of rows', () => {
+  const edit = (db: ReturnType<typeof live>, sql: string): void => {
+    db.prepare(sql).run();
+  };
+
+  it('catches a record edited after the copy was taken, with an unchanged row count', () => {
+    const db = live();
+    addCapture(db, 'a');
+    const file = path.join(tmp(), 'b.db');
+    snapshot(db, file);
+    expect(compareBackupToLive(db, file).ok).toBe(true);
+    edit(db, `UPDATE captures SET content = 'changed' WHERE id = 'a'`);
+    expect(compareBackupToLive(db, file)).toEqual({ ok: false, integrity: 'ok', mismatched: ['captures'] });
+  });
+
+  it('catches a swapped row: same count, different record', () => {
+    const db = live();
+    addCapture(db, 'a');
+    const file = path.join(tmp(), 'b.db');
+    snapshot(db, file);
+    edit(db, `DELETE FROM captures WHERE id = 'a'`);
+    addCapture(db, 'b');
+    expect(compareBackupToLive(db, file).mismatched).toEqual(['captures']);
+  });
+
+  it('is not fooled by the same text stored as a different type', () => {
+    const db = live();
+    db.exec(`CREATE TABLE probe_t (k TEXT, v)`);
+    db.prepare(`INSERT INTO probe_t VALUES ('x', 1)`).run();
+    const file = path.join(tmp(), 'b.db');
+    snapshot(db, file);
+    edit(db, `UPDATE probe_t SET v = '1'`);
+    expect(compareBackupToLive(db, file).mismatched).toEqual(['probe_t']);
+  });
+
+  it('is independent of row order, and passes for an identical copy with many rows', () => {
+    const db = live();
+    for (let i = 0; i < 200; i += 1) addCapture(db, `id-${i}`);
+    const file = path.join(tmp(), 'b.db');
+    snapshot(db, file);
+    expect(compareBackupToLive(db, file)).toEqual({ ok: true, integrity: 'ok', mismatched: [] });
+  });
+
+  it('never reports a digest or any content', () => {
+    const db = live();
+    addCapture(db, 'PERSONAL-MARKER');
+    const file = path.join(tmp(), 'b.db');
+    snapshot(db, file);
+    edit(db, `UPDATE captures SET content = 'SECOND-MARKER'`);
+    const out = JSON.stringify(compareBackupToLive(db, file));
+    expect(out).not.toMatch(/MARKER|[0-9a-f]{32}/);
+  });
+});

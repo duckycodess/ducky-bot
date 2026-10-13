@@ -184,6 +184,11 @@ export class AssistantImportService {
     };
     // A document never names its own owner. A mismatch is a hard stop.
     if (doc.ownerId !== e.ownerId) add('document', 'owner_mismatch');
+    // Identities are scoped by namespace, so a mistyped one would look like a
+    // brand-new source and import every record a second time. Once the ledger has
+    // seen a source, only that source is accepted.
+    const known = this.store.assistantImport.namespaces();
+    if (known.length > 0 && !known.includes(doc.namespace)) add('document', 'namespace_mismatch');
     if (doc.profile !== e.profile) add('document', 'profile_mismatch');
     if (doc.timeZone !== e.timeZone) add('document', 'time_zone_mismatch');
 
@@ -201,6 +206,13 @@ export class AssistantImportService {
         add('preferences', 'evening_time_conflict');
       }
       if (p.includeWeather && !e.weatherConfigured) add('preferences', 'weather_not_configured');
+      // Captures and the repository digest are private to the owner. A briefing
+      // posted to a channel could be read by others, so those sections are only
+      // ever put in the owner's DM; delivery to a channel would either leak them
+      // or silently drop them, and neither is acceptable, so it is refused.
+      if ((p.includeGithub || p.includeCaptures) && e.briefing.delivery !== 'dm') {
+        add('preferences', 'private_sections_need_dm_delivery');
+      }
     }
 
     if (doc.watch && doc.watch.targets.length > 0) {
@@ -376,9 +388,15 @@ export class AssistantImportService {
         counts.reminders.suppressed += 1;
         continue;
       }
-      // A pending reminder for a task the owner has since closed would be a
-      // send nobody wants. Remembered as suppressed, not written.
-      if (r.state === 'pending' && live.status !== 'open') {
+      // A pending reminder for a task the owner has since closed, or whose
+      // deadline or policy the owner has since changed in Ducky, would be a send
+      // derived from a state the owner has moved past (an edit already re-derived
+      // that task's reminders). Remembered as suppressed, not written.
+      const imported = byTask.get(r.taskSourceId);
+      if (
+        r.state === 'pending' &&
+        (live.status !== 'open' || (imported !== undefined && live.updatedAt !== imported.updatedAt))
+      ) {
         imp.recordTombstone({ namespace: ns, category: 'reminder', sourceId: r.sourceId, at });
         counts.reminders.suppressed += 1;
         continue;

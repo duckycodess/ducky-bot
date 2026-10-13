@@ -116,7 +116,7 @@ export class IntentsService {
    * `undefined` means "this is ordinary conversation" and the caller falls
    * through to the provider — which is the answer for almost every message.
    */
-  handle(
+  async handle(
     actor: ActorContext,
     threadKey: string,
     text: string,
@@ -131,7 +131,7 @@ export class IntentsService {
      * channel and a `gpt` channel is left alone entirely.
      */
     role?: ChannelRole,
-  ): OutboundMessage | undefined {
+  ): Promise<OutboundMessage | undefined> {
     // Owner-only in full. A whitelist user's message is conversation, exactly as
     // it was before: they cannot write the owner's data and they do not get the
     // owner's helpers.
@@ -151,7 +151,7 @@ export class IntentsService {
     if (!allowedInRole(intent.kind, role)) return undefined;
 
     if (isWriteIntent(intent.kind)) return this.propose(actor, threadKey, intent);
-    return this.answerRead(actor, intent, text);
+    return await this.answerRead(actor, intent, text);
   }
 
   /** Drops anything expired. Called on every use; there is no timer. */
@@ -238,18 +238,18 @@ export class IntentsService {
   }
 
   /** Reads. Assembled from stored records or a fixed local table, never generated. */
-  private answerRead(
+  private async answerRead(
     actor: ActorContext,
     intent: DetectedIntent,
     text: string,
-  ): OutboundMessage {
+  ): Promise<OutboundMessage> {
     const nowMs = this.deps.clock.nowMs();
     const tz = this.deps.clock.timeZone;
 
     if (intent.kind === 'briefing') {
       // The same assembly `/briefing` uses, and the same provenance line.
       const hour = zonedParts(nowMs, tz).hour;
-      return briefingMessage(this.deps.briefing.build(actor, hour < 15 ? 'morning' : 'evening'));
+      return briefingMessage(await this.deps.briefing.assemble(actor, hour < 15 ? 'morning' : 'evening'));
     }
 
     if (intent.kind === 'meal') {

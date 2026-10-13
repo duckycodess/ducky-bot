@@ -648,7 +648,7 @@ export class DuckyRouter {
       // proposed and never applied until the owner confirms in their own words.
       // Everything else -- almost every message -- falls through to the provider
       // exactly as it did before.
-      const handled = this.deps.intents?.handle(
+      const handled = await this.deps.intents?.handle(
         actor,
         event.threadKey,
         event.text,

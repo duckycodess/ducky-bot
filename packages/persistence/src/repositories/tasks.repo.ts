@@ -2,20 +2,33 @@ import type { TaskPriority, TaskState } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { fromBool, toBool, type ReminderPolicy, type TaskRow } from './types.js';
 
+/**
+ * A policy nobody can read is the quietest policy, not the default one.
+ *
+ * Falling back to the native defaults would let the next Edit re-derive and
+ * SEND reminders the owner had configured away; failing to silence means a
+ * damaged row is visible (a task that no longer reminds) rather than a task
+ * that suddenly starts talking again.
+ */
+const UNREADABLE_POLICY: ReminderPolicy = Object.freeze({ enabled: false, offsetsMinutes: null });
+
 const parsePolicy = (raw: unknown): ReminderPolicy | null => {
   if (raw == null) return null;
   try {
     const v = JSON.parse(String(raw)) as { enabled?: unknown; offsetsMinutes?: unknown };
-    if (typeof v.enabled !== 'boolean') return null;
-    const offsets =
-      Array.isArray(v.offsetsMinutes) && v.offsetsMinutes.every((n) => Number.isInteger(n) && n > 0)
-        ? (v.offsetsMinutes as number[])
-        : null;
-    return { enabled: v.enabled, offsetsMinutes: offsets };
+    if (typeof v.enabled !== 'boolean') return UNREADABLE_POLICY;
+    if (v.offsetsMinutes === null || v.offsetsMinutes === undefined) {
+      return { enabled: v.enabled, offsetsMinutes: null };
+    }
+    if (
+      Array.isArray(v.offsetsMinutes) &&
+      v.offsetsMinutes.every((n) => Number.isInteger(n) && n > 0)
+    ) {
+      return { enabled: v.enabled, offsetsMinutes: v.offsetsMinutes as number[] };
+    }
+    return UNREADABLE_POLICY;
   } catch {
-    // A policy nobody can read is the native default, never a task that
-    // silently stops reminding.
-    return null;
+    return UNREADABLE_POLICY;
   }
 };
 

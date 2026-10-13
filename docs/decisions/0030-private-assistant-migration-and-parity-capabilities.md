@@ -147,6 +147,30 @@ forecast read behind a port (a timeout, a short cache, silent omission on any
 failure); its coordinates are explicit configuration, never stored data, and an
 active weather preference with no configured location is a refusal.
 
+### Hardening recorded after independent review
+
+- **Identity, not a pid.** The lock records the boot and the process start, so a
+  reused pid, a reboot and a second handle in the same process are judged on what
+  they are; a live holder is refused whoever asks, and a stale row (an earlier boot
+  or a replaced pid, even this process's own number) is recovered. The coordinator
+  takes it inside `createApp` right after migrations, before the configuration
+  mirrors or the feed selection are written, and beats on a fixed period of its own.
+- **Importer order.** The lock is taken first, for a dry run too, then the backup is
+  compared by the content of every table. Paths are judged by realpath; the
+  document, database and backup must be `0600` in `0700` directories. A source
+  namespace is pinned once the ledger has seen one, so a typo cannot import
+  everything again.
+- **Atomic checkpoints.** A checkpoint, its events, the holds it releases and its
+  second checkpoint commit in one savepoint, so a fault never leaves a cursor past
+  events that were not recorded.
+- **Boundary overlap.** A late event with the cursor's own timestamp is reconciled
+  by identity, but only when the items at the cursor were processed by a Ducky pass
+  (`boundary_known`); a baseline or a source cursor stays strict.
+- **Private sections stay private.** The capture inbox and the repository digest go
+  only into the owner's DM copy, and the importer refuses preferences that want
+  them with a channel delivery. Native feed suppression covers only kinds an
+  imported surface sees in full.
+
 ## What this ADR deliberately does not do
 
 - It does not claim a live bridge. The existing reader seams (ADR 0029; `gh api`
@@ -159,8 +183,14 @@ active weather preference with no configured location is a refusal.
 - It adds no `gh` shape, no HTTP path to GitHub and no new owner command. The
   owner-only command manifest is unchanged; list and cancel for these targets,
   and Forget for schedules, reuse the existing owner-only commands.
-- It does not wire AI wording for briefings, which needs a provider path of its
-  own; an active preference for it is a refusal, not a silent drop.
+- It does not support AI wording of briefings, which needs a provider path of its
+  own, nor meals, the `urgent` priority, task categories or a paused global watch
+  switch. Each is **source behavior full parity must preserve**, so each is a
+  required parity blocker: the importer refuses the input (the fail-closed form of
+  the blocker), and nothing here proposes dropping it. The same is true of the
+  other known differences listed in `docs/CURRENT_STATE.md` (alert "areas
+  mentioned", the morning staleness rule, schedule-batch rollback, discovery and
+  the polling cycle, and overlap with the ordinary watch's snapshot DM).
 - It performs no deployment, no production setting change and no stop or
   removal of the source module. The operational gates in
   `docs/runbooks/dcstro-cutover.md` stay required and unverified.

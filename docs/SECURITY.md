@@ -481,13 +481,19 @@ promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-ca
 - **Offline and not a route.** The importer is a CLI. No Discord command, phone
   route or transport reaches it, and nothing it calls can send a message.
 - **Applying is gated by facts, not flags.** The database, the document and the
-  backup must be outside the repository; the document must be `0600` in a `0700`
-  directory; the backup must pass SQLite's integrity check and match the live
-  database table for table at that moment; and the shared `runtime_lock` must be
-  obtainable. The coordinator holds that lock while it runs and the importer
-  cannot take it from a live holder (same host: the process exists; another
-  host: a fresh heartbeat), including an equal pid on another host and a second
-  handle in the same process. The coordinator refuses to start during an import.
+  backup are judged by where their REAL path lands (a symlink into the repository
+  is refused) and must be `0600` in `0700` directories; the shared `runtime_lock`
+  must be obtainable, and it is taken FIRST, for a dry run as well; then the backup
+  must pass SQLite's integrity check and match the live database by the CONTENT of
+  every table (a digest compared in memory and never stored or printed), not by row
+  counts. The coordinator holds the lock while it runs, takes it right after
+  migrations and before any other write, and refreshes it on a fixed period of its
+  own. A holder is live on the same host while its boot is current, its pid exists
+  and that pid began when the holder began; from another host, while its heartbeat
+  is fresh. A live holder is never replaced, including by an equal pid on another
+  host or a second handle in the same process; a row from an earlier boot or a
+  replaced pid is recovered. A source namespace is pinned once the ledger has seen
+  one. The coordinator refuses to start during an import.
 - **Frozen configuration is the only authority.** The owner, profile and
   timezone come from the profile's configuration; a document naming another
   owner is a hard stop. Imported preferences live in `owner_preferences`,
@@ -505,12 +511,16 @@ promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-ca
 - **Notification-only targets are not an authorization.** They never reference
   `repos`, never set `allow_jobs`, and never reach an executor. Their alerts go to
   the owner's DM and their digest to the owner's briefing, never to the shared
-  GitHub feed channel, and when an imported target observes a repository the
-  native feed's card for the same fact is retired rather than sent twice. Titles
+  GitHub feed channel. The capture inbox and the repository digest appear only in
+  the owner's DM copy of a briefing, never in a channel copy, and the importer
+  refuses preferences that want them with a channel delivery. When an imported target
+  observes a repository the native feed's duplicate card is retired, but only for
+  pull requests, issues and change requests, which an imported surface sees in full. Titles
   are scrubbed of links, addresses and @mentions before they are stored.
 - **One new outbound request, to one host.** The briefing weather is a key-less
   read over HTTPS from `api.open-meteo.com` only, built from numbers and constants
-  (no owner text is ever sent), with a timeout, a body ceiling and a cache, and
+  (no owner text is ever sent), with a timeout, redirects refused, a body ceiling
+  enforced as the response streams, and a cache, and
   it runs only when a location is configured and an imported preference asks for
   it. No `gh` shape was added: AGENTS.md still permits `gh api` and
   `gh search prs` in one exact shape each, and the typed watch reader that the

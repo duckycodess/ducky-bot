@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { DuckyError } from '@ducky/contracts';
 import {
@@ -58,9 +58,25 @@ const USAGE =
   'usage: pnpm import:assistant --db <db> --file <document.json> [--backup <backup.db>] [--verify | --apply]\n' +
   '  default: validate only (a dry run). --apply needs --backup and a stopped coordinator.\n';
 
+/** The path as the filesystem sees it, with every symlink followed. */
+function real(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
 function insideRepo(repoRoot: string, p: string): boolean {
-  const rel = path.relative(repoRoot, p);
+  const rel = path.relative(real(repoRoot), real(p));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** Whether a file and the directory holding it are private: 0600 and 0700 or tighter. */
+function isPrivate(file: string): boolean {
+  const fileMode = statSync(file).mode & 0o777;
+  const dirMode = statSync(path.dirname(file)).mode & 0o777;
+  return (fileMode & 0o077) === 0 && (dirMode & 0o077) === 0;
 }
 
 export function runImportCli(
@@ -81,9 +97,11 @@ export function runImportCli(
   }
 
   // ---- paths: explicit, private, outside the repository --------------------------
-  const dbPath = path.resolve(dbArg);
-  const filePath = path.resolve(fileArg);
-  const backupPath = backupArg ? path.resolve(backupArg) : undefined;
+  // Every path is resolved through the filesystem first, so a symlink that points
+  // into this checkout is judged by where it lands, not by what it is called.
+  const dbPath = real(path.resolve(dbArg));
+  const filePath = real(path.resolve(fileArg));
+  const backupPath = backupArg ? real(path.resolve(backupArg)) : undefined;
   for (const p of [dbPath, filePath, ...(backupPath ? [backupPath] : [])]) {
     if (insideRepo(repoRoot, p)) {
       io.err('refused: the database, the document and the backup must all live outside the repository.\n');
@@ -94,10 +112,11 @@ export function runImportCli(
     io.err('refused: the document or the database does not exist.\n');
     return 2;
   }
-  const fileMode = statSync(filePath).mode & 0o777;
-  const dirMode = statSync(path.dirname(filePath)).mode & 0o777;
-  if ((fileMode & 0o077) !== 0 || (dirMode & 0o077) !== 0) {
-    io.err('refused: the document must be mode 0600 in a directory that is mode 0700.\n');
+  // The document, the database and the backup all hold the owner's data, so each
+  // must be 0600 in a directory that is 0700.
+  const private_ = [filePath, dbPath, ...(backupPath && existsSync(backupPath) ? [backupPath] : [])];
+  if (!private_.every(isPrivate)) {
+    io.err('refused: the document, the database and the backup must each be mode 0600 in a directory that is mode 0700.\n');
     return 2;
   }
 
@@ -144,36 +163,40 @@ export function runImportCli(
     const print = (report: unknown): void => io.out(`${JSON.stringify(report, null, 2)}\n`);
 
     if (verify) {
+      // Read only, and reads nothing the coordinator cannot be writing safely.
       const report = svc.verify(doc);
       print(report);
       return report.ok ? 0 : 3;
     }
-    if (!apply) {
-      const report = svc.run(doc, { apply: false });
-      print(report);
-      return report.ok ? 0 : 3;
-    }
 
-    // ---- apply ----
-    if (!backupPath) {
-      io.err('refused: --apply needs --backup, a copy of this database taken just now.\n');
-      return 3;
-    }
-    const cmp = compareBackupToLive(db, backupPath);
-    if (!cmp.ok) {
-      io.err(
-        cmp.integrity === 'failed'
-          ? 'refused: the backup is not a usable database.\n'
-          : `refused: the backup is not a copy of this database as it stands (differs in ${cmp.mismatched.length} table(s)).\n`,
-      );
-      return 3;
-    }
+    // A dry run and an apply both take the shared lock first. A dry run against a
+    // database a live coordinator is writing would answer for a state that is
+    // already gone; and an apply must hold the lock before it compares the backup,
+    // so nothing can change between the comparison and the write.
     const lock = acquireRuntimeLock(db, 'importer');
     if (!lock.ok) {
       io.err(`refused: a live ${lock.heldBy} holds this database. Stop it first.\n`);
       return 4;
     }
     try {
+      if (!apply) {
+        const report = svc.run(doc, { apply: false, lock: lock.handle });
+        print(report);
+        return report.ok ? 0 : 3;
+      }
+      if (!backupPath) {
+        io.err('refused: --apply needs --backup, a copy of this database taken just now.\n');
+        return 3;
+      }
+      const cmp = compareBackupToLive(db, backupPath);
+      if (!cmp.ok) {
+        io.err(
+          cmp.integrity === 'failed'
+            ? 'refused: the backup is not a usable database.\n'
+            : `refused: the backup is not a copy of this database as it stands (differs in ${cmp.mismatched.length} table(s)).\n`,
+        );
+        return 3;
+      }
       const report = svc.run(doc, { apply: true, lock: lock.handle });
       print(report);
       return report.ok ? 0 : 3;

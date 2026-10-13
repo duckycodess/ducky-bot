@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -38,6 +38,7 @@ function world(doc: unknown = importDoc(), opts: { migrate?: boolean } = {}) {
   const db = openDatabase({ location: dbPath });
   if (opts.migrate !== false) runMigrations(db);
   db.close();
+  chmodSync(dbPath, 0o600); // explicit: never rely on the umask of whoever runs the tests
   const file = path.join(dir, 'doc.json');
   writeFileSync(file, typeof doc === 'string' ? doc : JSON.stringify(doc), { mode: 0o600 });
   chmodSync(file, 0o600);
@@ -46,6 +47,7 @@ function world(doc: unknown = importDoc(), opts: { migrate?: boolean } = {}) {
     const d = openDatabase({ location: dbPath });
     d.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
     d.close();
+    chmodSync(backup, 0o600);
   };
   const counts = () => {
     const d = openDatabase({ location: dbPath });
@@ -240,5 +242,119 @@ describe('--verify', () => {
     expect(v.code).toBe(0);
     expect(JSON.parse(v.out)).toMatchObject({ ok: true, parity: true });
     expect(existsSync(w.file)).toBe(true);
+  });
+});
+
+
+describe('review fixes: paths, modes and the order of the gates', () => {
+  const lockedByCoordinator = (dbPath: string): void => {
+    const d = openDatabase({ location: dbPath });
+    d.prepare(
+      `INSERT INTO runtime_lock (id, holder, pid, host, token, acquired_at, heartbeat_at)
+       VALUES (1,'coordinator',?,?, 't', 'n', 'n')`,
+    ).run(process.pid, hostname());
+    d.close();
+  };
+
+  it('judges a path by where it LANDS: a symlink into the repository is refused', () => {
+    const w = world();
+    const repo = mkdtempSync(path.join(tmpdir(), 'ducky-fakerepo-'));
+    dirs.push(repo);
+    chmodSync(repo, 0o700);
+    const inside = path.join(repo, 'doc.json');
+    copyFileSync(w.file, inside);
+    chmodSync(inside, 0o600);
+    const link = path.join(w.dir, 'innocent-name.json');
+    symlinkSync(inside, link);
+    const viaLink = run(['--db', w.dbPath, '--file', link], { repoRoot: repo, importEnvironment: sees });
+    expect(viaLink.code).toBe(2);
+    expect(viaLink.err).toContain('outside the repository');
+    // Likewise a database or a backup reached through a link.
+    const dbLink = path.join(w.dir, 'db-link.db');
+    const insideDb = path.join(repo, 'x.db');
+    copyFileSync(w.dbPath, insideDb);
+    chmodSync(insideDb, 0o600);
+    symlinkSync(insideDb, dbLink);
+    expect(run(['--db', dbLink, '--file', w.file], { repoRoot: repo }).code).toBe(2);
+    // And the same real files are fine when the repository is elsewhere.
+    expect(run(['--db', w.dbPath, '--file', w.file], { importEnvironment: sees }).code).toBe(0);
+  });
+
+  it('refuses a database or backup that others could read, or in a directory they could enter', () => {
+    const w = world();
+    chmodSync(w.dbPath, 0o644);
+    expect(run(['--db', w.dbPath, '--file', w.file], { importEnvironment: sees }).code).toBe(2);
+    chmodSync(w.dbPath, 0o600);
+
+    w.makeBackup();
+    chmodSync(w.backup, 0o644);
+    const loose = run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    expect(loose.code).toBe(2);
+    expect(w.counts().tasks).toBe(0);
+    chmodSync(w.backup, 0o600);
+
+    // A backup in an open directory.
+    const open = mkdtempSync(path.join(tmpdir(), 'ducky-open-'));
+    dirs.push(open);
+    chmodSync(open, 0o755);
+    const there = path.join(open, 'b.db');
+    copyFileSync(w.backup, there);
+    chmodSync(there, 0o600);
+    expect(run(['--db', w.dbPath, '--file', w.file, '--backup', there, '--apply'], { importEnvironment: sees }).code).toBe(2);
+    expect(w.counts().tasks).toBe(0);
+  });
+
+  it('a dry run takes the lock too, and says so when a live coordinator holds the database', () => {
+    const w = world();
+    lockedByCoordinator(w.dbPath);
+    const r = run(['--db', w.dbPath, '--file', w.file], { importEnvironment: sees });
+    expect(r.code).toBe(4);
+    expect(r.err).toContain('live coordinator');
+    expect(r.out).toBe('');
+  });
+
+  it('a dry run leaves no lock behind', () => {
+    const w = world();
+    expect(run(['--db', w.dbPath, '--file', w.file], { importEnvironment: sees }).code).toBe(0);
+    const d = openDatabase({ location: w.dbPath });
+    expect((d.prepare('SELECT COUNT(*) n FROM runtime_lock').get() as { n: number }).n).toBe(0);
+    d.close();
+  });
+
+  it('takes the lock BEFORE it looks at the backup, so a live writer is reported as that, not as a bad backup', () => {
+    const w = world();
+    lockedByCoordinator(w.dbPath);
+    writeFileSync(w.backup, 'junk');
+    chmodSync(w.backup, 0o600);
+    const r = run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    expect(r.code).toBe(4);
+    expect(r.err).not.toContain('backup');
+  });
+
+  it('refuses a backup with the SAME row counts but different content', () => {
+    const w = world();
+    const d = openDatabase({ location: w.dbPath });
+    d.prepare(`INSERT INTO captures (id, discord_user_id, content, status, created_at, updated_at) VALUES ('c','u','before','open','n','n')`).run();
+    d.close();
+    chmodSync(w.dbPath, 0o600);
+    w.makeBackup();
+    const e = openDatabase({ location: w.dbPath });
+    e.prepare(`UPDATE captures SET content = 'after' WHERE id = 'c'`).run();
+    e.close();
+    const r = run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    expect(r.code).toBe(3);
+    expect(r.err).toContain('not a copy of this database as it stands');
+    expect(r.err).not.toMatch(/before|after/);
+    expect(w.counts().tasks).toBe(0);
+  });
+
+  it('still applies against a backup that matches in content', () => {
+    const w = world();
+    const d = openDatabase({ location: w.dbPath });
+    d.prepare(`INSERT INTO captures (id, discord_user_id, content, status, created_at, updated_at) VALUES ('c','u','kept','open','n','n')`).run();
+    d.close();
+    chmodSync(w.dbPath, 0o600);
+    w.makeBackup();
+    expect(run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees }).code).toBe(0);
   });
 });

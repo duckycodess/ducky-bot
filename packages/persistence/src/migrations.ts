@@ -1592,6 +1592,12 @@ CREATE TABLE assistant_watch_checkpoints (
   cursor         TEXT,
   pending_cursor TEXT,
   pending_page   INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  -- Whether the items sitting exactly AT the cursor are known to have been
+  -- processed by a Ducky pass (so a late event with the same timestamp can be told
+  -- from one already announced, by identity). It is false for a baseline and for
+  -- a cursor that came from the source, whose boundary items may never have been
+  -- recorded here: re-reading them would announce history.
+  boundary_known INTEGER NOT NULL DEFAULT 0 CHECK (boundary_known IN (0,1)),
   next_due_at    TEXT NOT NULL,
   failures       INTEGER NOT NULL DEFAULT 0,
   last_error     TEXT,
@@ -1648,6 +1654,11 @@ CREATE TABLE runtime_lock (
   pid          INTEGER NOT NULL,
   host         TEXT NOT NULL,
   token        TEXT NOT NULL,
+  -- WHICH boot and WHICH process incarnation the holder was. A pid alone is not
+  -- an identity: after a reboot, or once the holder has died and its pid has been
+  -- handed to somebody else, "that pid exists" would keep a dead lock alive.
+  boot_id      TEXT,
+  proc_start   TEXT,
   acquired_at  TEXT NOT NULL,
   heartbeat_at TEXT NOT NULL
 );

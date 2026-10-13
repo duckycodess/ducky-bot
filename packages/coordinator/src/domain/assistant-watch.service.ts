@@ -58,15 +58,32 @@ const MINUTE = 60_000;
 
 /**
  * Which native feed events an imported target's observation already covers, and
- * through which surface. `review_requested` is absent on purpose: a review
- * requested of the owner is a search across repositories, not a fact about one
- * watched repository, so nothing imported produces it.
+ * through which surface.
+ *
+ * Only a kind whose imported surface sees EVERY instance of it is listed. The
+ * imported pulls surface reads every pull request of the repository and the
+ * reviews on the open ones, and the issues surface every issue, so a native
+ * pull-request, issue or change-request card is a duplicate of what that
+ * surface will say.
+ *
+ * Deliberately absent:
+ * - `review_requested`: a search across repositories, not a fact about a watched
+ *   one, which nothing imported produces.
+ * - `check_failed`: the native feed also reports failing checks and external
+ *   statuses on PULL REQUEST heads, and the imported runs surface reads only the
+ *   default branch's workflow runs. Suppressing on its behalf would silently
+ *   drop a failure that only the native feed ever sees. Until an imported
+ *   surface can carry the identity of a failing check exactly, it is not
+ *   suppressed.
+ *
+ * Overlap with the ORDINARY `github_watches` snapshot DM is not suppressed
+ * either. That is a required parity blocker, recorded in
+ * `docs/CURRENT_STATE.md`, not an accepted exclusion.
  */
 export const IMPORT_COVERS_NATIVE: Partial<Record<GitHubFeedKind, WatchSurface>> = {
   pr_opened: 'pulls',
   issue_opened: 'issues',
   changes_requested: 'pulls',
-  check_failed: 'runs',
 };
 
 /** The most calls one unit can make, so a unit is only started when it fits. */
@@ -210,6 +227,9 @@ export class AssistantWatchService {
       return this.fail(unit, nowMs, 'unreadable_cursor');
     }
     const page = unit.pendingPage + 1;
+    // Items at the cursor are re-read (and told from known ones by identity) only
+    // when Ducky itself processed them; a baseline or a source cursor stays strict.
+    const inclusive = unit.state === 'ready' && unit.boundaryKnown;
 
     try {
       let read: SurfaceRead;
@@ -220,7 +240,7 @@ export class AssistantWatchService {
         case 'commits': {
           const res = await call(() => this.reader.commits(ref, unit.defaultBranch, page));
           hasMore = res.hasMore;
-          read = deriveCommits(res.items, sinceMs, unit.defaultBranch);
+          read = deriveCommits(res.items, sinceMs, unit.defaultBranch, inclusive);
           break;
         }
         case 'pulls': {
@@ -233,26 +253,26 @@ export class AssistantWatchService {
               reviews.set(p.number, await call(() => this.reader.pullReviews(ref, p.number)));
             }
           }
-          read = derivePulls(res.items, sinceMs, reviews);
+          read = derivePulls(res.items, sinceMs, reviews, inclusive);
           break;
         }
         case 'issues': {
           const res = await call(() => this.reader.issues(ref, page));
           hasMore = res.hasMore;
-          read = deriveIssues(res.items, sinceMs);
+          read = deriveIssues(res.items, sinceMs, inclusive);
           break;
         }
         case 'runs': {
           const items = await call(() => this.reader.runs(ref, unit.defaultBranch));
           const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
-          const runs = deriveRuns(items, sinceMs, failing);
+          const runs = deriveRuns(items, sinceMs, failing, inclusive);
           read = runs;
           if (!baseline && runs.ciState !== null) alsoSet = { surface: 'ci_state', cursor: runs.ciState };
           break;
         }
         case 'releases': {
           const items = await call(() => this.reader.releases(ref));
-          read = deriveReleases(items, sinceMs);
+          read = deriveReleases(items, sinceMs, inclusive);
           break;
         }
         case 'default_branch': {
@@ -294,12 +314,18 @@ export class AssistantWatchService {
       }
 
       const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, newest ?? Number.NEGATIVE_INFINITY);
+      // The cursor moving to an item newer than the old one means that item went
+      // through THIS pass and its events (if any) were recorded: the items at the
+      // new cursor are then known. A baseline, or a pass that moved nothing, says
+      // nothing new about the boundary.
+      const advanced = !baseline && sinceMs !== null && newest !== null && newest > sinceMs;
       const committed = repo.commitObservation({
         targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
         cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : nowMs),
         nextDueAt: this.nextDue(nowMs), atIso: nowIso,
         events: read.events.map((e) => this.write(e)),
         ...(alsoSet ? { alsoSet } : {}),
+        ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
       });
       if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
       return 'completed';

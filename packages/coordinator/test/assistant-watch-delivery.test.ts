@@ -167,14 +167,42 @@ describe('a briefing carries the digest, and settles it only once sent', () => {
     h.close();
   });
 
-  it('settles after BOTH copies when a slot goes to the DM and a channel', async () => {
+  it('puts the digest in the DM copy only, and settles it when the DM copy is sent', async () => {
     const { h, add } = boot({ DUCKY_BRIEFING_DELIVERY: 'both', DUCKY_DEV_BRIEFING_CHANNEL_ID: '900000000000000031' });
     add('a', 'pr_opened', '5:opened');
     const out = await h.app.briefingNotifier.tick();
     expect(out.delivered).toBe(2);
-    const bodies = h.transport.sent.map((s) => JSON.stringify(s.message));
-    expect(bodies.every((b) => b.includes('PR #5 opened'))).toBe(true);
+    const dm = h.transport.sent.find((s) => s.target.kind === 'user')!;
+    const channel = h.transport.sent.find((s) => s.target.kind === 'channel')!;
+    expect(JSON.stringify(dm.message)).toContain('PR #5 opened');
+    // The channel's readers are not something Ducky can check: the owner's private
+    // imported data never goes there.
+    expect(JSON.stringify(channel.message)).not.toContain('PR #5 opened');
     expect(h.store.assistantWatch.undigested(OWNER, 10)).toEqual([]);
+    h.close();
+  });
+
+  it('never sends the digest or the capture inbox to a channel-only briefing, and does not settle', async () => {
+    const { h, add } = boot({ DUCKY_BRIEFING_DELIVERY: 'channel', DUCKY_DEV_BRIEFING_CHANNEL_ID: '900000000000000031' });
+    h.store.db.prepare('DELETE FROM owner_preferences').run();
+    h.store.ownerPreferences.insert({ ownerId: OWNER, prefsJson: JSON.stringify({ ...PREFS, includeCaptures: true }), source: 'import', at: T0 });
+    h.store.assistantImport.insertCapture({ id: 'c1', discordUserId: OWNER, content: 'PRIVATE-CAPTURE-TEXT', status: 'open', createdAt: T0, updatedAt: T0 });
+    add('a', 'pr_opened', '5:opened');
+    expect((await h.app.briefingNotifier.tick()).delivered).toBe(1);
+    const body = JSON.stringify(h.transport.sent[0]!.message);
+    expect(body).not.toContain('PR #5 opened');
+    expect(body).not.toContain('PRIVATE-CAPTURE-TEXT');
+    expect(body).not.toContain('Quick-capture');
+    // Nothing carried the digest, so nothing is settled.
+    expect(h.store.assistantWatch.undigested(OWNER, 10)).toHaveLength(1);
+    h.close();
+  });
+
+  it('keeps the owner’s own ephemeral reply complete', async () => {
+    const { h, add } = boot({ DUCKY_BRIEFING_DELIVERY: 'channel', DUCKY_DEV_BRIEFING_CHANNEL_ID: '900000000000000031' });
+    add('a', 'pr_opened', '5:opened');
+    const b = await h.app.briefing.assemble(h.owner, 'morning');
+    expect(b.github!.repos[0]!.lines).toEqual(['PR #5 opened: Add a thing']);
     h.close();
   });
 
@@ -401,9 +429,43 @@ describe('overlap with the native feed', () => {
     h.close();
   });
 
-  it('never suppresses a review request, which no imported surface produces', () => {
-    expect(Object.keys(IMPORT_COVERS_NATIVE).sort()).toEqual(['changes_requested', 'check_failed', 'issue_opened', 'pr_opened']);
+  it('suppresses only kinds an imported surface sees in full', () => {
+    expect(Object.keys(IMPORT_COVERS_NATIVE).sort()).toEqual(['changes_requested', 'issue_opened', 'pr_opened']);
+    // A review request is a cross-repository search; a failing check on a pull
+    // request head is invisible to the default-branch runs surface.
     expect(IMPORT_COVERS_NATIVE['review_requested']).toBeUndefined();
+    expect(IMPORT_COVERS_NATIVE['check_failed']).toBeUndefined();
+  });
+
+  it('still delivers a failing check even when an imported runs surface is healthy', async () => {
+    const { h, reader, tick } = boot();
+    await baseline(reader, () => tick(0));
+    observeDemo(h, { pulls: 'ready', issues: 'ready', runs: 'ready' });
+    news(reader);
+    await tick();
+    const texts = sentTo(h.transport.sent).map((s) => s.text).join('\n');
+    expect(texts).toContain('Checks failed');
+    expect(h.store.githubFeed.listEvents('skipped').map((e) => e.kind)).not.toContain('check_failed');
+    h.close();
+  });
+
+  it('stops suppressing while the imported surface is failing, so a failure never silences a card', async () => {
+    const { h, reader, tick } = boot();
+    await baseline(reader, () => tick(0));
+    observeDemo(h, { pulls: 'ready' });
+    h.store.db.prepare(`UPDATE assistant_watch_checkpoints SET failures = 2 WHERE surface = 'pulls'`).run();
+    news(reader);
+    await tick();
+    expect(sentTo(h.transport.sent).map((s) => s.text).join('\n')).toContain('Pull request opened');
+    h.close();
+  });
+
+  it('is scoped to the owner who has the target', () => {
+    const { h } = boot();
+    observeDemo(h, { pulls: 'ready' });
+    expect(h.store.assistantWatch.observes(OWNER, DEMO, 'pulls')).toBe(true);
+    expect(h.store.assistantWatch.observes('100000000000000099', DEMO, 'pulls')).toBe(false);
+    h.close();
   });
 
   it('changes no authorization or job read: the native selection and allowlist are untouched', async () => {

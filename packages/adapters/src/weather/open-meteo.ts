@@ -63,14 +63,49 @@ export class OpenMeteoWeather implements WeatherPort {
     url.searchParams.set('timezone', place.timeZone);
     // Two days: today for the morning briefing, tomorrow for the evening one.
     url.searchParams.set('forecast_days', '2');
-    const res = await this.doFetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    // A redirect would take the request, and the owner's coordinates in it, to a
+    // host this adapter was never told about: it is an error, not something followed.
+    const res = await this.doFetch(url, {
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      redirect: 'error',
+    });
     if (!res.ok) return this.cache?.key === key ? this.cache.payload : null;
-    const body = await res.text();
-    if (body.length > MAX_BODY_BYTES) return null;
+    const body = await readCapped(res, MAX_BODY_BYTES);
+    if (body === undefined) return null;
     const payload: unknown = JSON.parse(body);
     this.cache = { at: this.nowMs(), key, payload };
     return payload;
   }
+}
+
+/**
+ * The body as text, or undefined once it has grown past the ceiling.
+ *
+ * It is counted AS IT STREAMS and the stream is cancelled the moment it passes
+ * the limit, so a hostile or broken response cannot make this buffer more than
+ * the ceiling before being refused, whatever it claims about its own length.
+ */
+async function readCapped(res: Response, max: number): Promise<string | undefined> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > max) return undefined;
+  if (!res.body) {
+    const text = await res.text();
+    return text.length > max ? undefined : text;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function parse(payload: unknown, location: string, day: 0 | 1): WeatherReport | null {

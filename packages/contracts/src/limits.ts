@@ -639,3 +639,9 @@ export const ASSISTANT_DIGEST_MAX_LINES_PER_REPO = 4;
 
 /** The shared runtime lock: a holder is live while its heartbeat is this fresh. */
 export const RUNTIME_LOCK_STALE_MS = 3 * 60_000;
+/**
+ * How often the holder refreshes its heartbeat: a fixed, short period of its own,
+ * never the reconcile interval, which an operator can set arbitrarily long. Six
+ * beats fit inside the stale window, so a few missed ones never lose the lock.
+ */
+export const RUNTIME_LOCK_HEARTBEAT_MS = 30_000;

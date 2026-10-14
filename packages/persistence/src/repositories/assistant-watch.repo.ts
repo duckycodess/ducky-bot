@@ -45,6 +45,8 @@ export interface WatchCheckpointRow {
   readonly pendingState: string | null;
   /** Creation time of the oldest item still unsettled when the last window closed. */
   readonly scanFloor: string | null;
+  /** Where lifecycle times count from for one more read after a multi-page window. */
+  readonly lifecycleFloor: string | null;
   readonly updatedAt: string;
 }
 
@@ -83,6 +85,8 @@ export interface PollCycle {
   readonly limit: number;
   readonly includeArchived: boolean;
   readonly includeForks: boolean;
+  /** Relationships whose targets may occupy a slot; a target outside them never does. */
+  readonly relationships?: readonly ('owner' | 'organization' | 'collaborator')[];
 }
 
 export interface DiscoveryRow {
@@ -141,6 +145,7 @@ const mapCheckpoint = (r: Record<string, unknown>): WatchCheckpointRow => ({
   blockedReason: r['blocked_reason'] == null ? null : String(r['blocked_reason']),
   pendingState: r['pending_state'] == null ? null : String(r['pending_state']),
   scanFloor: r['scan_floor'] == null ? null : String(r['scan_floor']),
+  lifecycleFloor: r['lifecycle_floor'] == null ? null : String(r['lifecycle_floor']),
   updatedAt: String(r['updated_at']),
 });
 
@@ -181,13 +186,20 @@ export interface ObservedEventWrite {
  */
 const ELIGIBLE_SQL = `t.discord_user_id = :owner AND t.state = 'active'
   AND (t.archived = 0 OR :includeArchived = 1)
-  AND NOT (t.fork = 1 AND t.relationship = 'owner' AND :includeForks = 0)`;
+  AND NOT (t.fork = 1 AND t.relationship = 'owner' AND :includeForks = 0)
+  AND (t.relationship IS NULL OR t.relationship IN (:relA, :relB, :relC))
+  AND NOT EXISTS (SELECT 1 FROM assistant_watch_checkpoints b
+                   WHERE b.target_id = t.id AND b.blocked_reason = 'identity_changed')`;
 const CYCLE_SQL = `SELECT t.id AS id FROM assistant_watch_targets t
   WHERE ${ELIGIBLE_SQL} AND t.pushed_at IS NOT NULL
   ORDER BY t.pushed_at DESC, t.repo_key ASC LIMIT :cycleLimit`;
-const eligibleParams = (c: PollCycle) => ({
-  owner: c.ownerId, includeArchived: c.includeArchived ? 1 : 0, includeForks: c.includeForks ? 1 : 0,
-});
+const eligibleParams = (c: PollCycle) => {
+  const rel = c.relationships ?? ['owner', 'organization', 'collaborator'];
+  return {
+    owner: c.ownerId, includeArchived: c.includeArchived ? 1 : 0, includeForks: c.includeForks ? 1 : 0,
+    relA: rel[0] ?? '', relB: rel[1] ?? '', relC: rel[2] ?? '',
+  };
+};
 const cycleParams = (c: PollCycle) => ({ ...eligibleParams(c), cycleLimit: c.limit });
 
 const ALERT_LIST = WATCH_ALERT_KINDS.map((k) => `'${k}'`).join(',');
@@ -464,7 +476,7 @@ export class AssistantWatchRepo {
   }
 
   /** Counts of blocked surfaces by reason: never a repository name. */
-  blockedCounts(ownerId: string): { windowExceeded: number; identityChanged: number } {
+  blockedCounts(ownerId: string): { windowExceeded: number; identityChanged: number; systemCancelled: number } {
     const one = (reason: string): number =>
       Number(
         (this.db
@@ -475,7 +487,15 @@ export class AssistantWatchRepo {
           )
           .get(ownerId, reason) as { n: number }).n,
       );
-    return { windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed') };
+    const systemCancelled = Number(
+      (this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM assistant_watch_targets
+            WHERE discord_user_id = ? AND state = 'cancelled' AND cancel_reason IS NOT NULL`,
+        )
+        .get(ownerId) as { n: number }).n,
+    );
+    return { windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed'), systemCancelled };
   }
 
   /** Counts only: covered by this cycle, beyond it by recency, and not yet measured. */
@@ -530,6 +550,8 @@ export class AssistantWatchRepo {
      * on every commit, because "nothing was unsettled" is itself something to record.
      */
     scanFloor?: string | null;
+    /** The lifecycle floor for the NEXT read. Omitted leaves it; null clears it. */
+    lifecycleFloor?: string | null;
   }): number | undefined {
     // The cursor, the state, the events, the released holds and the second
     // checkpoint change together or not at all: a failure anywhere leaves the
@@ -546,6 +568,7 @@ export class AssistantWatchRepo {
                 pending_state = NULL,
                 boundary_known = COALESCE(?, boundary_known),
                 scan_floor = CASE WHEN ? = 1 THEN ? ELSE scan_floor END,
+                lifecycle_floor = CASE WHEN ? = 1 THEN ? ELSE lifecycle_floor END,
                 next_due_at = ?, failures = 0, last_error = NULL, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
@@ -553,6 +576,7 @@ export class AssistantWatchRepo {
         input.cursor,
         input.boundaryKnown === undefined ? null : input.boundaryKnown ? 1 : 0,
         input.scanFloor === undefined ? 0 : 1, input.scanFloor ?? null,
+        input.lifecycleFloor === undefined ? 0 : 1, input.lifecycleFloor ?? null,
         input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt,
       );
     if (Number(moved.changes) !== 1) return undefined;
@@ -645,18 +669,21 @@ export class AssistantWatchRepo {
    * suppressing on its behalf would lose the notification. So is one whose last
    * read FAILED: while it is failing it observes nothing, however healthy it was.
    */
-  observes(ownerId: string, repoKey: string, surface: WatchSurface): boolean {
+  observes(ownerId: string, repoKey: string, surface: WatchSurface, cycle?: PollCycle): boolean {
+    // Under the source's poll cycle a target outside its coverage is not being read at
+    // all, however healthy its last read was, so it observes nothing.
+    const covered = cycle ? `AND t.id IN (${CYCLE_SQL})` : '';
     return (
       this.db
         .prepare(
           `SELECT 1 FROM assistant_watch_targets t
              JOIN assistant_watch_checkpoints c ON c.target_id = t.id
-            WHERE t.discord_user_id = ? AND t.repo_key = ? AND t.state = 'active'
-              AND c.surface = ? AND c.blocked_reason IS NULL AND c.failures = 0
-              AND c.state IN ('imported','ready')
+            WHERE t.discord_user_id = :owner AND t.repo_key = :repoKey AND t.state = 'active'
+              AND c.surface = :surface AND c.blocked_reason IS NULL AND c.failures = 0
+              AND c.state IN ('imported','ready') ${covered}
             LIMIT 1`,
         )
-        .get(ownerId, repoKey, surface) !== undefined
+        .get({ owner: ownerId, repoKey, surface, ...(cycle ? cycleParams(cycle) : {}) }) !== undefined
     );
   }
 
@@ -921,6 +948,70 @@ export class AssistantWatchRepo {
         row.id, row.targetId, row.kind, WATCH_EVENT_SURFACE[row.kind], row.identity, row.occurredAt,
         row.payloadJson, row.alertedAt, row.digestedAt, row.createdAt,
       );
+  }
+
+  /**
+   * Makes a discovered target an imported one. The source's mute wins (a cancelled
+   * source state cancels it; an active one leaves Ducky's own state alone, so a mute the
+   * owner already made here is never undone), and the default branch is filled only if
+   * unknown.
+   */
+  adoptDiscovered(
+    id: string, defaultBranch: string | null, cancelAtIso: string | null, lastObservedAt: string | null, atIso: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE assistant_watch_targets
+            SET origin = 'imported', default_branch = COALESCE(default_branch, ?),
+                last_observed_at = COALESCE(last_observed_at, ?), updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(defaultBranch, lastObservedAt, atIso, id);
+    if (cancelAtIso !== null) {
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_targets SET state = 'cancelled', cancelled_at = ?, updated_at = ?
+            WHERE id = ? AND state = 'active'`,
+        )
+        .run(cancelAtIso, atIso, id);
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events SET alert_abandoned_at = ?
+            WHERE target_id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
+        )
+        .run(atIso, id);
+    }
+  }
+
+  /**
+   * Gives an adopted target the source's cursor for a surface Ducky has NOT read yet.
+   * A checkpoint Ducky already baselined or advanced is newer than the source's and is
+   * kept. A missing one (the ci_state companion) is created. Returns whether it took.
+   */
+  adoptCheckpoint(targetId: string, surface: WatchSurface, cursor: string, atIso: string, nextDueAt: string): boolean {
+    const existing = this.checkpoint(targetId, surface);
+    if (!existing) {
+      this.insertCheckpoint({
+        targetId, surface, state: surface === 'ci_state' ? 'ready' : 'imported', cursor, nextDueAt, updatedAt: atIso,
+      });
+      return true;
+    }
+    if (existing.state !== 'unbaselined') return false;
+    const info = this.db
+      .prepare(
+        `UPDATE assistant_watch_checkpoints
+            SET state = 'imported', cursor = ?, boundary_known = 0, updated_at = ?
+          WHERE target_id = ? AND surface = ? AND state = 'unbaselined'`,
+      )
+      .run(cursor, atIso, targetId, surface);
+    return Number(info.changes) === 1;
+  }
+
+  /** An imported event, unless the target already knows that identity. */
+  insertImportedEventIfNew(row: Parameters<AssistantWatchRepo['insertImportedEvent']>[0]): boolean {
+    if (this.eventExists(row.targetId, row.kind, row.identity)) return false;
+    this.insertImportedEvent(row);
+    return true;
   }
 
   eventExists(targetId: string, kind: WatchEventKind, identity: string): boolean {

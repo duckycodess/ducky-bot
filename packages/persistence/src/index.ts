@@ -123,6 +123,12 @@ export interface Store {
    * outermost cause wins.
    */
   withDeletionCause<T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T;
+  /**
+   * Removes a deletion cause left behind by a process that died mid-deletion. Only
+   * safe while the runtime lock is held, which is where start-up calls it. Returns
+   * how many rows it removed.
+   */
+  clearStaleDeletionContext(): number;
   /** Indefinite weekly rules and their dated exceptions. */
   readonly scheduleRules: ScheduleRulesRepo;
   /** Non-authoritative owner preferences; authorization never reads them. */
@@ -132,13 +138,18 @@ export interface Store {
 }
 
 export function createStore(db: Db): Store {
+  // Nesting is tracked in MEMORY. The row is only what the triggers read, so a crash
+  // that leaves it behind cannot be mistaken for a deletion path that is running: the
+  // outermost entry of a fresh process overwrites it, and start-up clears it.
+  let depth = 0;
   const withDeletionCause = <T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T => {
-    const outer = db.prepare('SELECT 1 FROM deletion_context WHERE id = 1').get() !== undefined;
-    if (outer) return fn();
-    db.prepare('INSERT INTO deletion_context (id, cause) VALUES (1, ?)').run(cause);
+    if (depth > 0) return fn();
+    depth += 1;
+    db.prepare('INSERT OR REPLACE INTO deletion_context (id, cause) VALUES (1, ?)').run(cause);
     try {
       return fn();
     } finally {
+      depth -= 1;
       db.prepare('DELETE FROM deletion_context WHERE id = 1').run();
     }
   };
@@ -169,6 +180,7 @@ export function createStore(db: Db): Store {
     assistantImport: new AssistantImportRepo(db),
     rollbackDelta: new RollbackDeltaRepo(db),
     withDeletionCause,
+    clearStaleDeletionContext: () => Number(db.prepare('DELETE FROM deletion_context').run().changes),
     scheduleRules: new ScheduleRulesRepo(db),
     ownerPreferences: new OwnerPreferencesRepo(db),
     assistantWatch: new AssistantWatchRepo(db),

@@ -231,7 +231,7 @@ export class AssistantImportService {
     const plan: Plan = {
       conflicts: [],
       task: new Map(), reminder: new Map(), capture: new Map(), rule: new Map(),
-      exception: new Map(), preferences: undefined, target: new Map(),
+      exception: new Map(), preferences: undefined, target: new Map(), adopt: new Map(),
     };
     const conflict = (category: string, rule = 'source_changed'): void => {
       const existing = plan.conflicts.find((c) => c.category === category && c.rule === rule);
@@ -284,8 +284,18 @@ export class AssistantImportService {
       if (d.disposition === 'conflict') conflict('watch');
       // A different identity for a repository that is already a target would
       // collide on the owner's unique key: say so rather than fail mid-write.
-      if (d.disposition === 'create' && this.store.assistantWatch.byRepoKey(this.deps.env.ownerId, watchTargetKey(t.reference))) {
-        conflict('watch', 'reference_already_present');
+      const present = d.disposition === 'create'
+        ? this.store.assistantWatch.byRepoKey(this.deps.env.ownerId, watchTargetKey(t.reference))
+        : undefined;
+      if (present) {
+        // A repository discovery found before this import is adopted (its state, its
+        // checkpoints it has not read yet, its events), so discovery running first can
+        // never block the import or override a source mute. Anything else is a collision.
+        if (present.origin === 'discovered' && !this.store.assistantImport.hasLiveTarget('watch_target', present.id)) {
+          plan.adopt.set(t.sourceId, present.id);
+        } else {
+          conflict('watch', 'reference_already_present');
+        }
       }
       plan.target.set(t.sourceId, d);
     }
@@ -324,7 +334,8 @@ export class AssistantImportService {
       out.push({ category: 'schedule', rule: 'over_exception_capacity', count: 1 });
     }
 
-    const newTargets = creating(doc.watch?.targets ?? [], plan.target).length;
+    // An adopted target is already counted: it adds nothing.
+    const newTargets = creating(doc.watch?.targets ?? [], plan.target).length - plan.adopt.size;
     if (this.store.assistantWatch.countAll(owner) + newTargets > ASSISTANT_WATCH_MAX_TARGETS) {
       out.push({ category: 'watch', rule: 'over_target_capacity', count: 1 });
     }
@@ -487,8 +498,11 @@ export class AssistantImportService {
     for (const t of doc.watch?.targets ?? []) {
       const d = plan.target.get(t.sourceId)!;
       if (!tally('watchTargets', d.disposition)) continue;
-      const id = randomUUID();
-      const counted = this.insertTarget(id, owner, t, doc.exportedAt, at);
+      const adopted = plan.adopt.get(t.sourceId);
+      const id = adopted ?? randomUUID();
+      const counted = adopted
+        ? this.adoptTarget(adopted, t, doc.exportedAt, at)
+        : this.insertTarget(id, owner, t, doc.exportedAt, at);
       watch.checkpoints += counted.checkpoints;
       watch.events += counted.events;
       imp.recordLive({ namespace: ns, category: 'watch_target', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('watch_target', id) });
@@ -504,6 +518,39 @@ export class AssistantImportService {
     const h = this.store.rollbackDelta.currentHash(category, targetId);
     if (h === undefined) throw new Error('baseline: the record just written is not readable');
     return h;
+  }
+
+  /**
+   * Takes over a target discovery created before the import.
+   *
+   * The source is what the owner decided, so its mute wins over discovery's default of
+   * active; but what Ducky has ALREADY read is newer than anything the source had, so a
+   * checkpoint Ducky has baselined or advanced is kept and only one it has not read
+   * takes the source's cursor. Events are added where they are not already known.
+   * Nothing here touches authorization: a watch target never did.
+   */
+  private adoptTarget(
+    id: string, t: ImportedWatchTarget, exportedAt: string, at: string,
+  ): { checkpoints: number; events: number } {
+    const repo = this.store.assistantWatch;
+    repo.adoptDiscovered(id, t.defaultBranch, t.state === 'cancelled' ? exportedAt : null, t.lastObservedAt, at);
+    const given = new Map(t.checkpoints.map((c) => [c.surface, c] as const));
+    let checkpoints = 0;
+    for (const [surface, c] of given) {
+      if (surface === 'ci_state') {
+        repo.adoptCheckpoint(id, surface, c.cursor, at, NEVER);
+      } else if (repo.adoptCheckpoint(id, surface, cursorText(surface, c.cursor), at, at)) {
+        checkpoints += 1;
+      }
+    }
+    let events = 0;
+    for (const e of t.events) {
+      if (repo.insertImportedEventIfNew({
+        id: randomUUID(), targetId: id, kind: e.kind, identity: e.identity, occurredAt: e.occurredAt,
+        payloadJson: JSON.stringify(e.payload), alertedAt: e.alertedAt, digestedAt: e.digestedAt, createdAt: at,
+      })) events += 1;
+    }
+    return { checkpoints, events };
   }
 
   private insertTarget(
@@ -747,6 +794,11 @@ interface Plan {
   readonly exception: Map<string, { disposition: Disposition; fp: string }>;
   preferences: { disposition: Disposition; fp: string } | undefined;
   readonly target: Map<string, { disposition: Disposition; fp: string }>;
+  /**
+   * Source watch targets that are ALREADY targets here only because discovery found the
+   * repository first (never imported). The import adopts them instead of colliding.
+   */
+  readonly adopt: Map<string, string>;
 }
 
 class DryRun extends Error {

@@ -1244,14 +1244,17 @@ fail-closed form of the blocker, not a decision to drop it.
   account that IS the owner is stated by configuration rather than proven, and whether
   the timing holds under the real quota and selection is unproven.
 - **Overlap with the ordinary `github_watches` snapshot DM:** when an imported target
-  is observing the same repository's pulls or issues surface (active, not blocked, last
-  read healthy), the ordinary snapshot DM leaves out the parts that surface already
-  reports (pull request updates, merges, approvals, requested changes, review comments,
+  will really DELIVER the same repository's pulls or issues surface (watching on, inside
+  the poll cycle where one applies, healthy, and for digest-only kinds a briefing that
+  can carry the digest: briefings on, imported preferences with the GitHub section, a DM
+  copy; a requested change is an alert and needs no digest), the ordinary snapshot DM
+  leaves out the parts that surface already reports (pull request updates, merges, approvals, requested changes, review comments,
   issue activity) and says nothing at all if nothing else changed. It keeps what the
   imported side cannot see (a check flipping on a pull request head, a workflow run on
   any branch) and the follow-up job proposal, so nothing unrelated is lost. The native
   feed's duplicate cards are retired the same way, for the kinds an imported surface
-  sees in full. Unit-tested only.
+  sees in full, under the same conditions. Paused, outside the cycle, preferences off,
+  no GitHub section or briefings off keep the native DM and card. Unit-tested only.
 - **Equal-time late reviews:** a late event that shares the cursor's timestamp is
   reconciled by identity for commits, pull-request-level events, reviews, issues,
   runs and releases once Ducky has processed the boundary (a pull request touched at
@@ -1278,7 +1281,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2305 tests in 148 files**.
+The unmodified `pnpm test` command passes all **2337 tests in 148 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

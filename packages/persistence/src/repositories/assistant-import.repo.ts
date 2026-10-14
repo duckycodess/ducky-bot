@@ -139,6 +139,15 @@ export class AssistantImportRepo {
       .run(row.namespace, row.category, row.sourceId, row.targetId, row.fingerprint, row.at, row.storedHash ?? null);
   }
 
+  /** Whether a live ledger identity already points at this record. */
+  hasLiveTarget(category: IdentityCategory, targetId: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM assistant_import_identities WHERE category = ? AND target_id = ? AND state = 'live'")
+        .get(category, targetId) !== undefined
+    );
+  }
+
   /** Counts only, for verification: how many identities are live or tombstoned. */
   identityCounts(namespace: string): Record<IdentityCategory, { live: number; tombstone: number }> {
     const out = Object.fromEntries(

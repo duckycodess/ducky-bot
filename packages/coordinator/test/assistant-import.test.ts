@@ -645,3 +645,69 @@ describe('the source urgent priority and task categories', () => {
     h.close();
   });
 });
+
+describe('a repository discovery found before the import is adopted, not collided with', () => {
+  const discover = (h: Harness, keys: readonly string[]) => {
+    const repo = h.store.assistantWatch;
+    repo.ensureDiscovery(OWNER, NOW);
+    repo.commitDiscoveryPage({
+      ownerId: OWNER, expectedPage: 0, maxTargets: 1000, atIso: NOW,
+      surfaces: ['commits', 'pulls', 'issues', 'runs', 'releases', 'default_branch'],
+      next: { kind: 'done', incomplete: false, nextDueAt: '2099-01-01T00:00:00.000Z' },
+      found: keys.map((k, i) => ({
+        repoKey: k, display: k, pushedAt: '2026-10-12T00:00:00Z', archived: false, fork: false,
+        relationship: 'owner' as const, id: `disc-${i}`, publicId: `wdisc${i}`.slice(0, 6),
+      })),
+    });
+  };
+
+  it('takes the source mute, the cursors Ducky has not read, and the events, without a conflict', () => {
+    const { h, svc } = boot();
+    discover(h, ['acme/widgets', 'acme/muted']);
+    // Ducky has already READ the pulls surface of one of them: that is newer than the source's.
+    const widgets = h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!;
+    h.store.assistantWatch.checkpointsFor(widgets.id); // exists, unbaselined
+    h.store.db.prepare("UPDATE assistant_watch_checkpoints SET state='ready', cursor='2026-10-12T20:00:00.000Z' WHERE target_id = ? AND surface = 'pulls'").run(widgets.id);
+
+    const out = apply(h, svc());
+    expect(out.ok).toBe(true);
+    expect(out.counts.watchTargets.conflicts).toBe(0);
+
+    const rows = h.store.assistantWatch.listForOwner(OWNER, true, 10);
+    expect(rows.map((r) => `${r.repoKey}:${r.state}:${r.origin}`).sort()).toEqual([
+      'acme/muted:cancelled:imported', 'acme/widgets:active:imported',
+    ]);
+    const cps = new Map(h.store.assistantWatch.checkpointsFor(widgets.id).map((c) => [c.surface, c]));
+    expect(cps.get('pulls')).toMatchObject({ state: 'ready', cursor: '2026-10-12T20:00:00.000Z' }); // Ducky's is newer
+    expect(cps.get('default_branch')).toMatchObject({ state: 'imported', cursor: 'main' }); // not read yet: the source's
+    expect(cps.get('ci_state')).toMatchObject({ cursor: 'failing' });
+    expect(h.store.assistantWatch.eventsFor(widgets.id).map((e) => e.identity).sort()).toEqual(['12:opened', '12:review:9']);
+    // It now has a ledger identity and a baseline, like any imported target, and no extra target exists.
+    expect(h.store.assistantImport.identity('fixture', 'watch_target', 'w-1')?.targetId).toBe(widgets.id);
+    expect(h.store.assistantWatch.countAll(OWNER)).toBe(2);
+    expect(svc().verify(importDoc()).parity).toBe(true);
+    h.close();
+  });
+
+  it('is the same on a repeat import, and never overrides a mute the owner made here', () => {
+    const { h, svc } = boot();
+    discover(h, ['acme/widgets']);
+    const widgets = h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!;
+    h.store.assistantWatch.cancel(OWNER, widgets.id, NOW); // the owner muted it in Ducky first
+    expect(apply(h, svc()).ok).toBe(true);
+    expect(h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!.state).toBe('cancelled');
+    const again = apply(h, svc());
+    expect(again.ok).toBe(true);
+    expect(again.counts.watchTargets).toEqual({ created: 0, existing: 2, suppressed: 0, conflicts: 0 });
+    h.close();
+  });
+
+  it('still refuses a different identity for a target that was IMPORTED, not discovered', () => {
+    const { h, svc } = boot();
+    expect(apply(h, svc()).ok).toBe(true);
+    const doc = importDoc() as Record<string, any>;
+    doc['watch'].targets[0].sourceId = 'w-other';
+    expect(apply(h, svc(), doc).issues).toContainEqual({ category: 'watch', rule: 'reference_already_present', count: 1 });
+    h.close();
+  });
+});

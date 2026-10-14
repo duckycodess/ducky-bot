@@ -397,3 +397,14 @@ describe("the source's staleness rule for a pending briefing", () => {
     h.close();
   });
 });
+
+describe('the staleness rule needs the evening to come after the morning', () => {
+  it('keeps a morning briefing due until the end of its day when the times are not in that order', async () => {
+    const { h } = boot({ DUCKY_BRIEFING_ENABLED: 'true', DUCKY_IMPORTED_PREFERENCES: 'true' }, '2026-10-13T20:00:00.000+08:00');
+    setPrefs(h, { morningTime: '09:00', eveningTime: '07:00' });
+    const out = await h.app.briefingNotifier.tick();
+    expect(out.skippedStale).toBe(0);
+    expect(h.store.briefings.bySlot(OWNER, 'morning', '2026-10-13')!.status).toBe('delivered');
+    h.close();
+  });
+});

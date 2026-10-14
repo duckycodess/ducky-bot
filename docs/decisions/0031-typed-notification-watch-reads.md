@@ -97,6 +97,18 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   what was found stays held, because it is real and deduplicates by identity. A
   window that fitted one page is one consistent answer and is not re-read.
   **This narrows the window for a miss; it is not a proof** (see the residuals).
+- A window that closes on an EMPTY page is verified against the last page that held
+  items, not against the empty one: a row deleted from an already-read page slides its
+  successor onto it, leaving the next page empty both times, and an empty page proves
+  nothing about a boundary.
+- A lifecycle change on an unread page is not lost when a comment moves it to a read one.
+  A pull request merged, or an issue opened or closed, on page two can be bumped onto page
+  one before page two is read; the pass then commits a cursor past its lifecycle time. A
+  window that spanned pages hands its STARTING cursor to the next read (`lifecycle_floor`,
+  migration 35) for exactly one read, and opened/merged/closed times count from there;
+  their identities are stable, so what is looked at again is deduplicated. An item AT the
+  cursor re-read in inclusive mode is no longer called "updated" a second time. This is not
+  a proof against arbitrary paging drift, which stays a named residual.
 - What settles in the middle of a pass is not jumped over. The committed cursor is
   capped at an unsettled run's last update (less a millisecond), or at the moment a
   draft release was read, so something else on the same pass cannot carry the cursor
@@ -176,11 +188,21 @@ one by its id. A baseline or a source cursor stays strict.
 
 ## Consequences
 
-- Migrations 30 and 31 are additive: pending state and scan floor, target facts
-  (`pushed_at`, `relationship`, `archived`, `fork`, `cancel_reason`, `origin`), the
-  discovery pass, discovery tombstones (by trigger, so no deletion path can forget
-  one) and the per-owner monitoring switch.
+- Migrations 30, 31 and 35 are additive: pending state, scan floor and lifecycle floor,
+  target facts (`pushed_at`, `relationship`, `archived`, `fork`, `cancel_reason`,
+  `origin`), the discovery pass, discovery tombstones (by trigger, so no deletion path can
+  forget one) and the per-owner monitoring switch.
 - A repository the provider no longer shows is cancelled by the system with a
-  `not_found` reason, as the source unmonitors it; the row, its events and the
-  owner's Forget control remain.
+  `not_found` reason, as the source unmonitors it, but only after a SECOND consecutive
+  not-found on the metadata read, a backoff apart. One answer cannot tell a missing
+  repository from a private one without access or a moment of provider trouble, and a
+  cancellation has no owner control to undo it; a success in between resets the count.
+  The row, its events and the owner's Forget control remain, and `/status` counts these.
+- Discovery that ran before the import is ADOPTED by it, never a collision: the source's
+  mute wins over discovery's default, a checkpoint Ducky has already read is kept (it is
+  newer), one it has not takes the source's cursor, and events are added where unknown. A
+  mute the owner already made in Ducky is never undone. Nothing here touches
+  authorization.
+- A target the poll cycle cannot read (a renamed or transferred repository) or that is
+  outside the frozen discovery scope does not occupy one of the 40 slots.
 - A multi-page window costs one extra request.

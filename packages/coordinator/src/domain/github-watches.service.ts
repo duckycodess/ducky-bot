@@ -92,7 +92,7 @@ export interface GitHubWatchServiceDeps {
    * a surface right now, so a part of a snapshot summary that surface already
    * reports is not told a second time. Absent means nothing is covered.
    */
-  readonly importedCovers?: (repoKey: string, surface: 'pulls' | 'issues') => boolean;
+  readonly importedCovers?: (repoKey: string, surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean;
 }
 
 /**
@@ -112,7 +112,9 @@ export class GitHubWatchService {
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
   private readonly clock: OwnerClock;
-  private readonly importedCovers: ((repoKey: string, surface: 'pulls' | 'issues') => boolean) | undefined;
+  private readonly importedCovers:
+    | ((repoKey: string, surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean)
+    | undefined;
   private ticking: Promise<GitHubWatchTickResult> | null = null;
 
   constructor(deps: GitHubWatchServiceDeps) {
@@ -262,7 +264,10 @@ export class GitHubWatchService {
     const changed = watch.snapshotHash !== fingerprint;
     const repoKey = `${ref.owner}/${ref.repo}`.toLowerCase();
     const summary = changed
-      ? summarizeChange(repo.slug, previous, normalized, (surface) => this.importedCovers?.(repoKey, surface) ?? false)
+      ? summarizeChange(
+        repo.slug, previous, normalized,
+        (surface, delivery) => this.importedCovers?.(repoKey, surface, delivery) ?? false,
+      )
       : '';
     const nowMs = this.clock.nowMs();
     const nextCheckAt = new Date(nowMs + watch.intervalMinutes * 60_000).toISOString();
@@ -437,10 +442,13 @@ function summarizeChange(
   slug: string,
   previous: NormalizedSnapshot | undefined,
   current: NormalizedSnapshot,
-  covers: (surface: 'pulls' | 'issues') => boolean = () => false,
+  covers: (surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean = () => false,
 ): string | null {
-  const pulls = covers('pulls');
-  const issues = covers('issues');
+  // Pull request changes ride the digest, except a requested change, which an imported
+  // target ALERTS on immediately; the two are covered separately.
+  const pulls = covers('pulls', 'digest');
+  const pullAlerts = covers('pulls', 'immediate');
+  const issues = covers('issues', 'digest');
   let suppressed = false;
   if (!previous) {
     return clampSummary(
@@ -505,7 +513,7 @@ function summarizeChange(
       (!old || old.latestChangeRequestAt !== pr.latestChangeRequestAt);
   });
   if (newlyBlocked.length > 0) {
-    if (pulls) suppressed = true;
+    if (pullAlerts) suppressed = true;
     else parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
   }
 

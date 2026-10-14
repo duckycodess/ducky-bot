@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { WatchSurface } from '@ducky/contracts';
+import type { ImportedPreferences } from '@ducky/contracts';
+import type { AssistantWatchConfig } from '../src/domain/assistant-watch.service.js';
 import { OWNER, TestClock, makeHarness, type Harness } from './helpers.js';
 import { MutableGitHubReader } from './github-watch-helpers.js';
 
@@ -37,13 +39,53 @@ const importedTarget = (h: Harness, surfaces: readonly WatchSurface[], over: { f
   }
 };
 
-const start = async (surfaces: readonly WatchSurface[] | null, over: Parameters<typeof importedTarget>[2] = {}) => {
+const PREFS: ImportedPreferences = {
+  timeZone: 'UTC', morningEnabled: true, morningTime: '07:00', eveningEnabled: true, eveningTime: '21:00',
+  weekendBriefings: true, lookaheadDays: 3, includeWeather: false, includeGithub: true, includeCaptures: false,
+  includeMeal: false, assistantWording: false, defaultReminderOffsetsMinutes: [1440, 60],
+};
+/** What must hold for the imported side to REALLY tell the owner, each switchable off. */
+interface World {
+  prefs?: 'github' | 'none' | 'no_github_section';
+  briefing?: boolean;
+  delivery?: 'dm' | 'channel';
+  paused?: boolean;
+  cycle?: { pushedAt: string | null };
+}
+const CYCLE: AssistantWatchConfig = {
+  account: null, cycle: true, discovery: false, relationships: new Set(['owner', 'organization', 'collaborator']),
+  includeForks: false, includeArchived: false,
+};
+
+const start = async (
+  surfaces: readonly WatchSurface[] | null,
+  over: Parameters<typeof importedTarget>[2] = {},
+  world: World = {},
+) => {
   const clock = new TestClock(START);
   const reader = new MutableGitHubReader();
   seed(reader);
-  const h = makeHarness({ clock, github: reader });
+  const h = makeHarness({
+    clock, github: reader,
+    ...(world.cycle ? { assistantWatchConfig: CYCLE } : {}),
+    env: {
+      ...(world.briefing === false ? {} : { DUCKY_BRIEFING_ENABLED: 'true' }),
+      ...(world.prefs === 'none' ? {} : { DUCKY_IMPORTED_PREFERENCES: 'true' }),
+      ...(world.delivery === 'channel'
+        ? { DUCKY_BRIEFING_DELIVERY: 'channel', DUCKY_DEV_BRIEFING_CHANNEL_ID: '900000000000000031' }
+        : {}),
+    },
+  });
+  if (world.prefs !== 'none') {
+    h.store.ownerPreferences.insert({
+      ownerId: OWNER, source: 'import', at: START,
+      prefsJson: JSON.stringify({ ...PREFS, includeGithub: world.prefs !== 'no_github_section' }),
+    });
+  }
   h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
   if (surfaces) importedTarget(h, surfaces, over);
+  if (world.cycle) h.store.db.prepare('UPDATE assistant_watch_targets SET pushed_at = ?').run(world.cycle.pushedAt);
+  if (world.paused) h.store.assistantWatch.setMonitoring(OWNER, false, START);
   clock.advance(15 * MIN);
   await h.app.githubWatches.tick(); // "Started watching" is never suppressed
   h.transport.clear();
@@ -149,6 +191,57 @@ describe('the ordinary watch does not repeat what an imported target tells', () 
     clock.advance(15 * MIN);
     await h.app.githubWatches.tick();
     expect(sent(h)).toContain('Improve the API safely');
+    h.close();
+  });
+});
+
+describe('an imported target only silences the native DM when it will really deliver', () => {
+  const change = (reader: MutableGitHubReader) => {
+    reader.prs = [{ ...reader.prs[0]!, title: 'Improve the API safely', updatedAt: '2026-09-01T01:00:00.000Z' }];
+  };
+
+  it('is silenced when watching is on, a briefing can carry the digest and the target is healthy (positive control)', async () => {
+    const { h, reader, step } = await start(['pulls', 'issues']);
+    change(reader);
+    expect((await step()).delivered).toBe(0);
+    h.close();
+  });
+
+  it.each([
+    ['watching is paused', {}, { paused: true }],
+    ['imported preferences are not in force', {}, { prefs: 'none' as const }],
+    ['the preferences leave the GitHub section out', {}, { prefs: 'no_github_section' as const }],
+    ['briefings are off', {}, { briefing: false }],
+    ['briefings go to a channel only, which never carries the digest', {}, { delivery: 'channel' as const }],
+    ['the target is outside the poll cycle', {}, { cycle: { pushedAt: null } }],
+  ] as const)('keeps the native DM when %s', async (_name, over, world) => {
+    const { h, reader, step } = await start(['pulls', 'issues'], over, world);
+    change(reader);
+    await step();
+    expect(sent(h)).toContain('Improve the API safely');
+    h.close();
+  });
+
+  it('silences it again once the target is inside the poll cycle', async () => {
+    const { h, reader, step } = await start(['pulls', 'issues'], {}, { cycle: { pushedAt: '2026-09-01T00:00:00Z' } });
+    change(reader);
+    expect((await step()).delivered).toBe(0);
+    h.close();
+  });
+
+  it('silences a requested change on the imported ALERT alone, with no digest anywhere', async () => {
+    const { h, reader, step } = await start(['pulls', 'issues'], {}, { prefs: 'none', briefing: false });
+    reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'CHANGES_REQUESTED', updatedAt: '2026-09-01T03:00:00.000Z' }];
+    reader.reviews.set(7, {
+      number: 7, reviewDecision: 'CHANGES_REQUESTED',
+      latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-09-01T03:00:00.000Z' }],
+    });
+    await step();
+    const body = sent(h);
+    // The pull request's own update, which would ride a digest nobody can receive, is kept...
+    expect(body).toContain('pull request update');
+    // ...while the requested change is the imported alert's to tell.
+    expect(body).not.toContain('changes requested on #7');
     h.close();
   });
 });

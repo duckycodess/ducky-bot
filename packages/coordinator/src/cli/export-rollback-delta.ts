@@ -1,7 +1,9 @@
-import { existsSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
-import { acquireRuntimeLock, createStore, isUpToDate, openDatabase, type Db } from '@ducky/persistence';
+import {
+  acquireRuntimeLock, createStore, isUpToDate, openDatabase, peekLiveRuntimeHolder, type Db,
+} from '@ducky/persistence';
 import { loadEnv } from '../config.js';
 import { buildRollbackDelta, deltaCounts } from '../domain/rollback-delta.service.js';
 import type { CliIo, CliOptions } from './import-assistant.js';
@@ -55,6 +57,21 @@ const insideRepo = (repoRoot: string, p: string): boolean => {
 };
 const privateFile = (file: string): boolean => (statSync(file).mode & 0o077) === 0;
 const privateDir = (dir: string): boolean => existsSync(dir) && (statSync(dir).mode & 0o077) === 0;
+
+/**
+ * Writes the output so it is either complete and 0600 or absent, and never replaces
+ * anything: the bytes go to a private temporary file beside it, then a hard link
+ * publishes them (which fails if the output exists) and the temporary name is removed.
+ */
+function publishPrivately(outPath: string, body: string): void {
+  const tmp = `${outPath}.tmp-${process.pid}`;
+  writeFileSync(tmp, body, { mode: 0o600, flag: 'wx' });
+  try {
+    linkSync(tmp, outPath);
+  } finally {
+    unlinkSync(tmp);
+  }
+}
 
 export function runExportRollbackDeltaCli(
   args: readonly string[],
@@ -125,8 +142,21 @@ export function runExportRollbackDeltaCli(
       io.err('refused: the backup has pending migrations; export from a current backup.\n');
       return 3;
     }
+    // A file whose writer is still alive is not a quiescent state: the delta would be
+    // missing whatever that writer does next. Refused by the same liveness rules the
+    // lock uses, not by an acknowledgement.
+    if (peekLiveRuntimeHolder(db as Db) !== undefined) {
+      (db as DatabaseSync).close();
+      io.err('refused: a live process is still writing this database; it is not a finished backup.\n');
+      return 3;
+    }
   } else {
-    db = openDatabase({ location: sourcePath });
+    try {
+      db = openDatabase({ location: sourcePath });
+    } catch {
+      io.err('refused: the database could not be opened.\n');
+      return 2;
+    }
     if (!isUpToDate(db)) {
       db.close();
       io.err('refused: the database has pending migrations. Run `pnpm migrate` first.\n');
@@ -152,9 +182,13 @@ export function runExportRollbackDeltaCli(
       io.err('incomplete: nothing was written. Re-run with --allow-incomplete to keep a file that says what is missing.\n');
       return 5;
     }
-    writeFileSync(outPath, `${JSON.stringify(delta, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    publishPrivately(outPath, `${JSON.stringify(delta, null, 2)}\n`);
     io.out(`${counts}\n`);
     return delta.complete ? 0 : 5;
+  } catch {
+    // Never a raw exception: its text can carry a path.
+    io.err('refused: the export could not be read or written.\n');
+    return 2;
   } finally {
     release?.();
     (db as DatabaseSync).close();

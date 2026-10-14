@@ -37,7 +37,7 @@ import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
 import { WeatherBriefing } from './domain/weather-briefing.js';
 import { takeCoordinatorLock } from './runtime-lock.js';
 import {
-  AssistantWatchService, IMPORT_COVERS_NATIVE, type AssistantWatchConfig,
+  AssistantWatchService, IMPORT_COVERS_NATIVE, IMPORT_COVER_DELIVERY, type AssistantWatchConfig,
 } from './domain/assistant-watch.service.js';
 import {
   UnavailableAssistantWatchReader, type AssistantWatchReader,
@@ -526,6 +526,11 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
+    digestDeliverable: () => {
+      const schedule = resolveBriefingSchedule(env);
+      return schedule.enabled && schedule.delivery !== 'channel' &&
+        ownerPreferences.effective()?.includeGithub === true;
+    },
     store, authz, transport, ownerId: authz.ownerId, clock,
     reader: overrides.assistantWatchReader ??
       (watchConfig.readerEnabled
@@ -554,7 +559,9 @@ export function createApp(
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
     // An imported target that observes a repository tells its pull request and issue
     // events itself (alert or digest), so the ordinary snapshot DM leaves those out.
-    importedCovers: (repoKey, surface) => store.assistantWatch.observes(authz.ownerId, repoKey, surface),
+    // Only where the imported side will really deliver it (watching on, inside the poll
+    // cycle, and a briefing that can carry a digest for digest-only kinds).
+    importedCovers: (repoKey, surface, delivery) => assistantWatch.covers(repoKey, surface, delivery),
   });
   /**
    * The GitHub feed rides the SAME coordinator interval and holds no model
@@ -570,7 +577,8 @@ export function createApp(
     // are untouched.
     coveredByImport: (repoKey, kind) => {
       const surface = IMPORT_COVERS_NATIVE[kind];
-      return surface !== undefined && store.assistantWatch.observes(authz.ownerId, repoKey, surface);
+      const delivery = IMPORT_COVER_DELIVERY[kind];
+      return surface !== undefined && delivery !== undefined && assistantWatch.covers(repoKey, surface, delivery);
     },
   });
   githubFeed.reconcileSelection();

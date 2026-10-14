@@ -21,6 +21,10 @@ export function takeCoordinatorLock(db: Db): RuntimeLockHandle {
       `A live ${out.heldBy} is already writing this database. Stop it first; two writers are never safe.`,
     );
   }
+  // A previous coordinator that died in the middle of a deletion left its cause row
+  // behind. Holding the lock, nobody is deleting, so any row here is stale and would
+  // mislabel the next deletion that reaches a tombstone trigger. Clear it.
+  db.prepare('DELETE FROM deletion_context').run();
   return out.handle;
 }
 

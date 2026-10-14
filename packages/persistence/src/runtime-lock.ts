@@ -125,6 +125,51 @@ export function readProcessStart(pid: number): string | undefined {
   }
 }
 
+/** Whether the lock row names a holder that is still alive, by the rules above. */
+function rowIsLive(
+  row: Record<string, unknown>,
+  ctx: {
+    nowMs: () => number;
+    host: string;
+    alive: (pid: number) => boolean;
+    bootId: string | undefined;
+    startOf: (pid: number) => string | undefined;
+  },
+): boolean {
+  if (String(row['host']) !== ctx.host) {
+    return ctx.nowMs() - Date.parse(String(row['heartbeat_at'])) <= RUNTIME_LOCK_STALE_MS;
+  }
+  const rowBoot = row['boot_id'] == null ? undefined : String(row['boot_id']);
+  const rowStart = row['proc_start'] == null ? undefined : String(row['proc_start']);
+  const holderPid = Number(row['pid']);
+  if (rowBoot !== undefined && ctx.bootId !== undefined && rowBoot !== ctx.bootId) {
+    return false; // left by an earlier boot: every pid in it means nothing now
+  }
+  if (!ctx.alive(holderPid)) return false;
+  const nowStart = ctx.startOf(holderPid);
+  // A pid that exists but began at a different time is someone else.
+  return !(rowStart !== undefined && nowStart !== undefined && rowStart !== nowStart);
+}
+
+/**
+ * Who, if anyone, is live on this database right now, WITHOUT taking the lock or
+ * writing anything. Used to refuse reading a "backup" whose writer is still alive:
+ * such a file is not a final, quiescent state, and a delta read from it would be
+ * missing whatever that writer does next.
+ */
+export function peekLiveRuntimeHolder(db: Db, opts: RuntimeLockOptions = {}): RuntimeHolder | undefined {
+  const row = db.prepare('SELECT * FROM runtime_lock WHERE id = 1').get() as Record<string, unknown> | undefined;
+  if (!row) return undefined;
+  const live = rowIsLive(row, {
+    nowMs: opts.nowMs ?? Date.now,
+    host: opts.host ?? hostname(),
+    alive: opts.isPidAlive ?? defaultAlive,
+    bootId: 'bootId' in opts ? opts.bootId : readBootId(),
+    startOf: opts.startOf ?? readProcessStart,
+  });
+  return live ? (String(row['holder']) as RuntimeHolder) : undefined;
+}
+
 export function acquireRuntimeLock(
   db: Db,
   holder: RuntimeHolder,
@@ -144,24 +189,9 @@ export function acquireRuntimeLock(
       | Record<string, unknown>
       | undefined;
     if (row) {
-      let live: boolean;
-      if (String(row['host']) !== host) {
-        live = nowMs() - Date.parse(String(row['heartbeat_at'])) <= RUNTIME_LOCK_STALE_MS;
-      } else {
-        const rowBoot = row['boot_id'] == null ? undefined : String(row['boot_id']);
-        const rowStart = row['proc_start'] == null ? undefined : String(row['proc_start']);
-        const holderPid = Number(row['pid']);
-        if (rowBoot !== undefined && bootId !== undefined && rowBoot !== bootId) {
-          live = false; // left by an earlier boot: every pid in it means nothing now
-        } else if (!alive(holderPid)) {
-          live = false;
-        } else {
-          const nowStart = startOf(holderPid);
-          // A pid that exists but began at a different time is someone else.
-          live = !(rowStart !== undefined && nowStart !== undefined && rowStart !== nowStart);
-        }
+      if (rowIsLive(row, { nowMs, host, alive, bootId, startOf })) {
+        return { ok: false, heldBy: String(row['holder']) as RuntimeHolder };
       }
-      if (live) return { ok: false, heldBy: String(row['holder']) as RuntimeHolder };
       db.prepare('DELETE FROM runtime_lock WHERE id = 1').run();
     }
     db.prepare(

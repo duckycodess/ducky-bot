@@ -28,10 +28,17 @@ consistent state and writes one file. It is a CLI beside `import:assistant` and
   while a live coordinator holds the database. `--from-backup` opens a backup file
   READ-ONLY after SQLite's integrity check and a fully-migrated-schema check. Exactly one
   of the two is required.
+- **One read snapshot.** All reads run inside a single read transaction (a concurrent
+  writer cannot make reminders and their occurrences disagree), a snapshot that breaks a
+  foreign key is incomplete, and a backup whose runtime-lock row names a still-live holder
+  is refused: it is not a finished state, and a delta read from it would miss whatever that
+  writer does next.
 - **Private by construction.** The source and the output must be outside the repository
   (through symlinks), the source 0600 and both directories 0700; the output is created
-  0600 and never overwrites anything. The terminal gets counts and rule names only: never
-  a title, an id, a repository, a preference or a path.
+  0600, is published by a hard link from a private temporary file so it is complete or
+  absent and never replaces anything, and an I/O failure prints a fixed sentence, never a
+  path. The terminal gets counts and rule names only: never a title, an id, a repository,
+  a preference value (the monitoring switch is a presence count) or a path.
 - **Exit codes.** 0 complete; 2 refused before reading data; 3 backup refused; 4 a live
   process holds the database; **5 incomplete**. An incomplete export writes nothing
   unless `--allow-incomplete`, and even then exits 5 and the file says `complete: false`.
@@ -58,6 +65,12 @@ or `unknown`. The cause is set by the deletion path that ran (`deletion_context`
 single row read by the tombstone triggers, written by Forget, the retention pass and the
 owner's own capture deletion). A deletion that reaches the trigger with no path around it
 is `unknown`, never mislabelled.
+
+The cause row is only what the triggers read. Nesting is tracked in memory, so a row a
+crashed process left behind is overwritten by the next outermost deletion path and cleared
+at coordinator start-up (under the lock); and an export that finds a cause row present
+reports `deletion_context_stale` and is incomplete, because a tombstone made since could
+carry a cause that was never meant for it.
 
 **This does not defeat Forget.** Nothing about the deleted record's content is kept or
 exported, and the cause is one word from a closed list; a deletion record that quoted what

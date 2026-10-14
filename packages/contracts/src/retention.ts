@@ -49,6 +49,15 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'assistant_watch_checkpoints',
   'assistant_watch_events',
   'assistant_watch_calls',
+  /**
+   * Discovery's pass position, the tombstones that keep a deleted target deleted, the
+   * global monitoring switch, and the one-row cause a deletion path names. All state,
+   * none a finished record.
+   */
+  'assistant_watch_discovery',
+  'assistant_watch_discovery_tombstones',
+  'assistant_watch_settings',
+  'deletion_context',
   /** Who may write this database right now. */
   'runtime_lock',
 ] as const;

@@ -159,6 +159,54 @@ describe('a complete export', () => {
   });
 });
 
+describe('a backup is only read when it is a finished state', () => {
+  it('refuses a backup whose writer is still alive', () => {
+    const w = world();
+    const db = openDatabase({ location: w.dbPath });
+    // This very process holds the lock, so a copy of the file carries a LIVE holder.
+    expect(acquireRuntimeLock(db, 'coordinator').ok).toBe(true);
+    db.close();
+    const live = openDatabase({ location: w.dbPath });
+    live.exec(`VACUUM INTO '${path.join(w.dir, 'copy.db').replace(/'/g, "''")}'`);
+    live.close();
+    chmodSync(path.join(w.dir, 'copy.db'), 0o600);
+    const r = run(['--from-backup', path.join(w.dir, 'copy.db'), '--out', w.out]);
+    expect(r.code).toBe(3);
+    expect(r.err).toContain('still writing');
+    expect(existsSync(w.out)).toBe(false);
+  });
+
+  it('refuses a backup that breaks a foreign key, as incomplete', () => {
+    const w = world();
+    const db = openDatabase({ location: w.dbPath });
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.prepare(`INSERT INTO reminder_occurrences (id, reminder_id, occurrence_no, scheduled_for, created_at)
+                VALUES ('o-bad','missing',1,'2026-10-01T00:00:00Z','2026-10-01T00:00:00Z')`).run();
+    db.close();
+    expect(run(['--db', w.dbPath, '--out', w.out]).code).toBe(5);
+    expect(existsSync(w.out)).toBe(false);
+  });
+});
+
+describe('errors and the output never carry a path or a half-written file', () => {
+  it('says nothing about the file when the database cannot be opened', () => {
+    const w = world();
+    const junk = path.join(w.dir, 'junk.db');
+    writeFileSync(junk, 'not a database', { mode: 0o600 });
+    const r = run(['--db', junk, '--out', w.out]);
+    expect(r.code).toBe(2);
+    expect(r.err).not.toContain(w.dir);
+    expect(existsSync(w.out)).toBe(false);
+  });
+
+  it('leaves no temporary file behind and publishes a 0600 file', () => {
+    const w = world();
+    expect(run(['--db', w.dbPath, '--out', w.out]).code).toBe(0);
+    expect(existsSync(`${w.out}.tmp-${process.pid}`)).toBe(false);
+    expect(statSync(w.out).mode & 0o777).toBe(0o600);
+  });
+});
+
 describe('an incomplete export cannot be mistaken for success', () => {
   const lose = (w: ReturnType<typeof world>) => {
     const db = openDatabase({ location: w.dbPath });

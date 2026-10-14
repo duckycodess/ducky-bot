@@ -173,7 +173,7 @@ describe('what the owner and Ducky did since', () => {
     expect(d.state.briefingSlots.some((s) => s['dayKey'] === '2026-10-13' && s['kind'] === 'evening')).toBe(true);
     expect(d.state.watchCheckpoints.length).toBeGreaterThan(0);
     // Events Ducky settled or found since: the imported event the owner's briefing/alert has not touched is NOT here.
-    expect(d.state.watchEvents.every((e) => e['origin'] === 'observed' || e['alertedAt'] != null || e['digestedAt'] != null)).toBe(true);
+    expect(d.state.watchEvents.every((e) => e['origin'] === 'observed' || e['alertedAt'] != null || e['digestedAt'] != null || e['alertAbandonedAt'] != null)).toBe(true);
     h.close();
   });
 
@@ -275,6 +275,54 @@ describe('what it refuses to claim', () => {
     apply();
     h.app.forget.forgetEntity(h.owner, 'task', pub(h, 'task', 't-late'));
     expect(JSON.stringify(exportDelta(h))).not.toContain('Return the book');
+    h.close();
+  });
+});
+
+describe('what a crash or a concurrent writer cannot be allowed to hide', () => {
+  it('is incomplete when a cause row was left behind by a process that died mid-deletion', () => {
+    const { h, apply } = boot();
+    apply();
+    h.store.db.prepare("INSERT INTO deletion_context (id, cause) VALUES (1, 'retention')").run();
+    const d = exportDelta(h);
+    expect(d.complete).toBe(false);
+    expect(d.incomplete).toContainEqual({ category: 'deletion', rule: 'deletion_context_stale', count: 1 });
+    h.close();
+  });
+
+  it('is incomplete when the snapshot breaks a foreign key', () => {
+    const { h, apply } = boot();
+    apply();
+    h.store.db.exec('PRAGMA foreign_keys = OFF');
+    h.store.db.prepare(
+      `INSERT INTO reminder_occurrences (id, reminder_id, occurrence_no, scheduled_for, created_at)
+       VALUES ('o-bad','no-such-reminder',1,'2026-10-01T00:00:00Z','2026-10-01T00:00:00Z')`,
+    ).run();
+    const d = exportDelta(h);
+    expect(d.complete).toBe(false);
+    expect(d.incomplete.some((i) => i.rule === 'foreign_key_violation')).toBe(true);
+    h.close();
+  });
+
+  it('prints a presence count for the monitoring setting, never its value', () => {
+    const { h, apply } = boot();
+    apply();
+    h.store.assistantWatch.setMonitoring(OWNER, false, NOW);
+    const counts = JSON.stringify(deltaCounts(exportDelta(h)));
+    expect(counts).not.toContain('watchMonitoringEnabled');
+    expect(counts).toContain('"watchMonitoringSettingPresent":1');
+    expect(counts).not.toContain('false');
+    h.close();
+  });
+
+  it('includes an alert Ducky abandoned after the import', () => {
+    const { h, apply } = boot();
+    apply();
+    const target = h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!;
+    const alert = h.store.assistantWatch.eventsFor(target.id).find((e) => e.kind === 'review_requested_changes')!;
+    h.store.assistantWatch.recordAlertFailure(alert.id, '2026-10-13T01:00:00.000Z', 1);
+    const d = exportDelta(h);
+    expect(d.state.watchEvents.some((e) => e['kind'] === 'review_requested_changes' && e['alertAbandonedAt'] != null)).toBe(true);
     h.close();
   });
 });

@@ -52,7 +52,8 @@ export interface CategoryDelta {
 export interface IncompleteReason {
   readonly category: string;
   readonly rule:
-    | 'baseline_unknown' | 'deletion_cause_unknown' | 'over_cap' | 'ledger_orphan';
+    | 'baseline_unknown' | 'deletion_cause_unknown' | 'over_cap' | 'ledger_orphan'
+    | 'deletion_context_stale' | 'foreign_key_violation';
   readonly count: number;
 }
 
@@ -147,6 +148,11 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
     incomplete.set(k, { category, rule, count: (prior?.count ?? 0) + n });
   };
   for (const t of snap.truncated) note(t, 'over_cap');
+  // A cause row at read time means a process died in the middle of a deletion: every
+  // tombstone since could carry a cause that was never meant for it. And a snapshot
+  // that breaks a foreign key is not one consistent state.
+  if (snap.deletionContext !== null) note('deletion', 'deletion_context_stale');
+  if (snap.foreignKeyViolations > 0) note('snapshot', 'foreign_key_violation', snap.foreignKeyViolations);
 
   // ---- the ledger: what was imported, and what is gone ----
   const ledger: IdentityRow[] = snap.identities.map((r) => ({
@@ -261,7 +267,8 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
       // later than the import itself, which no time in the source document can be.
       return baselineAt !== null && (
         (e['alerted_at'] != null && String(e['alerted_at']) > baselineAt) ||
-        (e['digested_at'] != null && String(e['digested_at']) > baselineAt)
+        (e['digested_at'] != null && String(e['digested_at']) > baselineAt) ||
+        (e['alert_abandoned_at'] != null && String(e['alert_abandoned_at']) > baselineAt)
       );
     })
     .map((e) => ({ repoKey: targetKeys.get(String(e['target_id'])) ?? String(e['repo_key']), ...rec(e, ['id', 'target_id', 'repo_key']) }));
@@ -311,7 +318,9 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
     state: {
       watchCheckpoints: d.state.watchCheckpoints.length, watchEvents: d.state.watchEvents.length,
       briefingSlots: d.state.briefingSlots.length, discoveryTombstones: d.state.discoveryTombstones.length,
-      watchMonitoringEnabled: d.state.watchMonitoringEnabled,
+      // A presence count, never the value: the setting is a preference and the terminal
+      // output is counts only.
+      watchMonitoringSettingPresent: d.state.watchMonitoringEnabled === null ? 0 : 1,
     },
   };
 }

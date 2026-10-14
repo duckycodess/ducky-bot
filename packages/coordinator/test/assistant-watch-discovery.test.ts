@@ -360,3 +360,22 @@ describe('the global monitoring switch', () => {
     h.close();
   });
 });
+
+describe('a target that cannot be read does not occupy a cycle slot', () => {
+  const cycle = { ownerId: OWNER, limit: ASSISTANT_WATCH_CYCLE_TARGETS, includeArchived: false, includeForks: false };
+
+  it('skips a target whose repository was renamed or transferred, and one outside the frozen scope', () => {
+    const { h } = boot();
+    const ok = addTarget(h, 'acme/ok', { pushedAt: '2026-10-12T00:00:00Z' });
+    const moved = addTarget(h, 'acme/moved', { pushedAt: '2026-10-12T01:00:00Z' });
+    const out = addTarget(h, 'other/shared', { pushedAt: '2026-10-12T02:00:00Z', relationship: 'collaborator' });
+    for (const id of [ok, moved, out]) checkpoint(h, id, 'issues');
+    h.store.assistantWatch.blockTarget(moved, 'identity_changed', NOW);
+    const due = (rel?: ('owner' | 'organization' | 'collaborator')[]) =>
+      h.store.assistantWatch.dueCheckpoints('2099-01-01T00:00:00.000Z', 100, { ...cycle, ...(rel ? { relationships: rel } : {}) })
+        .filter((u) => u.surface === 'issues').map((u) => u.repoKey);
+    expect(due().sort()).toEqual(['acme/ok', 'other/shared']);
+    expect(due(['owner', 'organization'])).toEqual(['acme/ok']);
+    h.close();
+  });
+});

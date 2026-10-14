@@ -362,14 +362,31 @@ describe('overlap with the native feed', () => {
   const DEMO = 'acme/demo';
   const CHANNEL = '900000000000000021';
 
-  const boot = () => {
+  // The imported side delivers only when watching is on and a briefing can carry the
+  // digest, so the positive controls have both unless a test says otherwise.
+  const boot = (world: { prefs?: boolean; paused?: boolean; cycle?: boolean } = {}) => {
     const clock = new TestClock('2026-10-01T00:00:00.000Z', 'UTC');
     const reader = new FeedReader();
     reader.setView(DEMO);
     const h = makeHarness({
       clock, github: reader, assistantWatchReader: new FakeWatchReader(),
-      env: { DUCKY_GITHUB_FEED_ENABLED: 'true', DUCKY_DEV_GITHUB_CHANNEL_ID: CHANNEL },
+      ...(world.cycle
+        ? {
+          assistantWatchConfig: {
+            account: null, cycle: true, discovery: false, relationships: new Set(['owner', 'organization', 'collaborator'] as const),
+            includeForks: false, includeArchived: false,
+          },
+        }
+        : {}),
+      env: {
+        DUCKY_GITHUB_FEED_ENABLED: 'true', DUCKY_DEV_GITHUB_CHANNEL_ID: CHANNEL,
+        DUCKY_BRIEFING_ENABLED: 'true', DUCKY_IMPORTED_PREFERENCES: 'true',
+      },
     });
+    if (world.prefs !== false) {
+      h.store.ownerPreferences.insert({ ownerId: OWNER, prefsJson: JSON.stringify(PREFS), source: 'import', at: T0 });
+    }
+    if (world.paused) h.store.assistantWatch.setMonitoring(OWNER, false, T0);
     const tick = async (min = 16) => {
       clock.advance(min * 60_000);
       return h.app.githubFeed.tick();
@@ -421,6 +438,51 @@ describe('overlap with the native feed', () => {
     const skipped = h.store.githubFeed.listEvents('skipped').map((e) => e.kind).sort();
     // Both new pull requests (3 and 2) and the review on 2 are observed by the import.
     expect(skipped).toEqual(['changes_requested', 'pr_opened', 'pr_opened']);
+    h.close();
+  });
+
+  it('keeps the card for a digest-only kind when the digest cannot be delivered, or watching is paused', async () => {
+    for (const world of [{ prefs: false }, { paused: true }]) {
+      const { h, reader, tick } = boot(world);
+      await baseline(reader, () => tick(0));
+      observeDemo(h, { pulls: 'ready', issues: 'ready' });
+      news(reader);
+      await tick();
+      const texts = sentTo(h.transport.sent).map((s) => s.text).join('\n');
+      expect(texts, JSON.stringify(world)).toContain('Pull request opened');
+      expect(texts, JSON.stringify(world)).toContain('Issue opened');
+      h.close();
+    }
+  });
+
+  it('keeps the card for a target outside the poll cycle, and retires it once inside', async () => {
+    const { h, reader, tick } = boot({ cycle: true });
+    await baseline(reader, () => tick(0));
+    observeDemo(h, { pulls: 'ready', issues: 'ready' }); // no recency yet: not covered
+    news(reader);
+    await tick();
+    expect(sentTo(h.transport.sent).map((s) => s.text).join('\n')).toContain('Pull request opened');
+    h.close();
+
+    const inside = boot({ cycle: true });
+    await baseline(inside.reader, () => inside.tick(0));
+    observeDemo(inside.h, { pulls: 'ready', issues: 'ready' });
+    inside.h.store.db.prepare("UPDATE assistant_watch_targets SET pushed_at = '2026-09-30T00:00:00Z'").run();
+    news(inside.reader);
+    await inside.tick();
+    expect(sentTo(inside.h.transport.sent).map((s) => s.text).join('\n')).not.toContain('Pull request opened');
+    inside.h.close();
+  });
+
+  it('retires a requested-changes card on the imported alert alone, with no digest to carry anything', async () => {
+    const { h, reader, tick } = boot({ prefs: false });
+    await baseline(reader, () => tick(0));
+    observeDemo(h, { pulls: 'ready', issues: 'ready' });
+    news(reader);
+    await tick();
+    const texts = sentTo(h.transport.sent).map((s) => s.text).join('\n');
+    expect(texts).not.toContain('Changes requested');
+    expect(texts).toContain('Pull request opened');
     h.close();
   });
 

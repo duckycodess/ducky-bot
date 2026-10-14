@@ -45,6 +45,12 @@ export interface AssistantWatchServiceDeps {
    * is covered and nothing is discovered.
    */
   readonly watchConfig?: AssistantWatchConfig;
+  /**
+   * Whether the owner's briefing can actually carry the repository digest right now:
+   * briefings on, imported preferences in force with the GitHub section, and a DM copy.
+   * Absent means no: a digest nobody can receive covers nothing.
+   */
+  readonly digestDeliverable?: () => boolean;
 }
 
 export interface AssistantWatchConfig {
@@ -113,6 +119,14 @@ const WATCH_SURFACES_OBSERVED: readonly WatchSurface[] = [
  * The ORDINARY `github_watches` snapshot DM is trimmed the same way, part by part,
  * in `GitHubWatchService` (ADR 0032).
  */
+export const IMPORT_COVER_DELIVERY: Partial<Record<GitHubFeedKind, 'immediate' | 'digest'>> = {
+  // A requested change interrupts: an imported alert is sent the moment it is found.
+  changes_requested: 'immediate',
+  // Everything else an imported surface tells waits for a briefing digest.
+  pr_opened: 'digest',
+  issue_opened: 'digest',
+};
+
 export const IMPORT_COVERS_NATIVE: Partial<Record<GitHubFeedKind, WatchSurface>> = {
   pr_opened: 'pulls',
   issue_opened: 'issues',
@@ -175,6 +189,7 @@ export class AssistantWatchService {
   private readonly clock: OwnerClock;
   private readonly reader: AssistantWatchReader;
   private readonly cfg: AssistantWatchConfig | undefined;
+  private readonly digestDeliverable: () => boolean;
   private ticking: Promise<AssistantWatchTickResult> | null = null;
   /** Until when a rate limit or an authentication failure has stopped the cycle. */
   private pausedUntilMs = 0;
@@ -187,6 +202,7 @@ export class AssistantWatchService {
     this.clock = deps.clock;
     this.reader = deps.reader;
     this.cfg = deps.watchConfig;
+    this.digestDeliverable = deps.digestDeliverable ?? (() => false);
   }
 
   // ---- the tick ---------------------------------------------------------------
@@ -403,6 +419,12 @@ export class AssistantWatchService {
     const branch = unit.surface === 'commits' || unit.surface === 'runs' ? await this.branchFor(ctx) : '';
     const f = await this.fetchList(ctx, page, branch);
     const floorMs = unit.scanFloor ? Date.parse(unit.scanFloor) : null;
+    // After a multi-page window, lifecycle times count from where THAT window started, so
+    // an item that moved between page reads still has its merge, open or close announced.
+    const lifeFloorMs = unit.lifecycleFloor ? Date.parse(unit.lifecycleFloor) : null;
+    const lifeSinceMs = sinceMs !== null && lifeFloorMs !== null && !Number.isNaN(lifeFloorMs)
+      ? Math.min(sinceMs, lifeFloorMs)
+      : sinceMs;
 
     let read: SurfaceRead;
     let hasMore = false;
@@ -417,14 +439,14 @@ export class AssistantWatchService {
         break;
       case 'pulls': {
         hasMore = f.res.hasMore;
-        const list = derivePullList(f.res.items, sinceMs, inclusive);
+        const list = derivePullList(f.res.items, sinceMs, inclusive, lifeSinceMs);
         read = list;
         if (list.reviewTargets.length > 0) queue = list.reviewTargets;
         break;
       }
       case 'issues':
         hasMore = f.res.hasMore;
-        read = deriveIssues(f.res.items, sinceMs, inclusive, f.res.windowStamp ?? null);
+        read = deriveIssues(f.res.items, sinceMs, inclusive, f.res.windowStamp ?? null, lifeSinceMs);
         break;
       case 'runs': {
         hasMore = f.res.hasMore;
@@ -466,7 +488,9 @@ export class AssistantWatchService {
     const next: ScanState = {
       v: 1,
       ...(branch ? { branch } : {}),
-      last: { page, keys: f.keys },
+      // The last NONEMPTY page: an empty page proves nothing about a boundary, so a
+      // window that closes on one is verified against the page before it.
+      ...(f.keys.length > 0 ? { last: { page, keys: f.keys } } : scan.last ? { last: scan.last } : {}),
       total: scan.total ?? (f.surface === 'runs' ? f.res.total ?? null : null),
       floorMs: minMs(scan.floorMs ?? null, pageFloorMs),
       capMs: minMs(scan.capMs ?? null, pageCapMs),
@@ -631,6 +655,11 @@ export class AssistantWatchService {
       ...(!baseline && ci !== null ? { alsoSet: { surface: 'ci_state' as const, cursor: ci } } : {}),
       ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
       ...(unit.surface === 'runs' || unit.surface === 'releases' ? { scanFloor: floor } : {}),
+      // A window that spanned pages hands its starting cursor to the next read; any
+      // other read clears it. A baseline has nothing to hand on.
+      ...(unit.surface === 'pulls' || unit.surface === 'issues'
+        ? { lifecycleFloor: !baseline && sinceMs !== null && a.page >= 2 ? isoOf(sinceMs) : null }
+        : {}),
     });
     if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
     return 'completed';
@@ -721,8 +750,15 @@ export class AssistantWatchService {
           return this.fail(unit, nowMs, err.code, PAUSE_MS);
         case 'not_found':
           if (unit.surface === 'default_branch') {
-            repo.cancelBySystem(unit.targetId, 'not_found', nowIso);
-            return 'failed';
+            // One not-found is not a verdict: a private repository without access, a
+            // moment of provider trouble and a repository that is really gone answer the
+            // same way. Only a SECOND consecutive one, after the backoff, cancels; a
+            // success in between resets the count.
+            if (unit.lastError === 'not_found' && unit.failures >= 1) {
+              repo.cancelBySystem(unit.targetId, 'not_found', nowIso);
+              return 'failed';
+            }
+            return this.fail(unit, nowMs, 'not_found');
           }
           return this.fail(unit, nowMs, 'not_found');
         default:
@@ -730,6 +766,23 @@ export class AssistantWatchService {
       }
     }
     return this.fail(unit, nowMs, 'read_failed');
+  }
+
+  /**
+   * Whether an imported target will really TELL the owner about this surface, so a
+   * native notification for the same thing can be left out without losing it.
+   *
+   * A healthy checkpoint on an active target is not delivery. Watching must be on (the
+   * global switch), the target must be inside the poll cycle's coverage where one
+   * applies, and what the target tells must have somewhere to go: an alert needs
+   * nothing more (it is sent as soon as it is found), but a digest-only kind needs a
+   * briefing that can carry it. Anything less keeps the native notification.
+   */
+  covers(repoKey: string, surface: WatchSurface, delivery: 'immediate' | 'digest'): boolean {
+    const repo = this.store.assistantWatch;
+    if (!repo.monitoringEnabled(this.ownerId)) return false;
+    if (delivery === 'digest' && !this.digestDeliverable()) return false;
+    return repo.observes(this.ownerId, repoKey, surface, this.cycle());
   }
 
   // ---- the poll cycle, relationships and discovery -----------------------------------
@@ -740,6 +793,7 @@ export class AssistantWatchService {
     return {
       ownerId: this.ownerId, limit: ASSISTANT_WATCH_CYCLE_TARGETS,
       includeArchived: this.cfg.includeArchived, includeForks: this.cfg.includeForks,
+      relationships: [...this.cfg.relationships],
     };
   }
 
@@ -941,6 +995,9 @@ export class AssistantWatchService {
       );
     }
     const blocked = repo.blockedCounts(this.ownerId);
+    if (blocked.systemCancelled > 0) {
+      parts.push(`${blocked.systemCancelled} target(s) cancelled because the repository stopped being shown`);
+    }
     if (blocked.windowExceeded + blocked.identityChanged > 0) {
       parts.push(
         `blocked: ${blocked.windowExceeded} surface(s) with a window too deep to prove, ` +

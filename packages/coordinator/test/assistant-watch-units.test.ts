@@ -484,15 +484,37 @@ describe('failures stop what they should and advance nothing', () => {
     h.close();
   });
 
-  it('unmonitors a repository the provider no longer shows, and keeps its row', async () => {
-    const { h, reader } = boot();
+  it('unmonitors a repository only after a SECOND consecutive not-found, and keeps its row', async () => {
+    const { h, clock, reader } = boot();
     const id = target(h);
     checkpoint(h, id, 'default_branch', 'imported', 'main');
+    reader.failWith.set('repository', new WatchReadError('not_found'));
+    await h.app.assistantWatch.tick();
+    expect(h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!.state).toBe('active');
+    expect(cp(h, id, 'default_branch')).toMatchObject({ lastError: 'not_found', failures: 1 });
+    clock.advance(16 * MIN);
     reader.failWith.set('repository', new WatchReadError('not_found'));
     await h.app.assistantWatch.tick();
     expect(h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')).toMatchObject({
       state: 'cancelled', cancelReason: 'not_found',
     });
+    expect(h.app.assistantWatch.statusLine()).toContain('cancelled because the repository stopped being shown');
+    h.close();
+  });
+
+  it('does not cancel when one not-found is followed by a success', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'default_branch', 'imported', 'main');
+    reader.failWith.set('repository', new WatchReadError('not_found'));
+    await h.app.assistantWatch.tick();
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick(); // answers normally
+    expect(cp(h, id, 'default_branch')).toMatchObject({ failures: 0, lastError: null });
+    clock.advance(16 * MIN);
+    reader.failWith.set('repository', new WatchReadError('not_found'));
+    await h.app.assistantWatch.tick(); // a later, separate not-found is a first one again
+    expect(h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!.state).toBe('active');
     h.close();
   });
 
@@ -676,6 +698,119 @@ describe('what settles in the middle of a pass is not jumped over', () => {
     const out = await h.app.assistantWatch.tick();
     expect(out.failed).toBe(1);
     expect(cp(h, id, 'issues')).toMatchObject({ cursor: SINCE, lastError: 'window_unstable' });
+    h.close();
+  });
+});
+
+describe('a window that closes on an EMPTY page is verified against the last page that held items', () => {
+  it('restarts when a row was deleted from page one and its successor slid onto it', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    // Three fresh issues and nothing older: page one is [a b], page two would be [c].
+    reader.issuesBy.set('acme/widgets', [issue(3, at(12, 3)), issue(2, at(12, 2)), issue(1, at(12, 1))]);
+    let n = 0;
+    reader.hook = (method) => {
+      if (method !== 'issues') return;
+      n += 1;
+      // Before page two is read, issue 3 (already read on page one) is deleted: issue 1
+      // slides up onto page one, which was already read. Page two is now empty.
+      if (n === 2) reader.issuesBy.set('acme/widgets', [issue(2, at(12, 2)), issue(1, at(12, 1))]);
+    };
+    const out = await h.app.assistantWatch.tick();
+    expect(out.failed).toBe(1);
+    expect(cp(h, id, 'issues')).toMatchObject({ cursor: SINCE, lastError: 'window_unstable' });
+    expect(reader.log).toEqual(['issues:acme/widgets:1', 'issues:acme/widgets:2', 'issues:acme/widgets:1']);
+    h.close();
+  });
+});
+
+describe('a lifecycle change on an unread page is not lost when a comment moves it to a read one', () => {
+  const pr = (n: number, updated: string, over: Record<string, unknown> = {}) => ({
+    number: n, title: `PR ${n}`, state: 'open' as const, createdAt: at(1), updatedAt: updated, mergedAt: null, closedAt: null, ...over,
+  });
+
+  it('still announces a merge, exactly once', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'pulls', 'imported', SINCE);
+    const merged = pr(9, at(12, 2), { state: 'merged', mergedAt: at(12, 2), closedAt: at(12, 2) });
+    reader.pullsBy.set('acme/widgets', [pr(1, at(12, 5)), pr(2, at(12, 4)), merged, pr(3, at(12, 1)), pr(8, '2026-10-01T00:00:00Z')]);
+    let n = 0;
+    reader.hook = (method) => {
+      if (method !== 'pulls') return;
+      n += 1;
+      // Before page two is read, somebody comments on the merged pull request: it takes the top.
+      if (n === 2) {
+        const all = reader.pullsBy.get('acme/widgets')!;
+        const i = all.findIndex((p) => p.number === 9);
+        all.unshift({ ...all.splice(i, 1)[0]!, updatedAt: at(12, 9) });
+      }
+    };
+    await h.app.assistantWatch.tick();
+    reader.hook = null;
+    expect(ids(h, id)).not.toContain('9:merged');
+    // The pass committed past the merge time, and handed its starting cursor on.
+    expect(cp(h, id, 'pulls').lifecycleFloor).toBe(SINCE);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id).filter((i) => i === '9:merged')).toEqual(['9:merged']);
+    clock.advance(16 * MIN);
+    reader.pageSize = 10; // a read that fits one page hands nothing on
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id).filter((i) => i === '9:merged')).toHaveLength(1);
+    expect(cp(h, id, 'pulls').lifecycleFloor).toBeNull();
+    h.close();
+  });
+
+  it('still announces an issue that closed, and one that opened, exactly once each', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)),
+      issue(7, at(12, 2), { closedAt: at(12, 2) }),
+      issue(8, at(12, 3), { createdAt: at(12, 3) }),
+      issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    // Sorted by update: 1, 2, 8 (12/3), 7 (12/2), 9. Put 8 before 7.
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(8, at(12, 3), { createdAt: at(12, 3) }),
+      issue(7, at(12, 2), { closedAt: at(12, 2) }), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    let n = 0;
+    reader.hook = (method) => {
+      if (method !== 'issues') return;
+      n += 1;
+      if (n === 2) {
+        const all = reader.issuesBy.get('acme/widgets')!;
+        for (const num of [8, 7]) {
+          const i = all.findIndex((x) => x.number === num);
+          all.unshift({ ...all.splice(i, 1)[0]!, updatedAt: at(12, 9) });
+        }
+      }
+    };
+    await h.app.assistantWatch.tick();
+    reader.hook = null;
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    const got = ids(h, id);
+    expect(got.filter((i) => i.startsWith('7:issue_closed'))).toEqual([`7:issue_closed:${at(12, 2)}`]);
+    expect(got.filter((i) => i.startsWith('8:issue_opened'))).toEqual([`8:issue_opened:${at(12, 3)}`]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(got);
+    h.close();
+  });
+
+  it('does not widen anything after a read that fitted one page', async () => {
+    const { h, reader } = boot();
+    reader.pageSize = 10;
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [issue(1, at(12, 5))]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'issues').lifecycleFloor).toBeNull();
     h.close();
   });
 });

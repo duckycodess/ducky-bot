@@ -37,9 +37,16 @@ slot times. Without them the native six-hour rule is unchanged.
 
 ### The ordinary watch's snapshot DM leaves out what an imported target already tells
 
-When an imported target is observing the same repository's pulls or issues surface
-(active, not blocked, last read healthy), the ordinary snapshot DM omits the parts that
-surface reports, so one event is told once. A part the imported side cannot see is kept: a
+When an imported target will REALLY tell the owner about the same repository's pulls or
+issues surface, the ordinary snapshot DM (and the feed's duplicate card) omits the parts
+that surface reports, so one event is told once. A healthy checkpoint on an active target
+is not delivery. Watching must be on (the global switch), the target must be inside the
+poll cycle's coverage where one applies, and what it tells must have somewhere to go: a
+requested change is an imported ALERT, sent as soon as it is found, and needs nothing
+more; every other kind waits for a briefing digest, so it needs briefings on, imported
+preferences in force with the GitHub section, and a DM copy. Paused, outside the cycle,
+preferences off, no GitHub section, briefings off or channel-only, or a discovered target
+with no preferences all keep the native DM and card. A part the imported side cannot see is kept: a
 check changing on a pull request head (it touches none of a pull request's state, title or
 update time), and a workflow run on any branch (the imported runs surface follows the
 default branch only). The follow-up job proposal for a requested change is not a

@@ -283,8 +283,15 @@ export class BriefingNotifier {
     if (row.dayKey !== zonedDateKey(nowMs, tz)) return true;
     if (row.kind !== 'morning') return false;
     const eveningAt = !this.config.eveningExplicit ? prefs.eveningTime : this.config.eveningAt;
+    const morningAt = !this.config.morningExplicit ? prefs.morningTime : this.config.morningAt;
     const eveningMs = slotInstantMs(row.dayKey, eveningAt, tz);
-    return eveningMs !== undefined && nowMs >= eveningMs;
+    const morningMs = slotInstantMs(row.dayKey, morningAt, tz);
+    // "Due until the evening" only means something when the evening comes AFTER the
+    // morning. If the configured times are not in that order (or unreadable) the rule
+    // cannot be applied as the source meant it, and a morning briefing would be stale the
+    // instant it was due; it then stays due until the end of its day.
+    if (eveningMs === undefined || morningMs === undefined || eveningMs <= morningMs) return false;
+    return nowMs >= eveningMs;
   }
 
   /** The slots that may fire today, and when, after preferences are applied. */

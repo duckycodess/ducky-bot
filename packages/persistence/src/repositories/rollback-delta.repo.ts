@@ -64,6 +64,10 @@ export interface OwnerStateSnapshot {
   readonly watchSwitch: RawRow | null;
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
+  /** A deletion cause row present at read time: a process died mid-deletion. */
+  readonly deletionContext: RawRow | null;
+  /** Rows that break a foreign key. A snapshot that does is not a consistent one. */
+  readonly foreignKeyViolations: number;
 }
 
 /**
@@ -86,7 +90,22 @@ export class RollbackDeltaRepo {
     return row ? baselineHash(category, row) : undefined;
   }
 
-  snapshot(ownerId: string, cap: number): OwnerStateSnapshot {
+  /**
+   * Every read below happens inside ONE read transaction, so the tables agree with
+   * each other even if the file is being written by someone else (a live WAL
+   * database cannot make reminders and their occurrences disagree). `hooks` exists
+   * for a test to write between two reads and prove exactly that.
+   */
+  snapshot(ownerId: string, cap: number, hooks: { afterFirstRead?: () => void } = {}): OwnerStateSnapshot {
+    this.db.exec('BEGIN');
+    try {
+      return this.snapshotInner(ownerId, cap, hooks);
+    } finally {
+      this.db.exec('COMMIT');
+    }
+  }
+
+  private snapshotInner(ownerId: string, cap: number, hooks: { afterFirstRead?: () => void }): OwnerStateSnapshot {
     const truncated: string[] = [];
     const read = (name: string, sql: string, ...args: unknown[]): RawRow[] => {
       const rows = this.db.prepare(`${sql} LIMIT ${cap + 1}`).all(...(args as string[])) as RawRow[];
@@ -97,8 +116,10 @@ export class RollbackDeltaRepo {
       return rows;
     };
     const owner = ownerId;
+    const identities = read('identities', 'SELECT * FROM assistant_import_identities ORDER BY namespace, category, source_id');
+    hooks.afterFirstRead?.();
     return {
-      identities: read('identities', 'SELECT * FROM assistant_import_identities ORDER BY namespace, category, source_id'),
+      identities,
       tasks: read('tasks', 'SELECT * FROM tasks WHERE discord_user_id = ? ORDER BY created_at, id', owner),
       reminders: read('reminders', 'SELECT * FROM reminders WHERE discord_user_id = ? ORDER BY created_at, id', owner),
       occurrences: read(
@@ -143,6 +164,8 @@ export class RollbackDeltaRepo {
         (this.db.prepare('SELECT * FROM assistant_watch_settings WHERE discord_user_id = ?').get(owner) as RawRow | undefined) ??
         null,
       truncated,
+      deletionContext: (this.db.prepare('SELECT * FROM deletion_context WHERE id = 1').get() as RawRow | undefined) ?? null,
+      foreignKeyViolations: this.db.prepare('PRAGMA foreign_key_check').all().length,
     };
   }
 }

@@ -1916,4 +1916,18 @@ CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
 END;
 `,
   },
+  {
+    version: 35,
+    name: 'assistant_watch_lifecycle_floor',
+    sql: `
+-- Where the lifecycle times (opened, merged, closed) of the NEXT read start counting
+-- from, after a read that spanned several pages. An item that moved from an unread
+-- page to a read one (a comment bumped it) carries a lifecycle time older than the
+-- cursor the pass committed; without this floor its merge or close is never
+-- announced. It is the cursor the multi-page pass STARTED from, held for exactly one
+-- later pass and then cleared. Lifecycle identities are stable, so what it makes the
+-- next pass look at again is deduplicated.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN lifecycle_floor TEXT;
+`,
+  },
 ];

@@ -186,8 +186,11 @@ export function derivePullList(
   items: readonly PullRecord[],
   sinceMs: number | null,
   inclusive = false,
+  /** Lifecycle times (opened, merged, closed) count from here; at or before `sinceMs`. */
+  lifeSinceMs: number | null = sinceMs,
 ): PullListRead {
   const at_ = edges(sinceMs, inclusive);
+  const life = edges(lifeSinceMs, inclusive);
   let newest: number | null = null;
   let reached = false;
   const events: DerivedEvent[] = [];
@@ -202,16 +205,21 @@ export function derivePullList(
     }
     const base = { number: p.number, title: scrubText(p.title, 140) };
     const created = at(p.createdAt);
-    if (at_.fresh(created)) {
+    if (life.fresh(created)) {
       events.push({ kind: 'pr_opened', identity: `${p.number}:opened`, occurredAt: p.createdAt, payload: base });
     }
-    if (p.mergedAt && at_.fresh(at(p.mergedAt))) {
+    if (p.mergedAt && life.fresh(at(p.mergedAt))) {
       events.push({ kind: 'pr_merged', identity: `${p.number}:merged`, occurredAt: p.mergedAt, payload: base });
     }
-    if (p.closedAt && !p.mergedAt && at_.fresh(at(p.closedAt))) {
+    if (p.closedAt && !p.mergedAt && life.fresh(at(p.closedAt))) {
       events.push({ kind: 'pr_closed', identity: `${p.number}:closed`, occurredAt: p.closedAt, payload: base });
     }
-    if (p.state === 'open' && !at_.fresh(created)) {
+    // An item AT the cursor, re-read in inclusive mode, was already told by the pass that
+    // moved the cursor onto it (as opened, merged, closed or updated). Calling it
+    // "updated" again would be a new identity for the same instant, so it is only the
+    // lifecycle kinds, which have stable identities, that a re-read may announce.
+    const atBoundary = inclusive && sinceMs !== null && updated === sinceMs;
+    if (p.state === 'open' && !life.fresh(created) && !atBoundary) {
       events.push({
         kind: 'pr_updated', identity: `${p.number}:updated:${p.updatedAt}`,
         occurredAt: p.updatedAt, payload: base,
@@ -280,8 +288,11 @@ export function deriveIssues(
   sinceMs: number | null,
   inclusive = false,
   windowStamp: string | null = null,
+  /** Lifecycle times (opened, closed) count from here; at or before `sinceMs`. */
+  lifeSinceMs: number | null = sinceMs,
 ): SurfaceRead {
   const at_ = edges(sinceMs, inclusive);
+  const life = edges(lifeSinceMs, inclusive);
   let newest: number | null = null;
   // The listing mixes issues with pull requests and sorts them on ONE key, so the
   // last raw item's time proves how far down this page reached even when that
@@ -299,13 +310,16 @@ export function deriveIssues(
     // One classification per issue per pass.
     let kind: 'issue_opened' | 'issue_closed' | 'issue_updated';
     let when: string;
-    if (at_.fresh(at(i.createdAt))) {
+    if (life.fresh(at(i.createdAt))) {
       kind = 'issue_opened';
       when = i.createdAt;
-    } else if (i.closedAt && at_.fresh(at(i.closedAt))) {
+    } else if (i.closedAt && life.fresh(at(i.closedAt))) {
       kind = 'issue_closed';
       when = i.closedAt;
     } else {
+      // See derivePullList: an item AT the cursor was already told by the pass that
+      // moved the cursor onto it, and "updated" has no stable identity to dedupe by.
+      if (inclusive && sinceMs !== null && updated === sinceMs) continue;
       kind = 'issue_updated';
       when = i.updatedAt;
     }

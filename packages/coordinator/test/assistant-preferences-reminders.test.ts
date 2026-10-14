@@ -343,3 +343,57 @@ describe('pushed briefings under imported preferences', () => {
     h.close();
   });
 });
+
+describe("the source's staleness rule for a pending briefing", () => {
+  // Manila, Tuesday 2026-10-13. Configured slots are 07:00 and 21:00 by the preferences.
+  const bootAt = (hhmm: string, selected = true) => {
+    const { h, clock } = boot({
+      DUCKY_BRIEFING_ENABLED: 'true', ...(selected ? { DUCKY_IMPORTED_PREFERENCES: 'true' } : {}),
+    }, `2026-10-13T${hhmm}:00.000+08:00`);
+    if (selected) setPrefs(h);
+    return { h, clock };
+  };
+
+  it('still sends a morning briefing at 18:00, long after the native six hours, before the evening time', async () => {
+    const { h } = bootAt('18:00');
+    const out = await h.app.briefingNotifier.tick();
+    expect(out.delivered).toBe(1);
+    expect(h.store.briefings.bySlot(OWNER, 'morning', '2026-10-13')!.status).toBe('delivered');
+    h.close();
+  });
+
+  it('records the morning briefing skipped once the evening time has been reached, and sends the evening one', async () => {
+    const { h } = bootAt('21:05');
+    const out = await h.app.briefingNotifier.tick();
+    expect(out.skippedStale).toBe(1);
+    expect(out.delivered).toBe(1);
+    expect(h.store.briefings.bySlot(OWNER, 'morning', '2026-10-13')!.status).toBe('skipped');
+    expect(h.store.briefings.bySlot(OWNER, 'evening', '2026-10-13')!.status).toBe('delivered');
+    h.close();
+  });
+
+  it('keeps an evening briefing due until the end of its day', async () => {
+    const { h } = bootAt('23:50');
+    await h.app.briefingNotifier.tick();
+    expect(h.store.briefings.bySlot(OWNER, 'evening', '2026-10-13')!.status).toBe('delivered');
+    h.close();
+  });
+
+  it('never sends a pending briefing into a later day', async () => {
+    const { h, clock } = bootAt('21:05');
+    // Claimed, then the process was down past midnight, with the send still pending.
+    h.app.briefingNotifier.claimDueSlots();
+    clock.advance(4 * HOUR);
+    const out = await h.app.briefingNotifier.deliverPending();
+    expect(out.delivered).toBe(0);
+    expect(out.skippedStale).toBe(2);
+    h.close();
+  });
+
+  it('is only the rule when the profile selects imported preferences: the native six hours otherwise', async () => {
+    const { h } = bootAt('18:00', false);
+    const out = await h.app.briefingNotifier.tick();
+    expect(out.skippedStale).toBeGreaterThanOrEqual(1);
+    h.close();
+  });
+});

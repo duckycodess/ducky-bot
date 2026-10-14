@@ -1198,20 +1198,34 @@ cutover and module retirement stay blocked, until it is supported and proven.
 Where Ducky refuses an input instead of carrying it, the refusal is the
 fail-closed form of the blocker, not a decision to drop it.
 
-- **Unsupported source values (refused by validation, never normalized):** the
-  `urgent` priority and task categories; AI wording of briefings; and meals (their
-  preferences, suggestion history and the meal-in-briefing behavior). The paused
+- **Unsupported source values (refused by validation, never normalized):** AI
+  wording of briefings, and meals (their preferences, suggestion history and the
+  meal-in-briefing behavior). The `urgent` priority and the two task categories are
+  now carried as data (ADR 0032): urgent is stored as `high` plus a flag, ranks above
+  high in lists and the lookahead and is shown as urgent, and the category is shown
+  with the task; no native command sets either, and the task command definitions are
+  unchanged. Unit-tested only. The paused
   global watch switch is now carried over and gates reads, but **no owner control
   can flip it** (the owner-only manifest is not expanded), so resuming needs an
   operator import: a named blocker.
 - **Alert content:** a requested-changes alert omits the source's "areas
-  mentioned", which needs per-pull-request file and comment reads the reader seams
-  do not provide.
-- **Briefing timing:** an unsent morning briefing is skipped by Ducky's existing
-  six-hour staleness rule, where the source skips it once the evening time has been
-  reached. The two differ.
-- **Schedule batches:** the source can roll back to a replaced schedule batch; Ducky
-  keeps a replaced batch as inert data and has no rollback control for it.
+  mentioned". The review BODY is now read (and is the only approved source: file and
+  review-comment endpoints are not approved), but the private audit does not define
+  the extraction rule (what counts as an area, which file paths are sensitive), and
+  inventing one would be unsupported behavior, so this stays a **named blocker on the
+  rule**, not on access.
+- **Briefing timing:** when the profile selects imported preferences, a pending
+  morning briefing is due until the evening time and is then recorded skipped, an
+  evening briefing is due until the end of its day, and nothing survives into a later
+  day (ADR 0032). Without imported preferences the native six-hour rule is unchanged.
+  Unit-tested only.
+- **Schedule batches:** an owner-scoped service flips the schedule back one batch
+  (the active batch becomes replaced and the most recently replaced batch with a known
+  replacement time becomes active), deleting nothing; a batch of unknown order is never
+  chosen. **No Discord command reaches it: the owner-only command manifest was not
+  expanded, so the control is a named blocker.** It is not on the audit log (the event
+  set is closed and widening it needs a table rebuild), and the source's
+  keep-three-versions retention is not mirrored.
 - **Repository discovery and the polling cycle:** the source discovers new
   repositories on a schedule and polls the 40 most recently pushed per cycle. With
   the real reader enabled Ducky now does the same (ADR 0031): scoped, tombstone- and
@@ -1219,12 +1233,15 @@ fail-closed form of the blocker, not a decision to drop it.
   refresh for the rest. Unit-tested only; discovery has never been enabled, the
   account that IS the owner is stated by configuration rather than proven, and whether
   the timing holds under the real quota and selection is unproven.
-- **Overlap with the ordinary `github_watches` snapshot DM:** an imported target and
-  an ordinary watch on the same repository can both notify. Only the native
-  GitHub feed's duplicate cards (pull request opened, issue opened, changes
-  requested) are retired when an imported target observes the surface; a failing
-  check on a pull request head is deliberately NOT retired, because the imported runs
-  surface sees only default-branch runs.
+- **Overlap with the ordinary `github_watches` snapshot DM:** when an imported target
+  is observing the same repository's pulls or issues surface (active, not blocked, last
+  read healthy), the ordinary snapshot DM leaves out the parts that surface already
+  reports (pull request updates, merges, approvals, requested changes, review comments,
+  issue activity) and says nothing at all if nothing else changed. It keeps what the
+  imported side cannot see (a check flipping on a pull request head, a workflow run on
+  any branch) and the follow-up job proposal, so nothing unrelated is lost. The native
+  feed's duplicate cards are retired the same way, for the kinds an imported surface
+  sees in full. Unit-tested only.
 - **Equal-time late reviews:** a late event that shares the cursor's timestamp is
   reconciled by identity for commits, pull-request-level events, reviews, issues,
   runs and releases once Ducky has processed the boundary (a pull request touched at
@@ -1251,7 +1268,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2249 tests in 143 files**.
+The unmodified `pnpm test` command passes all **2277 tests in 145 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

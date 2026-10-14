@@ -87,6 +87,12 @@ export interface GitHubWatchServiceDeps {
   readonly transport: DiscordTransport;
   readonly ownerId: string;
   readonly clock: OwnerClock;
+  /**
+   * Whether an imported notification-only target for this repository is observing
+   * a surface right now, so a part of a snapshot summary that surface already
+   * reports is not told a second time. Absent means nothing is covered.
+   */
+  readonly importedCovers?: (repoKey: string, surface: 'pulls' | 'issues') => boolean;
 }
 
 /**
@@ -106,6 +112,7 @@ export class GitHubWatchService {
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
   private readonly clock: OwnerClock;
+  private readonly importedCovers: ((repoKey: string, surface: 'pulls' | 'issues') => boolean) | undefined;
   private ticking: Promise<GitHubWatchTickResult> | null = null;
 
   constructor(deps: GitHubWatchServiceDeps) {
@@ -116,6 +123,7 @@ export class GitHubWatchService {
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
     this.clock = deps.clock;
+    this.importedCovers = deps.importedCovers;
   }
 
   add(actor: ActorContext, raw: unknown): GitHubWatchRow {
@@ -252,7 +260,10 @@ export class GitHubWatchService {
     const fingerprint = createHash('sha256').update(snapshotJson).digest('hex');
     const previous = parseSnapshot(watch.snapshotJson);
     const changed = watch.snapshotHash !== fingerprint;
-    const summary = changed ? summarizeChange(repo.slug, previous, normalized) : '';
+    const repoKey = `${ref.owner}/${ref.repo}`.toLowerCase();
+    const summary = changed
+      ? summarizeChange(repo.slug, previous, normalized, (surface) => this.importedCovers?.(repoKey, surface) ?? false)
+      : '';
     const nowMs = this.clock.nowMs();
     const nextCheckAt = new Date(nowMs + watch.intervalMinutes * 60_000).toISOString();
 
@@ -267,7 +278,8 @@ export class GitHubWatchService {
     }));
 
     const events = [
-      ...(changed ? [{ id: randomUUID(), fingerprint, summary }] : []),
+      // `summary === null`: every change is already told by an imported target.
+      ...(changed && summary !== null ? [{ id: randomUUID(), fingerprint, summary }] : []),
       ...followUps,
     ];
 
@@ -410,23 +422,46 @@ function normalizeChecks(checks: PrChecks): string[] {
     .sort();
 }
 
+/**
+ * What changed, in words, or null when EVERYTHING that changed is already being
+ * reported by an imported notification target.
+ *
+ * `covers(surface)` says an imported target for this repository is observing
+ * that surface right now. A part of the summary an imported surface sees in full
+ * is left out, so one event is told once, by the imported digest or alert; a part
+ * it cannot see (a check changing on a pull request head, a workflow run on any
+ * branch, a pull request whose only change is its checks) is kept, so nothing
+ * unrelated is lost. A snapshot whose every change was covered says nothing.
+ */
 function summarizeChange(
   slug: string,
   previous: NormalizedSnapshot | undefined,
   current: NormalizedSnapshot,
-): string {
+  covers: (surface: 'pulls' | 'issues') => boolean = () => false,
+): string | null {
+  const pulls = covers('pulls');
+  const issues = covers('issues');
+  let suppressed = false;
   if (!previous) {
     return clampSummary(
       `Started watching \`${slug}\`: ${current.openPrCount} open pull request(s).`,
     );
   }
   const before = new Map(previous.prs.map((pr) => [pr.number, pr]));
-  const newOrUpdated = current.prs.filter((pr) => {
+  const allUpdated = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt ||
       canonicalJson(old.checks) !== canonicalJson(pr.checks) ||
       old.headRefOid !== pr.headRefOid;
   });
+  // The imported pulls surface sees a pull request opened, its state, title and last
+  // update. It does NOT see a check flipping on the head, which touches none of those.
+  const pullLevel = (pr: NormalizedPr): boolean => {
+    const old = before.get(pr.number);
+    return !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt;
+  };
+  const newOrUpdated = pulls ? allUpdated.filter((pr) => !pullLevel(pr)) : allUpdated;
+  if (newOrUpdated.length !== allUpdated.length) suppressed = true;
   const currentNumbers = new Set(current.prs.map((pr) => pr.number));
   const closed = previous.prs.filter((pr) => !currentNumbers.has(pr.number));
   const failedChecks = current.prs.filter((pr) => pr.checks.some((check) => /fail|error|cancel/i.test(check)));
@@ -435,7 +470,10 @@ function summarizeChange(
     const names = newOrUpdated.slice(0, 3).map((pr) => `#${pr.number} ${pr.title}`).join('; ');
     parts.push(`${newOrUpdated.length} pull request update(s): ${names}`);
   }
-  if (closed.length > 0) parts.push(`${closed.length} previously listed pull request(s) are no longer open`);
+  if (closed.length > 0) {
+    if (pulls) suppressed = true;
+    else parts.push(`${closed.length} previously listed pull request(s) are no longer open`);
+  }
   if (failedChecks.length > 0) parts.push(`${failedChecks.length} pull request(s) have failing checks`);
 
   // ---- what the wider surface added -------------------------------------
@@ -448,7 +486,8 @@ function summarizeChange(
     return isSet(pr.mergedAt) && (!old || !isSet(old.mergedAt));
   });
   if (merged.length > 0) {
-    parts.push(`merged: ${merged.slice(0, 3).map((pr) => `#${pr.number} ${pr.title}`).join('; ')}`);
+    if (pulls) suppressed = true;
+    else parts.push(`merged: ${merged.slice(0, 3).map((pr) => `#${pr.number} ${pr.title}`).join('; ')}`);
   }
 
   const newlyApproved = current.prs.filter((pr) => {
@@ -456,7 +495,8 @@ function summarizeChange(
     return /APPROVED/i.test(pr.reviewDecision ?? '') && !/APPROVED/i.test(old?.reviewDecision ?? '');
   });
   if (newlyApproved.length > 0) {
-    parts.push(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`);
+    if (pulls) suppressed = true;
+    else parts.push(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`);
   }
 
   const newlyBlocked = current.prs.filter((pr) => {
@@ -465,7 +505,8 @@ function summarizeChange(
       (!old || old.latestChangeRequestAt !== pr.latestChangeRequestAt);
   });
   if (newlyBlocked.length > 0) {
-    parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
+    if (pulls) suppressed = true;
+    else parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
   }
 
   const moreComments = current.prs.filter((pr) => {
@@ -473,15 +514,22 @@ function summarizeChange(
     return (pr.reviewComments ?? 0) > (old?.reviewComments ?? 0);
   });
   if (moreComments.length > 0) {
-    parts.push(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`);
+    if (pulls) suppressed = true;
+    else parts.push(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`);
   }
 
   const runSummary = summarizeRuns(previous.runs ?? [], current.runs ?? []);
   if (runSummary) parts.push(runSummary);
 
   const issueSummary = summarizeIssues(previous.openIssues ?? [], current.openIssues ?? []);
-  if (issueSummary) parts.push(issueSummary);
+  if (issueSummary) {
+    if (issues) suppressed = true;
+    else parts.push(issueSummary);
+  }
 
+  // Everything that changed is told by an imported target: this DM would be the
+  // same event twice, so it is not sent. (The snapshot itself still advances.)
+  if (parts.length === 0 && suppressed) return null;
   if (parts.length === 0) parts.push('The repository snapshot changed.');
   return clampSummary(`Update for \`${slug}\`: ${parts.join('. ')}.`);
 }

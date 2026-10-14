@@ -136,6 +136,27 @@ export class SchedulesService {
     return [...oneOff, ...rules, ...exceptions].slice(0, limit);
   }
 
+  /**
+   * Flips the weekly schedule back one batch: the active batch becomes replaced
+   * and the most recently replaced one with a KNOWN replacement time becomes
+   * active, which is the source's "roll back to the previous schedule".
+   *
+   * It changes state and deletes no row, touches no exception, and returns counts
+   * only. A replaced batch whose order is unknown (or two stamped the same
+   * instant) is never chosen: that is a refusal, not a guess. Owner-only, like
+   * every other schedule control.
+   *
+   * NOTE: this is a SERVICE control. The owner-only command manifest was not
+   * widened for it, so no Discord command reaches it yet; that missing control is
+   * a named blocker in `docs/CURRENT_STATE.md`.
+   */
+  rollbackBatch(actor: ActorContext, atIso: string):
+    | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
+    | { readonly ok: false; readonly reason: 'nothing_to_restore' | 'order_unknown' } {
+    this.authz.requireOwner(actor);
+    return this.store.scheduleRules.rollbackBatch(actor.discordUserId, atIso);
+  }
+
   private expiredMessage(): string {
     return 'This schedule preview expired (the assistant may have restarted). Send it again.';
   }

@@ -11,7 +11,7 @@ import {
 } from './limits.js';
 import { DUCKY_PROFILES } from './profile.js';
 import { SCHEDULE_EXCEPTION_KINDS, isCivilDate } from './schedule-rules.js';
-import { TASK_PRIORITIES, TASK_STATES } from './assistant.js';
+import { IMPORTED_TASK_PRIORITIES, TASK_CATEGORIES, TASK_STATES } from './assistant.js';
 import { isValidTimeZone } from './time.js';
 import {
   TIME_CURSOR_SURFACES, WATCH_EVENT_KINDS, WATCH_EVENT_SURFACE, WATCH_SURFACES,
@@ -99,7 +99,9 @@ export const ImportedTaskSchema = z.strictObject({
   sourceId: SourceId,
   title: text(TASK_TITLE_MIN, TASK_TITLE_MAX),
   status: z.enum(TASK_STATES),
-  priority: z.enum(TASK_PRIORITIES),
+  priority: z.enum(IMPORTED_TASK_PRIORITIES),
+  /** The source's category, or null when it had none. */
+  category: z.enum(TASK_CATEGORIES).nullable().default(null),
   due: Due,
   createdAt: Instant,
   updatedAt: Instant,
@@ -156,6 +158,12 @@ export const ImportedScheduleBatchSchema = z.strictObject({
   sourceId: SourceId,
   /** Only an active batch drives behavior; a replaced one is kept inert. */
   status: z.enum(['active', 'replaced']),
+  /**
+   * When a replaced batch was replaced. It orders a rollback (most recently
+   * replaced first). Absent for an active batch, and for a replaced one it means
+   * the order is UNKNOWN, so that batch can never be chosen by a rollback.
+   */
+  replacedAt: Instant.nullable().default(null),
   rules: z.array(ImportedScheduleRuleSchema).max(SCHEDULE_RULES_MAX),
 });
 

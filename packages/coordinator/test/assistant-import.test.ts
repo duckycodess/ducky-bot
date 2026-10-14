@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ASSISTANT_WATCH_MAX_TARGETS, MAX_OPEN_TASKS_PER_OWNER, MAX_SCHEDULED_REMINDERS_PER_OWNER } from '@ducky/contracts';
 import { AssistantImportService } from '../src/domain/assistant-import.service.js';
 import { controlId } from '../src/discord/message.js';
+import { tasksList } from '../src/discord/assistant-presenters.js';
 import { OWNER, STRANGER, TestClock, makeHarness, replyText, type Harness } from './helpers.js';
 import { MANILA, importDoc, importEnv, rowCounts, takeLock } from './assistant-import-fixture.js';
 
@@ -557,6 +558,90 @@ describe('the source global monitoring switch', () => {
     expect(report.categories['watchSwitch']).toMatchObject({ drifted: 1 });
     expect(report.ok).toBe(true);
     expect(report.parity).toBe(false);
+    h.close();
+  });
+});
+
+describe('a replaced schedule batch carries when it was replaced', () => {
+  it('lets an imported batch be rolled back to, and refuses one whose order the source did not give', () => {
+    const { h, svc } = boot();
+    const doc = importDoc() as Record<string, any>;
+    doc['schedule'].batches[1].replacedAt = '2026-09-20T00:00:00Z'; // b-0, the replaced one
+    expect(apply(h, svc(), doc).ok).toBe(true);
+    expect(h.app.schedules.rollbackBatch(h.owner, NOW)).toMatchObject({ ok: true, restoredRules: 1, replacedRules: 1 });
+    expect(h.store.scheduleRules.activeRules(OWNER).map((r) => r.label)).toEqual(['Old class']);
+    h.close();
+
+    const second = boot();
+    expect(apply(second.h, second.svc()).ok).toBe(true); // no replacedAt in the fixture
+    expect(second.h.app.schedules.rollbackBatch(second.h.owner, NOW)).toEqual({ ok: false, reason: 'order_unknown' });
+    second.h.close();
+  });
+});
+
+describe('the source urgent priority and task categories', () => {
+  const withTasks = () => {
+    const doc = importDoc() as Record<string, any>;
+    const base = { due: { kind: 'instant', at: '2026-10-20T15:59:00Z' }, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-02T00:00:00Z', closedAt: null, reminderPolicy: null };
+    doc['tasks'] = [
+      { sourceId: 'u1', title: 'Hand in the report', status: 'open', priority: 'urgent', category: 'school', ...base },
+      { sourceId: 'h1', title: 'Book the dentist', status: 'open', priority: 'high', category: 'personal', ...base },
+      { sourceId: 'n1', title: 'Plain thing', status: 'open', priority: 'normal', category: null, ...base },
+    ];
+    doc['reminders'] = [];
+    return doc;
+  };
+
+  it('keeps an urgent task urgent, ranked above a high one, and keeps the category', () => {
+    const { h, svc } = boot();
+    expect(apply(h, svc(), withTasks()).ok).toBe(true);
+    const rows = h.app.tasks.list(h.owner, 'open');
+    expect(rows.map((r) => r.title)).toEqual(['Hand in the report', 'Book the dentist', 'Plain thing']);
+    const urgent = rows[0]!;
+    // Stored beside the priority, which stays one of the native values.
+    expect(urgent).toMatchObject({ priority: 'high', urgent: true, category: 'school' });
+    expect(rows[1]).toMatchObject({ priority: 'high', urgent: false, category: 'personal' });
+    expect(rows[2]).toMatchObject({ urgent: false, category: null });
+    h.close();
+  });
+
+  it('shows urgent and the category in the list, distinguishing it from high', () => {
+    const { h, svc } = boot();
+    apply(h, svc(), withTasks());
+    const text = JSON.stringify(tasksList(h.app.tasks.list(h.owner, 'open'), 'UTC', 'open', []));
+    expect(text).toContain('!!! Hand in the report · school');
+    expect(text).toContain('!! Book the dentist · personal');
+    h.close();
+  });
+
+  it('is verified as parity, and a repeat import changes nothing', () => {
+    const { h, svc } = boot();
+    expect(apply(h, svc(), withTasks()).counts.tasks.created).toBe(3);
+    expect(svc().verify(withTasks()).parity).toBe(true);
+    const again = apply(h, svc(), withTasks());
+    expect(again.counts.tasks).toEqual({ created: 0, existing: 3, suppressed: 0, conflicts: 0 });
+    h.close();
+  });
+
+  it('refuses a priority or category the source does not have', () => {
+    const { h, svc } = boot();
+    const bad = withTasks();
+    bad['tasks'][0].priority = 'critical';
+    expect(svc().run(bad, { apply: false }).ok).toBe(false);
+    const worse = withTasks();
+    worse['tasks'][0].category = 'work';
+    expect(svc().run(worse, { apply: false }).ok).toBe(false);
+    h.close();
+  });
+
+  it('puts an urgent task in the lookahead, which lists high or urgent first', () => {
+    const { h, svc } = boot({ DUCKY_IMPORTED_PREFERENCES: 'true' });
+    const doc = withTasks();
+    doc['tasks'].forEach((t: any) => { t.due = { kind: 'instant', at: '2026-10-14T15:59:00Z' }; });
+    doc['tasks'][1].priority = 'normal'; // only the urgent one is high-or-urgent
+    apply(h, svc(), doc);
+    const b = h.app.briefing.build(h.owner, 'morning');
+    expect(b.lookahead?.tasks.rows.map((t) => t.title)).toEqual(['Hand in the report']);
     h.close();
   });
 });

@@ -29,6 +29,8 @@ import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } 
 
 const short = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
+/** An urgent task, ranked above `high`. */
+const URGENT_MARK = '!!!';
 const PRIORITY_MARK = {
   high: '!!',
   normal: '·',
@@ -54,7 +56,8 @@ export function taskDue(task: TaskRow, tz: string): string {
 const taskLine = (task: TaskRow, tz: string): string => {
   const due = taskDue(task, tz);
   return [
-    `\`${task.publicId}\` ${PRIORITY_MARK[task.priority]} ${short(task.title, 120)}`,
+    `\`${task.publicId}\` ${task.urgent ? URGENT_MARK : PRIORITY_MARK[task.priority]} ${short(task.title, 120)}` +
+      (task.category ? ` · ${task.category}` : ''),
     due === '' ? null : `-# due ${due}`,
   ]
     .filter(Boolean)

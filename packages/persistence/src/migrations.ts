@@ -1798,4 +1798,29 @@ CREATE TABLE assistant_watch_settings (
 );
 `,
   },
+  {
+    version: 32,
+    name: 'schedule_rule_replaced_at',
+    sql: `
+-- When a schedule batch was replaced, so a rollback can restore the most recently
+-- replaced one first. NULL for an active rule, and for a replaced rule whose order
+-- is unknown: such a batch is never chosen by a rollback. A rollback only flips
+-- \`active\` and this column; it deletes no row.
+ALTER TABLE schedule_rules ADD COLUMN replaced_at TEXT;
+`,
+  },
+  {
+    version: 33,
+    name: 'task_urgent_and_category',
+    sql: `
+-- The source's \`urgent\` priority and task categories, as columns beside the
+-- existing ones. \`priority\` itself is NOT widened: its CHECK cannot be changed
+-- without rebuilding \`tasks\`, whose children (reminders, with ON DELETE CASCADE)
+-- make a drop-and-rebuild unsafe. An urgent task is stored as priority 'high' with
+-- urgent = 1, so it can never be mistaken for a native high task by anything that
+-- ignores the flag, only ranked one place lower.
+ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1));
+ALTER TABLE tasks ADD COLUMN category TEXT CHECK (category IS NULL OR category IN ('school','personal'));
+`,
+  },
 ];

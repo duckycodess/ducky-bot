@@ -110,9 +110,8 @@ const WATCH_SURFACES_OBSERVED: readonly WatchSurface[] = [
  *   surface can carry the identity of a failing check exactly, it is not
  *   suppressed.
  *
- * Overlap with the ORDINARY `github_watches` snapshot DM is not suppressed
- * either. That is a required parity blocker, recorded in
- * `docs/CURRENT_STATE.md`, not an accepted exclusion.
+ * The ORDINARY `github_watches` snapshot DM is trimmed the same way, part by part,
+ * in `GitHubWatchService` (ADR 0032).
  */
 export const IMPORT_COVERS_NATIVE: Partial<Record<GitHubFeedKind, WatchSurface>> = {
   pr_opened: 'pulls',

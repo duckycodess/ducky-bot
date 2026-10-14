@@ -1,4 +1,4 @@
-import type { TaskPriority, TaskState } from '@ducky/contracts';
+import type { TaskCategory, TaskPriority, TaskState } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { fromBool, toBool, type ReminderPolicy, type TaskRow } from './types.js';
 
@@ -40,6 +40,8 @@ const map = (r: Record<string, unknown>): TaskRow => ({
   dueAt: r['due_at'] == null ? null : String(r['due_at']),
   dueAllDay: toBool(r['due_all_day']),
   priority: String(r['priority']) as TaskPriority,
+  urgent: toBool(r['urgent']),
+  category: r['category'] == null ? null : (String(r['category']) as TaskCategory),
   status: String(r['status']) as TaskState,
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
@@ -56,7 +58,7 @@ const map = (r: Record<string, unknown>): TaskRow => ({
  * same rows in different sequences would read as two different sets.
  */
 const ORDER = `ORDER BY (due_at IS NULL), due_at ASC,
-  CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+  CASE WHEN urgent = 1 THEN -1 WHEN priority = 'high' THEN 0 WHEN priority = 'normal' THEN 1 ELSE 2 END,
   created_at ASC`;
 
 /**
@@ -100,6 +102,9 @@ export class TasksRepo {
     return {
       ...row,
       reminderPolicy: row.reminderPolicy ?? null,
+      // A native task is never urgent and has no category; only an import carries them.
+      urgent: false,
+      category: null,
       status: 'open',
       updatedAt: row.createdAt,
       closedAt: null,

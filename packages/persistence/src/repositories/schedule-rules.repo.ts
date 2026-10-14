@@ -1,5 +1,6 @@
 import type { ScheduleExceptionInput, ScheduleExceptionKind, ScheduleRuleInput } from '@ducky/contracts';
 import type { Db } from '../db.js';
+import { atomically } from '../db.js';
 
 export interface ScheduleRuleRow extends ScheduleRuleInput {
   readonly discordUserId: string;
@@ -81,19 +82,69 @@ export class ScheduleRulesRepo {
     effectiveFrom: string | null;
     effectiveUntil: string | null;
     createdAt: string;
+    /** When a replaced batch was replaced; null for an active rule or an unknown order. */
+    replacedAt?: string | null;
   }): void {
     this.db
       .prepare(
         `INSERT INTO schedule_rules (id, discord_user_id, batch_key, active, weekday, start_time,
            end_time, label, course_code, section, room, uncertain, effective_from,
-           effective_until, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           effective_until, created_at, replaced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         row.id, row.discordUserId, row.batchKey, row.active ? 1 : 0, row.weekday, row.startTime,
         row.endTime, row.label, row.courseCode, row.section, row.room,
         JSON.stringify(row.uncertain), row.effectiveFrom, row.effectiveUntil, row.createdAt,
+        row.active ? null : row.replacedAt ?? null,
       );
+  }
+
+  /**
+   * Flips the schedule back one batch, deleting nothing.
+   *
+   * The batch that is active becomes replaced (stamped `atIso`), and the most
+   * recently replaced batch with a KNOWN replacement time becomes active. A
+   * replaced batch whose order is unknown is never chosen: guessing which one the
+   * owner meant would swap in a schedule nobody asked for. Returns what happened as
+   * counts only, never a label.
+   */
+  rollbackBatch(ownerId: string, atIso: string):
+    | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
+    | { readonly ok: false; readonly reason: 'nothing_to_restore' | 'order_unknown' } {
+    return atomically(this.db, () => {
+      const target = this.db
+        .prepare(
+          `SELECT batch_key AS k, MAX(replaced_at) AS at FROM schedule_rules
+            WHERE discord_user_id = ? AND active = 0 AND replaced_at IS NOT NULL
+            GROUP BY batch_key ORDER BY MAX(replaced_at) DESC, batch_key ASC LIMIT 2`,
+        )
+        .all(ownerId) as { k: string; at: string }[];
+      if (target.length === 0) {
+        const unknown = this.db
+          .prepare('SELECT COUNT(*) AS n FROM schedule_rules WHERE discord_user_id = ? AND active = 0')
+          .get(ownerId) as { n: number };
+        return { ok: false as const, reason: Number(unknown.n) > 0 ? ('order_unknown' as const) : ('nothing_to_restore' as const) };
+      }
+      // Two batches stamped the same instant: which is "most recent" is not known.
+      if (target.length === 2 && target[0]!.at === target[1]!.at) {
+        return { ok: false as const, reason: 'order_unknown' as const };
+      }
+      const restore = target[0]!.k;
+      const replaced = this.db
+        .prepare(
+          `UPDATE schedule_rules SET active = 0, replaced_at = ?
+            WHERE discord_user_id = ? AND active = 1`,
+        )
+        .run(atIso, ownerId);
+      const restored = this.db
+        .prepare(
+          `UPDATE schedule_rules SET active = 1, replaced_at = NULL
+            WHERE discord_user_id = ? AND batch_key = ? AND active = 0`,
+        )
+        .run(ownerId, restore);
+      return { ok: true as const, restoredRules: Number(restored.changes), replacedRules: Number(replaced.changes) };
+    });
   }
 
   insertException(row: {

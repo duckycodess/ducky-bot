@@ -204,6 +204,7 @@ export class BriefingNotifier {
     let failed = 0;
     let abandoned = 0;
     let skippedStale = 0;
+    const importedPrefs = this.prefs?.effective();
 
     for (const row of pending) {
       const nowIso = this.clock.nowIso();
@@ -217,8 +218,7 @@ export class BriefingNotifier {
         continue;
       }
 
-      const dueMs = Date.parse(row.dueAt);
-      if (Number.isFinite(dueMs) && this.clock.nowMs() - dueMs > BRIEFING_STALE_AFTER_MS) {
+      if (this.isStale(row, importedPrefs)) {
         this.store.briefings.markSkipped(row.id, nowIso);
         skippedStale += 1;
         continue;
@@ -259,6 +259,32 @@ export class BriefingNotifier {
       }
     }
     return { delivered, failed, abandoned, skippedStale };
+  }
+
+  /**
+   * Whether a pending briefing is too late to send.
+   *
+   * Natively a briefing is stale six hours after its slot. The source's rule, used
+   * when the profile selects imported preferences, is different: a morning briefing
+   * is due until the EVENING time has been reached (then it is recorded skipped,
+   * never sent late as a morning greeting), an evening briefing is due until the
+   * end of its day, and nothing survives into a later day.
+   */
+  private isStale(
+    row: { readonly kind: 'morning' | 'evening'; readonly dayKey: string; readonly dueAt: string },
+    prefs: ImportedPreferences | undefined,
+  ): boolean {
+    const nowMs = this.clock.nowMs();
+    if (!prefs) {
+      const dueMs = Date.parse(row.dueAt);
+      return Number.isFinite(dueMs) && nowMs - dueMs > BRIEFING_STALE_AFTER_MS;
+    }
+    const tz = this.clock.timeZone;
+    if (row.dayKey !== zonedDateKey(nowMs, tz)) return true;
+    if (row.kind !== 'morning') return false;
+    const eveningAt = !this.config.eveningExplicit ? prefs.eveningTime : this.config.eveningAt;
+    const eveningMs = slotInstantMs(row.dayKey, eveningAt, tz);
+    return eveningMs !== undefined && nowMs >= eveningMs;
   }
 
   /** The slots that may fire today, and when, after preferences are applied. */

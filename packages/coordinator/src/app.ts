@@ -552,6 +552,9 @@ export function createApp(
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
+    // An imported target that observes a repository tells its pull request and issue
+    // events itself (alert or digest), so the ordinary snapshot DM leaves those out.
+    importedCovers: (repoKey, surface) => store.assistantWatch.observes(authz.ownerId, repoKey, surface),
   });
   /**
    * The GitHub feed rides the SAME coordinator interval and holds no model

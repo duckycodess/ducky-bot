@@ -1,4 +1,4 @@
-import type { TaskPriority, TaskState } from '@ducky/contracts';
+import type { TaskCategory, TaskPriority, TaskState } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import type { ReminderPolicy } from './types.js';
 
@@ -41,6 +41,9 @@ export interface ImportedTaskWrite {
   dueAt: string | null;
   dueAllDay: boolean;
   priority: TaskPriority;
+  /** The source's urgent priority, stored beside `priority` (which stays `high`). */
+  urgent?: boolean;
+  category?: TaskCategory | null;
   status: TaskState;
   createdAt: string;
   updatedAt: string;
@@ -147,12 +150,12 @@ export class AssistantImportRepo {
     this.db
       .prepare(
         `INSERT INTO tasks (id, public_id, discord_user_id, title, due_at, due_all_day,
-           priority, status, created_at, updated_at, closed_at, reminder_policy)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           priority, urgent, category, status, created_at, updated_at, closed_at, reminder_policy)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         row.id, row.publicId, row.discordUserId, row.title, row.dueAt, row.dueAllDay ? 1 : 0,
-        row.priority, row.status, row.createdAt, row.updatedAt, row.closedAt,
+        row.priority, row.urgent ? 1 : 0, row.category ?? null, row.status, row.createdAt, row.updatedAt, row.closedAt,
         row.reminderPolicy ? JSON.stringify(row.reminderPolicy) : null,
       );
   }

@@ -300,6 +300,7 @@ export const CAPTURE_REVIEW_MAX = 6;
  */
 const LOOKAHEAD_FALLBACK = 5;
 function lookaheadTasks(rows: readonly TaskRow[]): TaskRow[] {
-  const high = rows.filter((t) => t.priority === 'high');
+  // Urgent ranks with high: the source puts "high or urgent" first.
+  const high = rows.filter((t) => t.priority === 'high' || t.urgent);
   return high.length > 0 ? high : rows.slice(0, LOOKAHEAD_FALLBACK);
 }

@@ -40,11 +40,11 @@ Unchecked operational evidence is required and blocks merge readiness for issue 
 Full parity is settled. These are not proposed exclusions: each blocks cutover and retirement until supported and proven, and Ducky refuses the corresponding input meanwhile.
 
 - [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests. (Reader, policy, ADR 0031 and pinned tests done and probed read-only on a public repository; off by default. Discovery with scope filtering, tombstones and a capacity report is implemented and unit-tested; it is off by default and has never been enabled or probed live.)
-- [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch. (The switch is carried over and gates reads; no owner control resumes it. The rest are not done.)
-- [ ] 5.3 The requested-changes alert's "areas mentioned".
-- [ ] 5.4 The source's morning-briefing staleness rule.
-- [ ] 5.5 Rollback control between schedule batches.
+- [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch. (Urgent and categories are carried as data and unit-tested; the switch is carried over and gates reads, with no owner control to resume it. AI wording and meals are NOT done.)
+- [ ] 5.3 The requested-changes alert's "areas mentioned". (Access is no longer the blocker: the review body is read. The extraction rule is not defined by the private audit, so none was invented.)
+- [ ] 5.4 The source's morning-briefing staleness rule. (Implemented for imported preferences and unit-tested.)
+- [ ] 5.5 Rollback control between schedule batches. (An owner-scoped service flips state and deletes nothing; no Discord control reaches it because the manifest was not expanded.)
 - [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics. (Implemented and unit-tested: six-hour discovery, 40-target recency cycle, eligibility filters. Unproven live.)
-- [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM.
+- [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM. (Implemented per covered part, keeping what the imported side cannot see; unit-tested.)
 - [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp. (Implemented by review id once the boundary is known; unit-tested only, so the box stays open until live evidence.)
 - [ ] 5.9 Paging (or a proof of completeness) for the workflow-runs and releases surfaces in a real reader. (Implemented as separate page units, a creation-sorted window with an unsettled-item floor and a last-page re-read; named residuals in ADR 0031 remain required blockers.)

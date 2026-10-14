@@ -207,7 +207,13 @@ describe('a briefing carries the digest, and settles it only once sent', () => {
   });
 
   it('skips settling for a stale briefing that was never sent', async () => {
-    const { h, add } = boot({}, '2026-10-13T08:00:00.000Z'); // 16:00 Manila: the 07:00 slot is stale
+    // 22:30 Manila: the evening time (21:00) has been reached, so the source records the
+    // 07:00 morning briefing skipped instead of sending it late. Only the morning slot is on.
+    const { h, add } = boot({}, '2026-10-13T14:30:00.000Z');
+    h.store.db.prepare('DELETE FROM owner_preferences').run();
+    h.store.ownerPreferences.insert({
+      ownerId: OWNER, prefsJson: JSON.stringify({ ...PREFS, eveningEnabled: false }), source: 'import', at: T0,
+    });
     add('a', 'pr_opened', '5:opened');
     const out = await h.app.briefingNotifier.tick();
     expect(out.skippedStale).toBe(1);

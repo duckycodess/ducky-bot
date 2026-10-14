@@ -438,7 +438,10 @@ export class AssistantImportService {
         const d = plan.rule.get(r.sourceId)!;
         if (tally('scheduleRules', d.disposition)) {
           const id = randomUUID();
-          this.store.scheduleRules.insertRule(this.ruleWrite(id, owner, b.sourceId, b.status === 'active', r, at));
+          this.store.scheduleRules.insertRule({
+            ...this.ruleWrite(id, owner, b.sourceId, b.status === 'active', r, at),
+            replacedAt: b.status === 'replaced' ? b.replacedAt : null,
+          });
           imp.recordLive({ namespace: ns, category: 'schedule_rule', sourceId: r.sourceId, targetId: id, fingerprint: d.fp, at });
         }
       }
@@ -552,7 +555,8 @@ export class AssistantImportService {
     }
     return {
       id, publicId: this.freshTaskId(), discordUserId: owner, title: t.title, dueAt, dueAllDay,
-      priority: t.priority, status: t.status, createdAt: t.createdAt, updatedAt: t.updatedAt,
+      priority: t.priority === 'urgent' ? ('high' as const) : t.priority, urgent: t.priority === 'urgent',
+      category: t.category, status: t.status, createdAt: t.createdAt, updatedAt: t.updatedAt,
       closedAt: t.closedAt, reminderPolicy: t.reminderPolicy,
     };
   }
@@ -637,6 +641,7 @@ export class AssistantImportService {
         const w = this.taskWrite(target, owner, tz, t);
         return (
           row.title !== w.title || row.status !== w.status || row.priority !== w.priority ||
+          row.urgent !== w.urgent || row.category !== w.category ||
           row.dueAt !== w.dueAt || row.dueAllDay !== w.dueAllDay || row.closedAt !== w.closedAt ||
           row.createdAt !== w.createdAt ||
           JSON.stringify(row.reminderPolicy ?? null) !== JSON.stringify(w.reminderPolicy)

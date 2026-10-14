@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  UnreadableTimestamp, deriveCommits, deriveDefaultBranch, deriveIssues, derivePulls, deriveReleases,
-  deriveRuns, pullNeedsReviews, scrubText,
+  UnreadableTimestamp, deriveCommits, deriveDefaultBranch, deriveIssues, derivePullList, deriveReleases,
+  deriveReviews, deriveRuns, pullNeedsReviews, reviewPendingMarker, scrubText, windowThresholdMs,
+  type DerivedEvent,
 } from '../src/domain/assistant-watch.engine.js';
 import type { PullRecord, ReviewRecord } from '../src/domain/assistant-watch.reader.js';
 
@@ -13,6 +14,25 @@ const T = {
   after1: '2026-09-10T12:00:01Z',
   after2: '2026-09-11T00:00:00Z',
 };
+/**
+ * The list and the reviews of each of its pull requests, in one call, for the
+ * rules below. The service reads them as separate units; the events are the same.
+ */
+function derivePulls(
+  items: readonly PullRecord[],
+  sinceMs: number | null,
+  reviews: ReadonlyMap<number, readonly ReviewRecord[]>,
+  inclusive = false,
+) {
+  const list = derivePullList(items, sinceMs, inclusive);
+  const events: DerivedEvent[] = [...list.events];
+  for (const t of list.reviewTargets) {
+    const rd = deriveReviews(t, reviews.get(t.n) ?? [], sinceMs!, inclusive);
+    events.push(...rd.events);
+    if (rd.changesRequested) events.push(reviewPendingMarker(t));
+  }
+  return { ...list, events };
+}
 const kinds = (r: { events: readonly { kind: string }[] }) => r.events.map((e) => e.kind);
 const ids = (r: { events: readonly { identity: string }[] }) => r.events.map((e) => e.identity);
 
@@ -207,15 +227,15 @@ describe('workflow runs', () => {
 describe('releases and the default branch', () => {
   it('announces a release published after the cursor, by id', () => {
     const r = deriveReleases([
-      { id: '5', tag: 'v2', name: 'Two', publishedAt: T.after1, createdAt: null },
-      { id: '4', tag: 'v1', name: 'One', publishedAt: T.at, createdAt: null },
-      { id: '3', tag: 'v0', name: 'Zero', publishedAt: null, createdAt: null },
+      { id: '5', tag: 'v2', name: 'Two', draft: false, publishedAt: T.after1, createdAt: null },
+      { id: '4', tag: 'v1', name: 'One', draft: false, publishedAt: T.at, createdAt: null },
+      { id: '3', tag: 'v0', name: 'Zero', draft: false, publishedAt: null, createdAt: null },
     ], since);
     expect(ids(r)).toEqual(['release:5']);
   });
 
   it('falls back to the creation time of an unpublished release', () => {
-    const r = deriveReleases([{ id: '6', tag: 'rc', name: 'rc', publishedAt: null, createdAt: T.after2 }], since);
+    const r = deriveReleases([{ id: '6', tag: 'rc', name: 'rc', draft: false, publishedAt: null, createdAt: T.after2 }], since);
     expect(ids(r)).toEqual(['release:6']);
   });
 

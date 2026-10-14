@@ -3,7 +3,7 @@ import {
   DisabledConversationProvider, DisabledFrontDoor, FrontDoorCli, MemoryCredentialStore,
   MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
-  GitHubCiDependencyChecker, UnavailableDependencyChecker, OpenMeteoWeather,
+  GhWatchReader, GitHubCiDependencyChecker, UnavailableDependencyChecker, OpenMeteoWeather,
   type WeatherPort,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
   type FrontDoorPort, type GitHubReader, type ScheduleExtractionProvider,
@@ -522,7 +522,8 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const assistantWatch = new AssistantWatchService({
     store, authz, transport, ownerId: authz.ownerId, clock,
-    reader: overrides.assistantWatchReader ?? new UnavailableAssistantWatchReader(),
+    reader: overrides.assistantWatchReader ??
+      (env.DUCKY_ASSISTANT_WATCH_READER_ENABLED ? new GhWatchReader() : new UnavailableAssistantWatchReader()),
   });
   const briefingSchedule = resolveBriefingSchedule(env);
   const briefingNotifier = new BriefingNotifier({

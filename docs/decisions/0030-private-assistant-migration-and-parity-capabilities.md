@@ -1,6 +1,7 @@
 # ADR 0030 — Migrating the private assistant: durable identity, indefinite schedules, notification-only targets
 
-**Status:** accepted
+**Status:** accepted. The real-reader blocker below is lifted in part by
+[ADR 0031](0031-typed-notification-watch-reads.md) (owner-approved 2026-10-14).
 **Extends** [ADR 0013](0013-bounded-reminder-recurrence-and-catch-up.md),
 [ADR 0014](0014-single-owner-timezone-as-a-projection.md),
 [ADR 0020](0020-conservative-retention-and-per-entity-deletion.md),

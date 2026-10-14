@@ -39,12 +39,12 @@ Unchecked operational evidence is required and blocks merge readiness for issue 
 
 Full parity is settled. These are not proposed exclusions: each blocks cutover and retirement until supported and proven, and Ducky refuses the corresponding input meanwhile.
 
-- [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests.
+- [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests. (Reader, policy, ADR 0031 and pinned tests done and probed read-only on a public repository; off by default. Discovery persistence, scope filtering and enablement are NOT done.)
 - [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch.
 - [ ] 5.3 The requested-changes alert's "areas mentioned".
 - [ ] 5.4 The source's morning-briefing staleness rule.
 - [ ] 5.5 Rollback control between schedule batches.
 - [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics.
 - [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM.
-- [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp.
-- [ ] 5.9 Paging (or a proof of completeness) for the workflow-runs and releases surfaces in a real reader, since the engine treats each as one window that always closes.
+- [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp. (Implemented by review id once the boundary is known; unit-tested only, so the box stays open until live evidence.)
+- [ ] 5.9 Paging (or a proof of completeness) for the workflow-runs and releases surfaces in a real reader. (Implemented as separate page units, a creation-sorted window with an unsettled-item floor and a last-page re-read; named residuals in ADR 0031 remain required blockers.)

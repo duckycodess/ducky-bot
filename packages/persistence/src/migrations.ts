@@ -1710,4 +1710,38 @@ CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
 END;
 `,
   },
+  {
+    version: 30,
+    name: 'assistant_watch_reader',
+    sql: `
+-- The real typed notification reader (ADR 0031). Additive only: nothing here
+-- changes the meaning of an existing row.
+--
+-- pending_state is the durable position INSIDE a multi-request read that is not
+-- a page number: the review queue of a pulls page, the page that must be re-read
+-- to prove the window held still, a provider total. It is JSON, owned by the
+-- service, and it is cleared by every commit and every restart of a pass.
+--
+-- scan_floor is the creation time of the oldest item that was still unsettled
+-- (a running workflow, a draft release) when the last window closed. Runs and
+-- releases are listed by creation but their events carry a later time, so the
+-- next window must reach back at least that far; see windowThresholdMs.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN pending_state TEXT;
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN scan_floor TEXT;
+
+-- Facts a repository metadata read establishes about a target, and the poll
+-- cycle may filter by. Existing rows keep the defaults.
+ALTER TABLE assistant_watch_targets ADD COLUMN pushed_at TEXT;
+ALTER TABLE assistant_watch_targets ADD COLUMN relationship TEXT
+  CHECK (relationship IS NULL OR relationship IN ('owner','organization','collaborator'));
+ALTER TABLE assistant_watch_targets ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+  CHECK (archived IN (0,1));
+ALTER TABLE assistant_watch_targets ADD COLUMN fork INTEGER NOT NULL DEFAULT 0
+  CHECK (fork IN (0,1));
+-- Why a target was cancelled by the SYSTEM rather than by the owner (a repository
+-- the provider no longer shows). NULL for an owner's cancellation and for an
+-- imported cancelled state.
+ALTER TABLE assistant_watch_targets ADD COLUMN cancel_reason TEXT;
+`,
+  },
 ];

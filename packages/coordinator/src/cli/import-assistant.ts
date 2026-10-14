@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { GhWatchReader } from '@ducky/adapters';
 import { DuckyError } from '@ducky/contracts';
 import {
   acquireRuntimeLock, compareBackupToLive, createStore, isUpToDate, openDatabase, type Db,
@@ -136,7 +137,9 @@ export function runImportCli(
         delivery: schedule.delivery,
       },
       weatherConfigured: resolveWeather(e) !== undefined,
-      watchCapabilities: new UnavailableAssistantWatchReader().capabilities,
+      watchCapabilities: e.DUCKY_ASSISTANT_WATCH_READER_ENABLED
+        ? new GhWatchReader().capabilities
+        : new UnavailableAssistantWatchReader().capabilities,
     };
   } catch (err) {
     io.err(`refused: configuration is not usable (${err instanceof DuckyError ? err.code : 'invalid'}).\n`);

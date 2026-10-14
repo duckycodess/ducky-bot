@@ -147,23 +147,51 @@ const reviewKind = (state: string): WatchEventKind | undefined => {
   }
 };
 
-/** Whether a pull request needs its reviews read: open, and touched after the cursor. */
-export const pullNeedsReviews = (p: PullRecord, sinceMs: number | null): boolean =>
-  sinceMs !== null && p.state === 'open' && at(p.updatedAt) > sinceMs;
-// Reviews are read only for a pull request touched strictly AFTER the cursor, and a
-// review at the cursor is skipped, in every mode: a late equal-time REVIEW is not
-// reconciled, which is recorded as a residual parity risk rather than guessed at.
+/**
+ * Whether a pull request needs its reviews read: open, and touched after the cursor.
+ *
+ * Inclusive mode also reads one touched AT the cursor. A review that reached
+ * GitHub late, stamped with the very second the cursor sits on, is on exactly
+ * such a pull request, and its identity (the review id) is what tells it from a
+ * review already announced. Strict mode (a baseline, or a cursor that came from
+ * the source) never re-reads the boundary, because it cannot tell what the source
+ * already announced.
+ */
+export const pullNeedsReviews = (p: PullRecord, sinceMs: number | null, inclusive = false): boolean =>
+  sinceMs !== null && p.state === 'open' && (inclusive ? at(p.updatedAt) >= sinceMs : at(p.updatedAt) > sinceMs);
 
-export function derivePulls(
+/** One pull request whose reviews remain to be read, with what its events carry. */
+export interface ReviewTarget {
+  readonly n: number;
+  /** The scrubbed title, so a later unit can build the event without re-reading the list. */
+  readonly t: string;
+  /** The pull request's last update, the time of its pending-review marker. */
+  readonly u: string;
+}
+
+export interface PullListRead extends SurfaceRead {
+  /** Pull requests, in list order, whose reviews must be read before the window can commit. */
+  readonly reviewTargets: readonly ReviewTarget[];
+}
+
+/**
+ * What a page of the pull request list says, WITHOUT the reviews.
+ *
+ * Reviews are their own surface of requests (a pull request can have many pages
+ * of them), so they are read by later units and turned into events by
+ * `deriveReviews`. The list sorts on the update time and events here use it, so a
+ * page whose last item is at or before the cursor has closed the window.
+ */
+export function derivePullList(
   items: readonly PullRecord[],
   sinceMs: number | null,
-  reviews: ReadonlyMap<number, readonly ReviewRecord[]>,
   inclusive = false,
-): SurfaceRead {
+): PullListRead {
   const at_ = edges(sinceMs, inclusive);
   let newest: number | null = null;
   let reached = false;
   const events: DerivedEvent[] = [];
+  const reviewTargets: ReviewTarget[] = [];
   for (const p of items) {
     const updated = at(p.updatedAt);
     newest = maxOf(newest, updated);
@@ -189,28 +217,61 @@ export function derivePulls(
         occurredAt: p.updatedAt, payload: base,
       });
     }
-    if (p.state === 'open') {
-      let changesRequested = false;
-      for (const r of reviews.get(p.number) ?? []) {
-        const kind = reviewKind(r.state);
-        // The pending marker is judged over EVERY review, before the cursor cut.
-        if (kind === 'review_requested_changes') changesRequested = true;
-        if (r.submittedAt && at(r.submittedAt) <= sinceMs) continue;
-        if (!kind) continue;
-        events.push({
-          kind,
-          identity: `${p.number}:review:${r.id}`,
-          occurredAt: r.submittedAt ?? p.updatedAt,
-          payload: { ...base, ...(r.body ? { summary: scrubText(r.body, 600) } : {}) },
-        });
-      }
-      if (changesRequested) {
-        events.push({ kind: 'review_pending', identity: `${p.number}:pending`, occurredAt: p.updatedAt, payload: base });
-      }
+    if (pullNeedsReviews(p, sinceMs, inclusive)) {
+      reviewTargets.push({ n: p.number, t: base.title, u: p.updatedAt });
     }
   }
-  return { events, newestMs: newest, reachedCursor: reached };
+  return { events, newestMs: newest, reachedCursor: reached, reviewTargets };
 }
+
+export interface ReviewsRead {
+  readonly events: readonly DerivedEvent[];
+  /** Whether any review on this page asked for changes (judged over EVERY review, cut or not). */
+  readonly changesRequested: boolean;
+}
+
+/**
+ * What one page of one pull request's reviews says.
+ *
+ * The pending marker is judged over every review, before the cursor cut, and is
+ * emitted by `reviewPendingMarker` once the LAST page has been read. A review
+ * submitted at or before the cursor is skipped in strict mode; in inclusive mode
+ * one AT the cursor is read again and told from an announced one by its id.
+ */
+export function deriveReviews(
+  target: ReviewTarget,
+  reviews: readonly ReviewRecord[],
+  sinceMs: number,
+  inclusive = false,
+): ReviewsRead {
+  const events: DerivedEvent[] = [];
+  let changesRequested = false;
+  const base = { number: target.n, title: target.t };
+  for (const r of reviews) {
+    const kind = reviewKind(r.state);
+    if (kind === 'review_requested_changes') changesRequested = true;
+    if (r.submittedAt) {
+      const submitted = at(r.submittedAt);
+      if (inclusive ? submitted < sinceMs : submitted <= sinceMs) continue;
+    }
+    if (!kind) continue;
+    events.push({
+      kind,
+      identity: `${target.n}:review:${r.id}`,
+      occurredAt: r.submittedAt ?? target.u,
+      payload: { ...base, ...(r.body ? { summary: scrubText(r.body, 600) } : {}) },
+    });
+  }
+  return { events, changesRequested };
+}
+
+/** The marker that says a pull request still has requested changes. It exists to dedupe. */
+export const reviewPendingMarker = (target: ReviewTarget): DerivedEvent => ({
+  kind: 'review_pending',
+  identity: `${target.n}:pending`,
+  occurredAt: target.u,
+  payload: { number: target.n, title: target.t },
+});
 
 // ---- issues -----------------------------------------------------------------
 
@@ -218,10 +279,14 @@ export function deriveIssues(
   items: readonly IssueRecord[],
   sinceMs: number | null,
   inclusive = false,
+  windowStamp: string | null = null,
 ): SurfaceRead {
   const at_ = edges(sinceMs, inclusive);
   let newest: number | null = null;
-  let reached = false;
+  // The listing mixes issues with pull requests and sorts them on ONE key, so the
+  // last raw item's time proves how far down this page reached even when that
+  // item was a pull request that is not in `items`.
+  let reached = sinceMs !== null && windowStamp !== null && at_.old(at(windowStamp));
   const events: DerivedEvent[] = [];
   for (const i of items) {
     const updated = at(i.updatedAt);
@@ -255,28 +320,65 @@ export function deriveIssues(
 // ---- workflow runs -----------------------------------------------------------
 
 const FAILED = new Set(['failure', 'timed_out', 'startup_failure']);
+const UNSETTLED_RUN = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
+
+/**
+ * How long a run that never settled is still tracked. A run stuck queued for
+ * longer is treated as abandoned, so one dead run cannot hold a window open
+ * forever; a run that settles after that is the residual this scheme does not
+ * claim to see.
+ */
+export const RUN_TRACK_MAX_AGE_MS = 24 * 60 * 60_000;
+/** The same bound for a draft release, which can legitimately wait for weeks. */
+export const DRAFT_TRACK_MAX_AGE_MS = 30 * 24 * 60 * 60_000;
 
 export interface RunsRead extends SurfaceRead {
   /** What the newest NEW conclusion says, or null when no new run concluded. */
   readonly ciState: 'failing' | 'passing' | null;
+  /** The oldest creation time (ms) of a run seen unsettled on this page, or null. */
+  readonly unsettledFloorMs: number | null;
 }
+
+/**
+ * The creation time a window must reach before it is closed.
+ *
+ * Runs and releases are listed newest-CREATED first, but their events carry a
+ * later time (a run's last update, a release's publication). Reaching an item
+ * updated at the cursor proves nothing, because an older-created item can still
+ * be updated after it. What does close the window is reaching an item CREATED at
+ * or before both the cursor and the creation time of the oldest item that was
+ * still unsettled (running, or a draft) when the last window closed: every item
+ * created earlier than that was settled then, and a settled run or a published
+ * release does not change again.
+ */
+export const windowThresholdMs = (sinceMs: number | null, floorMs: number | null): number | null =>
+  sinceMs === null ? null : floorMs === null ? sinceMs : Math.min(sinceMs, floorMs);
 
 export function deriveRuns(
   items: readonly RunRecord[],
   sinceMs: number | null,
   previouslyFailing: boolean,
   inclusive = false,
+  floorMs: number | null = null,
 ): RunsRead {
   const at_ = edges(sinceMs, inclusive);
+  const threshold = windowThresholdMs(sinceMs, floorMs);
   let newest: number | null = null;
   let newestConclusion: string | null = null;
+  let reached = false;
+  let unsettledFloor: number | null = null;
   const events: DerivedEvent[] = [];
   for (const r of items) {
     const stamp = r.updatedAt ?? r.createdAt;
     const ms = at(stamp);
+    const created = at(r.createdAt);
     newest = maxOf(newest, ms);
-    if (sinceMs === null || at_.old(ms)) continue;
     const status = r.status.toLowerCase();
+    if (UNSETTLED_RUN.has(status)) {
+      unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
+    }
+    if (threshold !== null && created <= threshold) reached = true;
+    if (sinceMs === null || at_.old(ms)) continue;
     const conclusion = (r.conclusion ?? '').toLowerCase();
     let kind: WatchEventKind | undefined;
     if (status === 'queued' || status === 'in_progress') kind = 'ci_started';
@@ -291,22 +393,39 @@ export function deriveRuns(
     }
   }
   return {
-    events, newestMs: newest, reachedCursor: true,
+    events, newestMs: newest, reachedCursor: reached, unsettledFloorMs: unsettledFloor,
     ciState: newestConclusion === null ? null : FAILED.has(newestConclusion) ? 'failing' : 'passing',
   };
 }
 
 // ---- releases ---------------------------------------------------------------
 
+export interface ReleasesRead extends SurfaceRead {
+  /** The oldest creation time (ms) of a draft seen on this page, or null. */
+  readonly unsettledFloorMs: number | null;
+}
+
 export function deriveReleases(
   items: readonly ReleaseRecord[],
   sinceMs: number | null,
   inclusive = false,
-): SurfaceRead {
+  floorMs: number | null = null,
+): ReleasesRead {
   const at_ = edges(sinceMs, inclusive);
+  const threshold = windowThresholdMs(sinceMs, floorMs);
   let newest: number | null = null;
+  let reached = false;
+  let unsettledFloor: number | null = null;
   const events: DerivedEvent[] = [];
   for (const r of items) {
+    const created = r.createdAt ? at(r.createdAt) : null;
+    if (created !== null && threshold !== null && created <= threshold) reached = true;
+    // A draft is not a publication. It is tracked, so that when it is published
+    // the window reaches back to where it sits, and it announces nothing now.
+    if (r.draft) {
+      if (created !== null) unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
+      continue;
+    }
     const stamp = r.publishedAt ?? r.createdAt;
     if (!stamp) continue;
     const ms = at(stamp);
@@ -317,7 +436,7 @@ export function deriveReleases(
       payload: { tag: scrubText(r.tag, 40), name: scrubText(r.name, 100) },
     });
   }
-  return { events, newestMs: newest, reachedCursor: true };
+  return { events, newestMs: newest, reachedCursor: reached, unsettledFloorMs: unsettledFloor };
 }
 
 // ---- the default branch ------------------------------------------------------

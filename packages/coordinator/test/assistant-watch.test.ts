@@ -186,7 +186,9 @@ describe('a read that is not finished', () => {
     clock.advance(16 * MIN);
     reader.log.length = 0;
     await h.app.assistantWatch.tick();
-    expect(reader.log).toEqual(['commits:acme/widgets:3']);
+    // Page 3 closes a window that spanned pages, so the same page is read once
+    // more to prove the window held still, and only then does it commit.
+    expect(reader.log).toEqual(['commits:acme/widgets:3', 'commits:acme/widgets:3']);
     expect(events(h, id)).toHaveLength(5);
     expect(events(h, id).every((e) => !e.held)).toBe(true);
     expect(h.store.assistantWatch.undigested(OWNER, 20)).toHaveLength(5);
@@ -327,14 +329,32 @@ describe('the call budget and fair scheduling', () => {
     later.h.close();
   });
 
-  it('starts a pull-request page only when its worst case fits, and never overspends', async () => {
+  it('starts a unit only when its worst case fits, and never overspends', async () => {
     const { h, reader } = boot();
-    const id = target(h);
-    checkpoint(h, id, 'pulls', 'imported', '2026-10-10T00:00:00.000Z');
-    h.store.assistantWatch.chargeCalls('2026-10-12T23:59', ASSISTANT_WATCH_CALLS_PER_HOUR - 10);
+    seq += 1;
+    const id = `t${seq}`;
+    // No default branch known: a commits unit may need a second request to learn it.
+    h.store.assistantWatch.insertTarget({
+      id, publicId: `w${String(seq).padStart(5, '0')}`, discordUserId: OWNER, repoKey: 'acme/widgets',
+      display: 'acme/widgets', defaultBranch: null, state: 'active', lastObservedAt: null,
+      createdAt: NOW, cancelledAt: null,
+    });
+    checkpoint(h, id, 'commits', 'imported', '2026-10-10T00:00:00.000Z');
+    h.store.assistantWatch.chargeCalls('2026-10-12T23:59', ASSISTANT_WATCH_CALLS_PER_HOUR - 1);
     const out = await h.app.assistantWatch.tick();
     expect(out.budgetStopped).toBe(true);
     expect(reader.calls).toBe(0);
+    h.close();
+  });
+
+  it('runs a one-request unit when exactly one call is left', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', '2026-10-10T00:00:00.000Z');
+    h.store.assistantWatch.chargeCalls('2026-10-12T23:59', ASSISTANT_WATCH_CALLS_PER_HOUR - 1);
+    const out = await h.app.assistantWatch.tick();
+    expect(out.callsUsed).toBe(1);
+    expect(reader.calls).toBe(1);
     h.close();
   });
 

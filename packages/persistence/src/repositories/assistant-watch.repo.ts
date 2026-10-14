@@ -18,6 +18,13 @@ export interface WatchTargetRow {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly cancelledAt: string | null;
+  /** The provider's last-push time for the repository, the recency a poll cycle orders by. */
+  readonly pushedAt: string | null;
+  readonly relationship: 'owner' | 'organization' | 'collaborator' | null;
+  readonly archived: boolean;
+  readonly fork: boolean;
+  /** Set when the SYSTEM cancelled the target (never when the owner did). */
+  readonly cancelReason: string | null;
 }
 
 export interface WatchCheckpointRow {
@@ -33,6 +40,10 @@ export interface WatchCheckpointRow {
   readonly failures: number;
   readonly lastError: string | null;
   readonly blockedReason: string | null;
+  /** The service's JSON position inside a multi-request read; null between reads. */
+  readonly pendingState: string | null;
+  /** Creation time of the oldest item still unsettled when the last window closed. */
+  readonly scanFloor: string | null;
   readonly updatedAt: string;
 }
 
@@ -78,6 +89,11 @@ const mapTarget = (r: Record<string, unknown>): WatchTargetRow => ({
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
   cancelledAt: r['cancelled_at'] == null ? null : String(r['cancelled_at']),
+  pushedAt: r['pushed_at'] == null ? null : String(r['pushed_at']),
+  relationship: r['relationship'] == null ? null : (String(r['relationship']) as 'owner' | 'organization' | 'collaborator'),
+  archived: Number(r['archived'] ?? 0) === 1,
+  fork: Number(r['fork'] ?? 0) === 1,
+  cancelReason: r['cancel_reason'] == null ? null : String(r['cancel_reason']),
 });
 
 const mapCheckpoint = (r: Record<string, unknown>): WatchCheckpointRow => ({
@@ -92,6 +108,8 @@ const mapCheckpoint = (r: Record<string, unknown>): WatchCheckpointRow => ({
   failures: Number(r['failures']),
   lastError: r['last_error'] == null ? null : String(r['last_error']),
   blockedReason: r['blocked_reason'] == null ? null : String(r['blocked_reason']),
+  pendingState: r['pending_state'] == null ? null : String(r['pending_state']),
+  scanFloor: r['scan_floor'] == null ? null : String(r['scan_floor']),
   updatedAt: String(r['updated_at']),
 });
 
@@ -241,6 +259,69 @@ export class AssistantWatchRepo {
     return true;
   }
 
+  /**
+   * What a repository metadata read established about a target: its default
+   * branch, its last-push time and the eligibility facts the poll cycle filters by.
+   * `relationship` is only ever set, never cleared: it comes from the configured
+   * account and discovery, and a later read without them must not forget it.
+   */
+  recordRepositoryFacts(id: string, facts: {
+    defaultBranch: string;
+    pushedAt: string | null;
+    archived: boolean;
+    fork: boolean;
+    relationship: 'owner' | 'organization' | 'collaborator' | null;
+  }, atIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE assistant_watch_targets
+            SET default_branch = ?, pushed_at = COALESCE(?, pushed_at), archived = ?, fork = ?,
+                relationship = COALESCE(?, relationship), updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(facts.defaultBranch, facts.pushedAt, facts.archived ? 1 : 0, facts.fork ? 1 : 0, facts.relationship, atIso, id);
+  }
+
+  /**
+   * Stops observing a target the provider no longer shows under its name.
+   *
+   * The source unmonitors a repository that answers not-found, permanently, and
+   * this does the same, as a cancellation with a SYSTEM reason: the row, its
+   * checkpoints and its events stay, so repeating an import cannot resurrect it
+   * and the owner can still list and Forget it.
+   */
+  cancelBySystem(id: string, reason: string, atIso: string): boolean {
+    return atomically(this.db, () => {
+      const info = this.db
+        .prepare(
+          `UPDATE assistant_watch_targets
+              SET state = 'cancelled', cancelled_at = ?, cancel_reason = ?, updated_at = ?
+            WHERE id = ? AND state = 'active'`,
+        )
+        .run(atIso, reason, atIso, id);
+      if (Number(info.changes) !== 1) return false;
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events SET alert_abandoned_at = ?
+            WHERE target_id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
+        )
+        .run(atIso, id);
+      return true;
+    });
+  }
+
+  /** Every surface of one target, stopped for one reason (a renamed or transferred repository). */
+  blockTarget(targetId: string, reason: string, atIso: string): number {
+    return Number(
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_checkpoints SET blocked_reason = ?, updated_at = ?
+            WHERE target_id = ? AND blocked_reason IS NULL`,
+        )
+        .run(reason, atIso, targetId).changes,
+    );
+  }
+
   touchObserved(id: string, atIso: string): void {
     this.db
       .prepare('UPDATE assistant_watch_targets SET last_observed_at = ?, updated_at = ? WHERE id = ?')
@@ -332,6 +413,11 @@ export class AssistantWatchRepo {
     alsoSet?: { surface: WatchSurface; cursor: string };
     /** The new boundary flag. Omitted leaves it as it was (the cursor did not move). */
     boundaryKnown?: boolean;
+    /**
+     * The new scan floor. Omitted LEAVES it; null clears it. Runs and releases set it
+     * on every commit, because "nothing was unsettled" is itself something to record.
+     */
+    scanFloor?: string | null;
   }): number | undefined {
     // The cursor, the state, the events, the released holds and the second
     // checkpoint change together or not at all: a failure anywhere leaves the
@@ -345,13 +431,16 @@ export class AssistantWatchRepo {
       .prepare(
         `UPDATE assistant_watch_checkpoints
             SET state = 'ready', cursor = ?, pending_cursor = NULL, pending_page = 0,
+                pending_state = NULL,
                 boundary_known = COALESCE(?, boundary_known),
+                scan_floor = CASE WHEN ? = 1 THEN ? ELSE scan_floor END,
                 next_due_at = ?, failures = 0, last_error = NULL, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
       .run(
         input.cursor,
         input.boundaryKnown === undefined ? null : input.boundaryKnown ? 1 : 0,
+        input.scanFloor === undefined ? 0 : 1, input.scanFloor ?? null,
         input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt,
       );
     if (Number(moved.changes) !== 1) return undefined;
@@ -388,6 +477,8 @@ export class AssistantWatchRepo {
     expectedUpdatedAt: string;
     pendingCursor: string;
     pendingPage: number;
+    /** The service's JSON position inside this read, or null for none. */
+    pendingState?: string | null;
     nextDueAt: string;
     atIso: string;
     events?: readonly ObservedEventWrite[];
@@ -399,11 +490,11 @@ export class AssistantWatchRepo {
     const info = this.db
       .prepare(
         `UPDATE assistant_watch_checkpoints
-            SET pending_cursor = ?, pending_page = ?, next_due_at = ?, updated_at = ?
+            SET pending_cursor = ?, pending_page = ?, pending_state = ?, next_due_at = ?, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
       .run(
-        input.pendingCursor, input.pendingPage, input.nextDueAt, input.atIso,
+        input.pendingCursor, input.pendingPage, input.pendingState ?? null, input.nextDueAt, input.atIso,
         input.targetId, input.surface, input.expectedUpdatedAt,
       );
     if (Number(info.changes) !== 1) return false;
@@ -470,6 +561,32 @@ export class AssistantWatchRepo {
       .prepare(
         `UPDATE assistant_watch_checkpoints
             SET failures = failures + 1, last_error = ?, next_due_at = ?, updated_at = ?
+          WHERE target_id = ? AND surface = ? AND updated_at = ?`,
+      )
+      .run(input.errorCode, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);
+    return Number(info.changes) === 1;
+  }
+
+  /**
+   * Throws a read away and starts it again from its first page, because the
+   * window did not hold still while it was being read. The committed cursor is
+   * untouched, events already found stay HELD (they are real and deduplicate by
+   * identity), and the restart is a FAILURE for backoff purposes, so a window
+   * that keeps moving is retried with growing delay rather than in a loop.
+   */
+  restartPass(input: {
+    targetId: string;
+    surface: WatchSurface;
+    expectedUpdatedAt: string;
+    nextDueAt: string;
+    errorCode: string;
+    atIso: string;
+  }): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE assistant_watch_checkpoints
+            SET pending_cursor = NULL, pending_page = 0, pending_state = NULL,
+                failures = failures + 1, last_error = ?, next_due_at = ?, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
       .run(input.errorCode, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);

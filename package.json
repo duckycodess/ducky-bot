@@ -27,6 +27,7 @@
     "probe:openclaw": "node scripts/probe-openclaw.mjs",
     "probe:gh": "node scripts/probe-gh.mjs",
     "probe:gh-live": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-gh-live.ts",
+    "probe:watch-reader": "tsx scripts/probe-watch-reader.ts",
     "probe:github-feed": "tsx scripts/probe-github-feed-live.ts",
     "probe:extraction": "node scripts/probe-extraction.mjs",
     "probe:discord-gateway": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-discord-gateway.ts",

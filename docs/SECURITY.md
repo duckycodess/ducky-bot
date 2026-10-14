@@ -457,9 +457,11 @@ may be shown rather than around who may act.
 - **Selection is not allowlisting.** The selected list is a separate table keyed
   by `owner/repo`. Nothing in the feed writes to `repos`, sets `allow_jobs`, or
   reaches an executor, so being watched grants no job target and no write path.
-- **Two reads have an exact argv shape.** `gh api` is allowed only as
+- **Reads with an exact argv shape.** `gh api` is allowed only as
   `api --method GET repos/{owner}/{repo}/commits?sha=<branch>&per_page=30&page=N`
-  and `gh search prs` only as the fixed review-request query. Each is built from
+  and as the seven typed notification-watch endpoints of ADR 0031 (repository,
+  pulls, reviews, issues, runs, releases, discovery), and `gh search prs` only as
+  the fixed review-request query. Each is built from
   validated parts and re-checked from scratch by the central command policy:
   another method, field, header, host, jq/template/cache/paginate flag, graphql,
   absolute URL, traversal, placeholder or alternate encoding is unclassified and
@@ -527,9 +529,14 @@ promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-ca
   (no owner text is ever sent), with a timeout, redirects refused, a body ceiling
   enforced as the response streams, and a cache, and
   it runs only when a location is configured and an imported preference asks for
-  it. No `gh` shape was added: AGENTS.md still permits `gh api` and
-  `gh search prs` in one exact shape each, and the typed watch reader that the
-  shipped build uses observes nothing.
+  it. The typed watch reader (ADR 0031) adds seven GET-only `gh api` shapes, each
+  four argv words with a canonical endpoint that the central policy re-parses and
+  rebuilds byte for byte; it is off by default
+  (`DUCKY_ASSISTANT_WATCH_READER_ENABLED`) and, when on, grants no job, model or
+  repository permission. A 403, 429 or authentication failure stops the cycle for
+  ten minutes and advances no cursor; failures are recorded as short codes, never
+  provider text. Discovery's reader method refuses unless frozen configuration
+  enables it, and this build does not.
 
 ## Egress and redaction
 

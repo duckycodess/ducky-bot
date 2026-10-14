@@ -299,6 +299,16 @@ export const EnvSchema = z.object({
    * person's review queue as the owner's.
    */
   DUCKY_GITHUB_FEED_ENABLED: bool(false),
+  /**
+   * Turns on the real typed reader behind notification-only watch targets (ADR
+   * 0031): the exact `gh api --method GET` shapes the owner approved for issue 9,
+   * through the central policy and `runArgv`. OFF by default, so nothing changes
+   * for an operator who did nothing: with it off the shipped reader observes
+   * nothing and an import that carries watch targets is refused. It grants no
+   * job, no model access and no repository permission, and enabling it is an
+   * operator decision that waits for runtime eligibility (issue 8).
+   */
+  DUCKY_ASSISTANT_WATCH_READER_ENABLED: bool(false),
   DUCKY_GITHUB_FEED_INTERVAL_MINUTES: z.coerce.number().int()
     .min(GITHUB_FEED_INTERVAL_MIN_MINUTES)
     .max(GITHUB_FEED_INTERVAL_MAX_MINUTES)

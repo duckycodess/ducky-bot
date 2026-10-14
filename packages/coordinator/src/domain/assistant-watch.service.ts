@@ -3,8 +3,9 @@ import {
   ASSISTANT_DIGEST_MAX_LINES_PER_REPO, ASSISTANT_DIGEST_MAX_REPOS, ASSISTANT_WATCH_ALERT_MAX_ATTEMPTS,
   ASSISTANT_WATCH_BACKOFF_MAX_MS, ASSISTANT_WATCH_CALLS_PER_HOUR, ASSISTANT_WATCH_CALLS_PER_TICK,
   ASSISTANT_WATCH_EVENT_BATCH, ASSISTANT_WATCH_EVENT_KEEP_DAYS, ASSISTANT_WATCH_INTERVAL_MINUTES,
-  ASSISTANT_WATCH_MAX_PAGES, ASSISTANT_WATCH_PAGE_SIZE, DuckyError, WATCH_EVENT_KINDS,
-  WATCH_EVENT_SURFACE, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
+  ASSISTANT_WATCH_MAX_PAGES, ASSISTANT_WATCH_PAGE_SIZE, DuckyError, GITHUB_FEED_COMMIT_MAX_PAGES,
+  WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
+  WATCH_RUNS_MAX_PAGES, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type {
   DueCheckpoint, ObservedEventWrite, Store, WatchEventWithTarget, WatchTargetRow,
@@ -14,10 +15,16 @@ import type { DiscordTransport } from '../discord/transport.js';
 import { assistantWatchAlert } from '../discord/assistant-presenters.js';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import {
-  UnreadableTimestamp, bareRepoName, deriveCommits, deriveDefaultBranch, deriveIssues, derivePulls,
-  deriveReleases, deriveRuns, pullNeedsReviews, scrubText, type DerivedEvent, type SurfaceRead,
+  DRAFT_TRACK_MAX_AGE_MS, RUN_TRACK_MAX_AGE_MS, UnreadableTimestamp, bareRepoName, deriveCommits,
+  deriveDefaultBranch, deriveIssues, derivePullList, deriveReleases, deriveReviews, deriveRuns,
+  reviewPendingMarker, scrubText, type DerivedEvent, type SurfaceRead,
 } from './assistant-watch.engine.js';
-import type { AssistantWatchReader, ReviewRecord, WatchRepoRef } from './assistant-watch.reader.js';
+import {
+  EMPTY_SCAN, keyOf, parseScan, serializeScan, windowHeldStill, type ScanState,
+} from './assistant-watch.scan.js';
+import {
+  WatchReadError, type AssistantWatchReader, type Page, type WatchRepoRef,
+} from './assistant-watch.reader.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
 
 export interface AssistantWatchServiceDeps {
@@ -86,9 +93,29 @@ export const IMPORT_COVERS_NATIVE: Partial<Record<GitHubFeedKind, WatchSurface>>
   changes_requested: 'pulls',
 };
 
-/** The most calls one unit can make, so a unit is only started when it fits. */
-const worstCaseCalls = (surface: WatchSurface): number =>
-  surface === 'pulls' ? 1 + ASSISTANT_WATCH_PAGE_SIZE : 1;
+/**
+ * The most calls one unit can make, so a unit is only started when it fits.
+ *
+ * A unit is ONE request, plus at most one more when a commits or runs read has to
+ * learn the default branch first. That is far inside the 20-call tick, and it is
+ * the point: nothing hides a loop of requests inside a unit.
+ */
+const worstCaseCalls = (unit: DueCheckpoint): number =>
+  (unit.surface === 'commits' || unit.surface === 'runs') && unit.defaultBranch === null ? 2 : 1;
+
+/** Pages one window may span before it is called too deep to prove, by surface. */
+const PAGE_CAP: Readonly<Record<'commits' | 'pulls' | 'issues' | 'runs' | 'releases', number>> = {
+  commits: GITHUB_FEED_COMMIT_MAX_PAGES,
+  pulls: ASSISTANT_WATCH_MAX_PAGES,
+  issues: ASSISTANT_WATCH_MAX_PAGES,
+  runs: WATCH_RUNS_MAX_PAGES,
+  releases: WATCH_RELEASES_MAX_PAGES,
+};
+
+/** After a rate limit or an authentication failure the whole cycle stops for this long. */
+const PAUSE_MS = 10 * MINUTE;
+
+type UnitResult = 'completed' | 'incomplete' | 'failed' | 'blocked';
 
 /**
  * Notification-only watch targets, observed within a budget and delivered to
@@ -122,6 +149,8 @@ export class AssistantWatchService {
   private readonly clock: OwnerClock;
   private readonly reader: AssistantWatchReader;
   private ticking: Promise<AssistantWatchTickResult> | null = null;
+  /** Until when a rate limit or an authentication failure has stopped the cycle. */
+  private pausedUntilMs = 0;
 
   constructor(deps: AssistantWatchServiceDeps) {
     this.store = deps.store;
@@ -156,7 +185,7 @@ export class AssistantWatchService {
     const nowMs = this.clock.nowMs();
     let left = this.budgetLeft(nowMs);
 
-    while (left > 0) {
+    while (left > 0 && this.clock.nowMs() >= this.pausedUntilMs) {
       const [unit] = repo.dueCheckpoints(isoOf(this.clock.nowMs()), 1);
       if (!unit) break;
       if (!this.observable(unit.surface)) {
@@ -166,7 +195,7 @@ export class AssistantWatchService {
       }
       // Strictly oldest-first: if the longest-waiting unit does not fit, the
       // tick ends rather than serving a cheaper, younger one past it.
-      if (worstCaseCalls(unit.surface) > left) {
+      if (worstCaseCalls(unit) > left) {
         out.budgetStopped = true;
         break;
       }
@@ -208,13 +237,23 @@ export class AssistantWatchService {
 
   // ---- one unit of work ----------------------------------------------------------
 
-  private async observeUnit(
-    unit: DueCheckpoint,
-    used: { n: number },
-  ): Promise<'completed' | 'incomplete' | 'failed' | 'blocked'> {
-    const repo = this.store.assistantWatch;
+  /**
+   * One REQUEST's worth of progress on one surface of one target.
+   *
+   * A surface read is a small state machine whose position lives in the
+   * checkpoint (`pendingPage`, `pendingCursor`, and the JSON `ScanState`):
+   *
+   *   list page  ->  [ review pages of each pull request that needs them ]
+   *              ->  (more list pages, until the window closes)
+   *              ->  [ one re-read of the last page, when the window spanned pages ]
+   *              ->  commit
+   *
+   * Every arrow is its own unit, so a restart resumes where it stood, a failure
+   * costs exactly the request that failed, and the budget is charged per request.
+   * Nothing is delivered and no cursor moves until the commit.
+   */
+  private async observeUnit(unit: DueCheckpoint, used: { n: number }): Promise<UnitResult> {
     const nowMs = this.clock.nowMs();
-    const nowIso = isoOf(nowMs);
     const call = async <T>(fn: () => Promise<T>): Promise<T> => {
       used.n += 1;
       return fn();
@@ -223,115 +262,327 @@ export class AssistantWatchService {
     const baseline = unit.cursor === null;
     const timeCursor = unit.surface === 'default_branch' || baseline ? null : unit.cursor;
     const sinceMs = timeCursor === null ? null : Date.parse(timeCursor);
-    if (timeCursor !== null && Number.isNaN(sinceMs)) {
-      return this.fail(unit, nowMs, 'unreadable_cursor');
-    }
-    const page = unit.pendingPage + 1;
-    // Items at the cursor are re-read (and told from known ones by identity) only
-    // when Ducky itself processed them; a baseline or a source cursor stays strict.
-    const inclusive = unit.state === 'ready' && unit.boundaryKnown;
+    if (timeCursor !== null && Number.isNaN(sinceMs)) return this.fail(unit, nowMs, 'unreadable_cursor');
+    const ctx: UnitCtx = {
+      unit, ref, call, nowMs, baseline, sinceMs,
+      // Items at the cursor are re-read (and told from known ones by identity) only
+      // when Ducky itself processed them; a baseline or a source cursor stays strict.
+      inclusive: unit.state === 'ready' && unit.boundaryKnown,
+      scan: parseScan(unit.pendingState),
+    };
 
     try {
-      let read: SurfaceRead;
-      let hasMore = false;
-      let alsoSet: { surface: WatchSurface; cursor: string } | undefined;
-
-      switch (unit.surface) {
-        case 'commits': {
-          const res = await call(() => this.reader.commits(ref, unit.defaultBranch, page));
-          hasMore = res.hasMore;
-          read = deriveCommits(res.items, sinceMs, unit.defaultBranch, inclusive);
-          break;
-        }
-        case 'pulls': {
-          const res = await call(() => this.reader.pulls(ref, page));
-          if (res.items.length > ASSISTANT_WATCH_PAGE_SIZE) return this.fail(unit, nowMs, 'page_too_large');
-          hasMore = res.hasMore;
-          const reviews = new Map<number, readonly ReviewRecord[]>();
-          for (const p of res.items) {
-            if (pullNeedsReviews(p, sinceMs)) {
-              reviews.set(p.number, await call(() => this.reader.pullReviews(ref, p.number)));
-            }
-          }
-          read = derivePulls(res.items, sinceMs, reviews, inclusive);
-          break;
-        }
-        case 'issues': {
-          const res = await call(() => this.reader.issues(ref, page));
-          hasMore = res.hasMore;
-          read = deriveIssues(res.items, sinceMs, inclusive);
-          break;
-        }
-        case 'runs': {
-          const items = await call(() => this.reader.runs(ref, unit.defaultBranch));
-          const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
-          const runs = deriveRuns(items, sinceMs, failing, inclusive);
-          read = runs;
-          if (!baseline && runs.ciState !== null) alsoSet = { surface: 'ci_state', cursor: runs.ciState };
-          break;
-        }
-        case 'releases': {
-          const items = await call(() => this.reader.releases(ref));
-          read = deriveReleases(items, sinceMs, inclusive);
-          break;
-        }
-        case 'default_branch': {
-          const current = await call(() => this.reader.defaultBranch(ref));
-          const d = deriveDefaultBranch(current, unit.cursor, nowIso);
-          const wrote = repo.commitObservation({
-            targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
-            cursor: d.cursor, nextDueAt: this.nextDue(nowMs), atIso: nowIso,
-            events: d.events.map((e) => this.write(e)),
-          });
-          return wrote === undefined ? 'incomplete' : 'completed';
-        }
-        default:
-          // `ci_state` moves with `runs` and is never read on its own.
-          return 'incomplete';
-      }
-
-      const priorNewest = unit.pendingCursor === null ? null : Date.parse(unit.pendingCursor);
-      const newest = [priorNewest, read.newestMs].reduce<number | null>(
-        (a, b) => (b === null || Number.isNaN(b) ? a : a === null || b > a ? b : a), null,
-      );
-      const complete = baseline || read.reachedCursor || !hasMore;
-
-      if (!complete) {
-        if (page >= ASSISTANT_WATCH_MAX_PAGES) {
-          // A window this deep is not something to chase: say so and stop, with
-          // the cursor and everything found so far left exactly as they were.
-          repo.block(unit.targetId, unit.surface, 'window_exceeded', nowIso);
-          return 'blocked';
-        }
-        repo.savePending({
-          targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
-          pendingCursor: isoOf(newest ?? nowMs), pendingPage: page,
-          // Continue at once: the read is half done, and others still go first
-          // because they have been waiting longer.
-          nextDueAt: nowIso, atIso: nowIso, events: read.events.map((e) => this.write(e)),
-        });
-        return 'incomplete';
-      }
-
-      const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, newest ?? Number.NEGATIVE_INFINITY);
-      // The cursor moving to an item newer than the old one means that item went
-      // through THIS pass and its events (if any) were recorded: the items at the
-      // new cursor are then known. A baseline, or a pass that moved nothing, says
-      // nothing new about the boundary.
-      const advanced = !baseline && sinceMs !== null && newest !== null && newest > sinceMs;
-      const committed = repo.commitObservation({
-        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
-        cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : nowMs),
-        nextDueAt: this.nextDue(nowMs), atIso: nowIso,
-        events: read.events.map((e) => this.write(e)),
-        ...(alsoSet ? { alsoSet } : {}),
-        ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
-      });
-      if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
-      return 'completed';
+      if (unit.surface === 'default_branch') return await this.observeRepository(ctx);
+      if (unit.surface === 'ci_state') return 'incomplete'; // moves with `runs`, never read alone
+      if (unit.surface === 'pulls' && (ctx.scan.queue?.length ?? 0) > 0) return await this.reviewStep(ctx);
+      if (ctx.scan.verify) return await this.verifyStep(ctx);
+      return await this.listStep(ctx);
     } catch (err) {
-      return this.fail(unit, nowMs, err instanceof UnreadableTimestamp ? 'unreadable_timestamp' : 'read_failed');
+      return this.failedWith(unit, nowMs, err);
     }
+  }
+
+  /** The default branch and the facts a poll cycle filters by, from one repository read. */
+  private async observeRepository(ctx: UnitCtx): Promise<UnitResult> {
+    const { unit } = ctx;
+    const repo = this.store.assistantWatch;
+    const nowIso = isoOf(ctx.nowMs);
+    const r = await ctx.call(() => this.reader.repository(ctx.ref));
+    repo.recordRepositoryFacts(unit.targetId, {
+      defaultBranch: r.defaultBranch, pushedAt: r.pushedAt, archived: r.archived, fork: r.fork,
+      relationship: null,
+    }, nowIso);
+    const d = deriveDefaultBranch(r.defaultBranch, unit.cursor, nowIso);
+    const wrote = repo.commitObservation({
+      targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+      cursor: d.cursor, nextDueAt: this.nextDue(ctx.nowMs), atIso: nowIso,
+      events: d.events.map((e) => this.write(e)),
+    });
+    return wrote === undefined ? 'incomplete' : 'completed';
+  }
+
+  /** The branch a commits or runs read follows, learned once and then fixed for the whole pass. */
+  private async branchFor(ctx: UnitCtx): Promise<string> {
+    if (ctx.scan.branch) return ctx.scan.branch;
+    if (ctx.unit.defaultBranch) return ctx.unit.defaultBranch;
+    const r = await ctx.call(() => this.reader.repository(ctx.ref));
+    this.store.assistantWatch.recordRepositoryFacts(ctx.unit.targetId, {
+      defaultBranch: r.defaultBranch, pushedAt: r.pushedAt, archived: r.archived, fork: r.fork,
+      relationship: null,
+    }, isoOf(ctx.nowMs));
+    return r.defaultBranch;
+  }
+
+  /** One list page, with the keys the end-of-window check compares. */
+  private async fetchList(ctx: UnitCtx, page: number, branch: string): Promise<ListFetch> {
+    const { ref, call } = ctx;
+    switch (ctx.unit.surface) {
+      case 'commits': {
+        const res = await call(() => this.reader.commits(ref, branch, page));
+        return { surface: 'commits', res, keys: res.items.map((c) => keyOf({ kind: 'commit', sha: c.sha })) };
+      }
+      case 'pulls': {
+        const res = await call(() => this.reader.pulls(ref, page));
+        if (res.items.length > ASSISTANT_WATCH_PAGE_SIZE) throw new WatchReadError('malformed');
+        return {
+          surface: 'pulls', res,
+          keys: res.items.map((p) => keyOf({ kind: 'pull', number: p.number, updatedAt: p.updatedAt })),
+        };
+      }
+      case 'issues': {
+        const res = await call(() => this.reader.issues(ref, page));
+        return {
+          surface: 'issues', res,
+          keys: res.items.map((i) => keyOf({ kind: 'issue', number: i.number, updatedAt: i.updatedAt })),
+        };
+      }
+      case 'runs': {
+        const res = await call(() => this.reader.runs(ref, branch, page));
+        return { surface: 'runs', res, keys: res.items.map((r) => keyOf({ kind: 'run', id: r.id })) };
+      }
+      case 'releases': {
+        const res = await call(() => this.reader.releases(ref, page));
+        return { surface: 'releases', res, keys: res.items.map((r) => keyOf({ kind: 'release', id: r.id })) };
+      }
+      default:
+        throw new WatchReadError('not_enabled', 'not a list surface');
+    }
+  }
+
+  private async listStep(ctx: UnitCtx): Promise<UnitResult> {
+    const { unit, sinceMs, inclusive, scan } = ctx;
+    const repo = this.store.assistantWatch;
+    const page = unit.pendingPage + 1;
+    const branch = unit.surface === 'commits' || unit.surface === 'runs' ? await this.branchFor(ctx) : '';
+    const f = await this.fetchList(ctx, page, branch);
+    const floorMs = unit.scanFloor ? Date.parse(unit.scanFloor) : null;
+
+    let read: SurfaceRead;
+    let hasMore = false;
+    let ci: 'failing' | 'passing' | null = null;
+    let pageFloorMs: number | null = null;
+    let queue: ScanState['queue'];
+    switch (f.surface) {
+      case 'commits':
+        hasMore = f.res.hasMore;
+        read = deriveCommits(f.res.items, sinceMs, branch, inclusive);
+        break;
+      case 'pulls': {
+        hasMore = f.res.hasMore;
+        const list = derivePullList(f.res.items, sinceMs, inclusive);
+        read = list;
+        if (list.reviewTargets.length > 0) queue = list.reviewTargets;
+        break;
+      }
+      case 'issues':
+        hasMore = f.res.hasMore;
+        read = deriveIssues(f.res.items, sinceMs, inclusive, f.res.windowStamp ?? null);
+        break;
+      case 'runs': {
+        hasMore = f.res.hasMore;
+        // A provider total that SHRINKS while the window is being read means rows were
+        // deleted above the read point, and one of them may have slid past a page.
+        if (scan.total != null && f.res.total != null && f.res.total < scan.total) {
+          return this.restart(unit, ctx.nowMs, 'window_unstable');
+        }
+        const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
+        const runs = deriveRuns(f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs);
+        read = runs;
+        ci = runs.ciState;
+        pageFloorMs = runs.unsettledFloorMs;
+        break;
+      }
+      case 'releases': {
+        hasMore = f.res.hasMore;
+        const rel = deriveReleases(f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs);
+        read = rel;
+        pageFloorMs = rel.unsettledFloorMs;
+        break;
+      }
+    }
+
+    const priorNewest = unit.pendingCursor === null ? null : Date.parse(unit.pendingCursor);
+    const newest = maxMs(priorNewest, read.newestMs);
+    const complete = ctx.baseline || read.reachedCursor || !hasMore;
+    const next: ScanState = {
+      v: 1,
+      ...(branch ? { branch } : {}),
+      last: { page, keys: f.keys },
+      total: scan.total ?? (f.surface === 'runs' ? f.res.total ?? null : null),
+      floorMs: minMs(scan.floorMs ?? null, pageFloorMs),
+      ci: scan.ci ?? ci,
+      ...(queue ? { queue } : {}),
+      ...(queue ? { closing: complete } : {}),
+    };
+
+    if (queue && !(page >= PAGE_CAP.pulls && !complete)) {
+      // Reviews are read before the window can commit or move on.
+      repo.savePending({
+        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+        pendingCursor: isoOf(newest ?? ctx.nowMs), pendingPage: page, pendingState: serializeScan(next),
+        nextDueAt: isoOf(ctx.nowMs), atIso: isoOf(ctx.nowMs), events: read.events.map((e) => this.write(e)),
+      });
+      return 'incomplete';
+    }
+    return this.advance(ctx, {
+      page, complete, newestMs: newest, events: read.events, scan: next, verified: false,
+    });
+  }
+
+  /**
+   * One pull request's reviews, one page of them, then on to the next.
+   *
+   * Reviews are listed oldest first, so the newest are on the LAST page and a
+   * pull request with a great many cannot be read whole inside the page cap: that
+   * blocks the surface as `window_exceeded` rather than reading a prefix and
+   * calling it the window.
+   */
+  private async reviewStep(ctx: UnitCtx): Promise<UnitResult> {
+    const { unit, scan } = ctx;
+    const repo = this.store.assistantWatch;
+    const queue = scan.queue ?? [];
+    const target = queue[0]!;
+    if (ctx.sinceMs === null) return this.restart(unit, ctx.nowMs, 'review_without_cursor');
+    const rvPage = scan.rv?.page ?? 1;
+    const res = await ctx.call(() => this.reader.pullReviews(ctx.ref, target.n, rvPage));
+    if (res.items.length > ASSISTANT_WATCH_PAGE_SIZE) throw new WatchReadError('malformed');
+    const rd = deriveReviews(target, res.items, ctx.sinceMs, ctx.inclusive);
+    const changes = (scan.rv?.changes ?? false) || rd.changesRequested;
+    const events: DerivedEvent[] = [...rd.events];
+    const nowIso = isoOf(ctx.nowMs);
+    const pendingCursor = unit.pendingCursor ?? nowIso;
+
+    if (res.hasMore) {
+      if (rvPage >= WATCH_API_REVIEWS_MAX_PAGES) {
+        repo.block(unit.targetId, unit.surface, 'window_exceeded', nowIso);
+        return 'blocked';
+      }
+      repo.savePending({
+        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+        pendingCursor, pendingPage: unit.pendingPage,
+        pendingState: serializeScan({ ...scan, rv: { page: rvPage + 1, changes } }),
+        nextDueAt: nowIso, atIso: nowIso, events: events.map((e) => this.write(e)),
+      });
+      return 'incomplete';
+    }
+
+    if (changes) events.push(reviewPendingMarker(target));
+    const rest = queue.slice(1);
+    const { rv: _rv, queue: _q, ...kept } = scan;
+    if (rest.length > 0) {
+      repo.savePending({
+        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+        pendingCursor, pendingPage: unit.pendingPage,
+        pendingState: serializeScan({ ...kept, queue: rest }),
+        nextDueAt: nowIso, atIso: nowIso, events: events.map((e) => this.write(e)),
+      });
+      return 'incomplete';
+    }
+    return this.advance(ctx, {
+      page: unit.pendingPage, complete: scan.closing === true, newestMs: Date.parse(pendingCursor),
+      events, scan: kept, verified: false,
+    });
+  }
+
+  /**
+   * Re-reads the last page of a window that spanned several, and compares.
+   *
+   * See `windowHeldStill`. If the page shows the window held still, the pass
+   * commits. If not, the pass is thrown away and restarted (with backoff): what
+   * was found stays held, because it is real and deduplicates by identity.
+   */
+  private async verifyStep(ctx: UnitCtx): Promise<UnitResult> {
+    const { unit, scan } = ctx;
+    const last = scan.last;
+    if (!last) return this.restart(unit, ctx.nowMs, 'window_unstable');
+    const branch = unit.surface === 'commits' || unit.surface === 'runs' ? await this.branchFor(ctx) : '';
+    const again = await this.fetchList(ctx, last.page, branch);
+    if (!windowHeldStill(last.keys, again.keys)) return this.restart(unit, ctx.nowMs, 'window_unstable');
+    return this.advance(ctx, {
+      page: last.page, complete: true, newestMs: unit.pendingCursor ? Date.parse(unit.pendingCursor) : null,
+      events: [], scan: { ...scan, verify: false }, verified: true,
+    });
+  }
+
+  /**
+   * What happens after a list page (or the last review of one) has been read:
+   * save progress, ask for the end-of-window re-read, or commit.
+   */
+  private advance(ctx: UnitCtx, a: {
+    page: number;
+    complete: boolean;
+    newestMs: number | null;
+    events: readonly DerivedEvent[];
+    scan: ScanState;
+    verified: boolean;
+  }): UnitResult {
+    const { unit, sinceMs, baseline } = ctx;
+    const repo = this.store.assistantWatch;
+    const nowIso = isoOf(ctx.nowMs);
+    const surface = unit.surface as keyof typeof PAGE_CAP;
+    const { queue: _q, rv: _rv, closing: _c, verify: _v, ...scan } = a.scan;
+
+    if (!a.complete) {
+      if (a.page >= PAGE_CAP[surface]) {
+        // A window this deep is not something to chase: say so and stop, with the
+        // cursor and everything found so far left exactly as they were.
+        repo.block(unit.targetId, unit.surface, 'window_exceeded', nowIso);
+        return 'blocked';
+      }
+      repo.savePending({
+        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+        pendingCursor: isoOf(a.newestMs ?? ctx.nowMs), pendingPage: a.page,
+        pendingState: serializeScan(scan),
+        // Continue at once: the read is half done, and others still go first
+        // because they have been waiting longer.
+        nextDueAt: nowIso, atIso: nowIso, events: a.events.map((e) => this.write(e)),
+      });
+      return 'incomplete';
+    }
+
+    if (!baseline && a.page >= 2 && !a.verified) {
+      repo.savePending({
+        targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+        pendingCursor: isoOf(a.newestMs ?? ctx.nowMs), pendingPage: a.page,
+        pendingState: serializeScan({ ...scan, verify: true }),
+        nextDueAt: nowIso, atIso: nowIso, events: a.events.map((e) => this.write(e)),
+      });
+      return 'incomplete';
+    }
+
+    const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, a.newestMs ?? Number.NEGATIVE_INFINITY);
+    // The cursor moving to an item newer than the old one means that item went
+    // through THIS pass and its events (if any) were recorded: the items at the
+    // new cursor are then known. A baseline, or a pass that moved nothing, says
+    // nothing new about the boundary.
+    const advanced = !baseline && sinceMs !== null && a.newestMs !== null && a.newestMs > sinceMs;
+    const ci = scan.ci ?? null;
+    const floor = this.trackedFloor(unit.surface, scan.floorMs ?? null, ctx.nowMs);
+    const committed = repo.commitObservation({
+      targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+      cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : ctx.nowMs),
+      nextDueAt: this.nextDue(ctx.nowMs), atIso: nowIso,
+      events: a.events.map((e) => this.write(e)),
+      ...(!baseline && ci !== null ? { alsoSet: { surface: 'ci_state' as const, cursor: ci } } : {}),
+      ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
+      ...(unit.surface === 'runs' || unit.surface === 'releases' ? { scanFloor: floor } : {}),
+    });
+    if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
+    return 'completed';
+  }
+
+  /**
+   * The creation time the NEXT window must reach back to, or null.
+   *
+   * Only an item young enough to be tracked counts: a run queued for a day, or a
+   * draft untouched for a month, is treated as abandoned, so one stuck item cannot
+   * hold a window open without bound. What settles after that is the named
+   * residual of this scheme, not something it claims to see.
+   */
+  private trackedFloor(surface: WatchSurface, floorMs: number | null, nowMs: number): string | null {
+    if (floorMs === null) return null;
+    const maxAge = surface === 'runs' ? RUN_TRACK_MAX_AGE_MS : DRAFT_TRACK_MAX_AGE_MS;
+    return nowMs - floorMs > maxAge ? null : isoOf(floorMs);
   }
 
   private write(e: DerivedEvent): ObservedEventWrite {
@@ -349,17 +600,71 @@ export class AssistantWatchService {
     return isoOf(nowMs + ASSISTANT_WATCH_INTERVAL_MINUTES * MINUTE);
   }
 
-  /** A failed read: backoff, a short code and nothing else. The cursor is untouched. */
-  private fail(unit: DueCheckpoint, nowMs: number, code: string): 'failed' {
-    const delay = Math.min(
-      ASSISTANT_WATCH_INTERVAL_MINUTES * MINUTE * 2 ** Math.min(unit.failures, 10),
-      ASSISTANT_WATCH_BACKOFF_MAX_MS,
+  private backoff(unit: DueCheckpoint, minimumMs = 0): number {
+    return Math.max(
+      minimumMs,
+      Math.min(
+        ASSISTANT_WATCH_INTERVAL_MINUTES * MINUTE * 2 ** Math.min(unit.failures, 10),
+        ASSISTANT_WATCH_BACKOFF_MAX_MS,
+      ),
     );
+  }
+
+  /** A failed read: backoff, a short code and nothing else. The cursor is untouched. */
+  private fail(unit: DueCheckpoint, nowMs: number, code: string, minimumMs = 0): 'failed' {
     this.store.assistantWatch.recordFailure({
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
-      nextDueAt: isoOf(nowMs + delay), errorCode: code, atIso: isoOf(nowMs),
+      nextDueAt: isoOf(nowMs + this.backoff(unit, minimumMs)), errorCode: code, atIso: isoOf(nowMs),
     });
     return 'failed';
+  }
+
+  /** A read whose window moved while it was being read: start it again, later. */
+  private restart(unit: DueCheckpoint, nowMs: number, code: string): 'failed' {
+    this.store.assistantWatch.restartPass({
+      targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+      nextDueAt: isoOf(nowMs + this.backoff(unit)), errorCode: code, atIso: isoOf(nowMs),
+    });
+    return 'failed';
+  }
+
+  /**
+   * What a failed request means.
+   *
+   * A rate limit or an authentication failure stops the WHOLE cycle for ten
+   * minutes (the source does the same) and fails only the unit that met it. A
+   * window past its cap, or a repository that is no longer the one asked for,
+   * blocks rather than retries. A repository the provider no longer shows is
+   * unmonitored for good, as the source does. Everything else is a short code and
+   * a backoff. Nothing here ever advances a cursor.
+   */
+  private failedWith(unit: DueCheckpoint, nowMs: number, err: unknown): UnitResult {
+    const repo = this.store.assistantWatch;
+    const nowIso = isoOf(nowMs);
+    if (err instanceof UnreadableTimestamp) return this.fail(unit, nowMs, 'unreadable_timestamp');
+    if (err instanceof WatchReadError) {
+      switch (err.code) {
+        case 'window_exceeded':
+          repo.block(unit.targetId, unit.surface, 'window_exceeded', nowIso);
+          return 'blocked';
+        case 'identity_changed':
+          repo.blockTarget(unit.targetId, 'identity_changed', nowIso);
+          return 'blocked';
+        case 'rate_limited':
+        case 'auth':
+          this.pausedUntilMs = nowMs + PAUSE_MS;
+          return this.fail(unit, nowMs, err.code, PAUSE_MS);
+        case 'not_found':
+          if (unit.surface === 'default_branch') {
+            repo.cancelBySystem(unit.targetId, 'not_found', nowIso);
+            return 'failed';
+          }
+          return this.fail(unit, nowMs, 'not_found');
+        default:
+          return this.fail(unit, nowMs, err.code);
+      }
+    }
+    return this.fail(unit, nowMs, 'read_failed');
   }
 
   // ---- delivery -------------------------------------------------------------------
@@ -452,6 +757,30 @@ export class AssistantWatchService {
       (observing ? '' : '; NOT observing (no typed reader in this build)');
   }
 }
+
+/** Everything one unit needs, assembled once. */
+interface UnitCtx {
+  readonly unit: DueCheckpoint;
+  readonly ref: WatchRepoRef;
+  readonly call: <T>(fn: () => Promise<T>) => Promise<T>;
+  readonly nowMs: number;
+  readonly baseline: boolean;
+  readonly sinceMs: number | null;
+  readonly inclusive: boolean;
+  readonly scan: ScanState;
+}
+
+type ListFetch =
+  | { readonly surface: 'commits'; readonly res: Page<import('./assistant-watch.reader.js').CommitRecord>; readonly keys: string[] }
+  | { readonly surface: 'pulls'; readonly res: Page<import('./assistant-watch.reader.js').PullRecord>; readonly keys: string[] }
+  | { readonly surface: 'issues'; readonly res: Page<import('./assistant-watch.reader.js').IssueRecord>; readonly keys: string[] }
+  | { readonly surface: 'runs'; readonly res: Page<import('./assistant-watch.reader.js').RunRecord>; readonly keys: string[] }
+  | { readonly surface: 'releases'; readonly res: Page<import('./assistant-watch.reader.js').ReleaseRecord>; readonly keys: string[] };
+
+const maxMs = (a: number | null, b: number | null): number | null =>
+  b === null || Number.isNaN(b) ? a : a === null || Number.isNaN(a) || b > a ? b : a;
+const minMs = (a: number | null, b: number | null): number | null =>
+  a === null ? b : b === null ? a : Math.min(a, b);
 
 const refOf = (display: string): WatchRepoRef => {
   const [owner, repo] = display.split('/') as [string, string];

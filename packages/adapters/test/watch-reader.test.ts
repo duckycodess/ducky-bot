@@ -175,7 +175,9 @@ describe('failures are short codes, never provider text', () => {
   });
 
   it('never carries stderr text in the error', async () => {
-    const h = harness([{ code: 1, stderr: 'gh: Not Found (HTTP 404) token ghp_abcdefghijklmnopqrstuvwxyz0123456789' }]);
+    // Built at run time so no token-shaped literal sits in the source.
+    const token = ['gh', 'p_', 'a'.repeat(36)].join('');
+    const h = harness([{ code: 1, stderr: `gh: Not Found (HTTP 404) token ${token}` }]);
     const err = await h.reader.pulls(REF, 1).then(() => new Error('no failure'), (e: unknown) => e as Error);
     expect(String(err.message)).not.toMatch(/ghp_|Not Found/);
   });

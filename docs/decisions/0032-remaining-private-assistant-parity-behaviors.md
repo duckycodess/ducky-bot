@@ -62,7 +62,22 @@ and widening it needs a table rebuild).
   read, but the private audit does not define how an area is extracted or which file
   paths count as sensitive. Inventing a rule would be unsupported behavior, so this stays
   a named blocker on the rule.
-- **AI wording of briefings, and meals.** Not implemented; the importer still refuses an
-  active preference for either, and nothing is copied from the source's catalog.
+- **AI wording of briefings.** Not implemented, and the blocker is specific. The only
+  approved provider path is the OpenClaw conversation provider, and every call through it is
+  a session-keyed agent turn whose transcript OpenClaw keeps in its own store; no
+  session-deletion contract has been recorded for it (ADR 0024: there are two stores, and
+  only one is Ducky's). A briefing sentence generated that way would leave the owner's day
+  in a transcript `/forget` cannot delete. Doing it safely needs a stateless call that
+  leaves no transcript (an owner decision and a recorded contract), frozen configuration
+  that opts in, counts-only input that never carries a capture or digest, validation that
+  item identities, counts and states are unchanged, and live evidence on an eligible
+  runtime. None exists, so the importer still refuses an active wording preference and
+  every briefing stays deterministic, which is already the complete, non-authoritative
+  fallback the source has. No billed fallback was or will be created.
+- **Meals.** Not implemented, and not asserted by mechanical support. The source's meal
+  behavior rests on a built-in catalog this repository has no licence to copy, so the
+  preferences, history and repeat-cooldown mechanics alone would be a shell that looks like
+  parity and is not. It needs an owner-supplied catalog and a contract for it; until then
+  the importer refuses an active meal preference.
 - **A way for the owner to resume a paused global watch switch.** Carried over and
   honoured (ADR 0031), but changing it needs an owner control that was not authorized.

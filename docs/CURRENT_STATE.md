@@ -1206,8 +1206,11 @@ Where Ducky refuses an input instead of carrying it, the refusal is the
 fail-closed form of the blocker, not a decision to drop it.
 
 - **Unsupported source values (refused by validation, never normalized):** AI
-  wording of briefings, and meals (their preferences, suggestion history and the
-  meal-in-briefing behavior). The `urgent` priority and the two task categories are
+  wording of briefings (the only approved provider is a session-keyed OpenClaw turn
+  whose transcript `/forget` cannot delete, so it needs a stateless-call contract, an
+  owner decision and live evidence; every briefing stays deterministic), and meals
+  (their preferences, suggestion history and the meal-in-briefing behavior; the source's
+  built-in catalog cannot be copied, so mechanics alone would not be parity). The `urgent` priority and the two task categories are
   now carried as data (ADR 0032): urgent is stored as `high` plus a flag, ranks above
   high in lists and the lookahead and is shown as urgent, and the category is shown
   with the task; no native command sets either, and the task command definitions are
@@ -1275,7 +1278,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2302 tests in 147 files**.
+The unmodified `pnpm test` command passes all **2305 tests in 148 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

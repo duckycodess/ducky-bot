@@ -337,6 +337,8 @@ export interface RunsRead extends SurfaceRead {
   readonly ciState: 'failing' | 'passing' | null;
   /** The oldest creation time (ms) of a run seen unsettled on this page, or null. */
   readonly unsettledFloorMs: number | null;
+  /** The oldest last-update time (ms) of a run seen unsettled on this page, or null. */
+  readonly unsettledStampMs: number | null;
 }
 
 /**
@@ -360,6 +362,8 @@ export function deriveRuns(
   previouslyFailing: boolean,
   inclusive = false,
   floorMs: number | null = null,
+  /** Runs created before this are abandoned and are not tracked as unsettled. */
+  trackFromMs: number | null = null,
 ): RunsRead {
   const at_ = edges(sinceMs, inclusive);
   const threshold = windowThresholdMs(sinceMs, floorMs);
@@ -367,6 +371,7 @@ export function deriveRuns(
   let newestConclusion: string | null = null;
   let reached = false;
   let unsettledFloor: number | null = null;
+  let unsettledStamp: number | null = null;
   const events: DerivedEvent[] = [];
   for (const r of items) {
     const stamp = r.updatedAt ?? r.createdAt;
@@ -374,8 +379,9 @@ export function deriveRuns(
     const created = at(r.createdAt);
     newest = maxOf(newest, ms);
     const status = r.status.toLowerCase();
-    if (UNSETTLED_RUN.has(status)) {
+    if (UNSETTLED_RUN.has(status) && (trackFromMs === null || created >= trackFromMs)) {
       unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
+      unsettledStamp = unsettledStamp === null || ms < unsettledStamp ? ms : unsettledStamp;
     }
     if (threshold !== null && created <= threshold) reached = true;
     if (sinceMs === null || at_.old(ms)) continue;
@@ -394,6 +400,7 @@ export function deriveRuns(
   }
   return {
     events, newestMs: newest, reachedCursor: reached, unsettledFloorMs: unsettledFloor,
+    unsettledStampMs: unsettledStamp,
     ciState: newestConclusion === null ? null : FAILED.has(newestConclusion) ? 'failing' : 'passing',
   };
 }
@@ -410,6 +417,8 @@ export function deriveReleases(
   sinceMs: number | null,
   inclusive = false,
   floorMs: number | null = null,
+  /** Drafts created before this are abandoned and are not tracked. */
+  trackFromMs: number | null = null,
 ): ReleasesRead {
   const at_ = edges(sinceMs, inclusive);
   const threshold = windowThresholdMs(sinceMs, floorMs);
@@ -423,7 +432,9 @@ export function deriveReleases(
     // A draft is not a publication. It is tracked, so that when it is published
     // the window reaches back to where it sits, and it announces nothing now.
     if (r.draft) {
-      if (created !== null) unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
+      if (created !== null && (trackFromMs === null || created >= trackFromMs)) {
+        unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
+      }
       continue;
     }
     const stamp = r.publishedAt ?? r.createdAt;

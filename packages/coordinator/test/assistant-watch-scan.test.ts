@@ -21,9 +21,13 @@ describe('windowHeldStill', () => {
   it('rejects a deletion paired with an insertion that keeps the length', () => {
     expect(windowHeldStill(page, ['x', 'b', 'c', 'd'])).toBe(false);
   });
-  it('treats an empty page on either side as holding still: nothing can have slid past it', () => {
+  it('treats a page that held items and is now EMPTY as drift, not as stability', () => {
+    // Everything on it was deleted, moved to the top or pushed off: any of those can hide a boundary item.
+    expect(windowHeldStill(page, [])).toBe(false);
+  });
+  it('treats a page that was empty as holding still: an item can only have appeared on it', () => {
     expect(windowHeldStill([], ['a'])).toBe(true);
-    expect(windowHeldStill(page, [])).toBe(true);
+    expect(windowHeldStill([], [])).toBe(true);
   });
 });
 

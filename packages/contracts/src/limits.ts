@@ -628,6 +628,17 @@ export const ASSISTANT_WATCH_INTERVAL_MINUTES = 15;
 export const ASSISTANT_WATCH_BACKOFF_MAX_MS = 6 * 60 * 60_000;
 /** Pages one read may span before it is blocked as unbounded; one page is one unit of work. */
 export const ASSISTANT_WATCH_MAX_PAGES = 50;
+/**
+ * The source polls at most this many eligible repositories per cycle, most
+ * recently pushed first (audited). Repositories beyond it are not polled until
+ * their recency moves them in, which is the source's behavior and is preserved,
+ * not "fixed" by a sweep. Their metadata is still refreshed on the slower interval
+ * below, so a quiet repository that wakes up can rise into coverage.
+ */
+export const ASSISTANT_WATCH_CYCLE_TARGETS = 40;
+/** How often repository discovery runs, and how often an uncovered target's metadata is refreshed. */
+export const ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS = 6;
+export const ASSISTANT_WATCH_METADATA_INTERVAL_HOURS = 6;
 /** Open pull requests whose reviews one pulls page reads, so a unit's cost is bounded. */
 export const ASSISTANT_WATCH_PAGE_SIZE = 10;
 export const ASSISTANT_WATCH_EVENT_BATCH = 10;

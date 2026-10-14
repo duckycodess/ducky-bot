@@ -6,6 +6,7 @@ import {
   type WeatherPort,
 } from '@ducky/adapters';
 import type { AssistantWatchReader } from '../src/domain/assistant-watch.reader.js';
+import type { AssistantWatchConfig } from '../src/domain/assistant-watch.service.js';
 import { createApp, type App } from '../src/app.js';
 import type { ActionPerformer } from '../src/domain/action-performer.js';
 import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
@@ -76,6 +77,7 @@ export interface HarnessOptions {
   readonly github?: GitHubReader;
   /** The typed notification reader. Omitted means the shipped one, which observes nothing. */
   readonly assistantWatchReader?: AssistantWatchReader;
+  readonly assistantWatchConfig?: AssistantWatchConfig;
   /** The forecast. Omitted means Open-Meteo, which only runs if a location is configured. */
   readonly weather?: WeatherPort;
   /** Take the shared runtime lock as the coordinator does. Off for tests that model a restart. */
@@ -180,6 +182,7 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
       ...(opts.assistantWatchReader ? { assistantWatchReader: opts.assistantWatchReader } : {}),
+      ...(opts.assistantWatchConfig ? { assistantWatchConfig: opts.assistantWatchConfig } : {}),
       ...(opts.weather ? { weather: opts.weather } : {}),
       ...(opts.holdRuntimeLock ? { holdRuntimeLock: true } : {}),
     },

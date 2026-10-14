@@ -239,7 +239,7 @@ export const ImportedWatchTargetSchema = z.strictObject({
 export type ImportedWatchTarget = z.infer<typeof ImportedWatchTargetSchema>;
 
 export const ImportedWatchSchema = z.strictObject({
-  /** The source's global switch. Off is refused: there is no paused state here. */
+  /** The source's global switch. Off is carried over: no target is read while it is off. */
   monitoringEnabled: z.boolean(),
   targets: z.array(ImportedWatchTargetSchema).max(ASSISTANT_WATCH_MAX_TARGETS),
 });
@@ -427,7 +427,6 @@ function semanticChecks(doc: AssistantImportDocument, bag: IssueBag): void {
   // ---- watch --------------------------------------------------------------
   const watch = doc.watch;
   if (watch) {
-    if (!watch.monitoringEnabled) bag.add('watch', 'monitoring_disabled_unsupported');
     bag.add('watch', 'duplicate_source_id', dupes(watch.targets, (t) => t.sourceId));
     bag.add('watch', 'duplicate_reference', dupes(watch.targets, (t) => watchTargetKey(t.reference)));
     let events = 0;

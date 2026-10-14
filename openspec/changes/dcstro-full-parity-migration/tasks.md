@@ -12,7 +12,7 @@
 - [x] 2.4 Implement indefinite recurring schedules, audited exceptions and bounded read-time occurrences for list/briefing.
 - [x] 2.5 Implement bounded notification-only selection and fair per-tick/rolling resource budgets without engineering authorization changes.
 - [x] 2.6 Preserve typed watch checkpoints and alert/digest event settlement with explicit transition reconciliation and resumable partial reads. (Engine and persistence, proven with a scripted reader. No real reader exists: release publication, closing times and discovery remain blocked, so a document with watch targets fails closed. See ADR 0030.)
-- [x] 2.7 Preserve audited active preference/briefing behavior with no imported authorization or deployment config writes. (AI wording, meals and a paused watch switch are refused, not supported.)
+- [x] 2.7 Preserve audited active preference/briefing behavior with no imported authorization or deployment config writes. (AI wording and meals are refused, not supported; a paused watch switch is now carried over, ADR 0031. Original note: AI wording, meals and a paused watch switch are refused, not supported.)
 - [ ] 2.8 Add explicit offline importer, dry validation/semantic verification and private read-only rollback-delta export where sufficient. (Importer, dry run, `--verify` and the lock/backup gates are done. The rollback-delta export is NOT implemented and the reverse-delta bridge stays an unproven gate.)
 
 ## 3. Synthetic verification and final review
@@ -39,12 +39,12 @@ Unchecked operational evidence is required and blocks merge readiness for issue 
 
 Full parity is settled. These are not proposed exclusions: each blocks cutover and retirement until supported and proven, and Ducky refuses the corresponding input meanwhile.
 
-- [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests. (Reader, policy, ADR 0031 and pinned tests done and probed read-only on a public repository; off by default. Discovery persistence, scope filtering and enablement are NOT done.)
-- [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch.
+- [ ] 5.1 A real typed reader (release publication, closing times) and repository discovery, through an owner-approved reader constraint change with an ADR and pinned tests. (Reader, policy, ADR 0031 and pinned tests done and probed read-only on a public repository; off by default. Discovery with scope filtering, tombstones and a capacity report is implemented and unit-tested; it is off by default and has never been enabled or probed live.)
+- [ ] 5.2 Support for the `urgent` priority, task categories, AI wording of briefings, meals and a paused global watch switch. (The switch is carried over and gates reads; no owner control resumes it. The rest are not done.)
 - [ ] 5.3 The requested-changes alert's "areas mentioned".
 - [ ] 5.4 The source's morning-briefing staleness rule.
 - [ ] 5.5 Rollback control between schedule batches.
-- [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics.
+- [ ] 5.6 The source's discovery schedule and polling-cycle coverage semantics. (Implemented and unit-tested: six-hour discovery, 40-target recency cycle, eligibility filters. Unproven live.)
 - [ ] 5.7 Suppression of overlap with the ordinary `github_watches` snapshot DM.
 - [ ] 5.8 Reconciliation of a late review that shares the cursor's timestamp. (Implemented by review id once the boundary is known; unit-tested only, so the box stays open until live evidence.)
 - [ ] 5.9 Paging (or a proof of completeness) for the workflow-runs and releases surfaces in a real reader. (Implemented as separate page units, a creation-sorted window with an unsettled-item floor and a last-page re-read; named residuals in ADR 0031 remain required blockers.)

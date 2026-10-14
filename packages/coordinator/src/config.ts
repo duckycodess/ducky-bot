@@ -16,7 +16,7 @@ import {
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   GITHUB_FEED_INTERVAL_DEFAULT_MINUTES, GITHUB_FEED_INTERVAL_MAX_MINUTES,
   GITHUB_FEED_INTERVAL_MIN_MINUTES, GITHUB_FEED_MAX_SELECTED, canonicalRepoKey, parseRepoKey,
-  blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
+  GH_OWNER_RE, blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -309,6 +309,22 @@ export const EnvSchema = z.object({
    * operator decision that waits for runtime eligibility (issue 8).
    */
   DUCKY_ASSISTANT_WATCH_READER_ENABLED: bool(false),
+  /**
+   * Repository DISCOVERY for notification-only targets: the authenticated account's
+   * repositories (owner, collaborator, organization member), five pages of a
+   * hundred at most, every six hours. Off by default and refused unless the reader
+   * is enabled and the account that IS the owner is named: the account cannot be
+   * proven through an approved read, so it is stated here, as with review requests.
+   * `RELATIONSHIPS` limits what is ever stored; anything outside never reaches
+   * the database. Forks the account owns and archived repositories are not polled
+   * unless included, as in the source. Discovered targets count toward the 1,000
+   * ceiling; overflow is reported, never truncated.
+   */
+  DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED: bool(false),
+  DUCKY_ASSISTANT_WATCH_ACCOUNT: z.string().max(100).optional(),
+  DUCKY_ASSISTANT_WATCH_RELATIONSHIPS: z.string().max(100).default('owner,organization,collaborator'),
+  DUCKY_ASSISTANT_WATCH_INCLUDE_FORKS: bool(false),
+  DUCKY_ASSISTANT_WATCH_INCLUDE_ARCHIVED: bool(false),
   DUCKY_GITHUB_FEED_INTERVAL_MINUTES: z.coerce.number().int()
     .min(GITHUB_FEED_INTERVAL_MIN_MINUTES)
     .max(GITHUB_FEED_INTERVAL_MAX_MINUTES)
@@ -1014,6 +1030,51 @@ export const resolveSkillBridge = (env: Env): {
  * reader enforces, so a typo fails at startup instead of becoming a feed that
  * quietly never observes anything.
  */
+export interface ResolvedWatchConfig {
+  readonly readerEnabled: boolean;
+  readonly account: string | null;
+  readonly discovery: boolean;
+  readonly relationships: ReadonlySet<'owner' | 'organization' | 'collaborator'>;
+  readonly includeForks: boolean;
+  readonly includeArchived: boolean;
+}
+
+/**
+ * The frozen configuration of notification-only watching. Inconsistent settings
+ * are refused rather than interpreted: discovery without the reader or without a
+ * named account would otherwise quietly never run.
+ */
+export function resolveWatchConfig(env: Env): ResolvedWatchConfig {
+  const account = env.DUCKY_ASSISTANT_WATCH_ACCOUNT?.trim() || null;
+  if (account !== null && !GH_OWNER_RE.test(account)) {
+    throw new DuckyError('invalid_input', 'DUCKY_ASSISTANT_WATCH_ACCOUNT is not a GitHub login.');
+  }
+  const relationships = new Set<'owner' | 'organization' | 'collaborator'>();
+  for (const part of env.DUCKY_ASSISTANT_WATCH_RELATIONSHIPS.split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (part !== 'owner' && part !== 'organization' && part !== 'collaborator') {
+      throw new DuckyError('invalid_input', 'DUCKY_ASSISTANT_WATCH_RELATIONSHIPS has an unknown value.');
+    }
+    relationships.add(part);
+  }
+  if (env.DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED) {
+    if (!env.DUCKY_ASSISTANT_WATCH_READER_ENABLED) {
+      throw new DuckyError('invalid_input', 'Discovery needs DUCKY_ASSISTANT_WATCH_READER_ENABLED.');
+    }
+    if (account === null) {
+      throw new DuckyError('invalid_input', 'Discovery needs DUCKY_ASSISTANT_WATCH_ACCOUNT: the login that is the owner.');
+    }
+    if (relationships.size === 0) {
+      throw new DuckyError('invalid_input', 'Discovery needs at least one allowed relationship.');
+    }
+  }
+  return {
+    readerEnabled: env.DUCKY_ASSISTANT_WATCH_READER_ENABLED, account,
+    discovery: env.DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED, relationships,
+    includeForks: env.DUCKY_ASSISTANT_WATCH_INCLUDE_FORKS,
+    includeArchived: env.DUCKY_ASSISTANT_WATCH_INCLUDE_ARCHIVED,
+  };
+}
+
 export function resolveGitHubFeed(env: Env): {
   enabled: boolean;
   intervalMinutes: number;

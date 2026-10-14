@@ -12,7 +12,7 @@ pnpm probe:herdr      # record live Herdr responses (creates and cleans up a tem
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
 pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
-pnpm probe:watch-reader   # read-only, approved PUBLIC repo only, counts never values; exits 4 on a missing surface, 3 on an unapproved target
+pnpm probe:watch-reader   # read-only, approved PUBLIC repo only, counts never values; exits 4 on a missing surface or an empty answer (--allow-empty accepts shape-only), 3 on an unapproved target
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file

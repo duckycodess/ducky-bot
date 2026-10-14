@@ -92,9 +92,17 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   shows the window held still: the original items, shifted down by insertions
   above and possibly with their tail pushed off. A deleted row above slides the
   next page up and would hide an item at a page boundary, so a re-read that shows
-  anything else, or a runs total that shrank, restarts the pass with backoff;
+  anything else (an item gone or moved, a different order, a page that held items
+  and is now empty), or a runs total that shrank, restarts the pass with backoff;
   what was found stays held, because it is real and deduplicates by identity. A
   window that fitted one page is one consistent answer and is not re-read.
+  **This narrows the window for a miss; it is not a proof** (see the residuals).
+- What settles in the middle of a pass is not jumped over. The committed cursor is
+  capped at an unsettled run's last update (less a millisecond), or at the moment a
+  draft release was read, so something else on the same pass cannot carry the cursor
+  past an update that is still to come. What the cap makes the next pass read again
+  is told apart by identity. A first sight is not capped: nothing was announced for
+  it, and re-reading would announce history.
 - A window past its page cap (3 commit pages, 50 pull and issue pages, 10 runs,
   releases or review pages) is **blocked as `window_exceeded`** with the cursor and
   the held events untouched. It is a counted, visible blocker, not a partial scan.
@@ -108,9 +116,12 @@ one by its id. A baseline or a source cursor stays strict.
 
 ## What this ADR deliberately does not claim
 
-- **Completeness is proven only as far as these reads allow.** The residuals are
-  named, not hidden: (1) a deletion and insertions that cancel out between the
-  first read of a page and its re-read look like a pure shift; (2) a draft release
+- **Completeness is NOT proven, and no parity claim rests on it.** Comparing the
+  last page cannot see a deletion that left that page untouched, nor tell a pure
+  shift from a deletion paired with insertions that cancel out, so a multi-page
+  window can still miss an item at a page boundary. This is a **required
+  completeness blocker** until the owner accepts it or a stronger scheme exists, not
+  a passed gate. The other residuals are named, not hidden: (1) the one above; (2) a draft release
   or an in-flight run that sat BEYOND the first page when a target was first seen
   is not tracked, because the first sight reads one page; (3) a run re-run long
   after it settled, a run unsettled for more than a day and a draft untouched for
@@ -118,15 +129,38 @@ one by its id. A baseline or a source cursor stays strict.
   than 100 reviews cannot be read whole and blocks. Each remains a required
   parity blocker until the owner accepts or a stronger scheme exists.
 - **No live certification of completeness or latency.** `pnpm
-  probe:watch-reader` recorded that each approved surface (except discovery)
-  answers and parses against the public probe repository. That is not evidence of
-  completeness, latency, quota behaviour under the source's real selection, or
-  runtime eligibility (issue 8), all of which remain required operational checks.
-- **Discovery is specified here but not enabled.** Its shape is pinned, its
-  reader method refuses unless frozen configuration enables it, and this build
-  does not enable it. Persisted discovery, the source's recency-limited poll cycle
-  and the eligibility filters are tracked in `docs/CURRENT_STATE.md` and
-  `openspec/changes/dcstro-full-parity-migration/tasks.md` as unfinished.
+  probe:watch-reader` showed real, non-empty answers for the repository, pull
+  request, issue and commit surfaces on the public probe repository, and EMPTY
+  answers for reviews, workflow runs and releases, so those three item schemas are
+  checked against GitHub's documented shape only; the probe exits non-zero for an
+  empty answer unless `--allow-empty` accepts it as shape-only evidence. None of
+  that is evidence of completeness, latency, quota behaviour under the source's real
+  selection, or runtime eligibility (issue 8), all of which remain required
+  operational checks. Discovery has not been probed at all.
+- **Discovery is implemented and unit-tested, and not enabled or probed live.** It
+  is a per-owner pass of one page per unit (at most five pages of a hundred, every
+  six hours, resumable), enabled only by frozen configuration that also names the
+  account that IS the owner (`DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED`,
+  `DUCKY_ASSISTANT_WATCH_ACCOUNT`; the account cannot be proven through an approved
+  read, so it is stated, as with review requests). A repository is stored only if its
+  relationship to that account (owner, organization, collaborator) is in the
+  configured scope; a repository the owner deleted is not brought back; a cancelled
+  or muted target keeps its state and only its recency and eligibility facts are
+  refreshed; discovered targets count toward the 1,000 ceiling, and overflow or more
+  than five pages is reported in `/status` as an incomplete pass, never truncated or
+  cancelled.
+- **The source's poll cycle is preserved, not swept.** With the real reader the
+  service covers at most 40 eligible active targets per cycle, most recently pushed
+  first (not archived, and not a fork the account owns, unless included); a target
+  beyond that is not read, as in the source, but its metadata is refreshed every six
+  hours so a quiet repository that wakes up can rise into coverage. A target whose
+  recency is not yet known has only its metadata read until it is. Counts are in
+  `/status`. Whether this meets the source's timing under the real quota and the real
+  selection is unproven.
+- **The global monitoring switch** is carried over from the import and gates reads
+  only (no target or cursor changes). There is no owner control to flip it: the
+  owner-only command manifest is not expanded, so an operator states it by importing
+  a document. **That missing control is a named blocker.**
 - It adds no engineering permission, no owner command and no write.
 
 ## Alternatives considered
@@ -142,8 +176,10 @@ one by its id. A baseline or a source cursor stays strict.
 
 ## Consequences
 
-- Migration 30 adds `pending_state`, `scan_floor` and target facts (`pushed_at`,
-  `relationship`, `archived`, `fork`, `cancel_reason`). Additive only.
+- Migrations 30 and 31 are additive: pending state and scan floor, target facts
+  (`pushed_at`, `relationship`, `archived`, `fork`, `cancel_reason`, `origin`), the
+  discovery pass, discovery tombstones (by trigger, so no deletion path can forget
+  one) and the per-owner monitoring switch.
 - A repository the provider no longer shows is cancelled by the system with a
   `not_found` reason, as the source unmonitors it; the row, its events and the
   owner's Forget control remain.

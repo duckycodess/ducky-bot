@@ -572,3 +572,110 @@ describe('every unit stays far inside the tick budget', () => {
     h.close();
   });
 });
+
+describe('what settles in the middle of a pass is not jumped over', () => {
+  const run = (id: string, created: string, status: string, conclusion: string | null, updated = created) => ({
+    id, name: 'build', branch: 'main', status, conclusion, createdAt: created, updatedAt: updated,
+  });
+
+  it('keeps the cursor at an unsettled run so its later conclusion is still news', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'imported', SINCE);
+    reader.pageSize = 10;
+    // Run 2 is running, last updated at 12:00. Run 1 settled later in the day.
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null, at(12, 12)),
+      run('1', at(12, 9), 'completed', 'success', at(12, 20)),
+    ]);
+    await h.app.assistantWatch.tick();
+    // Without the cap the cursor would sit at 20:00 and run 2's conclusion (at 15:00) would
+    // be OLDER than the cursor, so it would never be announced.
+    expect(Date.parse(cp(h, id, 'runs').cursor!)).toBeLessThan(Date.parse(at(12, 12)));
+    expect(ids(h, id)).toEqual(['2:ci_started']);
+
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'completed', 'failure', at(12, 15)),
+      run('1', at(12, 9), 'completed', 'success', at(12, 20)),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['2:ci_failed', '2:ci_started']);
+    h.close();
+  });
+
+  it('does not re-announce what the lowered cursor makes it read again', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'imported', SINCE);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null, at(12, 12)),
+      run('1', at(12, 9), 'completed', 'failure', at(12, 20)),
+    ]);
+    await h.app.assistantWatch.tick();
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['1:ci_failed', '2:ci_started']);
+    h.close();
+  });
+
+  it('does not cap the very first look: nothing was announced for it', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null, at(12, 12)),
+      run('1', at(12, 9), 'completed', 'failure', at(12, 20)),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs').cursor).toBe('2026-10-12T20:00:00.000Z');
+    expect(events(h, id)).toEqual([]);
+    h.close();
+  });
+
+  it('holds the release cursor while a draft is open, so its publication is news', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'releases', 'imported', SINCE);
+    reader.pageSize = 10;
+    reader.releasesBy.set('acme/widgets', [
+      { id: '2', tag: 'v2', name: 'Two', draft: true, publishedAt: null, createdAt: at(12, 1) },
+      { id: '1', tag: 'v1', name: 'One', draft: false, publishedAt: at(12, 2), createdAt: at(12, 2) },
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['release:1']);
+    expect(Date.parse(cp(h, id, 'releases').cursor!)).toBeLessThanOrEqual(Date.parse(NOW));
+    reader.releasesBy.set('acme/widgets', [
+      { id: '2', tag: 'v2', name: 'Two', draft: false, publishedAt: '2026-10-13T00:05:00Z', createdAt: at(12, 1) },
+      { id: '1', tag: 'v1', name: 'One', draft: false, publishedAt: at(12, 2), createdAt: at(12, 2) },
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['release:1', 'release:2']);
+    h.close();
+  });
+
+  it('a page that emptied between its read and its re-read is drift, not a commit', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [
+      issue(5, at(12, 5)), issue(4, at(12, 4)), issue(3, at(12, 3)), issue(2, at(12, 2)), issue(1, at(12, 1)),
+      issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    let n = 0;
+    reader.hook = (method) => {
+      if (method !== 'issues') return;
+      n += 1;
+      if (n === 4) reader.issuesBy.set('acme/widgets', []);
+    };
+    const out = await h.app.assistantWatch.tick();
+    expect(out.failed).toBe(1);
+    expect(cp(h, id, 'issues')).toMatchObject({ cursor: SINCE, lastError: 'window_unstable' });
+    h.close();
+  });
+});

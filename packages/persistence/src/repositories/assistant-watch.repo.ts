@@ -25,6 +25,7 @@ export interface WatchTargetRow {
   readonly fork: boolean;
   /** Set when the SYSTEM cancelled the target (never when the owner did). */
   readonly cancelReason: string | null;
+  readonly origin: 'imported' | 'discovered';
 }
 
 export interface WatchCheckpointRow {
@@ -70,6 +71,35 @@ export interface WatchEventWithTarget extends WatchEventRow {
   readonly discordUserId: string;
 }
 
+/**
+ * The source's recency-limited poll cycle (ADR 0031): at most `limit` ELIGIBLE
+ * active targets, most recently pushed first, have their surfaces read each cycle.
+ * Eligibility is not archived (unless included) and not a fork the account owns
+ * (unless included). A target whose recency is not yet known is not covered; its
+ * metadata surface runs first and fills the recency in.
+ */
+export interface PollCycle {
+  readonly ownerId: string;
+  readonly limit: number;
+  readonly includeArchived: boolean;
+  readonly includeForks: boolean;
+}
+
+export interface DiscoveryRow {
+  readonly ownerId: string;
+  readonly pendingPage: number;
+  readonly passCapacityBlocked: boolean;
+  readonly nextDueAt: string;
+  readonly lastCompletedAt: string | null;
+  readonly incomplete: boolean;
+  readonly capacityBlocked: boolean;
+  readonly failures: number;
+  readonly lastError: string | null;
+}
+
+/** What a discovered repository did to the target list. */
+export type DiscoveredOutcome = 'created' | 'updated' | 'tombstoned' | 'over_capacity';
+
 /** A checkpoint that is due, with the target it belongs to. */
 export interface DueCheckpoint extends WatchCheckpointRow {
   readonly repoKey: string;
@@ -94,6 +124,7 @@ const mapTarget = (r: Record<string, unknown>): WatchTargetRow => ({
   archived: Number(r['archived'] ?? 0) === 1,
   fork: Number(r['fork'] ?? 0) === 1,
   cancelReason: r['cancel_reason'] == null ? null : String(r['cancel_reason']),
+  origin: String(r['origin'] ?? 'imported') as 'imported' | 'discovered',
 });
 
 const mapCheckpoint = (r: Record<string, unknown>): WatchCheckpointRow => ({
@@ -141,6 +172,24 @@ export interface ObservedEventWrite {
   readonly settled: boolean;
 }
 
+/**
+ * The eligibility the source applies before it polls: not muted or unmonitored
+ * (a cancelled target), not archived unless included, and a fork excluded ONLY
+ * when the account owns it, unless forks are included. A fork in an organization
+ * or owned by a collaborator stays eligible, because those are assignment
+ * repositories.
+ */
+const ELIGIBLE_SQL = `t.discord_user_id = :owner AND t.state = 'active'
+  AND (t.archived = 0 OR :includeArchived = 1)
+  AND NOT (t.fork = 1 AND t.relationship = 'owner' AND :includeForks = 0)`;
+const CYCLE_SQL = `SELECT t.id AS id FROM assistant_watch_targets t
+  WHERE ${ELIGIBLE_SQL} AND t.pushed_at IS NOT NULL
+  ORDER BY t.pushed_at DESC, t.repo_key ASC LIMIT :cycleLimit`;
+const eligibleParams = (c: PollCycle) => ({
+  owner: c.ownerId, includeArchived: c.includeArchived ? 1 : 0, includeForks: c.includeForks ? 1 : 0,
+});
+const cycleParams = (c: PollCycle) => ({ ...eligibleParams(c), cycleLimit: c.limit });
+
 const ALERT_LIST = WATCH_ALERT_KINDS.map((k) => `'${k}'`).join(',');
 
 /**
@@ -166,17 +215,25 @@ export class AssistantWatchRepo {
     lastObservedAt: string | null;
     createdAt: string;
     cancelledAt: string | null;
+    origin?: 'imported' | 'discovered';
+    pushedAt?: string | null;
+    relationship?: 'owner' | 'organization' | 'collaborator' | null;
+    archived?: boolean;
+    fork?: boolean;
   }): void {
     this.db
       .prepare(
         `INSERT INTO assistant_watch_targets
            (id, public_id, discord_user_id, repo_key, display, default_branch, state,
-            last_observed_at, created_at, updated_at, cancelled_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            last_observed_at, created_at, updated_at, cancelled_at,
+            origin, pushed_at, relationship, archived, fork)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         row.id, row.publicId, row.discordUserId, row.repoKey, row.display, row.defaultBranch,
         row.state, row.lastObservedAt, row.createdAt, row.createdAt, row.cancelledAt,
+        row.origin ?? 'imported', row.pushedAt ?? null, row.relationship ?? null,
+        row.archived ? 1 : 0, row.fork ? 1 : 0,
       );
   }
 
@@ -368,18 +425,24 @@ export class AssistantWatchRepo {
    * served next, and because every serve moves its due time forward, no target
    * can be starved by a busier one. A blocked surface is never due.
    */
-  dueCheckpoints(nowIso: string, limit: number): DueCheckpoint[] {
+  dueCheckpoints(nowIso: string, limit: number, cycle?: PollCycle): DueCheckpoint[] {
+    // Without a cycle every active target is covered (the scripted-reader default).
+    // With one, a surface other than the metadata read is only served for a target
+    // inside the cycle's coverage.
+    const covered = cycle
+      ? `AND (c.surface = 'default_branch' OR c.target_id IN (${CYCLE_SQL}))`
+      : '';
     return this.db
       .prepare(
         `SELECT c.*, t.repo_key, t.display, t.default_branch
            FROM assistant_watch_checkpoints c
            JOIN assistant_watch_targets t ON t.id = c.target_id
-          WHERE t.state = 'active' AND c.blocked_reason IS NULL AND c.next_due_at <= ?
-            AND c.surface != 'ci_state'
+          WHERE t.state = 'active' AND c.blocked_reason IS NULL AND c.next_due_at <= :now
+            AND c.surface != 'ci_state' ${covered}
           ORDER BY c.next_due_at ASC, c.target_id ASC, c.surface ASC
-          LIMIT ?`,
+          LIMIT :limit`,
       )
-      .all(nowIso, limit)
+      .all({ now: nowIso, limit, ...(cycle ? cycleParams(cycle) : {}) })
       .map((raw) => {
         const r = raw as Record<string, unknown>;
         return {
@@ -389,6 +452,55 @@ export class AssistantWatchRepo {
           defaultBranch: r['default_branch'] == null ? null : String(r['default_branch']),
         };
       });
+  }
+
+  /** Whether a target is inside the cycle's coverage right now. */
+  inCycle(targetId: string, cycle: PollCycle): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM (${CYCLE_SQL}) WHERE id = :target`)
+        .get({ ...cycleParams(cycle), target: targetId }) !== undefined
+    );
+  }
+
+  /** Counts of blocked surfaces by reason: never a repository name. */
+  blockedCounts(ownerId: string): { windowExceeded: number; identityChanged: number } {
+    const one = (reason: string): number =>
+      Number(
+        (this.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM assistant_watch_checkpoints c
+               JOIN assistant_watch_targets t ON t.id = c.target_id
+              WHERE t.discord_user_id = ? AND c.blocked_reason = ?`,
+          )
+          .get(ownerId, reason) as { n: number }).n,
+      );
+    return { windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed') };
+  }
+
+  /** Counts only: covered by this cycle, beyond it by recency, and not yet measured. */
+  cycleCoverage(cycle: PollCycle): { covered: number; beyond: number; unmeasured: number; ineligible: number } {
+    const one = (sql: string, withLimit = false): number =>
+      Number(
+        (this.db.prepare(sql).get(withLimit ? cycleParams(cycle) : eligibleParams(cycle)) as { n: number }).n,
+      );
+    const covered = one(`SELECT COUNT(*) AS n FROM (${CYCLE_SQL})`, true);
+    const eligible = one(`SELECT COUNT(*) AS n FROM assistant_watch_targets t WHERE ${ELIGIBLE_SQL}`);
+    const unmeasured = one(
+      `SELECT COUNT(*) AS n FROM assistant_watch_targets t WHERE ${ELIGIBLE_SQL} AND t.pushed_at IS NULL`,
+    );
+    const active = Number(
+      (this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM assistant_watch_targets t
+            WHERE t.discord_user_id = ? AND t.state = 'active'`,
+        )
+        .get(cycle.ownerId) as { n: number }).n,
+    );
+    return {
+      covered, unmeasured, ineligible: active - eligible,
+      beyond: Math.max(0, eligible - unmeasured - covered),
+    };
   }
 
   /**
@@ -612,6 +724,177 @@ export class AssistantWatchRepo {
         )
         .run(atIso).changes,
     );
+  }
+
+  // ---- the global monitoring switch ---------------------------------------
+
+  /** Whether the owner's watching is on. Absent means on, as in the source. */
+  monitoringEnabled(ownerId: string): boolean {
+    const r = this.db
+      .prepare('SELECT monitoring_enabled AS m FROM assistant_watch_settings WHERE discord_user_id = ?')
+      .get(ownerId) as { m: number } | undefined;
+    return r === undefined || Number(r.m) === 1;
+  }
+
+  setMonitoring(ownerId: string, enabled: boolean, atIso: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO assistant_watch_settings (discord_user_id, monitoring_enabled, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(discord_user_id) DO UPDATE SET
+           monitoring_enabled = excluded.monitoring_enabled, updated_at = excluded.updated_at`,
+      )
+      .run(ownerId, enabled ? 1 : 0, atIso);
+  }
+
+  // ---- discovery ---------------------------------------------------------
+
+  private mapDiscovery(r: Record<string, unknown>): DiscoveryRow {
+    return {
+      ownerId: String(r['discord_user_id']),
+      pendingPage: Number(r['pending_page']),
+      passCapacityBlocked: Number(r['pass_capacity_blocked']) === 1,
+      nextDueAt: String(r['next_due_at']),
+      lastCompletedAt: r['last_completed_at'] == null ? null : String(r['last_completed_at']),
+      incomplete: Number(r['incomplete']) === 1,
+      capacityBlocked: Number(r['capacity_blocked']) === 1,
+      failures: Number(r['failures']),
+      lastError: r['last_error'] == null ? null : String(r['last_error']),
+    };
+  }
+
+  /** The owner's discovery row, created due-now the first time discovery is enabled. */
+  ensureDiscovery(ownerId: string, atIso: string): DiscoveryRow {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO assistant_watch_discovery (discord_user_id, next_due_at, updated_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(ownerId, atIso, atIso);
+    return this.mapDiscovery(
+      this.db.prepare('SELECT * FROM assistant_watch_discovery WHERE discord_user_id = ?').get(ownerId) as Record<string, unknown>,
+    );
+  }
+
+  discovery(ownerId: string): DiscoveryRow | undefined {
+    const r = this.db.prepare('SELECT * FROM assistant_watch_discovery WHERE discord_user_id = ?').get(ownerId);
+    return r ? this.mapDiscovery(r as Record<string, unknown>) : undefined;
+  }
+
+  discoveryTombstoned(ownerId: string, repoKey: string): boolean {
+    return (
+      this.db
+        .prepare('SELECT 1 FROM assistant_watch_discovery_tombstones WHERE discord_user_id = ? AND repo_key = ?')
+        .get(ownerId, repoKey) !== undefined
+    );
+  }
+
+  /**
+   * Stores what one discovery page found, and moves the pass on, in one
+   * transaction.
+   *
+   * A repository that is already a target has its FACTS refreshed (recency,
+   * archived, fork, relationship) and nothing else: its state, its mute, its
+   * checkpoints and its events are the owner's and are never reset by discovery. A
+   * repository whose reference was deleted stays deleted (the tombstone). A new one
+   * is created active with silent, unbaselined checkpoints, unless the ceiling is
+   * reached, in which case it is NOT stored and the pass says so; nothing already
+   * stored is ever cancelled or dropped to make room.
+   */
+  commitDiscoveryPage(input: {
+    ownerId: string;
+    expectedPage: number;
+    found: readonly {
+      repoKey: string;
+      display: string;
+      pushedAt: string | null;
+      archived: boolean;
+      fork: boolean;
+      relationship: 'owner' | 'organization' | 'collaborator';
+      id: string;
+      publicId: string;
+    }[];
+    surfaces: readonly WatchSurface[];
+    maxTargets: number;
+    /** What the pass does next: the next page, or finished. */
+    next: { kind: 'page'; page: number } | { kind: 'done'; incomplete: boolean; nextDueAt: string };
+    atIso: string;
+  }): { outcomes: Record<DiscoveredOutcome, number> } | undefined {
+    return atomically(this.db, () => {
+      const row = this.discovery(input.ownerId);
+      if (!row || row.pendingPage !== input.expectedPage) return undefined;
+      const outcomes: Record<DiscoveredOutcome, number> = { created: 0, updated: 0, tombstoned: 0, over_capacity: 0 };
+      let blocked = row.passCapacityBlocked;
+      let total = this.countAll(input.ownerId);
+      for (const f of input.found) {
+        if (this.discoveryTombstoned(input.ownerId, f.repoKey)) {
+          outcomes.tombstoned += 1;
+          continue;
+        }
+        const existing = this.byRepoKey(input.ownerId, f.repoKey);
+        if (existing) {
+          this.db
+            .prepare(
+              `UPDATE assistant_watch_targets
+                  SET pushed_at = COALESCE(?, pushed_at), archived = ?, fork = ?,
+                      relationship = COALESCE(?, relationship), updated_at = ?
+                WHERE id = ?`,
+            )
+            .run(f.pushedAt, f.archived ? 1 : 0, f.fork ? 1 : 0, f.relationship, input.atIso, existing.id);
+          outcomes.updated += 1;
+          continue;
+        }
+        if (total >= input.maxTargets) {
+          outcomes.over_capacity += 1;
+          blocked = true;
+          continue;
+        }
+        this.insertTarget({
+          id: f.id, publicId: f.publicId, discordUserId: input.ownerId, repoKey: f.repoKey, display: f.display,
+          defaultBranch: null, state: 'active', lastObservedAt: null, createdAt: input.atIso, cancelledAt: null,
+          origin: 'discovered', pushedAt: f.pushedAt, relationship: f.relationship,
+          archived: f.archived, fork: f.fork,
+        });
+        for (const surface of input.surfaces) {
+          this.insertCheckpoint({
+            targetId: f.id, surface, state: 'unbaselined', cursor: null, nextDueAt: input.atIso, updatedAt: input.atIso,
+          });
+        }
+        total += 1;
+        outcomes.created += 1;
+      }
+      if (input.next.kind === 'page') {
+        this.db
+          .prepare(
+            `UPDATE assistant_watch_discovery
+                SET pending_page = ?, pass_capacity_blocked = ?, next_due_at = ?, failures = 0,
+                    last_error = NULL, updated_at = ?
+              WHERE discord_user_id = ?`,
+          )
+          .run(input.next.page, blocked ? 1 : 0, input.atIso, input.atIso, input.ownerId);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE assistant_watch_discovery
+                SET pending_page = 0, pass_capacity_blocked = 0, capacity_blocked = ?, incomplete = ?,
+                    last_completed_at = ?, next_due_at = ?, failures = 0, last_error = NULL, updated_at = ?
+              WHERE discord_user_id = ?`,
+          )
+          .run(blocked ? 1 : 0, input.next.incomplete ? 1 : 0, input.atIso, input.next.nextDueAt, input.atIso, input.ownerId);
+      }
+      return { outcomes };
+    });
+  }
+
+  /** A failed discovery page: backoff and a short code. What was stored stays. */
+  recordDiscoveryFailure(ownerId: string, errorCode: string, nextDueAt: string, atIso: string): void {
+    this.db
+      .prepare(
+        `UPDATE assistant_watch_discovery
+            SET failures = failures + 1, last_error = ?, next_due_at = ?, updated_at = ?
+          WHERE discord_user_id = ?`,
+      )
+      .run(errorCode, nextDueAt, atIso, ownerId);
   }
 
   // ---- events -------------------------------------------------------------

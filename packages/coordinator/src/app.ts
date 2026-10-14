@@ -22,7 +22,7 @@ import {
   createStore, openDatabase, runMigrations, type RuntimeLockHandle, type Store,
 } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveWeather, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveWeather, resolveSkillBridge, resolveThreadParentChannelIds, resolveWatchConfig, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -36,7 +36,9 @@ import { SchedulesService } from './domain/schedules.service.js';
 import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
 import { WeatherBriefing } from './domain/weather-briefing.js';
 import { takeCoordinatorLock } from './runtime-lock.js';
-import { AssistantWatchService, IMPORT_COVERS_NATIVE } from './domain/assistant-watch.service.js';
+import {
+  AssistantWatchService, IMPORT_COVERS_NATIVE, type AssistantWatchConfig,
+} from './domain/assistant-watch.service.js';
 import {
   UnavailableAssistantWatchReader, type AssistantWatchReader,
 } from './domain/assistant-watch.reader.js';
@@ -89,6 +91,8 @@ export interface AppOverrides {
    * argv shape that could. Tests inject one that can, to prove the engine.
    */
   readonly assistantWatchReader?: AssistantWatchReader;
+  /** For tests: the poll-cycle and discovery configuration a scripted reader should run under. */
+  readonly assistantWatchConfig?: AssistantWatchConfig;
   /**
    * Take the shared runtime lock as THE writer of this database, immediately
    * after migrations and before anything else is written. Set by `main.ts` only:
@@ -520,10 +524,26 @@ export function createApp(
   // deliberately asks for it to be pushed.
   // Rides the SAME interval, holds no model provider and addresses the owner's
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
+  const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
     store, authz, transport, ownerId: authz.ownerId, clock,
     reader: overrides.assistantWatchReader ??
-      (env.DUCKY_ASSISTANT_WATCH_READER_ENABLED ? new GhWatchReader() : new UnavailableAssistantWatchReader()),
+      (watchConfig.readerEnabled
+        ? new GhWatchReader({ discovery: watchConfig.discovery })
+        : new UnavailableAssistantWatchReader()),
+    // The source's recency-limited cycle and discovery belong to the REAL reader; a
+    // scripted reader injected by a test keeps covering every active target.
+    ...(overrides.assistantWatchConfig
+      ? { watchConfig: overrides.assistantWatchConfig }
+      : watchConfig.readerEnabled && !overrides.assistantWatchReader
+      ? {
+        watchConfig: {
+          account: watchConfig.account, cycle: true, discovery: watchConfig.discovery,
+          relationships: watchConfig.relationships, includeForks: watchConfig.includeForks,
+          includeArchived: watchConfig.includeArchived,
+        },
+      }
+      : {}),
   });
   const briefingSchedule = resolveBriefingSchedule(env);
   const briefingNotifier = new BriefingNotifier({

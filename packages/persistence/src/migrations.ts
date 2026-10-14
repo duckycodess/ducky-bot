@@ -1744,4 +1744,58 @@ ALTER TABLE assistant_watch_targets ADD COLUMN fork INTEGER NOT NULL DEFAULT 0
 ALTER TABLE assistant_watch_targets ADD COLUMN cancel_reason TEXT;
 `,
   },
+  {
+    version: 31,
+    name: 'assistant_watch_discovery',
+    sql: `
+-- Repository discovery and the global monitoring switch (ADR 0031). Additive.
+--
+-- Where a target came from. Existing rows are imported. A discovered target is
+-- owner state exactly like an imported one: cancelled is a mute, and nothing here
+-- is engineering authorization.
+ALTER TABLE assistant_watch_targets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported'
+  CHECK (origin IN ('imported','discovered'));
+
+-- ONE row per owner: the durable position of the discovery pass. A page is one
+-- unit of work, so a pass survives a restart. 'incomplete' says the last finished
+-- pass left repositories unread (more pages than the cap); 'capacity_blocked' says
+-- a repository could not be stored because the target ceiling was reached. Neither
+-- is ever resolved by truncating or cancelling anything.
+CREATE TABLE assistant_watch_discovery (
+  discord_user_id   TEXT PRIMARY KEY,
+  pending_page      INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  pass_capacity_blocked INTEGER NOT NULL DEFAULT 0 CHECK (pass_capacity_blocked IN (0,1)),
+  next_due_at       TEXT NOT NULL,
+  last_completed_at TEXT,
+  incomplete        INTEGER NOT NULL DEFAULT 0 CHECK (incomplete IN (0,1)),
+  capacity_blocked  INTEGER NOT NULL DEFAULT 0 CHECK (capacity_blocked IN (0,1)),
+  failures          INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT,
+  updated_at        TEXT NOT NULL
+);
+
+-- A deleted target must not come back because discovery found the repository
+-- again. By TRIGGER, so no deletion path can forget to leave the mark. The mark is
+-- the reference alone: no content, no reason.
+CREATE TABLE assistant_watch_discovery_tombstones (
+  discord_user_id TEXT NOT NULL,
+  repo_key        TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, repo_key)
+);
+CREATE TRIGGER trg_watch_target_discovery_tombstone AFTER DELETE ON assistant_watch_targets BEGIN
+  INSERT OR IGNORE INTO assistant_watch_discovery_tombstones (discord_user_id, repo_key, created_at)
+  VALUES (OLD.discord_user_id, OLD.repo_key, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+END;
+
+-- The source's global monitoring switch, per owner. Absent means on. It governs
+-- reads only: it changes no target and no checkpoint, so a paused watch keeps every
+-- cursor exactly where it was.
+CREATE TABLE assistant_watch_settings (
+  discord_user_id    TEXT PRIMARY KEY,
+  monitoring_enabled INTEGER NOT NULL DEFAULT 1 CHECK (monitoring_enabled IN (0,1)),
+  updated_at         TEXT NOT NULL
+);
+`,
+  },
 ];

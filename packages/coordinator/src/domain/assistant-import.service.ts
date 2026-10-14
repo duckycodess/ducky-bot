@@ -490,6 +490,10 @@ export class AssistantImportService {
       watch.events += counted.events;
       imp.recordLive({ namespace: ns, category: 'watch_target', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at });
     }
+    // The source's global switch. It gates reads only (no target or cursor changes),
+    // and the document is an explicit operator act, so it states the switch: an
+    // import of a switch that is back on resumes watching.
+    if (doc.watch) this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at);
   }
 
   private insertTarget(
@@ -689,6 +693,12 @@ export class AssistantImportService {
         // Events the source had are all still there, identity for identity.
         return t.events.some((e) => !this.store.assistantWatch.eventExists(target, e.kind, e.identity));
       });
+    }
+
+    if (doc.watch) {
+      bump('watchSwitch', 'expected');
+      bump('watchSwitch', 'present');
+      if (this.store.assistantWatch.monitoringEnabled(owner) !== doc.watch.monitoringEnabled) bump('watchSwitch', 'drifted');
     }
 
     const totals = Object.values(cats);

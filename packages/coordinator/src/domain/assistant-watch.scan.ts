@@ -24,6 +24,14 @@ export interface ScanState {
   readonly total?: number | null;
   /** The oldest unsettled item's creation time (ms) seen so far this pass. */
   readonly floorMs?: number | null;
+  /**
+   * The newest the committed cursor may be: an unsettled run's last update (less a
+   * millisecond), or the moment a draft release was read. An item that settles
+   * after it was read has a LATER time than that, so a cursor held at or below the
+   * cap cannot jump over its update. Everything between the cap and what the pass
+   * saw is read again next time and told apart by identity.
+   */
+  readonly capMs?: number | null;
   /** What the newest NEW conclusion on a runs pass said. */
   readonly ci?: 'failing' | 'passing' | null;
   /** Pull requests whose reviews remain to be read, in order. */
@@ -80,15 +88,24 @@ export const keyOf = (i: KeyedItem): string => {
  * happened, because the page then holds the original items shifted down by the
  * number of new ones (possibly pushing the tail off it), or exactly as it was.
  *
- * Anything else (an item gone, an item moved, a different order) is drift, and
- * the pass is thrown away. One mix this cannot tell apart is a deletion and
- * insertions that cancel out between the first read and the re-read; that is a
- * documented residual, not a claim of proof.
+ * Anything else (an item gone, an item moved, a different order, a page that
+ * emptied) is drift, and the pass is thrown away.
+ *
+ * THIS IS NOT A PROOF. Comparing one page cannot tell a pure shift from a deletion
+ * paired with insertions that happen to cancel out between the first read and the
+ * re-read, nor see a deletion that left the last page untouched. That residual is a
+ * REQUIRED completeness blocker (ADR 0031): the check narrows the window for a
+ * miss, it does not close it, and no parity claim rests on it.
  */
 export function windowHeldStill(original: readonly string[], again: readonly string[]): boolean {
-  // Nothing was read on that page, or nothing is on it now: no item can have
+  // Nothing was on that page when it was read: an item can only have APPEARED on it
+  // since (an insertion above shifts items down onto it), and nothing can have
   // slid past a boundary into a page that was already read.
-  if (original.length === 0 || again.length === 0) return true;
+  if (original.length === 0) return true;
+  // A page that held items and now holds none is NOT evidence of stability. Every
+  // item on it was deleted, moved to the top or pushed off by a run of insertions,
+  // and any of those can have hidden an item at a boundary. It is drift.
+  if (again.length === 0) return false;
   for (let shift = 0; shift < again.length; shift += 1) {
     const rest = again.slice(shift);
     // `rest` is the original page shifted down by `shift` new items, possibly with

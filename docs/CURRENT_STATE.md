@@ -62,7 +62,7 @@ registered.
 | Indefinite weekly schedules with dated exceptions | **Unit-tested** | Rules are computed for a requested window, never materialized: thirty years out, leap days, DST weeks, replaced batches, exception targeting, owner scoping, Forget and retention covered through the real briefing |
 | Imported task reminder policy and preferences | **Unit-tested** | Disabled, custom, default-deferring and deadline-fallback policies through Done, Edit and Snooze; preferences apply only when `DUCKY_IMPORTED_PREFERENCES` is set |
 | Notification-only watch targets: observation engine, budget, digest, alerts | **Unit-tested with a scripted reader** | Boundary rules, atomic checkpoint commits (fault-injected), held partial reads, resume after a restart, fair oldest-due scheduling and the 20-per-tick / 2400-per-hour budget are covered. Captures and the repository digest go only into the owner's DM copy of a briefing. **No real reader exists for this surface** (next row) |
-| Notification-only watch targets: observing a real repository | **Unit-tested; probed read-only on a public repository; live completeness unproven** | The owner approved typed GET-only reads on 2026-10-14 (ADR 0031). `GhWatchReader` reads repository, pulls, reviews, issues, runs, releases and commits through seven exact `gh api` shapes, one request per unit, with pinned schemas, identity checks, a re-read proof for multi-page windows and a `window_exceeded` blocker. It is OFF by default (`DUCKY_ASSISTANT_WATCH_READER_ENABLED`). `pnpm probe:watch-reader` showed every approved surface except discovery answering and parsing on the public probe repository, which proves shape, not completeness, latency or runtime eligibility. **Discovery is pinned but not enabled and has no persistence or poll-cycle semantics yet.** Residual completeness gaps are named in ADR 0031 and below |
+| Notification-only watch targets: observing a real repository | **Unit-tested; probed read-only on a public repository; live completeness unproven** | The owner approved typed GET-only reads on 2026-10-14 (ADR 0031). `GhWatchReader` reads repository, pulls, reviews, issues, runs, releases and commits through seven exact `gh api` shapes, one request per unit, with pinned schemas, identity checks, a re-read proof for multi-page windows and a `window_exceeded` blocker. It is OFF by default (`DUCKY_ASSISTANT_WATCH_READER_ENABLED`). `pnpm probe:watch-reader` showed real non-empty answers for the repository, pull request, issue and commit surfaces on the public probe repository and EMPTY answers for reviews, runs and releases (so those item schemas are documented-shape only); it exits 4 for an empty answer unless `--allow-empty` accepts shape-only evidence. That proves shape, not completeness, latency or runtime eligibility. Discovery, the 40-target recency-limited cycle and the monitoring switch are implemented and unit-tested; discovery has never been enabled or probed live. **Multi-page completeness is NOT proven (a required blocker)**; residuals are in ADR 0031 and below |
 | Private imported sections in owner-requested briefings | **Unit-tested** | `/briefing` and "brief me" put the capture inbox and repository digest in the reply only when it is a DM or a guaranteed-ephemeral command reply; in a role channel (where replies persist) and in a guild message reply they are left out, while the native tasks, schedule and reminders are unchanged |
 | Briefing weather | **Unit-tested; no live request made** | Parsing, caching, failure-to-null, the fixed host, refused redirects and a streamed size ceiling are covered with an injected `fetch`. The natural-language `brief me` includes it. No request to Open-Meteo has been made from this host |
 | Shared runtime lock (coordinator and importer) | **Unit-tested** | The lock records the boot and the process start, so a reused pid, an earlier boot, a second handle in the same process and an equal pid on another host are each judged on what they are. The coordinator takes it right after migrations, before any other write, and beats on its own fixed period. The `main.ts` wiring has not been run against a live process |
@@ -1180,8 +1180,8 @@ was revised.
   runs, issues and the default branch are now read by `GhWatchReader` (ADR 0031) when
   `DUCKY_ASSISTANT_WATCH_READER_ENABLED` is set; it is off by default, so the shipped
   default still declares nothing and an import with watch targets still fails closed.
-  Repository discovery, its persistence and the source's recency-limited poll cycle
-  are NOT implemented; live completeness and latency are unproven.
+  Repository discovery and the source's recency-limited poll cycle are implemented and
+  unit-tested (ADR 0031) but have never run live; completeness and latency are unproven.
 - **Every operational gate in the runbook.** No fresh live source backup or
   restoration configuration, no private source-to-target parity, no live synthetic
   notification or Done/Edit/Snooze/non-owner check, no reverse-delta rollback
@@ -1199,9 +1199,11 @@ Where Ducky refuses an input instead of carrying it, the refusal is the
 fail-closed form of the blocker, not a decision to drop it.
 
 - **Unsupported source values (refused by validation, never normalized):** the
-  `urgent` priority and task categories; AI wording of briefings; meals (their
-  preferences, suggestion history and the meal-in-briefing behavior); and a paused
-  global watch switch.
+  `urgent` priority and task categories; AI wording of briefings; and meals (their
+  preferences, suggestion history and the meal-in-briefing behavior). The paused
+  global watch switch is now carried over and gates reads, but **no owner control
+  can flip it** (the owner-only manifest is not expanded), so resuming needs an
+  operator import: a named blocker.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned", which needs per-pull-request file and comment reads the reader seams
   do not provide.
@@ -1211,10 +1213,12 @@ fail-closed form of the blocker, not a decision to drop it.
 - **Schedule batches:** the source can roll back to a replaced schedule batch; Ducky
   keeps a replaced batch as inert data and has no rollback control for it.
 - **Repository discovery and the polling cycle:** the source discovers new
-  repositories on a schedule and polls the 40 most recently pushed per cycle. Ducky
-  has no discovery (no reader shape exists for it) and reads every target fairly
-  within its budget, so which repositories are covered when, and with what latency,
-  is different. No full-sweep latency is claimed.
+  repositories on a schedule and polls the 40 most recently pushed per cycle. With
+  the real reader enabled Ducky now does the same (ADR 0031): scoped, tombstone- and
+  mute-preserving discovery, and a 40-target recency cycle with a slow metadata
+  refresh for the rest. Unit-tested only; discovery has never been enabled, the
+  account that IS the owner is stated by configuration rather than proven, and whether
+  the timing holds under the real quota and selection is unproven.
 - **Overlap with the ordinary `github_watches` snapshot DM:** an imported target and
   an ordinary watch on the same repository can both notify. Only the native
   GitHub feed's duplicate cards (pull request opened, issue opened, changes
@@ -1233,8 +1237,10 @@ fail-closed form of the blocker, not a decision to drop it.
   oldest item that was unsettled at the last close (`scan_floor`), pages are separate
   units, and a window that spanned pages is committed only after its last page is
   re-read and held still. A window past its cap is blocked as `window_exceeded`.
-  **Named residuals, each a required blocker until accepted or closed:** a deletion
-  that cancels an insertion between a page's read and its re-read; a draft release or
+  **Named residuals, each a required blocker until accepted or closed:** multi-page
+  completeness is not proven (the last-page re-read narrows the window for a miss and
+  cannot see a deletion that left that page untouched, or a deletion paired with an
+  insertion); a draft release or
   run that sat beyond the first page when a target was first seen; a run re-run long
   after it settled, a run unsettled for over a day and a draft untouched for over
   thirty days; a pull request with over 100 reviews. Unit-tested and probed for
@@ -1245,7 +1251,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2215 tests in 141 files**.
+The unmodified `pnpm test` command passes all **2249 tests in 143 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

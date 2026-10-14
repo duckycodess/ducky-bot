@@ -6,7 +6,7 @@ import {
   acquireRuntimeLock, compareBackupToLive, createStore, isUpToDate, openDatabase, type Db,
 } from '@ducky/persistence';
 import {
-  loadEnv, resolveBriefingSchedule, resolveImportedPreferences, resolveOwnerTimeZone, resolveWeather,
+  loadEnv, resolveBriefingSchedule, resolveImportedPreferences, resolveOwnerTimeZone, resolveWatchConfig, resolveWeather,
 } from '../config.js';
 import {
   AssistantImportService, type ImportEnvironment,
@@ -137,8 +137,8 @@ export function runImportCli(
         delivery: schedule.delivery,
       },
       weatherConfigured: resolveWeather(e) !== undefined,
-      watchCapabilities: e.DUCKY_ASSISTANT_WATCH_READER_ENABLED
-        ? new GhWatchReader().capabilities
+      watchCapabilities: resolveWatchConfig(e).readerEnabled
+        ? new GhWatchReader({ discovery: resolveWatchConfig(e).discovery }).capabilities
         : new UnavailableAssistantWatchReader().capabilities,
     };
   } catch (err) {

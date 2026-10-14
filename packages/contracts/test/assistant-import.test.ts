@@ -249,8 +249,8 @@ describe('preferences: unsupported active behavior is refused, never dropped', (
 });
 
 describe('watch targets', () => {
-  it('refuses a disabled global switch because there is no paused state', () => {
-    expect(rules(bad((d) => { d['watch']['monitoringEnabled'] = false; }))).toContain('watch:monitoring_disabled_unsupported');
+  it('carries a disabled global switch over instead of refusing it', () => {
+    expect(rules(bad((d) => { d['watch']['monitoringEnabled'] = false; }))).not.toContain('watch:monitoring_disabled_unsupported');
   });
 
   it('refuses a duplicate reference regardless of case', () => {

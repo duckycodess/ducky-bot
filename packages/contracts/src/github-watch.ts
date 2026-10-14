@@ -54,7 +54,7 @@ export type WatchApiRequest =
 
 // An owner or repo of `.` or `..`, or containing `..`, satisfies the general
 // name pattern and is a path traversal in a URL path. Refused on every surface.
-const plain = (n: string): boolean =>
+export const isPlainRepoName = (n: string): boolean =>
   GH_OWNER_RE.test(n) && GH_REPO_RE.test(n) && n !== '.' && n !== '..' && !n.includes('..');
 
 const okPage = (p: number, max: number): boolean => Number.isInteger(p) && p >= 1 && p <= max;
@@ -70,7 +70,7 @@ export function watchEndpoint(req: WatchApiRequest): string {
     return `user/repos?affiliation=${WATCH_DISCOVERY_AFFILIATION}&sort=pushed&direction=desc` +
       `&per_page=${WATCH_API_DISCOVERY_PAGE_SIZE}&page=${req.page}`;
   }
-  if (!plain(req.owner) || !plain(req.repo)) throw new Error('invalid repository');
+  if (!isPlainRepoName(req.owner) || !isPlainRepoName(req.repo)) throw new Error('invalid repository');
   const base = `repos/${req.owner}/${req.repo}`;
   switch (req.surface) {
     case 'repository':
@@ -163,12 +163,17 @@ export const isWatchApiArgv = (argv: readonly string[]): boolean =>
   argv.length === 4 && argv[0] === 'api' && argv[1] === '--method' && argv[2] === 'GET' &&
   typeof argv[3] === 'string' && parseWatchEndpoint(argv[3]) !== undefined;
 
-// ---- the pinned response schemas ---------------------------------------------
+// ---- the response schemas -----------------------------------------------------
 //
-// Pinned to what GitHub actually returned for each endpoint (`pnpm probe:watch-reader`
-// records the key sets, never a value). Each schema asks for the fields an event's
-// identity and cursor depend on and ignores the rest. A page longer than the
-// `per_page` that was asked for is a malformed answer, not a longer window.
+// Each schema asks for the fields an event's identity and cursor depend on and
+// ignores the rest. They are written from GitHub's documented REST shapes. A live
+// read-only probe (`pnpm probe:watch-reader`) of the owner-approved public repository
+// showed real, non-empty responses for the repository, pull request, issue and
+// commit surfaces; the reviews, workflow-runs and releases answers there were EMPTY,
+// so those three ITEM schemas have been checked against the documented shape only,
+// not against a live item. The probe says so and exits non-zero for them unless
+// told to accept shape-only evidence. A page longer than the `per_page` asked for
+// is a malformed answer, not a longer window.
 
 const Iso = z.string().min(1).max(64);
 

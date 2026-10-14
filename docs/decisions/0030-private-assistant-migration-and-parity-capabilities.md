@@ -187,8 +187,8 @@ active weather preference with no configured location is a refusal.
   owner-only command manifest is unchanged; list and cancel for these targets,
   and Forget for schedules, reuse the existing owner-only commands.
 - It does not support AI wording of briefings, which needs a provider path of its
-  own, nor meals, the `urgent` priority, task categories or a paused global watch
-  switch. Each is **source behavior full parity must preserve**, so each is a
+  own, nor meals, the `urgent` priority, task categories (a paused global watch
+  switch was later carried over, ADR 0031). Each is **source behavior full parity must preserve**, so each is a
   required parity blocker: the importer refuses the input (the fail-closed form of
   the blocker), and nothing here proposes dropping it. The same is true of the
   other known differences listed in `docs/CURRENT_STATE.md` (alert "areas

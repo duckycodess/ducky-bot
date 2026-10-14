@@ -4,11 +4,13 @@ import {
   ASSISTANT_WATCH_BACKOFF_MAX_MS, ASSISTANT_WATCH_CALLS_PER_HOUR, ASSISTANT_WATCH_CALLS_PER_TICK,
   ASSISTANT_WATCH_EVENT_BATCH, ASSISTANT_WATCH_EVENT_KEEP_DAYS, ASSISTANT_WATCH_INTERVAL_MINUTES,
   ASSISTANT_WATCH_MAX_PAGES, ASSISTANT_WATCH_PAGE_SIZE, DuckyError, GITHUB_FEED_COMMIT_MAX_PAGES,
-  WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
+  ASSISTANT_WATCH_CYCLE_TARGETS, ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS, ASSISTANT_WATCH_MAX_TARGETS,
+  ASSISTANT_WATCH_METADATA_INTERVAL_HOURS, GH_OWNER_RE, GH_REPO_RE, isPlainRepoName, WATCH_API_DISCOVERY_MAX_PAGES,
+  WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, newPublicWatchId, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
   WATCH_RUNS_MAX_PAGES, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type {
-  DueCheckpoint, ObservedEventWrite, Store, WatchEventWithTarget, WatchTargetRow,
+  DueCheckpoint, ObservedEventWrite, PollCycle, Store, WatchEventWithTarget, WatchTargetRow,
 } from '@ducky/persistence';
 import { dmTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
@@ -23,7 +25,8 @@ import {
   EMPTY_SCAN, keyOf, parseScan, serializeScan, windowHeldStill, type ScanState,
 } from './assistant-watch.scan.js';
 import {
-  WatchReadError, type AssistantWatchReader, type Page, type WatchRepoRef,
+  WatchReadError, type AssistantWatchReader, type CommitRecord, type IssueRecord, type Page, type PullRecord,
+  type ReleaseRecord, type RunRecord, type WatchRepoRef,
 } from './assistant-watch.reader.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
 
@@ -35,6 +38,25 @@ export interface AssistantWatchServiceDeps {
   readonly ownerId: string;
   readonly clock: OwnerClock;
   readonly reader: AssistantWatchReader;
+  /**
+   * Frozen configuration for the real reader: the source's recency-limited poll
+   * cycle, and discovery (off unless the operator enabled it and named the
+   * account). Absent means a scripted or unavailable reader: every active target
+   * is covered and nothing is discovered.
+   */
+  readonly watchConfig?: AssistantWatchConfig;
+}
+
+export interface AssistantWatchConfig {
+  /** The GitHub login that IS the owner, used to classify a repository's relationship. */
+  readonly account: string | null;
+  /** Whether the source's recency-limited cycle applies. */
+  readonly cycle: boolean;
+  readonly discovery: boolean;
+  /** Which relationships discovery may store; anything else never reaches the database. */
+  readonly relationships: ReadonlySet<'owner' | 'organization' | 'collaborator'>;
+  readonly includeForks: boolean;
+  readonly includeArchived: boolean;
 }
 
 export interface AssistantWatchTickResult {
@@ -62,6 +84,11 @@ export interface WatchDigest {
 }
 
 const MINUTE = 60_000;
+
+/** Every surface a target is read through; `ci_state` moves with `runs` and has no read of its own. */
+const WATCH_SURFACES_OBSERVED: readonly WatchSurface[] = [
+  'commits', 'pulls', 'issues', 'runs', 'releases', 'default_branch',
+];
 
 /**
  * Which native feed events an imported target's observation already covers, and
@@ -148,6 +175,7 @@ export class AssistantWatchService {
   private readonly ownerId: string;
   private readonly clock: OwnerClock;
   private readonly reader: AssistantWatchReader;
+  private readonly cfg: AssistantWatchConfig | undefined;
   private ticking: Promise<AssistantWatchTickResult> | null = null;
   /** Until when a rate limit or an authentication failure has stopped the cycle. */
   private pausedUntilMs = 0;
@@ -159,6 +187,7 @@ export class AssistantWatchService {
     this.ownerId = deps.ownerId;
     this.clock = deps.clock;
     this.reader = deps.reader;
+    this.cfg = deps.watchConfig;
   }
 
   // ---- the tick ---------------------------------------------------------------
@@ -185,8 +214,20 @@ export class AssistantWatchService {
     const nowMs = this.clock.nowMs();
     let left = this.budgetLeft(nowMs);
 
-    while (left > 0 && this.clock.nowMs() >= this.pausedUntilMs) {
-      const [unit] = repo.dueCheckpoints(isoOf(this.clock.nowMs()), 1);
+    // The source's global switch: off means no read at all. Alerts already owed,
+    // the digest and maintenance still run, and nothing about a target changes.
+    const watching = repo.monitoringEnabled(this.ownerId);
+    while (watching && left > 0 && this.clock.nowMs() >= this.pausedUntilMs) {
+      if (await this.discoveryDue()) {
+        const used = { n: 0 };
+        const result = await this.discoveryStep(used);
+        out[result] += 1;
+        out.callsUsed += used.n;
+        left -= used.n;
+        if (used.n > 0) repo.chargeCalls(this.clock.nowIso().slice(0, 16), used.n);
+        continue;
+      }
+      const [unit] = repo.dueCheckpoints(isoOf(this.clock.nowMs()), 1, this.cycle());
       if (!unit) break;
       if (!this.observable(unit.surface)) {
         repo.block(unit.targetId, unit.surface, 'unobservable', this.clock.nowIso());
@@ -290,12 +331,19 @@ export class AssistantWatchService {
     const r = await ctx.call(() => this.reader.repository(ctx.ref));
     repo.recordRepositoryFacts(unit.targetId, {
       defaultBranch: r.defaultBranch, pushedAt: r.pushedAt, archived: r.archived, fork: r.fork,
-      relationship: null,
+      relationship: this.relationshipOf(ctx.ref.owner),
     }, nowIso);
     const d = deriveDefaultBranch(r.defaultBranch, unit.cursor, nowIso);
+    // A target inside the cycle's coverage is re-read every interval; one beyond it
+    // only has its metadata refreshed slowly, so its recency can still move it in.
+    const cycle = this.cycle();
+    const covered = cycle === undefined || repo.inCycle(unit.targetId, cycle);
     const wrote = repo.commitObservation({
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
-      cursor: d.cursor, nextDueAt: this.nextDue(ctx.nowMs), atIso: nowIso,
+      cursor: d.cursor, nextDueAt: covered
+        ? this.nextDue(ctx.nowMs)
+        : isoOf(ctx.nowMs + ASSISTANT_WATCH_METADATA_INTERVAL_HOURS * 60 * MINUTE),
+      atIso: nowIso,
       events: d.events.map((e) => this.write(e)),
     });
     return wrote === undefined ? 'incomplete' : 'completed';
@@ -308,7 +356,7 @@ export class AssistantWatchService {
     const r = await ctx.call(() => this.reader.repository(ctx.ref));
     this.store.assistantWatch.recordRepositoryFacts(ctx.unit.targetId, {
       defaultBranch: r.defaultBranch, pushedAt: r.pushedAt, archived: r.archived, fork: r.fork,
-      relationship: null,
+      relationship: this.relationshipOf(ctx.ref.owner),
     }, isoOf(ctx.nowMs));
     return r.defaultBranch;
   }
@@ -361,6 +409,7 @@ export class AssistantWatchService {
     let hasMore = false;
     let ci: 'failing' | 'passing' | null = null;
     let pageFloorMs: number | null = null;
+    let pageCapMs: number | null = null;
     let queue: ScanState['queue'];
     switch (f.surface) {
       case 'commits':
@@ -386,17 +435,28 @@ export class AssistantWatchService {
           return this.restart(unit, ctx.nowMs, 'window_unstable');
         }
         const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
-        const runs = deriveRuns(f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs);
+        const runs = deriveRuns(
+          f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs,
+          ctx.nowMs - RUN_TRACK_MAX_AGE_MS,
+        );
         read = runs;
         ci = runs.ciState;
         pageFloorMs = runs.unsettledFloorMs;
+        // A run that settles after it was read has a later update than the one read,
+        // so the cursor must not be carried past it by something else on the pass.
+        pageCapMs = runs.unsettledStampMs === null ? null : runs.unsettledStampMs - 1;
         break;
       }
       case 'releases': {
         hasMore = f.res.hasMore;
-        const rel = deriveReleases(f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs);
+        const rel = deriveReleases(
+          f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs,
+          ctx.nowMs - DRAFT_TRACK_MAX_AGE_MS,
+        );
         read = rel;
         pageFloorMs = rel.unsettledFloorMs;
+        // A draft published after this read is published AFTER this moment.
+        pageCapMs = rel.unsettledFloorMs === null ? null : ctx.nowMs;
         break;
       }
     }
@@ -410,6 +470,7 @@ export class AssistantWatchService {
       last: { page, keys: f.keys },
       total: scan.total ?? (f.surface === 'runs' ? f.res.total ?? null : null),
       floorMs: minMs(scan.floorMs ?? null, pageFloorMs),
+      capMs: minMs(scan.capMs ?? null, pageCapMs),
       ci: scan.ci ?? ci,
       ...(queue ? { queue } : {}),
       ...(queue ? { closing: complete } : {}),
@@ -550,12 +611,17 @@ export class AssistantWatchService {
       return 'incomplete';
     }
 
-    const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, a.newestMs ?? Number.NEGATIVE_INFINITY);
+    // Capped, so something that settles after it was read cannot be jumped over. A
+    // baseline is not capped: nothing was announced for it, and re-reading would
+    // announce history.
+    const cap = baseline ? null : scan.capMs ?? null;
+    const newestMs = a.newestMs !== null && cap !== null ? Math.min(a.newestMs, cap) : a.newestMs;
+    const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, newestMs ?? Number.NEGATIVE_INFINITY);
     // The cursor moving to an item newer than the old one means that item went
     // through THIS pass and its events (if any) were recorded: the items at the
     // new cursor are then known. A baseline, or a pass that moved nothing, says
     // nothing new about the boundary.
-    const advanced = !baseline && sinceMs !== null && a.newestMs !== null && a.newestMs > sinceMs;
+    const advanced = !baseline && sinceMs !== null && newestMs !== null && newestMs > sinceMs;
     const ci = scan.ci ?? null;
     const floor = this.trackedFloor(unit.surface, scan.floorMs ?? null, ctx.nowMs);
     const committed = repo.commitObservation({
@@ -667,6 +733,105 @@ export class AssistantWatchService {
     return this.fail(unit, nowMs, 'read_failed');
   }
 
+  // ---- the poll cycle, relationships and discovery -----------------------------------
+
+  /** The source's recency-limited cycle, or undefined when it does not apply. */
+  private cycle(): PollCycle | undefined {
+    if (!this.cfg?.cycle) return undefined;
+    return {
+      ownerId: this.ownerId, limit: ASSISTANT_WATCH_CYCLE_TARGETS,
+      includeArchived: this.cfg.includeArchived, includeForks: this.cfg.includeForks,
+    };
+  }
+
+  /** `owner` for the configured account's own repositories; otherwise unknown from the name alone. */
+  private relationshipOf(ownerLogin: string): 'owner' | null {
+    const account = this.cfg?.account;
+    return account && ownerLogin.toLowerCase() === account.toLowerCase() ? 'owner' : null;
+  }
+
+  private async discoveryDue(): Promise<boolean> {
+    if (!this.cfg?.discovery || !this.reader.capabilities.discovery) return false;
+    const row = this.store.assistantWatch.ensureDiscovery(this.ownerId, this.clock.nowIso());
+    return row.nextDueAt <= this.clock.nowIso();
+  }
+
+  /**
+   * One page of repository discovery, one request.
+   *
+   * The source discovers at first start and every six hours, five pages of a
+   * hundred at most. A repository is stored only if its relationship to the
+   * configured account is one the frozen configuration allows, so nothing outside
+   * the scope ever reaches the database. Pages beyond the fifth are reported as an
+   * INCOMPLETE pass, a repository the ceiling cannot hold as a capacity block; both
+   * are visible in `/status`, and neither truncates, cancels or drops anything.
+   */
+  private async discoveryStep(used: { n: number }): Promise<UnitResult> {
+    const repo = this.store.assistantWatch;
+    const nowMs = this.clock.nowMs();
+    const nowIso = isoOf(nowMs);
+    const cfg = this.cfg!;
+    const row = repo.ensureDiscovery(this.ownerId, nowIso);
+    const page = row.pendingPage + 1;
+    try {
+      used.n += 1;
+      const res = await this.reader.discover(page);
+      const found: Parameters<typeof repo.commitDiscoveryPage>[0]['found'][number][] = [];
+      for (const d of res.items) {
+        const [owner, name] = d.fullName.split('/');
+        if (!owner || !name || d.fullName.split('/').length !== 2 || !GH_OWNER_RE.test(owner) || !GH_REPO_RE.test(name) || !isPlainRepoName(owner) || !isPlainRepoName(name)) continue;
+        const relationship = this.relationshipForDiscovered(d.ownerLogin, d.ownerType);
+        if (!cfg.relationships.has(relationship)) continue;
+        found.push({
+          repoKey: d.fullName.toLowerCase(), display: d.fullName, pushedAt: d.pushedAt, archived: d.archived,
+          fork: d.fork, relationship, id: randomUUID(), publicId: this.freshWatchId(),
+        });
+      }
+      const more = res.hasMore;
+      const last = !more || page >= WATCH_API_DISCOVERY_MAX_PAGES;
+      const committed = repo.commitDiscoveryPage({
+        ownerId: this.ownerId, expectedPage: row.pendingPage, found,
+        surfaces: WATCH_SURFACES_OBSERVED, maxTargets: ASSISTANT_WATCH_MAX_TARGETS,
+        next: last
+          ? {
+            kind: 'done', incomplete: more,
+            nextDueAt: isoOf(nowMs + ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS * 60 * MINUTE),
+          }
+          : { kind: 'page', page },
+        atIso: nowIso,
+      });
+      return committed === undefined ? 'incomplete' : last ? 'completed' : 'incomplete';
+    } catch (err) {
+      const code = err instanceof WatchReadError ? err.code : 'read_failed';
+      if (code === 'rate_limited' || code === 'auth') this.pausedUntilMs = nowMs + PAUSE_MS;
+      const delay = Math.min(
+        ASSISTANT_WATCH_INTERVAL_MINUTES * MINUTE * 2 ** Math.min(row.failures, 10), ASSISTANT_WATCH_BACKOFF_MAX_MS,
+      );
+      repo.recordDiscoveryFailure(
+        this.ownerId, code, isoOf(nowMs + Math.max(delay, code === 'rate_limited' || code === 'auth' ? PAUSE_MS : 0)), nowIso,
+      );
+      return 'failed';
+    }
+  }
+
+  /** The source's rule: the account's own repositories, then organizations, then everything else. */
+  private relationshipForDiscovered(
+    ownerLogin: string, ownerType: string | null,
+  ): 'owner' | 'organization' | 'collaborator' {
+    const account = this.cfg?.account;
+    if (account && ownerLogin.toLowerCase() === account.toLowerCase()) return 'owner';
+    return ownerType?.toLowerCase() === 'organization' ? 'organization' : 'collaborator';
+  }
+
+  private freshWatchId(): string {
+    for (let i = 0; i < 20; i += 1) {
+      const id = newPublicWatchId();
+      // One handle names exactly one watch of either kind.
+      if (!this.store.githubWatches.publicIdExists(id) && !this.store.assistantWatch.publicIdExists(id)) return id;
+    }
+    throw new DuckyError('not_found', 'Could not allocate a watch handle.');
+  }
+
   // ---- delivery -------------------------------------------------------------------
 
   /**
@@ -750,11 +915,40 @@ export class AssistantWatchService {
 
   /** For `/status`: counts only, never a repository name. */
   statusLine(): string {
-    const c = this.store.assistantWatch.counts(this.ownerId);
-    if (c.targets === 0) return 'no notification targets';
+    const repo = this.store.assistantWatch;
+    const c = repo.counts(this.ownerId);
+    if (c.targets === 0 && !this.cfg?.discovery) return 'no notification targets';
     const observing = this.reader.capabilities.observableKinds.length > 0;
-    return `${c.active} active of ${c.targets} notification target(s)` +
-      (observing ? '' : '; NOT observing (no typed reader in this build)');
+    const parts = [
+      `${c.active} active of ${c.targets} notification target(s)` +
+        (observing ? '' : '; NOT observing (no typed reader in this build)'),
+    ];
+    if (!repo.monitoringEnabled(this.ownerId)) parts.push('PAUSED (the imported global switch is off)');
+    const cycle = this.cycle();
+    if (cycle) {
+      const v = repo.cycleCoverage(cycle);
+      parts.push(
+        `${v.covered} covered this cycle, ${v.beyond} beyond it by recency, ${v.unmeasured} awaiting a first metadata read` +
+          (v.ineligible > 0 ? `, ${v.ineligible} ineligible (archived or an owned fork)` : ''),
+      );
+    }
+    if (this.cfg?.discovery) {
+      const d = repo.discovery(this.ownerId);
+      parts.push(
+        d === undefined || d.lastCompletedAt === null
+          ? 'discovery: not completed yet'
+          : `discovery: last pass complete${d.incomplete ? ' EXCEPT repositories beyond the page cap' : ''}` +
+            (d.capacityBlocked ? '; at the target ceiling, some repositories NOT stored' : ''),
+      );
+    }
+    const blocked = repo.blockedCounts(this.ownerId);
+    if (blocked.windowExceeded + blocked.identityChanged > 0) {
+      parts.push(
+        `blocked: ${blocked.windowExceeded} surface(s) with a window too deep to prove, ` +
+          `${blocked.identityChanged} target(s) whose repository was renamed or transferred`,
+      );
+    }
+    return parts.join('; ');
   }
 }
 
@@ -771,11 +965,11 @@ interface UnitCtx {
 }
 
 type ListFetch =
-  | { readonly surface: 'commits'; readonly res: Page<import('./assistant-watch.reader.js').CommitRecord>; readonly keys: string[] }
-  | { readonly surface: 'pulls'; readonly res: Page<import('./assistant-watch.reader.js').PullRecord>; readonly keys: string[] }
-  | { readonly surface: 'issues'; readonly res: Page<import('./assistant-watch.reader.js').IssueRecord>; readonly keys: string[] }
-  | { readonly surface: 'runs'; readonly res: Page<import('./assistant-watch.reader.js').RunRecord>; readonly keys: string[] }
-  | { readonly surface: 'releases'; readonly res: Page<import('./assistant-watch.reader.js').ReleaseRecord>; readonly keys: string[] };
+  | { readonly surface: 'commits'; readonly res: Page<CommitRecord>; readonly keys: string[] }
+  | { readonly surface: 'pulls'; readonly res: Page<PullRecord>; readonly keys: string[] }
+  | { readonly surface: 'issues'; readonly res: Page<IssueRecord>; readonly keys: string[] }
+  | { readonly surface: 'runs'; readonly res: Page<RunRecord>; readonly keys: string[] }
+  | { readonly surface: 'releases'; readonly res: Page<ReleaseRecord>; readonly keys: string[] };
 
 const maxMs = (a: number | null, b: number | null): number | null =>
   b === null || Number.isNaN(b) ? a : a === null || Number.isNaN(a) || b > a ? b : a;

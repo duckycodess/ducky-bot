@@ -528,3 +528,35 @@ describe('imported tasks use the accepted card and the owner-only controls', () 
     h.close();
   });
 });
+
+describe('the source global monitoring switch', () => {
+  const paused = (on: boolean) => {
+    const doc = importDoc() as Record<string, any>;
+    doc['watch']['monitoringEnabled'] = on;
+    return doc;
+  };
+
+  it('is carried over when it is off, and the watch reads nothing until it is on again', () => {
+    const { h, svc } = boot();
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(true);
+    const out = apply(h, svc(), paused(false));
+    expect(out.ok).toBe(true);
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
+    expect(svc().verify(paused(false)).categories['watchSwitch']).toMatchObject({ expected: 1, present: 1, drifted: 0 });
+    // The operator states the switch: importing a document with it on resumes watching.
+    apply(h, svc(), paused(true));
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(true);
+    h.close();
+  });
+
+  it('is reported as drift, not as a failure, when it differs from the document', () => {
+    const { h, svc } = boot();
+    apply(h, svc(), paused(false));
+    h.store.assistantWatch.setMonitoring(OWNER, true, NOW);
+    const report = svc().verify(paused(false));
+    expect(report.categories['watchSwitch']).toMatchObject({ drifted: 1 });
+    expect(report.ok).toBe(true);
+    expect(report.parity).toBe(false);
+    h.close();
+  });
+});

@@ -414,7 +414,10 @@ export class ForgetService {
 
     const owner = actor.discordUserId;
     const store = this.deps.store;
-    const rows = withTransaction(store.db, () => {
+    // The cause rides along so an imported record's tombstone says WHY it went, in one
+    // word, and nothing else: a deletion record that quoted what it deleted would
+    // defeat the deletion.
+    const rows = store.withDeletionCause('forget', () => withTransaction(store.db, () => {
       switch (target) {
         case 'task': {
           // The task AND the notifications it owns. Counted, so the owner is
@@ -438,7 +441,7 @@ export class ForgetService {
             store.scheduleRules.deleteException(owner, preview.id)
           );
       }
-    });
+    }));
 
     if (rows === 0) {
       // It was there a moment ago and is not now. Report the truth rather than

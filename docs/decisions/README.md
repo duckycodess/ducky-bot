@@ -36,6 +36,7 @@ reverse. Trivial implementation choices do not get one.
 | [0029](0029-github-feed-and-the-delivery-only-github-channel.md) | A GitHub feed with durable event identity, and a delivery-only github channel |
 | [0030](0030-private-assistant-migration-and-parity-capabilities.md) | Migrating the private assistant: durable identity, indefinite schedules, notification-only targets |
 | [0031](0031-typed-notification-watch-reads.md) | Typed notification-watch reads: seven GET-only `gh api` shapes, one request per unit |
+| [0033](0033-private-rollback-delta-export.md) | A private, read-only rollback-delta export with baseline versions and deletion causes |
 | [0032](0032-remaining-private-assistant-parity-behaviors.md) | Remaining private-assistant parity behaviors: urgent and categories, staleness, overlap, schedule rollback |
 
 ## Format

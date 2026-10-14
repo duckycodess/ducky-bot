@@ -1823,4 +1823,97 @@ ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN 
 ALTER TABLE tasks ADD COLUMN category TEXT CHECK (category IS NULL OR category IN ('school','personal'));
 `,
   },
+  {
+    version: 34,
+    name: 'rollback_delta_support',
+    sql: `
+-- What a reverse bridge needs that the ledger did not keep (ADR 0033).
+--
+-- stored_hash is the BASELINE VERSION of an imported record: a hash of the fields
+-- Ducky wrote, taken inside the import transaction. Comparing it with the record
+-- as it stands tells a later export, without the source document, whether the
+-- owner has changed it since. It is a hash, never content. NULL on a live identity
+-- means the baseline is unknown (imported before this column), which an export
+-- reports as incomplete rather than guessing.
+--
+-- tombstone_cause says WHY an imported record is gone, in one word: 'forget' (the
+-- owner asked for it to be deleted), 'owner_delete' (the owner deleted it by hand),
+-- 'retention' (it was finished and aged out), 'import_suppressed' (the import chose not
+-- to write it: deleted at the source, or superseded by what the owner did since, so it
+-- never existed here) or 'unknown'. A tombstone that said
+-- only "gone" could not tell a record a bridge must never resurrect from one that
+-- merely aged out, and a record of a deletion that quoted what it deleted would
+-- defeat the deletion, so the cause is the only thing kept. NULL on a live identity.
+ALTER TABLE assistant_import_identities ADD COLUMN stored_hash TEXT;
+ALTER TABLE assistant_import_identities ADD COLUMN tombstone_cause TEXT
+  CHECK (tombstone_cause IS NULL OR tombstone_cause IN
+    ('forget','owner_delete','retention','import_suppressed','unknown'));
+
+-- ONE row, present only while a deletion path is running, naming that path. The
+-- tombstone triggers read it. A trigger cannot see its caller, and a deletion that
+-- reaches the trigger without a path (a cascade nobody wrapped, a future path) is
+-- recorded as 'unknown' rather than mislabelled.
+CREATE TABLE deletion_context (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  cause TEXT NOT NULL CHECK (cause IN ('forget','owner_delete','retention'))
+);
+
+DROP TRIGGER trg_tombstone_task;
+CREATE TRIGGER trg_tombstone_task AFTER DELETE ON tasks BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'task' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_reminder;
+CREATE TRIGGER trg_tombstone_reminder AFTER DELETE ON reminders BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'reminder' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_capture;
+CREATE TRIGGER trg_tombstone_capture AFTER DELETE ON captures BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'capture' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_rule;
+CREATE TRIGGER trg_tombstone_schedule_rule AFTER DELETE ON schedule_rules BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_rule' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_exception;
+CREATE TRIGGER trg_tombstone_schedule_exception AFTER DELETE ON schedule_exceptions BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_exception' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_watch_target;
+CREATE TRIGGER trg_tombstone_watch_target AFTER DELETE ON assistant_watch_targets BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'watch_target' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_preferences;
+CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'preferences' AND target_id = OLD.discord_user_id AND state = 'live';
+END;
+`,
+  },
 ];

@@ -1187,9 +1187,16 @@ was revised.
   notification or Done/Edit/Snooze/non-owner check, no reverse-delta rollback
   bridge, no cutover and no module retirement. Nothing was imported, deployed,
   stopped or changed on any real system.
-- **A rollback-delta export.** The importer reads a document and writes; nothing
-  yet exports Ducky-side changes back toward the source. The rollback bridge stays
-  a required, unproven gate.
+- **A rollback-delta export: implemented; the bridge is not.** `pnpm
+  export:rollback-delta` (ADR 0033) writes one private file of what changed in Ducky
+  since an import (changed and added records, deletions by identity and cause, and
+  watch, briefing and switch state), under the runtime lock or from a verified backup,
+  exiting 5 and writing nothing when it cannot say something (an unknown baseline, a
+  deletion with no recorded cause, a table past its cap). It is unit-tested with a
+  synthetic replay against a model of the source, which proves completeness and
+  idempotence for the listed categories and nothing more. **No reverse bridge to the
+  source exists or was rehearsed**, and the export authorizes no restore of stale data;
+  the proven reverse-delta rollback stays a required operational gate.
 
 **Required parity blockers.** The owner settled full parity on 2026-10-13. Every
 item below is a behavior the source has that Ducky does not yet have. None is an
@@ -1268,7 +1275,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2277 tests in 145 files**.
+The unmodified `pnpm test` command passes all **2302 tests in 147 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

@@ -13,7 +13,7 @@
 - [x] 2.5 Implement bounded notification-only selection and fair per-tick/rolling resource budgets without engineering authorization changes.
 - [x] 2.6 Preserve typed watch checkpoints and alert/digest event settlement with explicit transition reconciliation and resumable partial reads. (Engine and persistence, proven with a scripted reader. No real reader exists: release publication, closing times and discovery remain blocked, so a document with watch targets fails closed. See ADR 0030.)
 - [x] 2.7 Preserve audited active preference/briefing behavior with no imported authorization or deployment config writes. (AI wording and meals are refused, not supported; a paused watch switch is now carried over, ADR 0031. Original note: AI wording, meals and a paused watch switch are refused, not supported.)
-- [ ] 2.8 Add explicit offline importer, dry validation/semantic verification and private read-only rollback-delta export where sufficient. (Importer, dry run, `--verify` and the lock/backup gates are done. The rollback-delta export is NOT implemented and the reverse-delta bridge stays an unproven gate.)
+- [x] 2.8 Add explicit offline importer, dry validation/semantic verification and private read-only rollback-delta export where sufficient. (Importer, dry run, `--verify` and the lock/backup gates are done. The rollback-delta export is implemented and synthetically replay-tested (ADR 0033): complete and idempotent for the listed categories, with `incomplete` when a baseline or a deletion cause is unknown. It is NOT a source bridge: the reverse-delta bridge stays an unproven, privately rehearsed gate.)
 
 ## 3. Synthetic verification and final review
 

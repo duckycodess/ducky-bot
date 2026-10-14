@@ -363,7 +363,7 @@ export class AssistantImportService {
       if (tally('tasks', d.disposition)) {
         const id = randomUUID();
         imp.insertTask(this.taskWrite(id, owner, tz, t));
-        imp.recordLive({ namespace: ns, category: 'task', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at });
+        imp.recordLive({ namespace: ns, category: 'task', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('task', id) });
         taskTarget.set(t.sourceId, id);
       } else {
         const live = imp.identity(ns, 'task', t.sourceId);
@@ -409,7 +409,7 @@ export class AssistantImportService {
         fireAt: r.fireAt, deliveredAt: r.deliveredAt, createdAt: r.createdAt,
         closedAt: r.state === 'cancelled' ? doc.exportedAt : null,
       });
-      imp.recordLive({ namespace: ns, category: 'reminder', sourceId: r.sourceId, targetId: id, fingerprint: d.fp, at });
+      imp.recordLive({ namespace: ns, category: 'reminder', sourceId: r.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('reminder', id) });
       counts.reminders.created += 1;
     }
 
@@ -428,7 +428,7 @@ export class AssistantImportService {
           id, discordUserId: owner, content: c.text!, status: captureStatus(c),
           createdAt: c.createdAt, updatedAt: c.processedAt ?? c.createdAt,
         });
-        imp.recordLive({ namespace: ns, category: 'capture', sourceId: c.sourceId, targetId: id, fingerprint: d.fp, at });
+        imp.recordLive({ namespace: ns, category: 'capture', sourceId: c.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('capture', id) });
       }
     }
 
@@ -442,7 +442,7 @@ export class AssistantImportService {
             ...this.ruleWrite(id, owner, b.sourceId, b.status === 'active', r, at),
             replacedAt: b.status === 'replaced' ? b.replacedAt : null,
           });
-          imp.recordLive({ namespace: ns, category: 'schedule_rule', sourceId: r.sourceId, targetId: id, fingerprint: d.fp, at });
+          imp.recordLive({ namespace: ns, category: 'schedule_rule', sourceId: r.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('schedule_rule', id) });
         }
       }
     }
@@ -451,7 +451,7 @@ export class AssistantImportService {
       if (tally('scheduleExceptions', d.disposition)) {
         const id = randomUUID();
         this.store.scheduleRules.insertException(this.exceptionWrite(id, owner, x));
-        imp.recordLive({ namespace: ns, category: 'schedule_exception', sourceId: x.sourceId, targetId: id, fingerprint: d.fp, at });
+        imp.recordLive({ namespace: ns, category: 'schedule_exception', sourceId: x.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('schedule_exception', id) });
       }
     }
 
@@ -463,7 +463,7 @@ export class AssistantImportService {
         });
         imp.recordLive({
           namespace: ns, category: 'preferences', sourceId: PREFERENCES_SOURCE_ID, targetId: owner,
-          fingerprint: plan.preferences.fp, at,
+          fingerprint: plan.preferences.fp, at, storedHash: this.baseline('preferences', owner),
         });
       }
     }
@@ -491,12 +491,19 @@ export class AssistantImportService {
       const counted = this.insertTarget(id, owner, t, doc.exportedAt, at);
       watch.checkpoints += counted.checkpoints;
       watch.events += counted.events;
-      imp.recordLive({ namespace: ns, category: 'watch_target', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at });
+      imp.recordLive({ namespace: ns, category: 'watch_target', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('watch_target', id) });
     }
     // The source's global switch. It gates reads only (no target or cursor changes),
     // and the document is an explicit operator act, so it states the switch: an
     // import of a switch that is back on resumes watching.
     if (doc.watch) this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at);
+  }
+
+  /** The baseline version of a record just written, read back inside the same transaction. */
+  private baseline(category: IdentityCategory, targetId: string): string {
+    const h = this.store.rollbackDelta.currentHash(category, targetId);
+    if (h === undefined) throw new Error('baseline: the record just written is not readable');
+    return h;
   }
 
   private insertTarget(

@@ -25,6 +25,7 @@ export * from './repositories/audit-log.repo.js';
 export * from './repositories/retention.repo.js';
 export * from './repositories/agent-threads.repo.js';
 export * from './repositories/assistant-import.repo.js';
+export * from './repositories/rollback-delta.repo.js';
 export * from './repositories/schedule-rules.repo.js';
 export * from './repositories/owner-preferences.repo.js';
 export * from './repositories/assistant-watch.repo.js';
@@ -55,6 +56,7 @@ import { RetentionRepo } from './repositories/retention.repo.js';
 import { AuditLogRepo } from './repositories/audit-log.repo.js';
 import { AgentThreadsRepo } from './repositories/agent-threads.repo.js';
 import { AssistantImportRepo } from './repositories/assistant-import.repo.js';
+import { RollbackDeltaRepo } from './repositories/rollback-delta.repo.js';
 import { ScheduleRulesRepo } from './repositories/schedule-rules.repo.js';
 import { OwnerPreferencesRepo } from './repositories/owner-preferences.repo.js';
 import { AssistantWatchRepo } from './repositories/assistant-watch.repo.js';
@@ -113,6 +115,14 @@ export interface Store {
   readonly agentThreads: AgentThreadsRepo;
   /** Import-specific writes and the permanent correlation ledger (ADR 0030). */
   readonly assistantImport: AssistantImportRepo;
+  readonly rollbackDelta: RollbackDeltaRepo;
+  /**
+   * Runs a deletion path under a named cause, so the tombstone an imported record
+   * leaves says WHY it went (`forget`, `owner_delete`, `retention`) in one word and
+   * nothing else. A deletion with no path is recorded as `unknown`. Nests: the
+   * outermost cause wins.
+   */
+  withDeletionCause<T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T;
   /** Indefinite weekly rules and their dated exceptions. */
   readonly scheduleRules: ScheduleRulesRepo;
   /** Non-authoritative owner preferences; authorization never reads them. */
@@ -122,6 +132,16 @@ export interface Store {
 }
 
 export function createStore(db: Db): Store {
+  const withDeletionCause = <T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T => {
+    const outer = db.prepare('SELECT 1 FROM deletion_context WHERE id = 1').get() !== undefined;
+    if (outer) return fn();
+    db.prepare('INSERT INTO deletion_context (id, cause) VALUES (1, ?)').run(cause);
+    try {
+      return fn();
+    } finally {
+      db.prepare('DELETE FROM deletion_context WHERE id = 1').run();
+    }
+  };
   return {
     db,
     repos: new ReposRepo(db),
@@ -147,6 +167,8 @@ export function createStore(db: Db): Store {
     retention: new RetentionRepo(db),
     agentThreads: new AgentThreadsRepo(db),
     assistantImport: new AssistantImportRepo(db),
+    rollbackDelta: new RollbackDeltaRepo(db),
+    withDeletionCause,
     scheduleRules: new ScheduleRulesRepo(db),
     ownerPreferences: new OwnerPreferencesRepo(db),
     assistantWatch: new AssistantWatchRepo(db),

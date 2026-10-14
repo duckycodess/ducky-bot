@@ -1,0 +1,148 @@
+import { createHash } from 'node:crypto';
+import { canonicalJson } from '@ducky/contracts';
+import type { Db } from '../db.js';
+import type { IdentityCategory } from './assistant-import.repo.js';
+
+/** A raw row, as the database holds it. Every key is a column name. */
+export type RawRow = Record<string, unknown>;
+
+/**
+ * The columns that make up an imported record's BASELINE VERSION, per category.
+ *
+ * These are the fields Ducky wrote at import and that a later edit, completion,
+ * snooze, cancellation or replacement can change. They deliberately exclude every
+ * column the system rewrites on its own (a task's `updated_at`, a watch target's
+ * default branch and last-observed time), because a baseline that moved when
+ * nothing the owner did had changed would report a change that never happened.
+ */
+const BASELINE: Readonly<Record<IdentityCategory, { table: string; key: string; columns: readonly string[] }>> = {
+  task: {
+    table: 'tasks', key: 'id',
+    columns: ['title', 'status', 'priority', 'urgent', 'category', 'due_at', 'due_all_day', 'closed_at', 'reminder_policy'],
+  },
+  reminder: {
+    table: 'reminders', key: 'id',
+    columns: ['status', 'first_fire_at', 'next_fire_at', 'fired_count', 'closed_at', 'text', 'task_id'],
+  },
+  capture: { table: 'captures', key: 'id', columns: ['content', 'status'] },
+  schedule_rule: {
+    table: 'schedule_rules', key: 'id',
+    columns: [
+      'active', 'weekday', 'start_time', 'end_time', 'label', 'course_code', 'section', 'room', 'uncertain',
+      'effective_from', 'effective_until', 'replaced_at',
+    ],
+  },
+  schedule_exception: {
+    table: 'schedule_exceptions', key: 'id', columns: ['local_date', 'course_code', 'label', 'kind', 'note'],
+  },
+  preferences: { table: 'owner_preferences', key: 'discord_user_id', columns: ['prefs_json'] },
+  watch_target: { table: 'assistant_watch_targets', key: 'id', columns: ['state', 'cancel_reason'] },
+};
+
+export const baselineHash = (category: IdentityCategory, row: RawRow): string => {
+  const picked: Record<string, unknown> = { v: 1, category };
+  for (const c of BASELINE[category].columns) picked[c] = row[c] ?? null;
+  return createHash('sha256').update(canonicalJson(picked)).digest('hex');
+};
+
+/** Rows read for an export, by table, with whether any table hit its cap. */
+export interface OwnerStateSnapshot {
+  readonly identities: RawRow[];
+  readonly tasks: RawRow[];
+  readonly reminders: RawRow[];
+  readonly occurrences: RawRow[];
+  readonly captures: RawRow[];
+  readonly schedules: RawRow[];
+  readonly scheduleRules: RawRow[];
+  readonly scheduleExceptions: RawRow[];
+  readonly preferences: RawRow[];
+  readonly briefingSlots: RawRow[];
+  readonly watchTargets: RawRow[];
+  readonly watchCheckpoints: RawRow[];
+  readonly watchEvents: RawRow[];
+  readonly discoveryTombstones: RawRow[];
+  readonly watchSwitch: RawRow | null;
+  /** Names of tables that held more than the cap, so the read was cut. */
+  readonly truncated: string[];
+}
+
+/**
+ * Owner-scoped, READ-ONLY reads for the rollback-delta export (ADR 0033), and the
+ * baseline hash an import records.
+ *
+ * Every read is scoped to one owner in SQL, bounded, and writes nothing. The
+ * export runs only while the runtime lock is held or against a verified backup,
+ * so these reads see one consistent state.
+ */
+export class RollbackDeltaRepo {
+  constructor(private readonly db: Db) {}
+
+  /** The baseline hash of one record as it stands now, or undefined if it is gone. */
+  currentHash(category: IdentityCategory, targetId: string): string | undefined {
+    const b = BASELINE[category];
+    const row = this.db
+      .prepare(`SELECT ${b.columns.join(', ')} FROM ${b.table} WHERE ${b.key} = ?`)
+      .get(targetId) as RawRow | undefined;
+    return row ? baselineHash(category, row) : undefined;
+  }
+
+  snapshot(ownerId: string, cap: number): OwnerStateSnapshot {
+    const truncated: string[] = [];
+    const read = (name: string, sql: string, ...args: unknown[]): RawRow[] => {
+      const rows = this.db.prepare(`${sql} LIMIT ${cap + 1}`).all(...(args as string[])) as RawRow[];
+      if (rows.length > cap) {
+        truncated.push(name);
+        return rows.slice(0, cap);
+      }
+      return rows;
+    };
+    const owner = ownerId;
+    return {
+      identities: read('identities', 'SELECT * FROM assistant_import_identities ORDER BY namespace, category, source_id'),
+      tasks: read('tasks', 'SELECT * FROM tasks WHERE discord_user_id = ? ORDER BY created_at, id', owner),
+      reminders: read('reminders', 'SELECT * FROM reminders WHERE discord_user_id = ? ORDER BY created_at, id', owner),
+      occurrences: read(
+        'reminder_occurrences',
+        `SELECT o.* FROM reminder_occurrences o JOIN reminders r ON r.id = o.reminder_id
+          WHERE r.discord_user_id = ? ORDER BY o.reminder_id, o.occurrence_no`,
+        owner,
+      ),
+      captures: read('captures', 'SELECT * FROM captures WHERE discord_user_id = ? ORDER BY created_at, id', owner),
+      schedules: read('schedules', 'SELECT * FROM schedules WHERE discord_user_id = ? ORDER BY created_at, id', owner),
+      scheduleRules: read('schedule_rules', 'SELECT * FROM schedule_rules WHERE discord_user_id = ? ORDER BY created_at, id', owner),
+      scheduleExceptions: read(
+        'schedule_exceptions', 'SELECT * FROM schedule_exceptions WHERE discord_user_id = ? ORDER BY created_at, id', owner,
+      ),
+      preferences: read('owner_preferences', 'SELECT * FROM owner_preferences WHERE discord_user_id = ?', owner),
+      briefingSlots: read(
+        'briefing_deliveries',
+        'SELECT * FROM briefing_deliveries WHERE discord_user_id = ? ORDER BY day_key, kind, target',
+        owner,
+      ),
+      watchTargets: read(
+        'assistant_watch_targets', 'SELECT * FROM assistant_watch_targets WHERE discord_user_id = ? ORDER BY repo_key', owner,
+      ),
+      watchCheckpoints: read(
+        'assistant_watch_checkpoints',
+        `SELECT c.*, t.repo_key FROM assistant_watch_checkpoints c JOIN assistant_watch_targets t ON t.id = c.target_id
+          WHERE t.discord_user_id = ? ORDER BY t.repo_key, c.surface`,
+        owner,
+      ),
+      watchEvents: read(
+        'assistant_watch_events',
+        `SELECT e.*, t.repo_key FROM assistant_watch_events e JOIN assistant_watch_targets t ON t.id = e.target_id
+          WHERE t.discord_user_id = ? ORDER BY t.repo_key, e.kind, e.identity`,
+        owner,
+      ),
+      discoveryTombstones: read(
+        'assistant_watch_discovery_tombstones',
+        'SELECT * FROM assistant_watch_discovery_tombstones WHERE discord_user_id = ? ORDER BY repo_key',
+        owner,
+      ),
+      watchSwitch:
+        (this.db.prepare('SELECT * FROM assistant_watch_settings WHERE discord_user_id = ?').get(owner) as RawRow | undefined) ??
+        null,
+      truncated,
+    };
+  }
+}

@@ -19,6 +19,10 @@ export interface IdentityRow {
   readonly fingerprint: string | null;
   readonly createdAt: string;
   readonly tombstonedAt: string | null;
+  /** The baseline version: a hash of what Ducky wrote. Null if unknown, and for a tombstone. */
+  readonly storedHash: string | null;
+  /** Why a tombstone exists, in one word. Null for a live identity. */
+  readonly tombstoneCause: 'forget' | 'owner_delete' | 'retention' | 'import_suppressed' | 'unknown' | null;
 }
 
 const mapIdentity = (r: Record<string, unknown>): IdentityRow => ({
@@ -30,6 +34,8 @@ const mapIdentity = (r: Record<string, unknown>): IdentityRow => ({
   fingerprint: r['fingerprint'] == null ? null : String(r['fingerprint']),
   createdAt: String(r['created_at']),
   tombstonedAt: r['tombstoned_at'] == null ? null : String(r['tombstoned_at']),
+  storedHash: r['stored_hash'] == null ? null : String(r['stored_hash']),
+  tombstoneCause: r['tombstone_cause'] == null ? null : (String(r['tombstone_cause']) as IdentityRow['tombstoneCause']),
 });
 
 /** The closed states a task can arrive in. An imported task is never reopened. */
@@ -121,14 +127,16 @@ export class AssistantImportRepo {
     targetId: string;
     fingerprint: string;
     at: string;
+    /** The baseline version of what was just written (`RollbackDeltaRepo.currentHash`). */
+    storedHash?: string;
   }): void {
     this.db
       .prepare(
         `INSERT INTO assistant_import_identities
-           (namespace, category, source_id, target_id, state, fingerprint, created_at)
-         VALUES (?,?,?,?, 'live', ?, ?)`,
+           (namespace, category, source_id, target_id, state, fingerprint, created_at, stored_hash)
+         VALUES (?,?,?,?, 'live', ?, ?, ?)`,
       )
-      .run(row.namespace, row.category, row.sourceId, row.targetId, row.fingerprint, row.at);
+      .run(row.namespace, row.category, row.sourceId, row.targetId, row.fingerprint, row.at, row.storedHash ?? null);
   }
 
   /** Counts only, for verification: how many identities are live or tombstoned. */
@@ -228,8 +236,9 @@ export class AssistantImportRepo {
     this.db
       .prepare(
         `INSERT INTO assistant_import_identities
-           (namespace, category, source_id, target_id, state, fingerprint, created_at, tombstoned_at)
-         VALUES (?,?,?,NULL,'tombstone',NULL,?,?)`,
+           (namespace, category, source_id, target_id, state, fingerprint, created_at, tombstoned_at,
+            tombstone_cause)
+         VALUES (?,?,?,NULL,'tombstone',NULL,?,?, 'import_suppressed')`,
       )
       .run(row.namespace, row.category, row.sourceId, row.at, row.at);
   }

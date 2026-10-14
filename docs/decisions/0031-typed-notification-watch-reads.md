@@ -109,8 +109,9 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   their identities are stable, so what is looked at again is deduplicated. An issue keeps the audited ONE classification per pass (opened if
   created after the cursor, else closed if closed after it, else updated), judged against the real
   cursor first, so a close in this window is never replaced by a replay of an earlier opening;
-  only when neither applies to this window does the floor recover a missed transition, with the
-  same precedence. An issue opened in one window and closed in the next still announces both; across consecutive multi-page passes the floor
+  the floor never replaces or suppresses that current classification (a comment-only touch after an
+  announced opening is an update, for issues and pull requests alike); it only ADDS a transition
+  from the window before, with the same precedence, deduplicated by identity. An issue opened in one window and closed in the next still announces both; across consecutive multi-page passes the floor
   stays the EARLIER of the inherited one and the new window's start. An item AT the
   cursor re-read in inclusive mode is no longer called "updated" a second time. This is not
   a proof against arbitrary paging drift, which stays a named residual.

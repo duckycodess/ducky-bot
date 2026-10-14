@@ -893,7 +893,7 @@ describe('one classification per issue per pass, with the audited precedence', (
     h.close();
   });
 
-  it('uses the same precedence when the floor recovers a missed transition: opened first', async () => {
+  it('adds a recovered transition with the same precedence (opened first) beside the current update', async () => {
     const { h, clock, reader } = boot();
     const id = target(h);
     checkpoint(h, id, 'issues', 'imported', SINCE);
@@ -909,7 +909,48 @@ describe('one classification per issue per pass, with the audited precedence', (
     reader.pageSize = 10;
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
-    expect(ids(h, id).filter((i) => i.startsWith('8:'))).toEqual([`8:issue_opened:${at(12, 1)}`]);
+    // The current window's classification is its own (a touch after the cursor: updated); the
+    // floor only ADDS the old transition it missed, opened before closed, never both.
+    expect(ids(h, id).filter((i) => i.startsWith('8:'))).toEqual(
+      [`8:issue_opened:${at(12, 1)}`, `8:issue_updated:${at(12, 9)}`].sort(),
+    );
+    h.close();
+  });
+});
+
+describe('a comment-only touch after an announced opening is an update, whatever the floor carries', () => {
+  it('records the issue update once and no second opening', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(7, at(12, 3), { createdAt: at(12, 3) }), issue(2, at(12, 2)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    await h.app.assistantWatch.tick(); // multi-page: announces 7 as opened, keeps the floor
+    reader.issuesBy.set('acme/widgets', [
+      issue(7, at(12, 9), { createdAt: at(12, 3) }), issue(1, at(12, 5)), issue(2, at(12, 2)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    const got = ids(h, id).filter((i) => i.startsWith('7:'));
+    expect(got).toEqual([`7:issue_opened:${at(12, 3)}`, `7:issue_updated:${at(12, 9)}`].sort());
+    h.close();
+  });
+
+  it('records the pull request update once and no second opening', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'pulls', 'imported', SINCE);
+    const pr = (n: number, updated: string, createdAt = at(1)) => ({
+      number: n, title: `PR ${n}`, state: 'open' as const, createdAt, updatedAt: updated, mergedAt: null, closedAt: null,
+    });
+    reader.pullsBy.set('acme/widgets', [pr(1, at(12, 5)), pr(7, at(12, 3), at(12, 3)), pr(2, at(12, 2)), pr(9, '2026-10-01T00:00:00Z')]);
+    await h.app.assistantWatch.tick();
+    reader.pullsBy.set('acme/widgets', [pr(7, at(12, 9), at(12, 3)), pr(1, at(12, 5)), pr(2, at(12, 2)), pr(9, '2026-10-01T00:00:00Z')]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    const got = ids(h, id).filter((i) => i.startsWith('7:'));
+    expect(got).toEqual(['7:opened', `7:updated:${at(12, 9)}`].sort());
     h.close();
   });
 });

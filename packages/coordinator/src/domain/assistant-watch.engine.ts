@@ -219,7 +219,9 @@ export function derivePullList(
     // "updated" again would be a new identity for the same instant, so it is only the
     // lifecycle kinds, which have stable identities, that a re-read may announce.
     const atBoundary = inclusive && sinceMs !== null && updated === sinceMs;
-    if (p.state === 'open' && !life.fresh(created) && !atBoundary) {
+    // Judged against the REAL cursor, never the lower lifecycle floor: a comment-only touch
+    // after an opening the last window already told is an update, whatever the floor says.
+    if (p.state === 'open' && !at_.fresh(created) && !atBoundary) {
       events.push({
         kind: 'pr_updated', identity: `${p.number}:updated:${p.updatedAt}`,
         occurredAt: p.updatedAt, payload: base,
@@ -307,30 +309,33 @@ export function deriveIssues(
       reached = true;
       continue;
     }
-    // ONE classification per issue per pass, with the audited precedence: opened if it
-    // was created after the cursor, else closed if it was closed after the cursor, else
-    // updated. That is judged against the REAL committed cursor first, so a close in this
-    // window is never replaced by a replay of an opening the last window already told
-    // (identities are stable, so the replay would only be dropped, and the close lost).
-    // Only when neither applies to THIS window does the lower lifecycle floor recover a
-    // transition an earlier multi-page read missed, with the same precedence.
+    // ONE classification per issue per pass, with the audited precedence, judged against
+    // the REAL committed cursor only: opened if it was created after the cursor, else
+    // closed if it was closed after it, else updated. The lower lifecycle floor never
+    // replaces or suppresses that current classification (a comment-only touch after an
+    // opening the last window told is an update, and a close in this window beats a
+    // replayed opening).
     const base = { number: i.number, title: scrubText(i.title, 140) };
-    const lifecycleKind = (edge: typeof at_): 'issue_opened' | 'issue_closed' | undefined =>
-      edge.fresh(at(i.createdAt)) ? 'issue_opened'
-        : i.closedAt && edge.fresh(at(i.closedAt)) ? 'issue_closed'
-          : undefined;
-    const kind = lifecycleKind(at_) ?? lifecycleKind(life);
-    if (kind) {
-      const when = kind === 'issue_opened' ? i.createdAt : i.closedAt!;
+    const push = (kind: 'issue_opened' | 'issue_closed' | 'issue_updated', when: string): void => {
       events.push({ kind, identity: `${i.number}:${kind}:${when}`, occurredAt: when, payload: base });
-      continue;
+    };
+    if (at_.fresh(at(i.createdAt))) {
+      push('issue_opened', i.createdAt);
+    } else if (i.closedAt && at_.fresh(at(i.closedAt))) {
+      push('issue_closed', i.closedAt);
+    } else if (!(inclusive && sinceMs !== null && updated === sinceMs)) {
+      // See derivePullList: an item AT the cursor was already told by the pass that moved
+      // the cursor onto it, and "updated" has no stable identity to dedupe by.
+      push('issue_updated', i.updatedAt);
     }
-    // See derivePullList: an item AT the cursor was already told by the pass that moved
-    // the cursor onto it, and "updated" has no stable identity to dedupe by.
-    if (inclusive && sinceMs !== null && updated === sinceMs) continue;
-    events.push({
-      kind: 'issue_updated', identity: `${i.number}:issue_updated:${i.updatedAt}`, occurredAt: i.updatedAt, payload: base,
-    });
+    // Reconciliation of an EARLIER multi-page read that may have missed a lifecycle
+    // transition (an item moved between page reads): it only ADDS a transition that
+    // belongs to the window before this one, with the same precedence, and identities
+    // deduplicate whatever was already told. It is not a second classification of this
+    // window, so it never fires for a transition the current cursor already covers.
+    const old = (ms: number): boolean => life.fresh(ms) && !at_.fresh(ms);
+    if (old(at(i.createdAt))) push('issue_opened', i.createdAt);
+    else if (i.closedAt && old(at(i.closedAt)) && !at_.fresh(at(i.createdAt))) push('issue_closed', i.closedAt);
   }
   return { events, newestMs: newest, reachedCursor: reached };
 }

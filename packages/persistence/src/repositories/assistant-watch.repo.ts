@@ -1022,7 +1022,7 @@ export class AssistantWatchRepo {
       .prepare(
         `UPDATE assistant_watch_checkpoints
             SET cursor = ?, boundary_known = 0, pending_cursor = NULL, pending_page = 0,
-                pending_state = NULL, scan_floor = NULL, lifecycle_floor = NULL,
+                pending_state = NULL,
                 next_due_at = ?, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )

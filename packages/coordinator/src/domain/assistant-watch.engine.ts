@@ -307,25 +307,24 @@ export function deriveIssues(
       reached = true;
       continue;
     }
-    // Opened and closed are independent facts with stable identities, exactly as for
-    // pull requests: an issue opened in one window and closed in the next must announce
-    // BOTH, and a re-read that meets the opening again drops it by identity without
-    // masking the close. Only an issue with neither is "updated".
+    // ONE classification per issue per pass, with the audited precedence: opened if it
+    // was created after the cursor, else closed if it was closed after the cursor, else
+    // updated. That is judged against the REAL committed cursor first, so a close in this
+    // window is never replaced by a replay of an opening the last window already told
+    // (identities are stable, so the replay would only be dropped, and the close lost).
+    // Only when neither applies to THIS window does the lower lifecycle floor recover a
+    // transition an earlier multi-page read missed, with the same precedence.
     const base = { number: i.number, title: scrubText(i.title, 140) };
-    let told = false;
-    if (life.fresh(at(i.createdAt))) {
-      events.push({
-        kind: 'issue_opened', identity: `${i.number}:issue_opened:${i.createdAt}`, occurredAt: i.createdAt, payload: base,
-      });
-      told = true;
+    const lifecycleKind = (edge: typeof at_): 'issue_opened' | 'issue_closed' | undefined =>
+      edge.fresh(at(i.createdAt)) ? 'issue_opened'
+        : i.closedAt && edge.fresh(at(i.closedAt)) ? 'issue_closed'
+          : undefined;
+    const kind = lifecycleKind(at_) ?? lifecycleKind(life);
+    if (kind) {
+      const when = kind === 'issue_opened' ? i.createdAt : i.closedAt!;
+      events.push({ kind, identity: `${i.number}:${kind}:${when}`, occurredAt: when, payload: base });
+      continue;
     }
-    if (i.closedAt && life.fresh(at(i.closedAt))) {
-      events.push({
-        kind: 'issue_closed', identity: `${i.number}:issue_closed:${i.closedAt}`, occurredAt: i.closedAt, payload: base,
-      });
-      told = true;
-    }
-    if (told) continue;
     // See derivePullList: an item AT the cursor was already told by the pass that moved
     // the cursor onto it, and "updated" has no stable identity to dedupe by.
     if (inclusive && sinceMs !== null && updated === sinceMs) continue;

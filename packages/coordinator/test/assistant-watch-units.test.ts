@@ -860,3 +860,56 @@ describe('an issue opened in one window and closed in the next announces both', 
     h.close();
   });
 });
+
+describe('one classification per issue per pass, with the audited precedence', () => {
+  it('says only "opened" for an issue created AND closed after the cursor', async () => {
+    const { h, reader } = boot();
+    reader.pageSize = 10;
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [issue(4, at(12, 5), { createdAt: at(12, 2), closedAt: at(12, 5) })]);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual([`4:issue_opened:${at(12, 2)}`]);
+    h.close();
+  });
+
+  it('lets a close in THIS window win over a replayed opening from the lifecycle floor', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(7, at(12, 3), { createdAt: at(12, 3) }),
+      issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    await h.app.assistantWatch.tick(); // multi-page: announces the opening, keeps the floor
+    reader.issuesBy.set('acme/widgets', [
+      issue(7, at(12, 9), { createdAt: at(12, 3), closedAt: at(12, 9) }),
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    const got = ids(h, id).filter((i) => i.startsWith('7:'));
+    expect(got).toEqual([`7:issue_closed:${at(12, 9)}`, `7:issue_opened:${at(12, 3)}`].sort());
+    h.close();
+  });
+
+  it('uses the same precedence when the floor recovers a missed transition: opened first', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    // Pass A spans pages, hands on its floor, and never saw issue 8 (opened AND closed on a page that moved).
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(3, at(12, 3)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    await h.app.assistantWatch.tick();
+    reader.issuesBy.set('acme/widgets', [
+      issue(8, at(12, 9), { createdAt: at(12, 1), closedAt: at(12, 2) }),
+      issue(1, at(12, 5)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    reader.pageSize = 10;
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id).filter((i) => i.startsWith('8:'))).toEqual([`8:issue_opened:${at(12, 1)}`]);
+    h.close();
+  });
+});

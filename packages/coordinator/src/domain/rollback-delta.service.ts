@@ -324,4 +324,3 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
     },
   };
 }
-

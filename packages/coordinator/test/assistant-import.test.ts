@@ -761,6 +761,21 @@ describe('adoption reconciles what discovery baselined with what the source had 
     h.close();
   });
 
+  it('keeps an unsettled floor a pending runs read already had, instead of dropping it', () => {
+    const { h, svc } = adoptedWorld();
+    const target = discoverWidgets(h);
+    h.store.db.prepare(
+      "UPDATE assistant_watch_checkpoints SET state='ready', cursor='2026-10-12T20:00:00.000Z', scan_floor='2026-10-12T09:00:00.000Z' WHERE target_id = ? AND surface = 'runs'",
+    ).run(target.id);
+    const lock = takeLock(h.store);
+    expect(svc().run(importDoc(), { apply: true, lock }).ok).toBe(true);
+    lock.release();
+    expect(h.store.assistantWatch.checkpoint(target.id, 'runs')).toMatchObject({
+      cursor: '2026-10-11T10:00:00.000Z', scanFloor: '2026-10-12T09:00:00.000Z', boundaryKnown: false,
+    });
+    h.close();
+  });
+
   it('never delivers again an event the source already settled, and never clears a Ducky settlement', () => {
     const { h, svc } = adoptedWorld();
     const target = discoverWidgets(h);

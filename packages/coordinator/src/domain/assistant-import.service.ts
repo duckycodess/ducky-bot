@@ -819,4 +819,3 @@ const captureStatus = (c: ImportedCapture): 'open' | 'done' | 'archived' =>
 
 const briefingTargets = (delivery: BriefingDelivery): readonly ('owner_dm' | 'briefing_channel')[] =>
   delivery === 'dm' ? ['owner_dm'] : delivery === 'channel' ? ['briefing_channel'] : ['owner_dm', 'briefing_channel'];
-

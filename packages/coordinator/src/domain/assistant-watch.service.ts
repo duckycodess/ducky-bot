@@ -658,7 +658,7 @@ export class AssistantWatchService {
       // A window that spanned pages hands its starting cursor to the next read; any
       // other read clears it. A baseline has nothing to hand on.
       ...(unit.surface === 'pulls' || unit.surface === 'issues'
-        ? { lifecycleFloor: !baseline && sinceMs !== null && a.page >= 2 ? isoOf(sinceMs) : null }
+        ? { lifecycleFloor: !baseline && sinceMs !== null && a.page >= 2 ? isoOf(Math.min(sinceMs, lifeFloorOf(unit) ?? sinceMs)) : null }
         : {}),
     });
     if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
@@ -1026,6 +1026,13 @@ type ListFetch =
   | { readonly surface: 'issues'; readonly res: Page<IssueRecord>; readonly keys: string[] }
   | { readonly surface: 'runs'; readonly res: Page<RunRecord>; readonly keys: string[] }
   | { readonly surface: 'releases'; readonly res: Page<ReleaseRecord>; readonly keys: string[] };
+
+/** The lifecycle floor a unit inherited, in ms, or null. */
+const lifeFloorOf = (unit: DueCheckpoint): number | null => {
+  if (!unit.lifecycleFloor) return null;
+  const ms = Date.parse(unit.lifecycleFloor);
+  return Number.isNaN(ms) ? null : ms;
+};
 
 const maxMs = (a: number | null, b: number | null): number | null =>
   b === null || Number.isNaN(b) ? a : a === null || Number.isNaN(a) || b > a ? b : a;

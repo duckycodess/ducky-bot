@@ -1,5 +1,5 @@
 import {
-  WATCH_ALERT_KINDS, WATCH_EVENT_SURFACE, type WatchEventKind, type WatchSurface,
+  TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS, WATCH_EVENT_SURFACE, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
@@ -984,9 +984,17 @@ export class AssistantWatchRepo {
   }
 
   /**
-   * Gives an adopted target the source's cursor for a surface Ducky has NOT read yet.
-   * A checkpoint Ducky already baselined or advanced is newer than the source's and is
-   * kept. A missing one (the ci_state companion) is created. Returns whether it took.
+   * Gives an adopted target the source's cursor, reconciling it with what Ducky has
+   * already read.
+   *
+   * A surface Ducky has not read takes the source's cursor outright. One it HAS read
+   * (discovery baselined it silently, announcing nothing) takes the EARLIER of the two,
+   * so what happened between the source's cursor and Ducky's baseline is read and told
+   * rather than skipped; the boundary becomes strict (it cannot tell what the source
+   * already announced), identities deduplicate, and any read in progress is dropped
+   * because its cursor just moved. A non-time surface (the default branch, the CI state)
+   * keeps Ducky's own value. A missing one (the ci_state companion) is created. Returns
+   * whether the checkpoint changed.
    */
   adoptCheckpoint(targetId: string, surface: WatchSurface, cursor: string, atIso: string, nextDueAt: string): boolean {
     const existing = this.checkpoint(targetId, surface);
@@ -996,20 +1004,47 @@ export class AssistantWatchRepo {
       });
       return true;
     }
-    if (existing.state !== 'unbaselined') return false;
+    if (existing.state === 'unbaselined') {
+      const info = this.db
+        .prepare(
+          `UPDATE assistant_watch_checkpoints
+              SET state = 'imported', cursor = ?, boundary_known = 0, updated_at = ?
+            WHERE target_id = ? AND surface = ? AND state = 'unbaselined'`,
+        )
+        .run(cursor, atIso, targetId, surface);
+      return Number(info.changes) === 1;
+    }
+    if (!TIME_CURSOR_SURFACES.includes(surface as (typeof TIME_CURSOR_SURFACES)[number])) return false;
+    const mine = existing.cursor === null ? Number.NaN : Date.parse(existing.cursor);
+    const theirs = Date.parse(cursor);
+    if (Number.isNaN(mine) || Number.isNaN(theirs) || theirs >= mine) return false;
     const info = this.db
       .prepare(
         `UPDATE assistant_watch_checkpoints
-            SET state = 'imported', cursor = ?, boundary_known = 0, updated_at = ?
-          WHERE target_id = ? AND surface = ? AND state = 'unbaselined'`,
+            SET cursor = ?, boundary_known = 0, pending_cursor = NULL, pending_page = 0,
+                pending_state = NULL, scan_floor = NULL, lifecycle_floor = NULL,
+                next_due_at = ?, updated_at = ?
+          WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
-      .run(cursor, atIso, targetId, surface);
+      .run(cursor, atIso, atIso, targetId, surface, existing.updatedAt);
     return Number(info.changes) === 1;
   }
 
   /** An imported event, unless the target already knows that identity. */
   insertImportedEventIfNew(row: Parameters<AssistantWatchRepo['insertImportedEvent']>[0]): boolean {
-    if (this.eventExists(row.targetId, row.kind, row.identity)) return false;
+    if (this.eventExists(row.targetId, row.kind, row.identity)) {
+      // Known on both sides: the source's settlement fills what Ducky has not settled, and
+      // never clears one Ducky has. An event the source already alerted or digested is
+      // therefore never told again.
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events
+              SET alerted_at = COALESCE(alerted_at, ?), digested_at = COALESCE(digested_at, ?)
+            WHERE target_id = ? AND kind = ? AND identity = ?`,
+        )
+        .run(row.alertedAt, row.digestedAt, row.targetId, row.kind, row.identity);
+      return false;
+    }
     this.insertImportedEvent(row);
     return true;
   }

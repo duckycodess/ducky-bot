@@ -32,7 +32,10 @@ consistent state and writes one file. It is a CLI beside `import:assistant` and
   writer cannot make reminders and their occurrences disagree), a snapshot that breaks a
   foreign key is incomplete, and a backup whose runtime-lock row names a still-live holder
   is refused: it is not a finished state, and a delta read from it would miss whatever that
-  writer does next.
+  writer does next. **Passing that check proves the writer is not alive; it does not prove the
+  backup is the final or latest one.** An older backup from a stopped coordinator passes. That
+  the export was taken from the FINAL state (both notifiers stopped, the last backup) remains
+  required operational evidence, not something the tool can establish.
 - **Private by construction.** The source and the output must be outside the repository
   (through symlinks), the source 0600 and both directories 0700; the output is created
   0600, is published by a hard link from a private temporary file so it is complete or

@@ -46,7 +46,7 @@ const PREFS: ImportedPreferences = {
 };
 /** What must hold for the imported side to REALLY tell the owner, each switchable off. */
 interface World {
-  prefs?: 'github' | 'none' | 'no_github_section';
+  prefs?: 'github' | 'none' | 'no_github_section' | 'no_slots';
   briefing?: boolean;
   delivery?: 'dm' | 'channel';
   paused?: boolean;
@@ -79,7 +79,10 @@ const start = async (
   if (world.prefs !== 'none') {
     h.store.ownerPreferences.insert({
       ownerId: OWNER, source: 'import', at: START,
-      prefsJson: JSON.stringify({ ...PREFS, includeGithub: world.prefs !== 'no_github_section' }),
+      prefsJson: JSON.stringify({
+        ...PREFS, includeGithub: world.prefs !== 'no_github_section',
+        ...(world.prefs === 'no_slots' ? { morningEnabled: false, eveningEnabled: false } : {}),
+      }),
     });
   }
   h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
@@ -211,6 +214,7 @@ describe('an imported target only silences the native DM when it will really del
     ['watching is paused', {}, { paused: true }],
     ['imported preferences are not in force', {}, { prefs: 'none' as const }],
     ['the preferences leave the GitHub section out', {}, { prefs: 'no_github_section' as const }],
+    ['both imported briefing slots are off, so nothing carries the digest', {}, { prefs: 'no_slots' as const }],
     ['briefings are off', {}, { briefing: false }],
     ['briefings go to a channel only, which never carries the digest', {}, { delivery: 'channel' as const }],
     ['the target is outside the poll cycle', {}, { cycle: { pushedAt: null } }],

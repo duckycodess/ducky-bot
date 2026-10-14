@@ -529,7 +529,11 @@ export function createApp(
     digestDeliverable: () => {
       const schedule = resolveBriefingSchedule(env);
       return schedule.enabled && schedule.delivery !== 'channel' &&
-        ownerPreferences.effective()?.includeGithub === true;
+        (() => {
+          const prefs = ownerPreferences.effective();
+          // A digest rides a briefing slot: with both imported slots off nothing carries it.
+          return prefs?.includeGithub === true && (prefs.morningEnabled || prefs.eveningEnabled);
+        })();
     },
     store, authz, transport, ownerId: authz.ownerId, clock,
     reader: overrides.assistantWatchReader ??

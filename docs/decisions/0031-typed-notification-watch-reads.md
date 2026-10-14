@@ -106,7 +106,10 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   one before page two is read; the pass then commits a cursor past its lifecycle time. A
   window that spanned pages hands its STARTING cursor to the next read (`lifecycle_floor`,
   migration 35) for exactly one read, and opened/merged/closed times count from there;
-  their identities are stable, so what is looked at again is deduplicated. An item AT the
+  their identities are stable, so what is looked at again is deduplicated. Opened and closed are
+  announced independently for issues too (as for pull requests), so an issue opened in one
+  window and closed in the next announces both; across consecutive multi-page passes the floor
+  stays the EARLIER of the inherited one and the new window's start. An item AT the
   cursor re-read in inclusive mode is no longer called "updated" a second time. This is not
   a proof against arbitrary paging drift, which stays a named residual.
 - What settles in the middle of a pass is not jumped over. The committed cursor is
@@ -199,8 +202,11 @@ one by its id. A baseline or a source cursor stays strict.
   cancellation has no owner control to undo it; a success in between resets the count.
   The row, its events and the owner's Forget control remain, and `/status` counts these.
 - Discovery that ran before the import is ADOPTED by it, never a collision: the source's
-  mute wins over discovery's default, a checkpoint Ducky has already read is kept (it is
-  newer), one it has not takes the source's cursor, and events are added where unknown. A
+  mute wins over discovery's default; a surface Ducky has not read takes the source's cursor;
+  one it HAS baselined (silently, announcing nothing) takes the EARLIER of the two cursors with
+  a strict boundary, so what happened between them is read and told once rather than skipped;
+  events are added where unknown, and where an event is known on both sides the source's
+  alert/digest settlement fills what Ducky has not settled and never clears one it has. A
   mute the owner already made in Ducky is never undone. Nothing here touches
   authorization.
 - A target the poll cycle cannot read (a renamed or transferred repository) or that is

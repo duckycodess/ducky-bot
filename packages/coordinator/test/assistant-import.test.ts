@@ -3,6 +3,7 @@ import { ASSISTANT_WATCH_MAX_TARGETS, MAX_OPEN_TASKS_PER_OWNER, MAX_SCHEDULED_RE
 import { AssistantImportService } from '../src/domain/assistant-import.service.js';
 import { controlId } from '../src/discord/message.js';
 import { tasksList } from '../src/discord/assistant-presenters.js';
+import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { OWNER, STRANGER, TestClock, makeHarness, replyText, type Harness } from './helpers.js';
 import { MANILA, importDoc, importEnv, rowCounts, takeLock } from './assistant-import-fixture.js';
 
@@ -664,7 +665,8 @@ describe('a repository discovery found before the import is adopted, not collide
   it('takes the source mute, the cursors Ducky has not read, and the events, without a conflict', () => {
     const { h, svc } = boot();
     discover(h, ['acme/widgets', 'acme/muted']);
-    // Ducky has already READ the pulls surface of one of them: that is newer than the source's.
+    // Ducky has already baselined the pulls surface of one of them, silently, LATER than the
+    // source's cursor: what happened in between must still be told.
     const widgets = h.store.assistantWatch.byRepoKey(OWNER, 'acme/widgets')!;
     h.store.assistantWatch.checkpointsFor(widgets.id); // exists, unbaselined
     h.store.db.prepare("UPDATE assistant_watch_checkpoints SET state='ready', cursor='2026-10-12T20:00:00.000Z' WHERE target_id = ? AND surface = 'pulls'").run(widgets.id);
@@ -678,7 +680,8 @@ describe('a repository discovery found before the import is adopted, not collide
       'acme/muted:cancelled:imported', 'acme/widgets:active:imported',
     ]);
     const cps = new Map(h.store.assistantWatch.checkpointsFor(widgets.id).map((c) => [c.surface, c]));
-    expect(cps.get('pulls')).toMatchObject({ state: 'ready', cursor: '2026-10-12T20:00:00.000Z' }); // Ducky's is newer
+    // The EARLIER cursor wins and the boundary is strict, so the gap is read, not skipped.
+    expect(cps.get('pulls')).toMatchObject({ state: 'ready', cursor: '2026-10-11T10:00:00.000Z', boundaryKnown: false });
     expect(cps.get('default_branch')).toMatchObject({ state: 'imported', cursor: 'main' }); // not read yet: the source's
     expect(cps.get('ci_state')).toMatchObject({ cursor: 'failing' });
     expect(h.store.assistantWatch.eventsFor(widgets.id).map((e) => e.identity).sort()).toEqual(['12:opened', '12:review:9']);
@@ -708,6 +711,75 @@ describe('a repository discovery found before the import is adopted, not collide
     const doc = importDoc() as Record<string, any>;
     doc['watch'].targets[0].sourceId = 'w-other';
     expect(apply(h, svc(), doc).issues).toContainEqual({ category: 'watch', rule: 'reference_already_present', count: 1 });
+    h.close();
+  });
+});
+
+describe('adoption reconciles what discovery baselined with what the source had settled', () => {
+  const adoptedWorld = () => {
+    const clock = new TestClock(NOW, MANILA);
+    const reader = new FakeWatchReader();
+    const h = makeHarness({ clock, assistantWatchReader: reader, env: { DUCKY_OWNER_TIMEZONE: MANILA } });
+    const svc = () => new AssistantImportService({ store: h.store, env: importEnv(), nowMs: () => clock.nowMs() });
+    return { h, clock, reader, svc };
+  };
+  const discoverWidgets = (h: Harness) => {
+    const repo = h.store.assistantWatch;
+    repo.ensureDiscovery(OWNER, NOW);
+    repo.commitDiscoveryPage({
+      ownerId: OWNER, expectedPage: 0, maxTargets: 1000, atIso: NOW,
+      surfaces: ['commits', 'pulls', 'issues', 'runs', 'releases', 'default_branch'],
+      next: { kind: 'done', incomplete: false, nextDueAt: '2099-01-01T00:00:00.000Z' },
+      found: [{
+        repoKey: 'acme/widgets', display: 'acme/widgets', pushedAt: null, archived: false, fork: false,
+        relationship: 'owner' as const, id: 'disc-0', publicId: 'wdisc0',
+      }],
+    });
+    return repo.byRepoKey(OWNER, 'acme/widgets')!;
+  };
+
+  it('tells an event between the source cursor and a later silent baseline, exactly once', async () => {
+    const { h, clock, reader, svc } = adoptedWorld();
+    const target = discoverWidgets(h);
+    // Discovery baselined pulls silently at B, later than the source's cursor S (2026-10-11T10:00).
+    h.store.db.prepare(
+      "UPDATE assistant_watch_checkpoints SET state='ready', cursor='2026-10-12T20:00:00.000Z', boundary_known=1 WHERE target_id = ? AND surface = 'pulls'",
+    ).run(target.id);
+    const lock = takeLock(h.store);
+    expect(svc().run(importDoc(), { apply: true, lock }).ok).toBe(true);
+    lock.release();
+    // An event between S and B: a pull request opened at 2026-10-12T00:00.
+    reader.pullsBy.set('acme/widgets', [{
+      number: 40, title: 'In the gap', state: 'open', createdAt: '2026-10-12T00:00:00Z', updatedAt: '2026-10-12T00:00:00Z',
+      mergedAt: null, closedAt: null,
+    }]);
+    await h.app.assistantWatch.tick();
+    clock.advance(20 * 60_000);
+    await h.app.assistantWatch.tick();
+    const events = h.store.assistantWatch.eventsFor(target.id).filter((e) => e.identity === '40:opened');
+    expect(events).toHaveLength(1);
+    h.close();
+  });
+
+  it('never delivers again an event the source already settled, and never clears a Ducky settlement', () => {
+    const { h, svc } = adoptedWorld();
+    const target = discoverWidgets(h);
+    const put = (id: string, identity: string, over: { alerted?: string | null; digested?: string | null }) =>
+      h.store.assistantWatch.insertImportedEvent({
+        id, targetId: target.id, kind: 'pr_opened', identity, occurredAt: '2026-10-11T09:00:00.000Z', payloadJson: '{}',
+        alertedAt: over.alerted ?? null, digestedAt: over.digested ?? null, createdAt: NOW,
+      });
+    // Ducky saw '12:opened' itself, unsettled; the source had digested it.
+    put('own-1', '12:opened', {});
+    // Ducky already digested another that the source (in the fixture) has not mentioned.
+    put('own-2', '99:opened', { digested: '2026-10-12T00:00:00.000Z' });
+    const lock = takeLock(h.store);
+    expect(svc().run(importDoc(), { apply: true, lock }).ok).toBe(true);
+    lock.release();
+    const byIdentity = new Map(h.store.assistantWatch.eventsFor(target.id).map((e) => [e.identity, e]));
+    expect(byIdentity.get('12:opened')!.digestedAt).not.toBeNull(); // the source's settlement filled it in
+    expect(byIdentity.get('99:opened')!.digestedAt).toBe('2026-10-12T00:00:00.000Z'); // Ducky's own is untouched
+    expect(h.store.assistantWatch.undigested(OWNER, 20).map((e) => e.identity)).not.toContain('12:opened');
     h.close();
   });
 });

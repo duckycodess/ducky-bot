@@ -44,8 +44,8 @@ is not delivery. Watching must be on (the global switch), the target must be ins
 poll cycle's coverage where one applies, and what it tells must have somewhere to go: a
 requested change is an imported ALERT, sent as soon as it is found, and needs nothing
 more; every other kind waits for a briefing digest, so it needs briefings on, imported
-preferences in force with the GitHub section, and a DM copy. Paused, outside the cycle,
-preferences off, no GitHub section, briefings off or channel-only, or a discovered target
+preferences in force with the GitHub section and at least one briefing slot enabled, and a DM
+copy. Paused, outside the cycle, preferences off, no GitHub section, both slots off, briefings off or channel-only, or a discovered target
 with no preferences all keep the native DM and card. A part the imported side cannot see is kept: a
 check changing on a pull request head (it touches none of a pull request's state, title or
 update time), and a workflow run on any branch (the imported runs surface follows the

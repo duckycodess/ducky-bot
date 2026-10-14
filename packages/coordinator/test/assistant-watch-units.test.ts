@@ -814,3 +814,49 @@ describe('a lifecycle change on an unread page is not lost when a comment moves 
     h.close();
   });
 });
+
+describe('an issue opened in one window and closed in the next announces both', () => {
+  it('emits the close after the opening was announced in a multi-page pass', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    // Pass A spans pages and announces issue 7 as opened (created after the cursor).
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(7, at(12, 3), { createdAt: at(12, 3) }),
+      issue(3, at(12, 2)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toContain(`7:issue_opened:${at(12, 3)}`);
+    expect(cp(h, id, 'issues').lifecycleFloor).toBe(SINCE);
+    // It closes after pass A's cursor.
+    reader.issuesBy.set('acme/widgets', [
+      issue(7, at(12, 9), { createdAt: at(12, 3), closedAt: at(12, 9) }),
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(3, at(12, 2)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    const got = ids(h, id);
+    expect(got.filter((i) => i.startsWith('7:issue_closed'))).toEqual([`7:issue_closed:${at(12, 9)}`]);
+    expect(got.filter((i) => i.startsWith('7:issue_opened'))).toHaveLength(1);
+    h.close();
+  });
+
+  it('keeps the EARLIER lifecycle floor across consecutive multi-page passes', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'issues', 'imported', SINCE);
+    reader.issuesBy.set('acme/widgets', [
+      issue(1, at(12, 5)), issue(2, at(12, 4)), issue(3, at(12, 3)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'issues').lifecycleFloor).toBe(SINCE);
+    // Pass B is multi-page as well: its own starting cursor is later, but the floor stays.
+    reader.issuesBy.set('acme/widgets', [
+      issue(5, at(13, 5)), issue(6, at(13, 4)), issue(1, at(12, 5)), issue(9, '2026-10-01T00:00:00Z'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'issues').lifecycleFloor).toBe(SINCE);
+    h.close();
+  });
+});

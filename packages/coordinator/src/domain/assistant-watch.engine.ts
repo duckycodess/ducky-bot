@@ -307,25 +307,30 @@ export function deriveIssues(
       reached = true;
       continue;
     }
-    // One classification per issue per pass.
-    let kind: 'issue_opened' | 'issue_closed' | 'issue_updated';
-    let when: string;
+    // Opened and closed are independent facts with stable identities, exactly as for
+    // pull requests: an issue opened in one window and closed in the next must announce
+    // BOTH, and a re-read that meets the opening again drops it by identity without
+    // masking the close. Only an issue with neither is "updated".
+    const base = { number: i.number, title: scrubText(i.title, 140) };
+    let told = false;
     if (life.fresh(at(i.createdAt))) {
-      kind = 'issue_opened';
-      when = i.createdAt;
-    } else if (i.closedAt && life.fresh(at(i.closedAt))) {
-      kind = 'issue_closed';
-      when = i.closedAt;
-    } else {
-      // See derivePullList: an item AT the cursor was already told by the pass that
-      // moved the cursor onto it, and "updated" has no stable identity to dedupe by.
-      if (inclusive && sinceMs !== null && updated === sinceMs) continue;
-      kind = 'issue_updated';
-      when = i.updatedAt;
+      events.push({
+        kind: 'issue_opened', identity: `${i.number}:issue_opened:${i.createdAt}`, occurredAt: i.createdAt, payload: base,
+      });
+      told = true;
     }
+    if (i.closedAt && life.fresh(at(i.closedAt))) {
+      events.push({
+        kind: 'issue_closed', identity: `${i.number}:issue_closed:${i.closedAt}`, occurredAt: i.closedAt, payload: base,
+      });
+      told = true;
+    }
+    if (told) continue;
+    // See derivePullList: an item AT the cursor was already told by the pass that moved
+    // the cursor onto it, and "updated" has no stable identity to dedupe by.
+    if (inclusive && sinceMs !== null && updated === sinceMs) continue;
     events.push({
-      kind, identity: `${i.number}:${kind}:${when}`, occurredAt: when,
-      payload: { number: i.number, title: scrubText(i.title, 140) },
+      kind: 'issue_updated', identity: `${i.number}:issue_updated:${i.updatedAt}`, occurredAt: i.updatedAt, payload: base,
     });
   }
   return { events, newestMs: newest, reachedCursor: reached };

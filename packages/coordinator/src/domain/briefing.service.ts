@@ -2,14 +2,34 @@ import {
   BRIEFING_SECTION_MAX, zonedParts,
   type BriefingKind,
 } from '@ducky/contracts';
-import type { ReminderRow, ScheduleRow, Store, TaskRow } from '@ducky/persistence';
+import type {
+  CaptureRow, ReminderRow, ScheduleExceptionRow, ScheduleRow, Store, TaskRow,
+} from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import { isoOf, type OwnerClock } from './owner-clock.js';
+import type { WeatherReport } from '@ducky/adapters';
+import type { AssistantWatchService, WatchDigest } from './assistant-watch.service.js';
+import type { OwnerPreferencesService } from './owner-preferences.service.js';
+import type { WeatherBriefing } from './weather-briefing.js';
+import { scheduleWindow } from './schedule-window.js';
 
 export interface BriefingServiceDeps {
   readonly store: Store;
   readonly authz: Authorizer;
   readonly clock: OwnerClock;
+  /**
+   * Imported preferences. Omitted, or not selected by the profile, means the
+   * native briefing exactly as it was: no section below is ever added by default.
+   */
+  readonly prefs?: OwnerPreferencesService | undefined;
+  /**
+   * The notification-only targets, for the GitHub digest an imported preference
+   * asks for. A getter, because the service is wired after this one and only
+   * ever read while a briefing is being built.
+   */
+  readonly watch?: (() => AssistantWatchService | undefined) | undefined;
+  /** The forecast, when a location is configured. */
+  readonly weather?: WeatherBriefing | undefined;
 }
 
 /**
@@ -51,6 +71,25 @@ export interface Briefing {
   readonly tasksClosedToday: BriefingSection<TaskRow>;
   readonly remindersToday: BriefingSection<ReminderRow>;
   readonly remindersTomorrow: BriefingSection<ReminderRow>;
+  /** Exceptions on the day this briefing is about, so a cancelled class is explained. */
+  readonly scheduleExceptions?: BriefingSection<ScheduleExceptionRow> | undefined;
+  /**
+   * Tasks due in the next few days, from tomorrow. Present only when an imported
+   * preference asks for a lookahead on a morning or daily briefing.
+   */
+  readonly lookahead?: { readonly days: number; readonly tasks: BriefingSection<TaskRow> } | undefined;
+  /** Unresolved captures, when an imported preference includes them. */
+  readonly captures?:
+    | { readonly total: number; readonly rows: readonly CaptureRow[]; readonly listed: boolean }
+    | undefined;
+  /** The forecast for the day this briefing is about, when one was asked for and fetched. */
+  readonly weather?: WeatherReport | undefined;
+  /**
+   * What happened in the owner's watched repositories since the last briefing.
+   * A digest is a read: carrying it settles nothing, and the notifier settles
+   * `eventIds` only after the briefing has actually been sent.
+   */
+  readonly github?: WatchDigest | undefined;
   readonly openTaskCount: number;
   readonly scheduledReminderCount: number;
   /** True when every section is empty: the presenter says so plainly. */
@@ -74,11 +113,17 @@ export class BriefingService {
   private readonly store: Store;
   private readonly authz: Authorizer;
   private readonly clock: OwnerClock;
+  private readonly prefs: OwnerPreferencesService | undefined;
+  private readonly watch: (() => AssistantWatchService | undefined) | undefined;
+  private readonly weather: WeatherBriefing | undefined;
 
   constructor(deps: BriefingServiceDeps) {
+    this.watch = deps.watch;
+    this.weather = deps.weather;
     this.store = deps.store;
     this.authz = deps.authz;
     this.clock = deps.clock;
+    this.prefs = deps.prefs;
   }
 
   get timeZone(): string {
@@ -95,7 +140,40 @@ export class BriefingService {
     return zonedParts(this.clock.nowMs(), this.clock.timeZone).hour < 12 ? 'morning' : 'evening';
   }
 
-  build(actor: ActorContext, kind?: BriefingKind): Briefing {
+  /**
+   * `build` plus the one thing that needs the network: the forecast, when an
+   * imported preference asks for it and a location is configured. A failed
+   * fetch leaves the briefing without a weather section, never without a
+   * briefing.
+   */
+  async assemble(
+    actor: ActorContext,
+    kind?: BriefingKind,
+    opts: { readonly includePrivate?: boolean } = {},
+  ): Promise<Briefing> {
+    this.authz.requireOwner(actor);
+    const resolved = kind ?? this.defaultKind();
+    const prefs = this.prefs?.effective();
+    const weather =
+      prefs?.includeWeather && this.weather ? ((await this.weather.forecastFor(resolved)) ?? undefined) : undefined;
+    return this.build(actor, resolved, { weather, includePrivate: opts.includePrivate ?? true });
+  }
+
+  build(
+    actor: ActorContext,
+    kind?: BriefingKind,
+    extras: {
+      readonly weather?: WeatherReport | undefined;
+      /**
+       * Whether the sections that carry the owner's private imported data (the
+       * capture inbox and the watched-repository digest) may appear. False for a
+       * copy bound for a channel, which other people might read; the owner's DM
+       * and the ephemeral `/briefing` reply keep the default.
+       */
+      readonly includePrivate?: boolean;
+    } = {},
+  ): Briefing {
+    const includePrivate = extras.includePrivate ?? true;
     this.authz.requireOwner(actor);
     const owner = actor.discordUserId;
     const resolved = kind ?? this.defaultKind();
@@ -110,11 +188,14 @@ export class BriefingService {
     // silently dropped. `section` trims it back and sets the flag.
     const probe = BRIEFING_SECTION_MAX + 1;
 
-    const scheduleToday = section(
-      this.store.schedules.listForOwnerBetweenDates(owner, dayKey, nextDayKey, probe),
-    );
-    const scheduleTomorrow = section(
-      this.store.schedules.listForOwnerBetweenDates(owner, nextDayKey, dayAfterKey, probe),
+    // Confirmed one-off rows AND the computed occurrences of weekly rules, with
+    // exceptions applied, merged in start order (ADR 0030).
+    const todayWindow = scheduleWindow(this.store, owner, dayKey, nextDayKey, probe);
+    const tomorrowWindow = scheduleWindow(this.store, owner, nextDayKey, dayAfterKey, probe);
+    const scheduleToday = section(todayWindow.rows);
+    const scheduleTomorrow = section(tomorrowWindow.rows);
+    const scheduleExceptions = section(
+      resolved === 'evening' ? tomorrowWindow.exceptions : todayWindow.exceptions,
     );
     const tasksDueToday = section(
       this.store.tasks.dueBetween(owner, isoOf(today.startMs), isoOf(today.endMs), probe),
@@ -139,6 +220,38 @@ export class BriefingService {
       ),
     );
 
+    const prefs = this.prefs?.effective();
+    const lookahead =
+      prefs && prefs.lookaheadDays > 0 && resolved !== 'evening'
+        ? {
+            days: prefs.lookaheadDays,
+            tasks: section(
+              lookaheadTasks(
+                this.store.tasks.dueBetween(
+                  owner,
+                  isoOf(tomorrow.startMs),
+                  isoOf(this.clock.dayRange(prefs.lookaheadDays).endMs),
+                  probe * 4,
+                ),
+              ),
+            ),
+          }
+        : undefined;
+    const captures =
+      prefs && prefs.includeCaptures && includePrivate
+        ? {
+            total: this.store.captures.countOpen(owner),
+            // The evening review lists items; the morning one reports the count.
+            listed: resolved === 'evening',
+            rows:
+              resolved === 'evening'
+                ? this.store.captures.listForOwner(owner, 'open', CAPTURE_REVIEW_MAX)
+                : [],
+          }
+        : undefined;
+
+    const github = prefs?.includeGithub && includePrivate ? this.watch?.()?.digest() : undefined;
+
     const forThisKind =
       resolved === 'evening'
         ? [scheduleTomorrow, tasksDueToday, tasksOverdue, tasksClosedToday, remindersTomorrow]
@@ -158,6 +271,11 @@ export class BriefingService {
       tasksClosedToday,
       remindersToday,
       remindersTomorrow,
+      scheduleExceptions,
+      lookahead,
+      captures,
+      weather: extras.weather,
+      github,
       openTaskCount: this.store.tasks.countOpen(owner),
       // The reminders the owner set, not the ones a deadline earned: the
       // tasks they belong to are already named in their own sections.
@@ -172,3 +290,17 @@ const section = <T>(rows: readonly T[]): BriefingSection<T> => ({
   rows: rows.slice(0, BRIEFING_SECTION_MAX),
   more: rows.length > BRIEFING_SECTION_MAX,
 });
+
+/** How many captures an evening review lists before it says "and N more". */
+export const CAPTURE_REVIEW_MAX = 6;
+
+/**
+ * The lookahead shows what needs attention first: the high-priority tasks if
+ * there are any, otherwise the next few. A busy week is not a wall of text.
+ */
+const LOOKAHEAD_FALLBACK = 5;
+function lookaheadTasks(rows: readonly TaskRow[]): TaskRow[] {
+  // Urgent ranks with high: the source puts "high or urgent" first.
+  const high = rows.filter((t) => t.priority === 'high' || t.urgent);
+  return high.length > 0 ? high : rows.slice(0, LOOKAHEAD_FALLBACK);
+}

@@ -35,6 +35,31 @@ export const RETENTION_FORBIDDEN_TABLES = [
    */
   'github_feed_repos',
   'github_feed_cursors',
+  /**
+   * The private-assistant migration's state (ADR 0030). The correlation ledger
+   * is what stops a re-import resurrecting a deleted record, a rule is a live
+   * recurring schedule rather than a finished record, and a watch target's
+   * checkpoints and settled events are what stop an old event looking new.
+   */
+  'assistant_import_identities',
+  'schedule_rules',
+  'schedule_exceptions',
+  'owner_preferences',
+  'assistant_watch_targets',
+  'assistant_watch_checkpoints',
+  'assistant_watch_events',
+  'assistant_watch_calls',
+  /**
+   * Discovery's pass position, the tombstones that keep a deleted target deleted, the
+   * global monitoring switch, and the one-row cause a deletion path names. All state,
+   * none a finished record.
+   */
+  'assistant_watch_discovery',
+  'assistant_watch_discovery_tombstones',
+  'assistant_watch_settings',
+  'deletion_context',
+  /** Who may write this database right now. */
+  'runtime_lock',
 ] as const;
 export type RetentionForbiddenTable = (typeof RETENTION_FORBIDDEN_TABLES)[number];
 

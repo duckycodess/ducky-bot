@@ -27,11 +27,16 @@
     "probe:openclaw": "node scripts/probe-openclaw.mjs",
     "probe:gh": "node scripts/probe-gh.mjs",
     "probe:gh-live": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-gh-live.ts",
+    "probe:watch-reader": "tsx scripts/probe-watch-reader.ts",
     "probe:github-feed": "tsx scripts/probe-github-feed-live.ts",
     "probe:extraction": "node scripts/probe-extraction.mjs",
     "probe:discord-gateway": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/probe-discord-gateway.ts",
     "backup": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/backup-db.ts",
-    "backup:verify": "tsx scripts/verify-backup.ts"
+    "backup:verify": "tsx scripts/verify-backup.ts",
+    "import:assistant": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/import-assistant.ts",
+    "export:rollback-delta": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.development scripts/export-rollback-delta.ts",
+    "export:rollback-delta:prod": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.production scripts/export-rollback-delta.ts",
+    "import:assistant:prod": "tsx --env-file-if-exists=.env --env-file-if-exists=.env.production scripts/import-assistant.ts"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

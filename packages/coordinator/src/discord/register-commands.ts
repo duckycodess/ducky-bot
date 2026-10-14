@@ -46,9 +46,11 @@ const COMMANDS = [
       { name: 'every', type: 4, required: false, description: 'Minutes between checks (15-1440)' },
     ] },
     { name: 'list', type: 1, description: 'List active repository watches', options: [
-      { name: 'filter', type: 3, required: false, description: 'active | all', choices: [
+      { name: 'filter', type: 3, required: false, description: 'active | all | targets', choices: [
         { name: 'active', value: 'active' }, { name: 'all', value: 'all' },
+        { name: 'targets', value: 'targets' },
       ] },
+      { name: 'page', type: 4, required: false, description: 'Page of notification targets' },
     ] },
     { name: 'remove', type: 1, description: 'Cancel a repository watch', options: [
       { name: 'id', type: 3, required: true, description: 'Watch id' },

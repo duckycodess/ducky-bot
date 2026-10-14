@@ -3,7 +3,8 @@ import {
   DisabledConversationProvider, DisabledFrontDoor, FrontDoorCli, MemoryCredentialStore,
   MockConversationProvider, GatewayOpenClawProvider,
   assertPrivateGatewayUrl,
-  GitHubCiDependencyChecker, UnavailableDependencyChecker,
+  GhWatchReader, GitHubCiDependencyChecker, UnavailableDependencyChecker, OpenMeteoWeather,
+  type WeatherPort,
   type ConversationProvider, type DependencyChecker, type ExecutorCredentialStore,
   type FrontDoorPort, type GitHubReader, type ScheduleExtractionProvider,
 } from '@ducky/adapters';
@@ -17,9 +18,11 @@ import { ConversationMemoryService } from './domain/conversation-memory.service.
 import {
   ConversationThreadPolicy, ConversationThreadService,
 } from './domain/conversation-threads.js';
-import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  createStore, openDatabase, runMigrations, type RuntimeLockHandle, type Store,
+} from '@ducky/persistence';
+import {
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveImportedPreferences, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveWeather, resolveSkillBridge, resolveThreadParentChannelIds, resolveWatchConfig, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -30,6 +33,15 @@ import { RepoAllowlist } from './domain/allowlist.js';
 import { CapturesService } from './domain/captures.service.js';
 import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
+import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
+import { WeatherBriefing } from './domain/weather-briefing.js';
+import { takeCoordinatorLock } from './runtime-lock.js';
+import {
+  AssistantWatchService, IMPORT_COVERS_NATIVE, IMPORT_COVER_DELIVERY, type AssistantWatchConfig,
+} from './domain/assistant-watch.service.js';
+import {
+  UnavailableAssistantWatchReader, type AssistantWatchReader,
+} from './domain/assistant-watch.reader.js';
 import { JobsService } from './domain/jobs.service.js';
 import { ApprovalsService } from './domain/approvals.service.js';
 import { type ActionPerformer } from './domain/action-performer.js';
@@ -72,6 +84,24 @@ export interface AppOverrides {
   readonly credentials?: ExecutorCredentialStore;
   readonly conversation?: ConversationProvider;
   readonly github?: GitHubReader;
+  /**
+   * The typed reader for notification-only watch targets. Production gets
+   * `UnavailableAssistantWatchReader`, which observes nothing: the existing
+   * reader seams cannot see releases or closing times, and this build adds no
+   * argv shape that could. Tests inject one that can, to prove the engine.
+   */
+  readonly assistantWatchReader?: AssistantWatchReader;
+  /** For tests: the poll-cycle and discovery configuration a scripted reader should run under. */
+  readonly assistantWatchConfig?: AssistantWatchConfig;
+  /**
+   * Take the shared runtime lock as THE writer of this database, immediately
+   * after migrations and before anything else is written. Set by `main.ts` only:
+   * tests build many apps over one store to model a restart, and each of those
+   * would otherwise refuse the one before it.
+   */
+  readonly holdRuntimeLock?: boolean;
+  /** Test override for the forecast. Production reads Open-Meteo, and only if a location is configured. */
+  readonly weather?: WeatherPort;
   readonly extractor?: ScheduleExtractionProvider;
   readonly transport?: DiscordTransport;
   readonly allowlistJson?: string;
@@ -118,6 +148,8 @@ export interface App {
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly githubWatches: GitHubWatchService;
+  /** Notification-only watch targets: owner-private, budgeted, never an engineering watch. */
+  readonly assistantWatch: AssistantWatchService;
   /** Actionable GitHub events and the daily commit digest. Off unless enabled. */
   readonly githubFeed: GitHubFeedService;
   readonly reconciler: Reconciler;
@@ -149,6 +181,8 @@ export interface App {
   readonly channelRoles: ChannelRolePolicy;
   readonly sharedJobs: SharedJobsService;
   readonly router: DuckyRouter;
+  /** The shared runtime lock this app holds, when it was asked to. `main.ts` refreshes and releases it. */
+  readonly runtimeLock: RuntimeLockHandle | undefined;
   /**
    * The phone capture surface, or undefined when it is off. `main.ts` hands it
    * to the HTTP server; undefined means the routes are never registered at
@@ -200,6 +234,18 @@ export function createApp(
   const secrets = resolveProfileSecrets(env);
 
   const store = overrides.store ?? createStoreFromEnv(env, paths);
+  // The sole-writer claim comes BEFORE the first write below (the configuration
+  // mirrors, the feed's selected list): a second coordinator that is refused must
+  // leave no trace of itself in the database it was refused.
+  let runtimeLock: RuntimeLockHandle | undefined;
+  if (overrides.holdRuntimeLock) {
+    try {
+      runtimeLock = takeCoordinatorLock(store.db);
+    } catch (err) {
+      if (!overrides.store) store.db.close();
+      throw err;
+    }
+  }
   const authz = new Authorizer(loadAuthzConfig(env));
   const signer = new ComponentSigner(secrets.componentSigningKey);
 
@@ -319,13 +365,31 @@ export function createApp(
   // The deadline-to-notification link, shared by every path that can create or
   // move a task: one place decides what a deadline owes, so the slash command,
   // a pasted list and the phone page cannot drift apart.
-  const taskReminderLinker = new TaskReminderLinker({ store, clock });
+  // Imported preferences are applied only when the profile says so, and they
+  // never decide who may do anything: authorization reads frozen config alone.
+  const ownerPreferences = new OwnerPreferencesService({
+    store, ownerId: authz.ownerId, enabled: resolveImportedPreferences(env),
+  });
+  const taskReminderLinker = new TaskReminderLinker({
+    store, clock, defaultOffsetsMinutes: () => ownerPreferences.defaultReminderOffsets(),
+  });
   const tasks = new TasksService({ store, authz, clock, linker: taskReminderLinker });
   const taskCapture = new TaskCaptureService({
     store, authz, clock, linker: taskReminderLinker,
   });
   const reminders = new RemindersService({ store, authz, clock });
-  const briefing = new BriefingService({ store, authz, clock });
+  // The forecast: only when a location is configured, over one fixed HTTPS host.
+  const weatherPlace = resolveWeather(env);
+  const weather = weatherPlace
+    ? new WeatherBriefing(overrides.weather ?? new OpenMeteoWeather(), {
+        ...weatherPlace, timeZone: clock.timeZone,
+      })
+    : undefined;
+  const briefing = new BriefingService({
+    store, authz, clock, prefs: ownerPreferences, weather,
+    // Wired below, after the transport exists; only read while a briefing is built.
+    watch: () => assistantWatch,
+  });
   const reconciler = new Reconciler({ store, approvals, pending });
   // Deterministic rules over the owner's own messages: no provider, no new
   // command, and no inferred write applied without an explicit confirmation.
@@ -458,12 +522,50 @@ export function createApp(
   // Rides the SAME interval as everything else, holds no provider, and sends to
   // the owner's DM only. Off by default: a briefing is pulled unless somebody
   // deliberately asks for it to be pushed.
+  // Rides the SAME interval, holds no model provider and addresses the owner's
+  // DM only. Its targets are not engineering watches: nothing reads `repos`.
+  const watchConfig = resolveWatchConfig(env);
+  const assistantWatch = new AssistantWatchService({
+    digestDeliverable: () => {
+      const schedule = resolveBriefingSchedule(env);
+      return schedule.enabled && schedule.delivery !== 'channel' &&
+        (() => {
+          const prefs = ownerPreferences.effective();
+          // A digest rides a briefing slot: with both imported slots off nothing carries it.
+          return prefs?.includeGithub === true && (prefs.morningEnabled || prefs.eveningEnabled);
+        })();
+    },
+    store, authz, transport, ownerId: authz.ownerId, clock,
+    reader: overrides.assistantWatchReader ??
+      (watchConfig.readerEnabled
+        ? new GhWatchReader({ discovery: watchConfig.discovery })
+        : new UnavailableAssistantWatchReader()),
+    // The source's recency-limited cycle and discovery belong to the REAL reader; a
+    // scripted reader injected by a test keeps covering every active target.
+    ...(overrides.assistantWatchConfig
+      ? { watchConfig: overrides.assistantWatchConfig }
+      : watchConfig.readerEnabled && !overrides.assistantWatchReader
+      ? {
+        watchConfig: {
+          account: watchConfig.account, cycle: true, discovery: watchConfig.discovery,
+          relationships: watchConfig.relationships, includeForks: watchConfig.includeForks,
+          includeArchived: watchConfig.includeArchived,
+        },
+      }
+      : {}),
+  });
+  const briefingSchedule = resolveBriefingSchedule(env);
   const briefingNotifier = new BriefingNotifier({
     store, transport, ownerId: authz.ownerId, clock, briefing,
-    config: resolveBriefingSchedule(env),
+    config: briefingSchedule, prefs: ownerPreferences, watch: assistantWatch,
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
+    // An imported target that observes a repository tells its pull request and issue
+    // events itself (alert or digest), so the ordinary snapshot DM leaves those out.
+    // Only where the imported side will really deliver it (watching on, inside the poll
+    // cycle, and a briefing that can carry a digest for digest-only kinds).
+    importedCovers: (repoKey, surface, delivery) => assistantWatch.covers(repoKey, surface, delivery),
   });
   /**
    * The GitHub feed rides the SAME coordinator interval and holds no model
@@ -474,6 +576,14 @@ export function createApp(
   const githubFeed = new GitHubFeedService({
     store, reader: githubReader, transport, ownerId: authz.ownerId, clock, allowlist,
     config: resolveGitHubFeed(env),
+    // An imported target's typed observation takes precedence for the events it
+    // covers, so the owner hears about each once. Job reads and authorization
+    // are untouched.
+    coveredByImport: (repoKey, kind) => {
+      const surface = IMPORT_COVERS_NATIVE[kind];
+      const delivery = IMPORT_COVER_DELIVERY[kind];
+      return surface !== undefined && delivery !== undefined && assistantWatch.covers(repoKey, surface, delivery);
+    },
   });
   githubFeed.reconcileSelection();
 
@@ -568,7 +678,7 @@ export function createApp(
     conversation: conversation.verified ? conversation.name : `${conversation.name} (unverified)`,
     conversationAttachments: attachmentAvailability(conversation, conversationAttachments),
     proactiveBriefings: briefingNotifier.enabled
-      ? `on — ${env.DUCKY_BRIEFING_MORNING_AT} and ${env.DUCKY_BRIEFING_EVENING_AT} in ${clock.timeZone}, to your DM`
+      ? `on — ${briefingSchedule.morningAt} and ${briefingSchedule.eveningAt} in ${clock.timeZone}, to your DM`
       : 'off — briefings are only sent when you ask with /briefing',
     conversationMemory: conversationMemory.enabled
       ? `on — the last ${env.DUCKY_CONVERSATION_MEMORY_TURNS} turns per thread, ` +
@@ -597,7 +707,8 @@ export function createApp(
       ? 'enabled only after owner approval and /job execute'
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
-    githubWatches: `${store.githubWatches.countActive(authz.ownerId)} active`,
+    githubWatches:
+      `${store.githubWatches.countActive(authz.ownerId)} active; ${assistantWatch.statusLine()}`,
     githubFeed: githubFeed.statusLine(),
     repositoryWorkflow: skillBridge.describe(),
   });
@@ -611,6 +722,7 @@ export function createApp(
     approvals,
     github,
     githubWatches,
+    assistantWatch,
     tasks,
     taskCapture,
     reminders,
@@ -658,12 +770,16 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
-    approvals, github, githubWatches, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
+    approvals, github, githubWatches, assistantWatch, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,
     conversationAttachments, dependencies,
     retention, forget, conversationMemory, conversationThreads, intents, skillBridge,
-    close: () => store.db.close(),
+    runtimeLock,
+    close: () => {
+      runtimeLock?.release();
+      store.db.close();
+    },
   };
 }
 

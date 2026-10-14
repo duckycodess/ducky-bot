@@ -20,6 +20,7 @@ import type { JobsService } from '../domain/jobs.service.js';
 import type { ApprovalsService } from '../domain/approvals.service.js';
 import type { GitHubService } from '../domain/github.service.js';
 import type { GitHubWatchService } from '../domain/github-watches.service.js';
+import type { AssistantWatchService } from '../domain/assistant-watch.service.js';
 import type { ForgetService } from '../domain/forget.service.js';
 import type { ConversationMemoryService } from '../domain/conversation-memory.service.js';
 import { threadNameFor, type ConversationThreadService } from '../domain/conversation-threads.js';
@@ -58,6 +59,7 @@ export interface RouterDeps {
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly githubWatches: GitHubWatchService;
+  readonly assistantWatch: AssistantWatchService;
   /**
    * The daily assistant. Owner-only in full: none of these is reachable from
    * `handleSharedRead`, and no shared route names any of their commands.
@@ -153,6 +155,9 @@ type ComponentHandler = (actor: ActorContext, entityId: string, values?: Record<
  * handler cannot quietly become reachable by a non-owner, and the only
  * non-privileged path is plain conversation.
  */
+/** Notification targets shown per page of `/watch list targets`. */
+const WATCH_TARGET_PAGE = 15;
+
 export class DuckyRouter {
   private readonly commands = new Map<string, CommandHandler>();
   private readonly components = new Map<string, ComponentHandler>();
@@ -643,11 +648,14 @@ export class DuckyRouter {
       // proposed and never applied until the owner confirms in their own words.
       // Everything else -- almost every message -- falls through to the provider
       // exactly as it did before.
-      const handled = this.deps.intents?.handle(
+      const handled = await this.deps.intents?.handle(
         actor,
         event.threadKey,
         event.text,
         this.channelRoles.roleOf(event.context),
+        // A message reply is a channel message unless this is a DM. The owner's
+        // capture inbox and repository digest are only ever put in a DM.
+        { privateReply: event.context?.guildId === undefined },
       );
       if (handled) {
         // Recorded like any other exchange, so a follow-up question still has
@@ -884,10 +892,7 @@ export class DuckyRouter {
           describes: `${c.status} · ${c.content}`,
         }));
       case 'schedule':
-        return d.schedules.list(actor, 10).map((row) => ({
-          id: row.id.slice(0, 8),
-          describes: `${row.startsAt} · ${row.title}`,
-        }));
+        return d.schedules.listRecords(actor, 10);
     }
   }
 
@@ -1374,10 +1379,18 @@ export class DuckyRouter {
           }));
         case 'remove':
         case 'cancel':
-          return assistant.watchCancelled(
-            d.githubWatches.cancel(actor, String(e.options['id'] ?? '')),
-          );
+          return this.cancelWatch(actor, String(e.options['id'] ?? ''));
         default: {
+          // `targets` lists the notification-only selection, a page at a time.
+          if (e.options['filter'] === 'targets') {
+            const page = Math.max(0, Math.floor(Number(e.options['page'] ?? 1)) - 1);
+            return assistant.assistantWatchesList(
+              d.assistantWatch.list(actor, true, WATCH_TARGET_PAGE, page * WATCH_TARGET_PAGE),
+              d.assistantWatch.counts(actor),
+              page,
+              WATCH_TARGET_PAGE,
+            );
+          }
           const all = e.options['filter'] === 'all';
           const rows = d.githubWatches.list(actor, all);
           return assistant.watchesList(rows, this.watchRows(actor, rows), all);
@@ -1460,7 +1473,15 @@ export class DuckyRouter {
       // An unrecognised value falls back to the time-of-day default rather
       // than erroring: the owner asked for a briefing either way.
       const kind = isBriefingKind(raw) ? raw : undefined;
-      return assistant.briefingMessage(d.briefing.build(actor, kind));
+      // The owner's capture inbox and repository digest are put in the reply only
+      // when that reply is GUARANTEED private. A reply in one of the owner's role
+      // channels persists (ADR 0023) and can be read by anyone who can read the
+      // channel, so there they are left out; the same rule the transport uses to
+      // choose ephemerality decides it, so the two cannot drift apart.
+      const privateReply = !this.replyPersistence.persists({
+        userId: actor.discordUserId, context: e.context, kind: 'command', commandName: 'briefing',
+      });
+      return assistant.briefingMessage(await d.briefing.assemble(actor, kind, { includePrivate: privateReply }));
     });
   }
 
@@ -1505,6 +1526,21 @@ export class DuckyRouter {
         version: task.updatedAt,
       });
     return { done: sign('task_done'), edit: sign('task_edit'), snooze: sign('task_snooze') };
+  }
+
+  /**
+   * Cancels a watch by its handle, whichever kind it is.
+   *
+   * An ordinary watch keeps its allowlist rules; a notification-only target is
+   * looked up in its own table. The handle namespace is shared and allocated
+   * against both, so one handle names exactly one watch.
+   */
+  private cancelWatch(actor: ActorContext, id: string): OutboundMessage {
+    const d = this.deps;
+    if (d.assistantWatch.owns(actor, id)) {
+      return assistant.assistantWatchCancelled(d.assistantWatch.cancel(actor, id));
+    }
+    return assistant.watchCancelled(d.githubWatches.cancel(actor, id));
   }
 
   private watchRows(
@@ -1802,7 +1838,7 @@ export class DuckyRouter {
       assistant.reminderCancelled(d.reminders.cancel(actor, entityId)),
     );
     this.components.set('watch_cancel', async (actor, entityId) =>
-      assistant.watchCancelled(d.githubWatches.cancel(actor, entityId)),
+      this.cancelWatch(actor, entityId),
     );
     /**
      * The repository-workflow card controls.

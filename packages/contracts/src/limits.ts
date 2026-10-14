@@ -581,3 +581,78 @@ export const CONVERSATION_COMPACT_KEEP_TURNS = 10;
 export const CONVERSATION_THREAD_READ_MAX = 2_000;
 /** How much of an explicitly selected reply anchor is carried into context. */
 export const CONVERSATION_ANCHOR_TEXT_MAX = 600;
+
+// ---- private-assistant migration (ADR 0030) --------------------------------
+//
+// Every bound here is a public, generic, fixed number. None is derived from the
+// owner's private inventory, and none is read from an imported document: a
+// document can be refused for exceeding one, never raise one.
+
+/** The largest interchange document, in categories' record counts. */
+export const ASSISTANT_IMPORT_MAX_TASKS = 5_000;
+export const ASSISTANT_IMPORT_MAX_REMINDERS = 20_000;
+export const ASSISTANT_IMPORT_MAX_CAPTURES = 5_000;
+export const ASSISTANT_IMPORT_MAX_BRIEFING_DELIVERIES = 400;
+export const ASSISTANT_IMPORT_MAX_WATCH_EVENTS = 20_000;
+export const ASSISTANT_IMPORT_MAX_EVENTS_PER_TARGET = 2_000;
+/** Offset lists are short on purpose; a per-task policy is a few reminders. */
+export const ASSISTANT_REMINDER_POLICY_MAX_OFFSETS = 8;
+export const ASSISTANT_REMINDER_OFFSET_MAX_MINUTES = 365 * 24 * 60;
+
+/** Indefinite weekly rules are bounded in COUNT and in what one read may ask for. */
+export const SCHEDULE_RULES_MAX = 300;
+export const SCHEDULE_EXCEPTIONS_MAX = 1_000;
+export const SCHEDULE_WINDOW_MAX_DAYS = 93;
+/** Distinct from the confirmed-row cap: one list shows at most this many lines. */
+export const SCHEDULE_LIST_LIMIT_MAX = 200;
+
+/**
+ * Notification-only watch targets.
+ *
+ * `ASSISTANT_WATCH_MAX_TARGETS` is a fixed hard ceiling, deliberately round and
+ * well above any real inventory, and it is NOT the 20-watch ordinary add limit
+ * (`MAX_GITHUB_WATCHES_PER_OWNER`) nor the 64-entry configured-repository cap.
+ *
+ * The call budgets are what bound throughput, not the ceiling: every
+ * subprocess read an observation makes is charged against both. They leave
+ * headroom below a typical 5000/hour authenticated quota for the feed and for
+ * jobs. At the roughly 14 calls one snapshot observation cost, 1000 targets
+ * would need over five hours of this budget per sweep; typed incremental reads
+ * carry persisted progress instead, and no full-sweep latency is promised.
+ */
+export const ASSISTANT_WATCH_MAX_TARGETS = 1_000;
+export const ASSISTANT_WATCH_CALLS_PER_TICK = 20;
+export const ASSISTANT_WATCH_CALLS_PER_HOUR = 2_400;
+/** How often a healthy surface is re-read, so a quiet one costs little. */
+export const ASSISTANT_WATCH_INTERVAL_MINUTES = 15;
+export const ASSISTANT_WATCH_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+/** Pages one read may span before it is blocked as unbounded; one page is one unit of work. */
+export const ASSISTANT_WATCH_MAX_PAGES = 50;
+/**
+ * The source polls at most this many eligible repositories per cycle, most
+ * recently pushed first (audited). Repositories beyond it are not polled until
+ * their recency moves them in, which is the source's behavior and is preserved,
+ * not "fixed" by a sweep. Their metadata is still refreshed on the slower interval
+ * below, so a quiet repository that wakes up can rise into coverage.
+ */
+export const ASSISTANT_WATCH_CYCLE_TARGETS = 40;
+/** How often repository discovery runs, and how often an uncovered target's metadata is refreshed. */
+export const ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS = 6;
+export const ASSISTANT_WATCH_METADATA_INTERVAL_HOURS = 6;
+/** Open pull requests whose reviews one pulls page reads, so a unit's cost is bounded. */
+export const ASSISTANT_WATCH_PAGE_SIZE = 10;
+export const ASSISTANT_WATCH_EVENT_BATCH = 10;
+export const ASSISTANT_WATCH_ALERT_MAX_ATTEMPTS = 5;
+/** Digested and abandoned events older than this are pruned; settlement is kept. */
+export const ASSISTANT_WATCH_EVENT_KEEP_DAYS = 30;
+export const ASSISTANT_DIGEST_MAX_REPOS = 12;
+export const ASSISTANT_DIGEST_MAX_LINES_PER_REPO = 4;
+
+/** The shared runtime lock: a holder is live while its heartbeat is this fresh. */
+export const RUNTIME_LOCK_STALE_MS = 3 * 60_000;
+/**
+ * How often the holder refreshes its heartbeat: a fixed, short period of its own,
+ * never the reconcile interval, which an operator can set arbitrarily long. Six
+ * beats fit inside the stale window, so a few missed ones never lose the lock.
+ */
+export const RUNTIME_LOCK_HEARTBEAT_MS = 30_000;

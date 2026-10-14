@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DuckyError, ScheduleDraftSchema, type ScheduleDraft } from '@ducky/contracts';
+import { DuckyError, ScheduleDraftSchema, WEEKDAY_NAMES, type ScheduleDraft } from '@ducky/contracts';
 import type { ScheduleExtractionProvider, ScheduleSource } from '@ducky/adapters';
 import { withTransaction, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
@@ -109,6 +109,52 @@ export class SchedulesService {
   list(actor: ActorContext, limit = 25): ReturnType<Store['schedules']['listForOwner']> {
     this.authz.requireOwner(actor);
     return this.store.schedules.listForOwner(actor.discordUserId, limit);
+  }
+
+  /**
+   * Every schedule record the owner can delete, as a handle and a description:
+   * confirmed one-off rows, weekly rules (including a replaced batch, which is
+   * inert but still the owner's) and exceptions. Handles are the first eight
+   * characters of the id; an ambiguous one is refused by `/forget`, not guessed.
+   */
+  listRecords(actor: ActorContext, limit = 25): { id: string; describes: string }[] {
+    this.authz.requireOwner(actor);
+    const owner = actor.discordUserId;
+    const oneOff = this.store.schedules.listForOwner(owner, limit).map((row) => ({
+      id: row.id.slice(0, 8),
+      describes: `${row.startsAt} · ${row.title}`,
+    }));
+    const rules = this.store.scheduleRules.listAllRulesForOwner(owner, limit).map((r) => ({
+      id: r.id.slice(0, 8),
+      describes: `every ${WEEKDAY_NAMES[r.weekday]} ${r.startTime} · ${r.label}` +
+        (r.active ? '' : ' (replaced batch)'),
+    }));
+    const exceptions = this.store.scheduleRules.listExceptionsForOwner(owner, limit).map((e) => ({
+      id: e.id.slice(0, 8),
+      describes: `${e.date} · ${e.kind} · ${e.courseCode ?? e.label ?? 'all classes'}`,
+    }));
+    return [...oneOff, ...rules, ...exceptions].slice(0, limit);
+  }
+
+  /**
+   * Flips the weekly schedule back one batch: the active batch becomes replaced
+   * and the most recently replaced one with a KNOWN replacement time becomes
+   * active, which is the source's "roll back to the previous schedule".
+   *
+   * It changes state and deletes no row, touches no exception, and returns counts
+   * only. A replaced batch whose order is unknown (or two stamped the same
+   * instant) is never chosen: that is a refusal, not a guess. Owner-only, like
+   * every other schedule control.
+   *
+   * NOTE: this is a SERVICE control. The owner-only command manifest was not
+   * widened for it, so no Discord command reaches it yet; that missing control is
+   * a named blocker in `docs/CURRENT_STATE.md`.
+   */
+  rollbackBatch(actor: ActorContext, atIso: string):
+    | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
+    | { readonly ok: false; readonly reason: 'nothing_to_restore' | 'order_unknown' } {
+    this.authz.requireOwner(actor);
+    return this.store.scheduleRules.rollbackBatch(actor.discordUserId, atIso);
   }
 
   private expiredMessage(): string {

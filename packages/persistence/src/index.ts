@@ -24,6 +24,13 @@ export * from './repositories/dependencies.repo.js';
 export * from './repositories/audit-log.repo.js';
 export * from './repositories/retention.repo.js';
 export * from './repositories/agent-threads.repo.js';
+export * from './repositories/assistant-import.repo.js';
+export * from './repositories/rollback-delta.repo.js';
+export * from './repositories/schedule-rules.repo.js';
+export * from './repositories/owner-preferences.repo.js';
+export * from './repositories/assistant-watch.repo.js';
+export * from './runtime-lock.js';
+export * from './backup-check.js';
 
 import type { Db } from './db.js';
 import { ReposRepo } from './repositories/repos.repo.js';
@@ -48,6 +55,11 @@ import { DependenciesRepo } from './repositories/dependencies.repo.js';
 import { RetentionRepo } from './repositories/retention.repo.js';
 import { AuditLogRepo } from './repositories/audit-log.repo.js';
 import { AgentThreadsRepo } from './repositories/agent-threads.repo.js';
+import { AssistantImportRepo } from './repositories/assistant-import.repo.js';
+import { RollbackDeltaRepo } from './repositories/rollback-delta.repo.js';
+import { ScheduleRulesRepo } from './repositories/schedule-rules.repo.js';
+import { OwnerPreferencesRepo } from './repositories/owner-preferences.repo.js';
+import { AssistantWatchRepo } from './repositories/assistant-watch.repo.js';
 
 export interface Store {
   readonly db: Db;
@@ -101,9 +113,46 @@ export interface Store {
    * able to delete rows an earlier run stored even after it is switched off.
    */
   readonly agentThreads: AgentThreadsRepo;
+  /** Import-specific writes and the permanent correlation ledger (ADR 0030). */
+  readonly assistantImport: AssistantImportRepo;
+  readonly rollbackDelta: RollbackDeltaRepo;
+  /**
+   * Runs a deletion path under a named cause, so the tombstone an imported record
+   * leaves says WHY it went (`forget`, `owner_delete`, `retention`) in one word and
+   * nothing else. A deletion with no path is recorded as `unknown`. Nests: the
+   * outermost cause wins.
+   */
+  withDeletionCause<T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T;
+  /**
+   * Removes a deletion cause left behind by a process that died mid-deletion. Only
+   * safe while the runtime lock is held, which is where start-up calls it. Returns
+   * how many rows it removed.
+   */
+  clearStaleDeletionContext(): number;
+  /** Indefinite weekly rules and their dated exceptions. */
+  readonly scheduleRules: ScheduleRulesRepo;
+  /** Non-authoritative owner preferences; authorization never reads them. */
+  readonly ownerPreferences: OwnerPreferencesRepo;
+  /** Notification-only watch targets, typed checkpoints and events. */
+  readonly assistantWatch: AssistantWatchRepo;
 }
 
 export function createStore(db: Db): Store {
+  // Nesting is tracked in MEMORY. The row is only what the triggers read, so a crash
+  // that leaves it behind cannot be mistaken for a deletion path that is running: the
+  // outermost entry of a fresh process overwrites it, and start-up clears it.
+  let depth = 0;
+  const withDeletionCause = <T>(cause: 'forget' | 'owner_delete' | 'retention', fn: () => T): T => {
+    if (depth > 0) return fn();
+    depth += 1;
+    db.prepare('INSERT OR REPLACE INTO deletion_context (id, cause) VALUES (1, ?)').run(cause);
+    try {
+      return fn();
+    } finally {
+      depth -= 1;
+      db.prepare('DELETE FROM deletion_context WHERE id = 1').run();
+    }
+  };
   return {
     db,
     repos: new ReposRepo(db),
@@ -128,5 +177,12 @@ export function createStore(db: Db): Store {
     auditLog: new AuditLogRepo(db),
     retention: new RetentionRepo(db),
     agentThreads: new AgentThreadsRepo(db),
+    assistantImport: new AssistantImportRepo(db),
+    rollbackDelta: new RollbackDeltaRepo(db),
+    withDeletionCause,
+    clearStaleDeletionContext: () => Number(db.prepare('DELETE FROM deletion_context').run().changes),
+    scheduleRules: new ScheduleRulesRepo(db),
+    ownerPreferences: new OwnerPreferencesRepo(db),
+    assistantWatch: new AssistantWatchRepo(db),
   };
 }

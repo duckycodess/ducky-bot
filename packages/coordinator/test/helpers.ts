@@ -3,7 +3,10 @@ import { createStore, openDatabase, runMigrations, type Store } from '@ducky/per
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
   type ConversationProvider, type DependencyChecker, type FrontDoorPort, type GitHubReader,
+  type WeatherPort,
 } from '@ducky/adapters';
+import type { AssistantWatchReader } from '../src/domain/assistant-watch.reader.js';
+import type { AssistantWatchConfig } from '../src/domain/assistant-watch.service.js';
 import { createApp, type App } from '../src/app.js';
 import type { ActionPerformer } from '../src/domain/action-performer.js';
 import { ConfiguredOwnerClock } from '../src/domain/owner-clock.js';
@@ -72,6 +75,13 @@ export interface HarnessOptions {
   readonly allowlistJson?: string;
   readonly registerExecutor?: boolean;
   readonly github?: GitHubReader;
+  /** The typed notification reader. Omitted means the shipped one, which observes nothing. */
+  readonly assistantWatchReader?: AssistantWatchReader;
+  readonly assistantWatchConfig?: AssistantWatchConfig;
+  /** The forecast. Omitted means Open-Meteo, which only runs if a location is configured. */
+  readonly weather?: WeatherPort;
+  /** Take the shared runtime lock as the coordinator does. Off for tests that model a restart. */
+  readonly holdRuntimeLock?: boolean;
   /**
    * Drives the daily assistant's clock. Reminder materialization, due dates
    * and briefing day boundaries are all read through this, so a test can move
@@ -171,6 +181,10 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       ...(opts.conversationFetch ? { conversationFetch: opts.conversationFetch } : {}),
       conversation: opts.conversation ?? new MockConversationProvider(),
       github: opts.github ?? new MockGitHubReader(),
+      ...(opts.assistantWatchReader ? { assistantWatchReader: opts.assistantWatchReader } : {}),
+      ...(opts.assistantWatchConfig ? { assistantWatchConfig: opts.assistantWatchConfig } : {}),
+      ...(opts.weather ? { weather: opts.weather } : {}),
+      ...(opts.holdRuntimeLock ? { holdRuntimeLock: true } : {}),
     },
   );
 

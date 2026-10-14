@@ -3,6 +3,7 @@ import { buildServer } from './http/server.js';
 import { formatDiagnostics, runStartupDiagnostics } from './diagnostics.js';
 import { sweepStaleTempDirs } from './discord/attachments.js';
 import { createLogger } from '@ducky/adapters';
+import { startLockHeartbeat } from './runtime-lock.js';
 
 /**
  * A logger that exists BEFORE configuration is read.
@@ -19,7 +20,10 @@ const bootLog = createLogger({
 });
 
 async function main(): Promise<void> {
-  const app = createApp();
+  // Takes the shared runtime lock inside createApp, right after migrations and
+  // before anything else is written, so a refused second coordinator leaves no
+  // trace of itself in the database it was refused.
+  const app = createApp(process.env, { holdRuntimeLock: true });
   // Every line from here goes through the redactor. Interpolating a raw
   // `(err as Error).message` into stderr -- which is what these sites used to
   // do -- puts whatever the error happened to quote into the log.
@@ -29,6 +33,13 @@ async function main(): Promise<void> {
     instance: app.paths.instanceLabel,
     profile: app.discordProfile.profile,
     phase: 'running',
+  });
+
+  // A heartbeat of its own, independent of the reconcile interval. If the lock is
+  // taken over this process is no longer the writer and stops at once.
+  const stopHeartbeat = startLockHeartbeat(app.runtimeLock!, () => {
+    log.error('runtime_lock.lost', {});
+    process.exit(1);
   });
 
   // Crash recovery for attachment scratch directories from a previous run.
@@ -110,6 +121,11 @@ async function main(): Promise<void> {
     app.githubWatches.tick().catch((err: unknown) => {
       log.error('github_watches.tick_failed', { err });
     });
+    // Notification-only targets ride the same interval, inside their own call
+    // budget, and tell the owner alone. They are not engineering watches.
+    app.assistantWatch.tick().catch((err: unknown) => {
+      log.error('assistant_watch.tick_failed', { err });
+    });
     // The GitHub feed is one more bounded observation on the same interval. It
     // reads GitHub and posts cards; it consults no model, so a paused
     // subscription quota changes nothing about it.
@@ -134,10 +150,12 @@ async function main(): Promise<void> {
     await app.briefingNotifier.waitForIdle();
     await app.dependencies.waitForIdle();
     await app.githubWatches.waitForIdle();
+    await app.assistantWatch.waitForIdle();
     await app.githubFeed.waitForIdle();
     await app.transport.stop();
     await server.close();
-    app.close();
+    stopHeartbeat();
+    app.close(); // also releases the runtime lock
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown());

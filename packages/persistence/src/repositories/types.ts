@@ -2,7 +2,7 @@ import type {
   AgentCardStatus, ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome,
   AuditSubjectKind, CaptureState, ConversationRole, DependencyCheckStatus, DependencyState,
   DependencyType, GitHubFeedKind, GitHubFeedTarget, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
-  QueueState, SkillCommand, TaskPriority, TaskState,
+  QueueState, SkillCommand, TaskCategory, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -303,10 +303,25 @@ export interface TaskRow {
   dueAt: string | null;
   dueAllDay: boolean;
   priority: TaskPriority;
+  /** The source's urgent priority, ranked above `high`. Stored beside `priority`, not in it. */
+  urgent?: boolean;
+  /** The source's category, or null. Absent reads as null. */
+  category?: TaskCategory | null;
   status: TaskState;
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /**
+   * A per-task reminder policy, or null for the native defaults (ADR 0030).
+   * Only a task that arrived with one has one. Absent reads as null.
+   */
+  reminderPolicy?: ReminderPolicy | null;
+}
+
+/** Whether a task reminds at all, and at which offsets (null: the owner's default list). */
+export interface ReminderPolicy {
+  readonly enabled: boolean;
+  readonly offsetsMinutes: readonly number[] | null;
 }
 
 /**

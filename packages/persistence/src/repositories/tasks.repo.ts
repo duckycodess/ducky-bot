@@ -1,6 +1,36 @@
-import type { TaskPriority, TaskState } from '@ducky/contracts';
+import type { TaskCategory, TaskPriority, TaskState } from '@ducky/contracts';
 import type { Db } from '../db.js';
-import { fromBool, toBool, type TaskRow } from './types.js';
+import { fromBool, toBool, type ReminderPolicy, type TaskRow } from './types.js';
+
+/**
+ * A policy nobody can read is the quietest policy, not the default one.
+ *
+ * Falling back to the native defaults would let the next Edit re-derive and
+ * SEND reminders the owner had configured away; failing to silence means a
+ * damaged row is visible (a task that no longer reminds) rather than a task
+ * that suddenly starts talking again.
+ */
+const UNREADABLE_POLICY: ReminderPolicy = Object.freeze({ enabled: false, offsetsMinutes: null });
+
+const parsePolicy = (raw: unknown): ReminderPolicy | null => {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(String(raw)) as { enabled?: unknown; offsetsMinutes?: unknown };
+    if (typeof v.enabled !== 'boolean') return UNREADABLE_POLICY;
+    if (v.offsetsMinutes === null || v.offsetsMinutes === undefined) {
+      return { enabled: v.enabled, offsetsMinutes: null };
+    }
+    if (
+      Array.isArray(v.offsetsMinutes) &&
+      v.offsetsMinutes.every((n) => Number.isInteger(n) && n > 0)
+    ) {
+      return { enabled: v.enabled, offsetsMinutes: v.offsetsMinutes as number[] };
+    }
+    return UNREADABLE_POLICY;
+  } catch {
+    return UNREADABLE_POLICY;
+  }
+};
 
 const map = (r: Record<string, unknown>): TaskRow => ({
   id: String(r['id']),
@@ -10,10 +40,13 @@ const map = (r: Record<string, unknown>): TaskRow => ({
   dueAt: r['due_at'] == null ? null : String(r['due_at']),
   dueAllDay: toBool(r['due_all_day']),
   priority: String(r['priority']) as TaskPriority,
+  urgent: toBool(r['urgent']),
+  category: r['category'] == null ? null : (String(r['category']) as TaskCategory),
   status: String(r['status']) as TaskState,
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
   closedAt: r['closed_at'] == null ? null : String(r['closed_at']),
+  reminderPolicy: parsePolicy(r['reminder_policy']),
 });
 
 /**
@@ -25,7 +58,7 @@ const map = (r: Record<string, unknown>): TaskRow => ({
  * same rows in different sequences would read as two different sets.
  */
 const ORDER = `ORDER BY (due_at IS NULL), due_at ASC,
-  CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+  CASE WHEN urgent = 1 THEN -1 WHEN priority = 'high' THEN 0 WHEN priority = 'normal' THEN 1 ELSE 2 END,
   created_at ASC`;
 
 /**
@@ -45,12 +78,14 @@ export class TasksRepo {
     dueAllDay: boolean;
     priority: TaskPriority;
     createdAt: string;
+    /** Omitted means the native defaults. */
+    reminderPolicy?: ReminderPolicy | null;
   }): TaskRow {
     this.db
       .prepare(
         `INSERT INTO tasks (id, public_id, discord_user_id, title, due_at, due_all_day,
-           priority, status, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,'open',?,?)`,
+           priority, status, created_at, updated_at, reminder_policy)
+         VALUES (?,?,?,?,?,?,?,'open',?,?,?)`,
       )
       .run(
         row.id,
@@ -62,9 +97,14 @@ export class TasksRepo {
         row.priority,
         row.createdAt,
         row.createdAt,
+        row.reminderPolicy ? JSON.stringify(row.reminderPolicy) : null,
       );
     return {
       ...row,
+      reminderPolicy: row.reminderPolicy ?? null,
+      // A native task is never urgent and has no category; only an import carries them.
+      urgent: false,
+      category: null,
       status: 'open',
       updatedAt: row.createdAt,
       closedAt: null,

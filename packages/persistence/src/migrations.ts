@@ -1467,4 +1467,467 @@ CREATE INDEX ix_github_feed_digests_settled
   ON github_feed_digests(created_at) WHERE status <> 'pending';
 `,
   },
+  {
+    version: 29,
+    name: 'assistant_migration',
+    sql: `
+-- Private-assistant migration (ADR 0030). Nothing here changes an existing row.
+--
+-- A per-task reminder policy. NULL is the normal case and means exactly what it
+-- meant before this column existed: the native 24 h / 1 h / 08:00 defaults. A
+-- non-NULL value is JSON {enabled, offsetsMinutes} and exists only for a task
+-- that arrived with one; Edit re-derives its reminders from it.
+ALTER TABLE tasks ADD COLUMN reminder_policy TEXT;
+
+-- THE CORRELATION LEDGER. A permanent record that a source identity has been
+-- seen, so a repeated import adds nothing and a record the owner deleted is
+-- never resurrected.
+--
+-- While the record exists the row is 'live' and carries a content fingerprint,
+-- which is what lets a later export that CHANGED a correlated record be
+-- reported as a conflict rather than silently ignored. When the record is
+-- deleted -- by Forget, by retention, by a cascade, by anything -- a trigger
+-- below turns the row into an identity-only tombstone: no target, no
+-- fingerprint, no content. A record of a deletion that kept a digest of what it
+-- deleted would defeat the deletion.
+--
+-- Retention never touches this table (it is on RETENTION_FORBIDDEN_TABLES).
+CREATE TABLE assistant_import_identities (
+  namespace     TEXT NOT NULL,
+  category      TEXT NOT NULL CHECK (category IN
+                  ('task','reminder','capture','schedule_rule','schedule_exception',
+                   'preferences','watch_target')),
+  source_id     TEXT NOT NULL,
+  target_id     TEXT,
+  state         TEXT NOT NULL CHECK (state IN ('live','tombstone')),
+  fingerprint   TEXT,
+  created_at    TEXT NOT NULL,
+  tombstoned_at TEXT,
+  PRIMARY KEY (namespace, category, source_id),
+  CHECK (
+    (state = 'live'      AND target_id IS NOT NULL AND fingerprint IS NOT NULL AND tombstoned_at IS NULL)
+    OR
+    (state = 'tombstone' AND target_id IS NULL     AND fingerprint IS NULL     AND tombstoned_at IS NOT NULL)
+  )
+);
+CREATE INDEX ix_import_identity_target
+  ON assistant_import_identities(category, target_id) WHERE state = 'live';
+
+-- Indefinite weekly recurrence. A rule is WALL-CLOCK (like a confirmed one-off
+-- row): 09:00 means 09:00 where the owner is. Nothing is materialized and there
+-- is no horizon; occurrences are computed for the window a reader asks about.
+-- active = 0 is a replaced batch kept as inert data: it never drives behavior.
+CREATE TABLE schedule_rules (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  batch_key       TEXT NOT NULL,
+  active          INTEGER NOT NULL CHECK (active IN (0,1)),
+  weekday         INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  start_time      TEXT NOT NULL CHECK (start_time GLOB '[0-2][0-9]:[0-5][0-9]'),
+  end_time        TEXT NOT NULL CHECK (end_time   GLOB '[0-2][0-9]:[0-5][0-9]'),
+  label           TEXT NOT NULL,
+  course_code     TEXT,
+  section         TEXT,
+  room            TEXT,
+  uncertain       TEXT NOT NULL DEFAULT '[]',
+  effective_from  TEXT,
+  effective_until TEXT,
+  created_at      TEXT NOT NULL,
+  CHECK (end_time > start_time),
+  CHECK (effective_from IS NULL OR effective_until IS NULL OR effective_from <= effective_until)
+);
+CREATE INDEX ix_schedule_rules_owner ON schedule_rules(discord_user_id, active, weekday);
+
+CREATE TABLE schedule_exceptions (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  local_date      TEXT NOT NULL,
+  course_code     TEXT,
+  label           TEXT,
+  kind            TEXT NOT NULL CHECK (kind IN ('cancelled')),
+  note            TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX ix_schedule_exceptions_owner ON schedule_exceptions(discord_user_id, local_date);
+
+-- Non-authoritative owner preferences. Authorization never reads this table;
+-- frozen configuration always wins. Applied only when the active profile
+-- explicitly selects imported preferences.
+CREATE TABLE owner_preferences (
+  discord_user_id TEXT PRIMARY KEY,
+  prefs_json      TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  imported_at     TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+-- Notification-only watch targets. Independent of repos and allow_jobs: a row
+-- here grants no job, no model, no owner role and no allowlist entry.
+CREATE TABLE assistant_watch_targets (
+  id              TEXT PRIMARY KEY,
+  public_id       TEXT NOT NULL UNIQUE,
+  discord_user_id TEXT NOT NULL,
+  repo_key        TEXT NOT NULL,
+  display         TEXT NOT NULL,
+  default_branch  TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('active','cancelled')),
+  last_observed_at TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  cancelled_at    TEXT,
+  UNIQUE (discord_user_id, repo_key),
+  CHECK ((state = 'cancelled') = (cancelled_at IS NOT NULL))
+);
+
+-- One checkpoint per target and surface. 'unbaselined' has no cursor and is an
+-- explicit state, never a NULL hash that turns into a "Started watching" burst.
+-- 'imported' carries a cursor that has not yet been reconciled across the
+-- stopped-notifier window. pending_* is durable progress through a multi-page
+-- read: the committed cursor does NOT move until every page has been read.
+CREATE TABLE assistant_watch_checkpoints (
+  target_id      TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  surface        TEXT NOT NULL CHECK (surface IN
+                   ('commits','pulls','issues','runs','releases','default_branch','ci_state')),
+  state          TEXT NOT NULL CHECK (state IN ('unbaselined','imported','ready')),
+  cursor         TEXT,
+  pending_cursor TEXT,
+  pending_page   INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  -- Whether the items sitting exactly AT the cursor are known to have been
+  -- processed by a Ducky pass (so a late event with the same timestamp can be told
+  -- from one already announced, by identity). It is false for a baseline and for
+  -- a cursor that came from the source, whose boundary items may never have been
+  -- recorded here: re-reading them would announce history.
+  boundary_known INTEGER NOT NULL DEFAULT 0 CHECK (boundary_known IN (0,1)),
+  next_due_at    TEXT NOT NULL,
+  failures       INTEGER NOT NULL DEFAULT 0,
+  last_error     TEXT,
+  blocked_reason TEXT,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (target_id, surface),
+  CHECK ((state = 'unbaselined') = (cursor IS NULL))
+);
+CREATE INDEX ix_assistant_watch_checkpoints_due ON assistant_watch_checkpoints(next_due_at);
+
+-- Typed events with a stable identity, and SEPARATE alert and digest
+-- settlement: an event can have interrupted once and, independently, been
+-- carried by a briefing.
+CREATE TABLE assistant_watch_events (
+  id              TEXT PRIMARY KEY,
+  target_id       TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL,
+  -- The surface that had to be read to see this event. A held event was found
+  -- while a surface read was still incomplete: it is real, but it is not
+  -- deliverable until the read finishes and the cursor commits, so an unfinished
+  -- page can never announce half of a window.
+  surface         TEXT NOT NULL CHECK (surface IN
+                    ('commits','pulls','issues','runs','releases','default_branch')),
+  held            INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0,1)),
+  identity        TEXT NOT NULL,
+  occurred_at     TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  origin          TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  alerted_at      TEXT,
+  alert_attempts  INTEGER NOT NULL DEFAULT 0,
+  alert_abandoned_at TEXT,
+  digested_at     TEXT,
+  created_at      TEXT NOT NULL,
+  UNIQUE (target_id, kind, identity)
+);
+CREATE INDEX ix_assistant_watch_events_digest
+  ON assistant_watch_events(created_at) WHERE digested_at IS NULL;
+CREATE INDEX ix_assistant_watch_events_alert
+  ON assistant_watch_events(created_at) WHERE alerted_at IS NULL AND alert_abandoned_at IS NULL;
+
+-- Read calls charged against the rolling-hour budget, bucketed by minute.
+CREATE TABLE assistant_watch_calls (
+  minute TEXT PRIMARY KEY,
+  calls  INTEGER NOT NULL CHECK (calls >= 0)
+);
+
+-- ONE row: who may write this database right now. A CLI flag that says "I
+-- stopped the coordinator" proves nothing; this does. The coordinator takes it
+-- at start and refreshes it; the importer takes it for the import and refuses
+-- while a live holder exists.
+CREATE TABLE runtime_lock (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  holder       TEXT NOT NULL CHECK (holder IN ('coordinator','importer')),
+  pid          INTEGER NOT NULL,
+  host         TEXT NOT NULL,
+  token        TEXT NOT NULL,
+  -- WHICH boot and WHICH process incarnation the holder was. A pid alone is not
+  -- an identity: after a reboot, or once the holder has died and its pid has been
+  -- handed to somebody else, "that pid exists" would keep a dead lock alive.
+  boot_id      TEXT,
+  proc_start   TEXT,
+  acquired_at  TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+
+-- A deleted imported record becomes an identity-only tombstone, by TRIGGER, so
+-- no deletion path (Forget, retention, a foreign-key cascade, a future one) can
+-- forget to do it and let a re-import resurrect the record.
+CREATE TRIGGER trg_tombstone_task AFTER DELETE ON tasks BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'task' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_reminder AFTER DELETE ON reminders BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'reminder' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_capture AFTER DELETE ON captures BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'capture' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_schedule_rule AFTER DELETE ON schedule_rules BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_rule' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_schedule_exception AFTER DELETE ON schedule_exceptions BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_exception' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_watch_target AFTER DELETE ON assistant_watch_targets BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'watch_target' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'preferences' AND target_id = OLD.discord_user_id AND state = 'live';
+END;
+`,
+  },
+  {
+    version: 30,
+    name: 'assistant_watch_reader',
+    sql: `
+-- The real typed notification reader (ADR 0031). Additive only: nothing here
+-- changes the meaning of an existing row.
+--
+-- pending_state is the durable position INSIDE a multi-request read that is not
+-- a page number: the review queue of a pulls page, the page that must be re-read
+-- to prove the window held still, a provider total. It is JSON, owned by the
+-- service, and it is cleared by every commit and every restart of a pass.
+--
+-- scan_floor is the creation time of the oldest item that was still unsettled
+-- (a running workflow, a draft release) when the last window closed. Runs and
+-- releases are listed by creation but their events carry a later time, so the
+-- next window must reach back at least that far; see windowThresholdMs.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN pending_state TEXT;
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN scan_floor TEXT;
+
+-- Facts a repository metadata read establishes about a target, and the poll
+-- cycle may filter by. Existing rows keep the defaults.
+ALTER TABLE assistant_watch_targets ADD COLUMN pushed_at TEXT;
+ALTER TABLE assistant_watch_targets ADD COLUMN relationship TEXT
+  CHECK (relationship IS NULL OR relationship IN ('owner','organization','collaborator'));
+ALTER TABLE assistant_watch_targets ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+  CHECK (archived IN (0,1));
+ALTER TABLE assistant_watch_targets ADD COLUMN fork INTEGER NOT NULL DEFAULT 0
+  CHECK (fork IN (0,1));
+-- Why a target was cancelled by the SYSTEM rather than by the owner (a repository
+-- the provider no longer shows). NULL for an owner's cancellation and for an
+-- imported cancelled state.
+ALTER TABLE assistant_watch_targets ADD COLUMN cancel_reason TEXT;
+`,
+  },
+  {
+    version: 31,
+    name: 'assistant_watch_discovery',
+    sql: `
+-- Repository discovery and the global monitoring switch (ADR 0031). Additive.
+--
+-- Where a target came from. Existing rows are imported. A discovered target is
+-- owner state exactly like an imported one: cancelled is a mute, and nothing here
+-- is engineering authorization.
+ALTER TABLE assistant_watch_targets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported'
+  CHECK (origin IN ('imported','discovered'));
+
+-- ONE row per owner: the durable position of the discovery pass. A page is one
+-- unit of work, so a pass survives a restart. 'incomplete' says the last finished
+-- pass left repositories unread (more pages than the cap); 'capacity_blocked' says
+-- a repository could not be stored because the target ceiling was reached. Neither
+-- is ever resolved by truncating or cancelling anything.
+CREATE TABLE assistant_watch_discovery (
+  discord_user_id   TEXT PRIMARY KEY,
+  pending_page      INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  pass_capacity_blocked INTEGER NOT NULL DEFAULT 0 CHECK (pass_capacity_blocked IN (0,1)),
+  next_due_at       TEXT NOT NULL,
+  last_completed_at TEXT,
+  incomplete        INTEGER NOT NULL DEFAULT 0 CHECK (incomplete IN (0,1)),
+  capacity_blocked  INTEGER NOT NULL DEFAULT 0 CHECK (capacity_blocked IN (0,1)),
+  failures          INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT,
+  updated_at        TEXT NOT NULL
+);
+
+-- A deleted target must not come back because discovery found the repository
+-- again. By TRIGGER, so no deletion path can forget to leave the mark. The mark is
+-- the reference alone: no content, no reason.
+CREATE TABLE assistant_watch_discovery_tombstones (
+  discord_user_id TEXT NOT NULL,
+  repo_key        TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, repo_key)
+);
+CREATE TRIGGER trg_watch_target_discovery_tombstone AFTER DELETE ON assistant_watch_targets BEGIN
+  INSERT OR IGNORE INTO assistant_watch_discovery_tombstones (discord_user_id, repo_key, created_at)
+  VALUES (OLD.discord_user_id, OLD.repo_key, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+END;
+
+-- The source's global monitoring switch, per owner. Absent means on. It governs
+-- reads only: it changes no target and no checkpoint, so a paused watch keeps every
+-- cursor exactly where it was.
+CREATE TABLE assistant_watch_settings (
+  discord_user_id    TEXT PRIMARY KEY,
+  monitoring_enabled INTEGER NOT NULL DEFAULT 1 CHECK (monitoring_enabled IN (0,1)),
+  updated_at         TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 32,
+    name: 'schedule_rule_replaced_at',
+    sql: `
+-- When a schedule batch was replaced, so a rollback can restore the most recently
+-- replaced one first. NULL for an active rule, and for a replaced rule whose order
+-- is unknown: such a batch is never chosen by a rollback. A rollback only flips
+-- \`active\` and this column; it deletes no row.
+ALTER TABLE schedule_rules ADD COLUMN replaced_at TEXT;
+`,
+  },
+  {
+    version: 33,
+    name: 'task_urgent_and_category',
+    sql: `
+-- The source's \`urgent\` priority and task categories, as columns beside the
+-- existing ones. \`priority\` itself is NOT widened: its CHECK cannot be changed
+-- without rebuilding \`tasks\`, whose children (reminders, with ON DELETE CASCADE)
+-- make a drop-and-rebuild unsafe. An urgent task is stored as priority 'high' with
+-- urgent = 1, so it can never be mistaken for a native high task by anything that
+-- ignores the flag, only ranked one place lower.
+ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1));
+ALTER TABLE tasks ADD COLUMN category TEXT CHECK (category IS NULL OR category IN ('school','personal'));
+`,
+  },
+  {
+    version: 34,
+    name: 'rollback_delta_support',
+    sql: `
+-- What a reverse bridge needs that the ledger did not keep (ADR 0033).
+--
+-- stored_hash is the BASELINE VERSION of an imported record: a hash of the fields
+-- Ducky wrote, taken inside the import transaction. Comparing it with the record
+-- as it stands tells a later export, without the source document, whether the
+-- owner has changed it since. It is a hash, never content. NULL on a live identity
+-- means the baseline is unknown (imported before this column), which an export
+-- reports as incomplete rather than guessing.
+--
+-- tombstone_cause says WHY an imported record is gone, in one word: 'forget' (the
+-- owner asked for it to be deleted), 'owner_delete' (the owner deleted it by hand),
+-- 'retention' (it was finished and aged out), 'import_suppressed' (the import chose not
+-- to write it: deleted at the source, or superseded by what the owner did since, so it
+-- never existed here) or 'unknown'. A tombstone that said
+-- only "gone" could not tell a record a bridge must never resurrect from one that
+-- merely aged out, and a record of a deletion that quoted what it deleted would
+-- defeat the deletion, so the cause is the only thing kept. NULL on a live identity.
+ALTER TABLE assistant_import_identities ADD COLUMN stored_hash TEXT;
+ALTER TABLE assistant_import_identities ADD COLUMN tombstone_cause TEXT
+  CHECK (tombstone_cause IS NULL OR tombstone_cause IN
+    ('forget','owner_delete','retention','import_suppressed','unknown'));
+
+-- ONE row, present only while a deletion path is running, naming that path. The
+-- tombstone triggers read it. A trigger cannot see its caller, and a deletion that
+-- reaches the trigger without a path (a cascade nobody wrapped, a future path) is
+-- recorded as 'unknown' rather than mislabelled.
+CREATE TABLE deletion_context (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  cause TEXT NOT NULL CHECK (cause IN ('forget','owner_delete','retention'))
+);
+
+DROP TRIGGER trg_tombstone_task;
+CREATE TRIGGER trg_tombstone_task AFTER DELETE ON tasks BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'task' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_reminder;
+CREATE TRIGGER trg_tombstone_reminder AFTER DELETE ON reminders BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'reminder' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_capture;
+CREATE TRIGGER trg_tombstone_capture AFTER DELETE ON captures BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'capture' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_rule;
+CREATE TRIGGER trg_tombstone_schedule_rule AFTER DELETE ON schedule_rules BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_rule' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_exception;
+CREATE TRIGGER trg_tombstone_schedule_exception AFTER DELETE ON schedule_exceptions BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_exception' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_watch_target;
+CREATE TRIGGER trg_tombstone_watch_target AFTER DELETE ON assistant_watch_targets BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'watch_target' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_preferences;
+CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'preferences' AND target_id = OLD.discord_user_id AND state = 'live';
+END;
+`,
+  },
+  {
+    version: 35,
+    name: 'assistant_watch_lifecycle_floor',
+    sql: `
+-- Where the lifecycle times (opened, merged, closed) of the NEXT read start counting
+-- from, after a read that spanned several pages. An item that moved from an unread
+-- page to a read one (a comment bumped it) carries a lifecycle time older than the
+-- cursor the pass committed; without this floor its merge or close is never
+-- announced. It is the cursor the multi-page pass STARTED from, held for exactly one
+-- later pass and then cleared. Lifecycle identities are stable, so what it makes the
+-- next pass look at again is deduplicated.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN lifecycle_floor TEXT;
+`,
+  },
 ];

@@ -411,7 +411,10 @@ export class AssistantWatchService {
       if (ctx.scan.verify) return await this.verifyStep(ctx);
       return await this.listStep(ctx);
     } catch (err) {
-      return this.failedWith(unit, nowMs, err);
+      // The version the checkpoint has NOW: the pre-write above moved it, and a failure
+      // recorded against the stale one would match no row and silently persist nothing
+      // (no failure count, no backoff, no error code).
+      return this.failedWith(current, nowMs, err);
     }
   }
 

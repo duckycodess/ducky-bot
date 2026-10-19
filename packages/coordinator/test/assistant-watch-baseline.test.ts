@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ASSISTANT_WATCH_CALLS_PER_TICK, type WatchSurface } from '@ducky/contracts';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { parseScan } from '../src/domain/assistant-watch.scan.js';
+import { WatchReadError } from '../src/domain/assistant-watch.reader.js';
 import { deriveReleases, deriveRuns, secondBoundaryMs } from '../src/domain/assistant-watch.engine.js';
 import { OWNER, TestClock, makeHarness, type Harness } from './helpers.js';
 
@@ -327,6 +328,99 @@ describe('the boundary survives every retry', () => {
     const c = cp(h, id, 'runs');
     expect(c).toMatchObject({ cursor: null, lastError: 'window_unstable', pendingPage: 0 });
     expect(parseScan(c.pendingState).baseline?.boundaryMs).toBe(Date.parse(B));
+    h.close();
+  });
+});
+
+describe('a failure after the boundary was written persists against the NEW version', () => {
+  // The checkpoint's own version is older than the clock here. When both are equal a
+  // stale version still matches the row, which is how a wrong version once went unseen.
+  const OLD = '2026-10-12T00:00:00.000Z';
+  const older = (h: Harness, id: string, surface: WatchSurface) => h.store.assistantWatch.insertCheckpoint({
+    targetId: id, surface, state: 'unbaselined', cursor: null, nextDueAt: NOW, updatedAt: OLD,
+  });
+  const expectRecorded = (h: Harness, id: string, surface: WatchSurface, code: string) => {
+    const c = cp(h, id, surface);
+    expect(c).toMatchObject({
+      state: 'unbaselined', cursor: null, failures: 1, lastError: code, pendingCursor: B, updatedAt: NOW,
+      nextDueAt: '2026-10-13T00:15:00.000Z', // one interval of backoff from the failure
+    });
+    expect(parseScan(c.pendingState).baseline?.boundaryMs).toBe(Date.parse(B));
+    expect(h.store.assistantWatch.callsSince('2026-10-13T00:00')).toBe(1); // the failed request was charged
+  };
+
+  it('records a failed first runs request: failure count, error, backoff, charge, same boundary', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    older(h, id, 'runs');
+    reader.failNext.add('runs');
+    const out = await h.app.assistantWatch.tick();
+    expect(out).toMatchObject({ failed: 1, callsUsed: 1 });
+    expectRecorded(h, id, 'runs', 'read_failed');
+    h.close();
+  });
+
+  it('records a failed repository metadata read that precedes the first list request', async () => {
+    const { h, reader } = boot();
+    const id = target(h, null);
+    older(h, id, 'runs');
+    reader.failNext.add('repository');
+    const out = await h.app.assistantWatch.tick();
+    expect(out).toMatchObject({ failed: 1, callsUsed: 1 });
+    expect(reader.log).toEqual(['repository:acme/widgets']);
+    expectRecorded(h, id, 'runs', 'read_failed');
+    h.close();
+  });
+
+  it('records a failed first releases request the same way', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    older(h, id, 'releases');
+    reader.failNext.add('releases');
+    await h.app.assistantWatch.tick();
+    expectRecorded(h, id, 'releases', 'read_failed');
+    h.close();
+  });
+
+  it('records a typed failure (rate limit) and still keeps the boundary for the retry', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    older(h, id, 'runs');
+    reader.failWith.set('runs', new WatchReadError('rate_limited'));
+    await h.app.assistantWatch.tick();
+    expectRecorded(h, id, 'runs', 'rate_limited');
+    reader.runsBy.set('acme/widgets', [run('2', AFTER(10), 'completed', 'failure')]);
+    clock.advance(40 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B, failures: 0, lastError: null });
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['2:ci_failed']);
+    h.close();
+  });
+
+  it('requests and charges nothing when the pre-write loses a race, and the unit is simply picked again', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    older(h, id, 'runs');
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('1', at(12, 9), 'completed', 'success')]);
+    // Something else moved the checkpoint after it was selected as due: the first write loses.
+    const repo = h.store.assistantWatch;
+    const real = repo.savePending.bind(repo);
+    let lost = false;
+    repo.savePending = ((input: Parameters<typeof real>[0]) => {
+      if (!lost) {
+        lost = true;
+        return false;
+      }
+      return real(input);
+    }) as typeof real;
+    const out = await h.app.assistantWatch.tick();
+    expect(out.incomplete).toBeGreaterThanOrEqual(1);
+    expect(reader.log).toEqual(['runs:acme/widgets:1']); // exactly one request, for the retried unit
+    expect(out.callsUsed).toBe(1);
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B });
     h.close();
   });
 });

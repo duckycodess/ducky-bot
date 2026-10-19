@@ -1307,7 +1307,7 @@ fail-closed form of the blocker, not a decision to drop it.
   reserved prefix; counts report markers separately; the rollback export is now schema v2 with a per-row
   `baselineMarker` flag (a v1 document's marker status is unknown). **Required limitation:** commit
   `b88b701` is pushed but never deployed, and a development or scratch database that ran it holds
-  canonical-identity markers that are not reinterpreted or migrated. A release with no creation time that is a draft, or was published after the boundary,
+  canonical-identity markers that are not reinterpreted or migrated; resetting a cursor or re-baselining in that database does not delete or repair them. A release with no creation time that is a draft, or was published after the boundary,
   is refused (`release_untrackable`, counted by reason in `/status`).
   **Limits that remain required blockers, not claims of completeness:** a first inventory
   of 100 or more runs or releases is REFUSED as `window_exceeded` (page cardinality cannot

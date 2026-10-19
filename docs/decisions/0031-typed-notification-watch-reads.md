@@ -167,8 +167,9 @@ multi-page window.
     authority. A row is a marker only if kind is `ci_started`, origin `observed`, the identity
     matches `^baseline-marker:v1:ci_started:(0|[1-9]\d{0,15}):([1-9]\d{12})$` with a safe run id
     and a boundary with `B % 1000 === 999`, `occurred_at` equals that boundary, the payload is
-    exactly `{}`, it is not held, and alert, digest and creation times are all set, equal and at
-    or after the boundary. Anything else (another version, a near miss, an imported row) is an
+    exactly `{}`, it is not held, and alert, digest and creation times are all set, equal, in the
+    canonical `toISOString` form (finite, millisecond precision, `Z`, unchanged by a round trip: two
+    equal malformed strings never authenticate a row) and not before the boundary. Anything else (another version, a near miss, an imported row) is an
     ordinary event that never suppresses and is never counted as a marker. Suppression, the
     counts, the export flag and the tests all call it. The namespace is refused BROADLY and
     classified NARROWLY: the importer rejects any imported event identity that starts with
@@ -202,8 +203,11 @@ multi-page window.
     ran that code keeps those rows: they are ordinary settled events, still deduplicate those
     runs' starts, and so keep the rewind defect for those runs only. They are never reinterpreted,
     unmarked or migrated, and nothing is inferred from an empty payload or a settlement time,
-    because that could rewrite genuine delivery history. A fresh baseline, or an explicit
-    owner-run offline step, is the only remedy.
+    because that could rewrite genuine delivery history. **Resetting a cursor, re-baselining or
+    re-importing in the SAME database does not delete a canonical event identity and does not
+    repair those rows.** Only a fresh database (an explicit restore or re-import into a new one) or
+    a separately reviewed, owner-run offline step would; no such step is provided or authorized
+    here, so this stays a required, documented limitation.
   A run created AFTER the boundary gets no marker, so its start is announced. A drift restart
   drops the markers gathered so far and the pass that commits recomputes them.
   *Superseded designs:* (1) a rule announcing a start only when the run was created after the

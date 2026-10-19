@@ -62,6 +62,17 @@ export const isReservedMarkerIdentity = (identity: string): boolean =>
 const safeInt = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
 
 /**
+ * A canonical ISO-8601 UTC instant, as `Date.prototype.toISOString` writes it, and nothing
+ * else: finite, millisecond precision, a `Z` offset, and unchanged by a round trip. Equality
+ * of two malformed strings must never authenticate provenance.
+ */
+const canonicalInstant = (s: string): number | null => {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(s)) return null;
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === s ? ms : null;
+};
+
+/**
  * The marker a row is, or null. The ONLY authority: nothing else decides.
  *
  * Every condition must hold. A different kind or origin, an imported row, a held row, a
@@ -80,9 +91,11 @@ export function classifyBaselineMarker(row: MarkerCandidate): BaselineMarker | n
   if (row.occurredAt !== new Date(boundaryMs).toISOString()) return null;
   if (row.payloadJson !== '{}' || (row.held !== false && row.held !== 0)) return null;
   const { alertedAt, digestedAt, createdAt } = row;
-  if (alertedAt === null || digestedAt === null || createdAt === '') return null;
+  if (alertedAt === null || digestedAt === null) return null;
+  // Settled at birth: all three are one canonical instant, and not before the boundary.
   if (alertedAt !== digestedAt || digestedAt !== createdAt) return null;
-  if (createdAt < row.occurredAt) return null;
+  const committed = canonicalInstant(createdAt);
+  if (committed === null || committed < boundaryMs) return null;
   return { runId, boundaryMs };
 }
 

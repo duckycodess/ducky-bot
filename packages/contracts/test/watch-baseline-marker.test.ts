@@ -50,6 +50,25 @@ describe('classifyBaselineMarker', () => {
     ['never digested', { digestedAt: null }],
     ['alert and digest differ', { alertedAt: new Date(B + 6_000).toISOString() }],
     ['created differs from settlement', { createdAt: new Date(B + 6_000).toISOString() }],
+    ['equal but invalid settlement and creation times', { alertedAt: 'not-a-time', digestedAt: 'not-a-time', createdAt: 'not-a-time' }],
+    ['equal empty settlement and creation times', { alertedAt: '', digestedAt: '', createdAt: '' }],
+    ['no milliseconds', {
+      alertedAt: '2025-10-13T00:00:05Z', digestedAt: '2025-10-13T00:00:05Z', createdAt: '2025-10-13T00:00:05Z',
+    }],
+    ['a numeric offset instead of Z', {
+      alertedAt: '2025-10-13T00:00:05.000+00:00', digestedAt: '2025-10-13T00:00:05.000+00:00',
+      createdAt: '2025-10-13T00:00:05.000+00:00',
+    }],
+    ['a space instead of T', {
+      alertedAt: '2025-10-13 00:00:05.000Z', digestedAt: '2025-10-13 00:00:05.000Z', createdAt: '2025-10-13 00:00:05.000Z',
+    }],
+    ['an impossible date that does not round-trip', {
+      alertedAt: '2099-02-31T00:00:00.000Z', digestedAt: '2099-02-31T00:00:00.000Z', createdAt: '2099-02-31T00:00:00.000Z',
+    }],
+    ['lower-case z and t', {
+      alertedAt: '2099-01-01t00:00:00.000z', digestedAt: '2099-01-01t00:00:00.000z', createdAt: '2099-01-01t00:00:00.000z',
+    }],
+    ['padded with spaces', { alertedAt: ` ${COMMIT}`, digestedAt: ` ${COMMIT}`, createdAt: ` ${COMMIT}` }],
     ['settled before the boundary', {
       alertedAt: new Date(B - 5_000).toISOString(), digestedAt: new Date(B - 5_000).toISOString(),
       createdAt: new Date(B - 5_000).toISOString(),

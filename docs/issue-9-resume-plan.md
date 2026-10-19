@@ -285,7 +285,11 @@ Approved, with these conditions, and implemented exactly:
 - D8 `b88b701` is PUSHED, never deployed, released or imported live. Databases that ran it keep their
   canonical, settled, empty-payload `<run>:ci_started` rows; they are not reinterpreted, unmarked or
   migrated and nothing is inferred from them, so the rewind defect persists for those development or
-  scratch databases only. This stays a REQUIRED limitation.
+  scratch databases only. Resetting a cursor or re-baselining in the same database does NOT delete a
+  canonical event identity and repairs nothing; only a fresh database or a separately reviewed owner-run
+  offline step could, and none is provided or authorized. This stays a REQUIRED limitation. The
+  classifier also requires the settlement and creation times to be canonical `toISOString` instants
+  (equal malformed strings never authenticate a row).
 - D9 waiting, pending or requested runs at the boundary set the floor and get no marker; a later start
   is announced. D10 the near-miss table, cross-run and cross-target isolation, drift-restart
   recomputation, unencodable ids, the 200-character identity bound, count/export agreement and the I3

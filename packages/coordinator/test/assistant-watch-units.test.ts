@@ -39,6 +39,10 @@ const checkpoint = (
 const cp = (h: Harness, id: string, surface: WatchSurface) => h.store.assistantWatch.checkpoint(id, surface)!;
 const events = (h: Harness, id: string) => h.store.assistantWatch.eventsFor(id);
 const ids = (h: Harness, id: string) => events(h, id).map((e) => e.identity).sort();
+/** A baseline's identity marker: observed, empty payload, settled at birth. Dedupe state, never news. */
+const isMarker = (e: ReturnType<typeof events>[number]) =>
+  e.origin === 'observed' && e.payloadJson === '{}' && e.alertedAt === e.createdAt && e.digestedAt === e.createdAt;
+const news = (h: Harness, id: string) => events(h, id).filter((e) => !isMarker(e));
 
 const issue = (n: number, updated: string, over: Record<string, unknown> = {}) => ({
   number: n, title: `Issue ${n}`, createdAt: '2026-10-01T00:00:00Z', updatedAt: updated, closedAt: null, ...over,
@@ -332,7 +336,7 @@ describe('workflow runs sort by creation, so the window reaches back to what was
     reader.runsBy.set('acme/widgets', [run('3', at(12, 9), 'in_progress', null, at(12, 9))]);
     await h.app.assistantWatch.tick();
     expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', scanFloor: '2026-10-12T09:00:00.000Z' });
-    expect(events(h, id)).toEqual([]);
+    expect(news(h, id)).toEqual([]);
 
     // Later: run 3 failed, and two NEWER completed runs sit above it. A window closed at the
     // cursor alone would stop on page 1 (run 4 was created after the cursor but run 2 before),
@@ -359,7 +363,7 @@ describe('workflow runs sort by creation, so the window reaches back to what was
     await h.app.assistantWatch.tick();
     // Created two days before NOW: the old one-day cutoff dropped this floor.
     expect(cp(h, id, 'runs').scanFloor).toBe('2026-10-11T00:00:00.000Z');
-    expect(events(h, id)).toEqual([]);
+    expect(news(h, id)).toEqual([]);
 
     // Still queued weeks later, and newer settled runs sit above it: the floor survives each pass.
     clock.advance(40 * 24 * 60 * MIN);
@@ -677,7 +681,7 @@ describe('what settles in the middle of a pass is not jumped over', () => {
     // Not the newest time seen (20:00 on the 12th): the boundary, one millisecond before
     // the second NOW falls in, so a transition after it is never swallowed.
     expect(cp(h, id, 'runs').cursor).toBe('2026-10-12T23:59:59.999Z');
-    expect(events(h, id)).toEqual([]);
+    expect(news(h, id)).toEqual([]);
     expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
     h.close();
   });

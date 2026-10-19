@@ -476,7 +476,9 @@ export class AssistantWatchRepo {
   }
 
   /** Counts of blocked surfaces by reason: never a repository name. */
-  blockedCounts(ownerId: string): { windowExceeded: number; identityChanged: number; systemCancelled: number } {
+  blockedCounts(ownerId: string): {
+    windowExceeded: number; identityChanged: number; releaseUntrackable: number; systemCancelled: number;
+  } {
     const one = (reason: string): number =>
       Number(
         (this.db
@@ -495,7 +497,10 @@ export class AssistantWatchRepo {
         )
         .get(ownerId) as { n: number }).n,
     );
-    return { windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed'), systemCancelled };
+    return {
+      windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed'),
+      releaseUntrackable: one('release_untrackable'), systemCancelled,
+    };
   }
 
   /** Counts only: covered by this cycle, beyond it by recency, and not yet measured. */

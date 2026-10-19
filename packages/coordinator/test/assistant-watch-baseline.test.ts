@@ -46,7 +46,12 @@ const checkpoint = (
 });
 const cp = (h: Harness, id: string, surface: WatchSurface) => h.store.assistantWatch.checkpoint(id, surface)!;
 const events = (h: Harness, id: string) => h.store.assistantWatch.eventsFor(id);
-const ids = (h: Harness, id: string) => events(h, id).map((e) => e.identity).sort();
+/** A baseline's identity marker: observed, empty payload, settled at birth. Dedupe state, never news. */
+const isMarker = (e: ReturnType<typeof events>[number]) =>
+  e.origin === 'observed' && e.payloadJson === '{}' && e.alertedAt === e.createdAt && e.digestedAt === e.createdAt;
+const news = (h: Harness, id: string) => events(h, id).filter((e) => !isMarker(e));
+const markers = (h: Harness, id: string) => events(h, id).filter(isMarker).map((e) => e.identity).sort();
+const ids = (h: Harness, id: string) => news(h, id).map((e) => e.identity).sort();
 
 const run = (id: string, created: string, status: string, conclusion: string | null, updated = created) => ({
   id, name: 'build', branch: 'main', status, conclusion, createdAt: created, updatedAt: updated,
@@ -76,7 +81,10 @@ describe('the boundary is the second before the first request, never the newest 
     ]);
     await h.app.assistantWatch.tick();
     expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B, boundaryKnown: false, pendingState: null });
-    expect(events(h, id)).toEqual([]);
+    expect(news(h, id)).toEqual([]);
+    // Run 2 was already underway: its start is recorded as known, silently, with no text.
+    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(events(h, id).every((e) => e.payloadJson === '{}' && !e.held)).toBe(true);
     expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
     h.close();
   });
@@ -197,6 +205,7 @@ describe('a transition while a multi-page baseline is read is announced once, by
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
     expect(ids(h, id)).toEqual(['9:ci_started']);
+    expect(markers(h, id)).toEqual(['2:ci_started']);
     reader.runsBy.set('acme/widgets', [
       run('9', AFTER(12), 'in_progress', null),
       run('2', at(12, 9), 'completed', 'failure', AFTER(20)),
@@ -405,13 +414,14 @@ describe('a failure after the boundary was written persists against the NEW vers
     older(h, id, 'runs');
     reader.pageSize = 10;
     reader.runsBy.set('acme/widgets', [run('1', at(12, 9), 'completed', 'success')]);
-    // Something else moved the checkpoint after it was selected as due: the first write loses.
+    // Something else moves the checkpoint after it was selected as due: our first write loses.
     const repo = h.store.assistantWatch;
     const real = repo.savePending.bind(repo);
     let lost = false;
     repo.savePending = ((input: Parameters<typeof real>[0]) => {
       if (!lost) {
         lost = true;
+        real({ ...input, pendingCursor: SINCE, atIso: '2026-10-12T12:00:00.000Z' }); // the other writer
         return false;
       }
       return real(input);
@@ -421,6 +431,19 @@ describe('a failure after the boundary was written persists against the NEW vers
     expect(reader.log).toEqual(['runs:acme/widgets:1']); // exactly one request, for the retried unit
     expect(out.callsUsed).toBe(1);
     expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B });
+    h.close();
+  });
+
+  it('ends the tick instead of spinning on a unit it can never write', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    older(h, id, 'runs');
+    reader.runsBy.set('acme/widgets', [run('1', at(12, 9), 'completed', 'success')]);
+    h.store.assistantWatch.savePending = (() => false) as typeof h.store.assistantWatch.savePending;
+    const out = await h.app.assistantWatch.tick(); // would never return without the guard
+    expect(out.callsUsed).toBe(0);
+    expect(reader.log).toEqual([]);
+    expect(cp(h, id, 'runs')).toMatchObject({ cursor: null });
     h.close();
   });
 });
@@ -585,7 +608,7 @@ describe('capacity: a first observation reads the bounded inventory or refuses v
     reader.pageSize = 10;
     reader.releasesBy.set('acme/widgets', [rel('1', null, null, true)]);
     await h.app.assistantWatch.tick();
-    expect(cp(h, id, 'releases')).toMatchObject({ cursor: null, blockedReason: 'draft_untrackable' });
+    expect(cp(h, id, 'releases')).toMatchObject({ cursor: null, blockedReason: 'release_untrackable' });
     clock.advance(1);
     h.close();
   });
@@ -597,7 +620,7 @@ describe('capacity: a first observation reads the bounded inventory or refuses v
     reader.pageSize = 10;
     reader.releasesBy.set('acme/widgets', [rel('1', null, null, true)]);
     await h.app.assistantWatch.tick();
-    expect(cp(h, id, 'releases')).toMatchObject({ cursor: SINCE, blockedReason: 'draft_untrackable' });
+    expect(cp(h, id, 'releases')).toMatchObject({ cursor: SINCE, blockedReason: 'release_untrackable' });
     h.close();
   });
 
@@ -662,11 +685,43 @@ describe('the derivations', () => {
     h.close();
   });
 
-  it('does not announce the start of a run created at or before the cursor', () => {
-    const old = run('1', '2026-10-12T09:00:00Z', 'in_progress', null, '2026-10-12T10:30:00Z');
-    expect(deriveRuns([old], T, false).events).toEqual([]);
+  it('announces a start from an UPDATE after the cursor, whatever the run\'s creation time', () => {
+    const lateInserted = run('1', '2026-10-12T09:00:00Z', 'in_progress', null, '2026-10-12T10:30:00Z');
+    expect(deriveRuns([lateInserted], T, false).events.map((e) => e.kind)).toEqual(['ci_started']);
     const fresh = run('2', '2026-10-12T10:30:00Z', 'queued', null);
     expect(deriveRuns([fresh], T, false).events.map((e) => e.kind)).toEqual(['ci_started']);
+  });
+
+  it('names the runs already underway at a baseline boundary, and nothing outside a baseline', () => {
+    const items = [
+      run('3', '2026-10-13T00:00:30Z', 'queued', null), // created after the boundary: a real start
+      run('2', '2026-10-12T09:00:00Z', 'in_progress', null),
+      run('1', '2026-10-12T08:00:00Z', 'completed', 'success'),
+    ];
+    expect(deriveRuns(items, null, false, false, null, Date.parse(B)).underwayIds).toEqual(['2']);
+    expect(deriveRuns(items, T, false).underwayIds).toEqual([]);
+  });
+
+  it('announces the start of a run inserted late, once, when an older run carried the cursor past its creation', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'imported', '2026-10-12T12:00:00.000Z');
+    reader.pageSize = 10;
+    // Pass one sees only the older run, which concluded at 13:00 and carries the cursor there.
+    reader.runsBy.set('acme/widgets', [run('O', '2026-10-12T08:00:00Z', 'completed', 'failure', '2026-10-12T13:00:00Z')]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs').cursor).toBe('2026-10-12T13:00:00.000Z');
+    // Run Q was created at 12:30 (before that cursor), was not listed yet, and progresses at 13:30.
+    reader.runsBy.set('acme/widgets', [
+      run('Q', '2026-10-12T12:30:00Z', 'in_progress', null, '2026-10-12T13:30:00Z'),
+      run('O', '2026-10-12T08:00:00Z', 'completed', 'failure', '2026-10-12T13:00:00Z'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['O:ci_failed', 'Q:ci_started']); // each exactly once
+    h.close();
   });
 
   it('caps a draft at the start of the read second so a same-second publication is still news', async () => {
@@ -686,6 +741,135 @@ describe('the derivations', () => {
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
     expect(ids(h, id)).toEqual(['release:1', 'release:2']);
+    h.close();
+  });
+});
+
+describe('a release whose place is unknown cannot be tracked, so it is refused visibly', () => {
+  it('refuses a published release with no creation time that was published after the boundary', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'releases', 'unbaselined', null);
+    reader.pageSize = 1;
+    reader.releasesBy.set('acme/widgets', [
+      rel('3', at(12, 3), at(12, 3)), rel('2', at(12, 2), at(12, 2)), rel('1', null, at(11)),
+    ]);
+    let published = false;
+    reader.hook = (method, _ref, page) => {
+      if (method !== 'releases' || page !== 3 || published) return;
+      published = true; // the page-three release (no creation time) is published after page one was read
+      clock.advance(30_000);
+      reader.releasesBy.set('acme/widgets', [
+        rel('3', at(12, 3), at(12, 3)), rel('2', at(12, 2), at(12, 2)), rel('1', null, AFTER(0, 30)),
+      ]);
+    };
+    const out = await h.app.assistantWatch.tick();
+    // Committing here would let the next window close on page one and never reach it.
+    expect(cp(h, id, 'releases')).toMatchObject({
+      state: 'unbaselined', cursor: null, blockedReason: 'release_untrackable',
+    });
+    expect(out.blocked).toBe(1);
+    expect(news(h, id)).toEqual([]);
+    h.close();
+  });
+
+  it('does not refuse a published release with no creation time that predates the boundary', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'releases', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.releasesBy.set('acme/widgets', [rel('1', null, at(11))]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'releases')).toMatchObject({ state: 'ready', cursor: B });
+    h.close();
+  });
+
+  it('reports the refusal by count, never by repository', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'releases', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.releasesBy.set('acme/widgets', [rel('1', null, null, true)]);
+    await h.app.assistantWatch.tick();
+    const line = h.app.assistantWatch.statusLine();
+    expect(line).toContain('1 releases surface(s) with a release that cannot be placed');
+    expect(line).not.toContain('acme');
+    expect(h.store.assistantWatch.blockedCounts(OWNER)).toMatchObject({ releaseUntrackable: 1, windowExceeded: 0 });
+    h.close();
+  });
+});
+
+describe('identity markers for runs already underway at the boundary', () => {
+  it('are written only in the baseline commit, silently, with no text, and never announced', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 1;
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 12), 'in_progress', null), run('1', at(12, 9), 'completed', 'success'),
+    ]);
+    reader.failNth.set('runs', 2); // page two fails: the baseline is half read
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs')).toMatchObject({ cursor: null, pendingPage: 1 });
+    // Nothing is visible, held or settled before the commit.
+    expect(events(h, id)).toEqual([]);
+    expect(parseScan(cp(h, id, 'runs').pendingState).underway).toEqual(['2']);
+
+    clock.advance(40 * MIN);
+    const out = await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(events(h, id).every((e) => !e.held && e.payloadJson === '{}')).toBe(true);
+    expect(out.alertsSent).toBe(0);
+    expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B, pendingState: null });
+    // An update after the cursor does not announce what the marker already knows.
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 12), 'in_progress', null, AFTER(50)), run('1', at(12, 9), 'completed', 'success'),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(news(h, id)).toEqual([]);
+    h.close();
+  });
+
+  it('are dropped by a drift restart and recomputed by the pass that commits', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 1;
+    const list = [
+      run('3', at(12, 20), 'completed', 'success'),
+      run('2', at(12, 12), 'in_progress', null),
+      run('1', at(12, 9), 'completed', 'success'),
+    ];
+    reader.runsBy.set('acme/widgets', list);
+    let n = 0;
+    reader.hook = (method) => {
+      if (method !== 'runs') return;
+      n += 1;
+      if (n === 4) reader.runsBy.set('acme/widgets', list.slice(1));
+    };
+    await h.app.assistantWatch.tick();
+    expect(parseScan(cp(h, id, 'runs').pendingState).underway).toBeUndefined();
+    expect(events(h, id)).toEqual([]);
+    reader.hook = null;
+    clock.advance(40 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual(['2:ci_started']);
+    h.close();
+  });
+
+  it('are not written for a run created after the boundary, whose start is real news', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('9', AFTER(0, 5), 'in_progress', null)]);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual([]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['9:ci_started']);
     h.close();
   });
 });

@@ -217,6 +217,9 @@ supersede any conflicting suggestions in the exploratory investigation.
 - C9: A run already running at the boundary must not announce a historical
   `ci_started`. Require creation after the observation cursor or retain settled
   identity markers; choose explicitly and test. No baseline delivery is added.
+  **Superseded by the final-review correction below:** the creation-after-cursor
+  option was unsafe (it loses the start of a run inserted late once an older run's
+  conclusion carries the cursor past its creation) and was removed.
 - C10: Preserve multi-page drift re-read, runs total-shrink detection and ten-page
   refusal with null committed cursor. Refuse runs on page one if `total_count`
   exceeds the bounded inventory capacity. Charge every call and preserve the
@@ -238,6 +241,22 @@ retain an old boundary and later reconcile from it. The reviewer made no edits
 or publications. Conditional approval becomes effective with these conditions
 included; deviations require scoped re-review. This is code-safety plan approval,
 not issue acceptance or readiness approval.
+
+### Final-review correction (I1, I2, M1, M2)
+
+The final reviewer rejected the first candidate and the corrected plan is recorded
+before the fix: (I1) a release with no usable creation time that is a draft, or was
+published after the boundary, cannot be floored, so the surface is refused as
+`release_untrackable` rather than committed; (I2) moving-cursor suppression of
+`ci_started` is unsafe and superseded: a start is again announced from an update after
+the cursor, and a run already underway at a baseline is silenced ONLY by a durable
+identity marker, the existing settled-at-birth write with an empty payload, written in
+the baseline's atomic commit (no schema change, no held or delivered row, dedupe state
+rather than a delivery claim, identifiable in the export as a settled observed event
+with an empty payload); (M1) refusals are counted by reason in the status line without
+naming a repository; (M2) a tick ends rather than re-picking a unit that made no request
+and did not move. All C1-C11 limits, the 99-item capacity, the cost, skew, imported and
+shallow targets and every earlier blocker remain required.
 
 ## Required operational gates, not waived
 

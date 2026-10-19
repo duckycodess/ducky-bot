@@ -93,7 +93,10 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   reached its creation time releases it. A floor deeper than the page cap blocks as
   `window_exceeded` with the cursor, the floor and the held events kept; it never
   expires or resets. A draft with no usable creation time cannot be placed in a window
-  and blocks (`draft_untrackable`) instead of being skipped. A draft's cursor cap is the
+  and blocks (`release_untrackable`) instead of being skipped; so does, in a baseline, a
+  PUBLISHED release with no creation time that was published after the boundary (its place
+  is unknown, so the next window could close before reaching it). A refusal is counted by
+  reason in `/status`, never by repository. A draft's cursor cap is the
   start of the second it was read in (less a millisecond), because the provider stamps
   whole seconds and a publication in the read's own second must still be later.
 - A window that spanned pages is committed only after the LAST page is re-read and
@@ -150,8 +153,23 @@ multi-page window.
 - **Nothing before the boundary is delivered.** The baseline itself delivers nothing. The
   following ordinary pass reads from the boundary, so only what moved after it is announced,
   once, by identity. A run that was already running at the boundary announces no
-  `ci_started` (a run announces a start only if it was created after the cursor); it still
-  announces its conclusion.
+  `ci_started`; it still announces its conclusion. This is done with DURABLE IDENTITY
+  MARKERS, not by a rule on the moving cursor: the baseline's atomic commit also writes, for
+  each run created at or before the boundary and queued or running when read, the
+  `<run>:ci_started` identity as an event **settled at birth with an empty payload** (the
+  existing `settled` write, no schema change). Nothing is held, shown or delivered for it, it
+  carries no text from the repository, and it is dedupe state meaning "known", never "told":
+  it is never counted as undigested, never an alert, and never a delivery claim. It is
+  retained like every watch event (the retention manifest forbids touching the table), and in
+  the rollback export it is a settled observed event with an empty payload, replayed as state
+  (the identity is known), which is the right meaning. A run created AFTER the boundary
+  gets no marker, so its start is announced. A drift restart drops the markers gathered so
+  far and the pass that commits recomputes them.
+  *Superseded design:* an earlier review-approved rule announced a start only when the run
+  was created after the observation cursor. That was unsafe and was removed: a run inserted
+  late whose creation sits before a cursor that an older run's later conclusion carried
+  forward would never announce its start. A start is announced from an UPDATE after the
+  cursor again, as before, and only the baseline's markers silence history.
 - **The next pass can reach what moved.** The creation floor committed with the baseline
   covers every unsettled item AND every item that moved after the boundary (a run's last
   update, a release's publication), so an older-created item that settled or published

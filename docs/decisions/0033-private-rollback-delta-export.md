@@ -90,6 +90,10 @@ only. **State** is one latest value per key, applied idempotently: watch checkpo
 events Ducky observed or settled since the import, briefing slots, the monitoring switch
 and discovery tombstones. A table past a 20,000-row read cap is reported incomplete rather
 than cut.
+A watch event with an empty payload whose alert and digest time equal its creation time is
+an identity marker a first observation wrote for a run already underway (ADR 0031): state
+meaning "this start is known", never a record that anything was delivered, and a reverse
+bridge must not read its settlement time as a delivery.
 
 ### Replay semantics
 

@@ -1297,7 +1297,11 @@ fail-closed form of the blocker, not a decision to drop it.
   re-anchor the retry; kept across a drift restart with the creation floor so far). It
   delivers nothing; the next ordinary pass announces, once, what moved after the boundary,
   including an older-created run or draft that settled or published while later pages were
-  being read. A run already running at the boundary announces no historical `ci_started`.
+  being read. A run already running at the boundary announces no historical `ci_started`: the baseline's
+  commit records that identity as a settled-at-birth marker with an empty payload (dedupe state,
+  never a delivery, never news), while a start is otherwise announced from an update after the
+  cursor. A release with no creation time that is a draft, or was published after the boundary,
+  is refused (`release_untrackable`, counted by reason in `/status`).
   **Limits that remain required blockers, not claims of completeness:** a first inventory
   of 100 or more runs or releases is REFUSED as `window_exceeded` (page cardinality cannot
   tell a full tenth page from a longer list, so at most 99 can be proven), which leaves

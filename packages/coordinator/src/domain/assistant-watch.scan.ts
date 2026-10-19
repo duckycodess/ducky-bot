@@ -43,6 +43,12 @@ export interface ScanState {
    * checkpoint's cursor is still null.
    */
   readonly baseline?: { readonly boundaryMs: number };
+  /**
+   * Run ids already queued or running at the boundary, gathered page by page during a
+   * runs baseline. Written as settled-at-birth identity markers in the baseline's own
+   * commit (never before it), so their start is never announced. Dropped by a restart.
+   */
+  readonly underway?: readonly string[];
   /** Pull requests whose reviews remain to be read, in order. */
   readonly queue?: readonly ReviewTarget[];
   /** Progress through the review pages of `queue[0]`. */

@@ -271,6 +271,10 @@ export class AssistantWatchService {
     // The source's global switch: off means no read at all. Alerts already owed,
     // the digest and maintenance still run, and nothing about a target changes.
     const watching = repo.monitoringEnabled(this.ownerId);
+    // A unit that made no request and did not move (its version was taken by someone else
+    // between selection and its first write) is picked again once; if it is picked again
+    // unchanged the tick ends rather than spin on a row it cannot write.
+    const idle = new Set<string>();
     while (watching && left > 0 && this.clock.nowMs() >= this.pausedUntilMs) {
       if (await this.discoveryDue()) {
         const used = { n: 0 };
@@ -296,6 +300,11 @@ export class AssistantWatchService {
       }
       const used = { n: 0 };
       const result = await this.observeUnit(unit, used);
+      if (result === 'incomplete' && used.n === 0) {
+        const key = `${unit.targetId}:${unit.surface}:${unit.updatedAt}`;
+        if (idle.has(key)) break;
+        idle.add(key);
+      }
       out[result] += 1;
       out.callsUsed += used.n;
       left -= used.n;
@@ -512,6 +521,7 @@ export class AssistantWatchService {
     let ci: 'failing' | 'passing' | null = null;
     let pageFloorMs: number | null = null;
     let pageCapMs: number | null = null;
+    let underway: readonly string[] | undefined;
     let queue: ScanState['queue'];
     switch (f.surface) {
       case 'commits':
@@ -549,6 +559,7 @@ export class AssistantWatchService {
         read = runs;
         ci = runs.ciState;
         pageFloorMs = minMs(runs.unsettledFloorMs, runs.touchedFloorMs);
+        if (boundaryMs !== null) underway = [...new Set([...(scan.underway ?? []), ...runs.underwayIds])];
         // A run that settles after it was read has a later update than the one read,
         // so the cursor must not be carried past it by something else on the pass.
         pageCapMs = runs.unsettledStampMs === null ? null : runs.unsettledStampMs - 1;
@@ -559,10 +570,12 @@ export class AssistantWatchService {
         const rel = deriveReleases(
           f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs, boundaryMs,
         );
-        // A draft with no creation time cannot be placed in a window, so it cannot be
-        // tracked: refused visibly, cursor and held events untouched, never skipped.
-        if (rel.untrackableDraft) {
-          repo.block(unit.targetId, unit.surface, 'draft_untrackable', isoOf(ctx.nowMs));
+        // A release whose place in a creation-sorted window is unknown and matters (a draft,
+        // or in a baseline a release published after the boundary, with no creation time)
+        // cannot be floored, and the next window could close before reaching it: refused
+        // visibly, cursor and held events untouched, never skipped.
+        if (rel.untrackable) {
+          repo.block(unit.targetId, unit.surface, 'release_untrackable', isoOf(ctx.nowMs));
           return 'blocked';
         }
         read = rel;
@@ -582,6 +595,7 @@ export class AssistantWatchService {
     const next: ScanState = {
       v: 1,
       ...(boundaryMs !== null ? { baseline: { boundaryMs } } : {}),
+      ...(underway ? { underway } : scan.underway ? { underway: scan.underway } : {}),
       ...(branch ? { branch } : {}),
       // The last NONEMPTY page: an empty page proves nothing about a boundary, so a
       // window that closes on one is verified against the page before it.
@@ -754,7 +768,7 @@ export class AssistantWatchService {
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
       cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : ctx.nowMs),
       nextDueAt: this.nextDue(ctx.nowMs), atIso: nowIso,
-      events: a.events.map((e) => this.write(e)),
+      events: [...a.events.map((e) => this.write(e)), ...this.underwayMarkers(ctx, scan.underway)],
       ...(!baseline && ci !== null ? { alsoSet: { surface: 'ci_state' as const, cursor: ci } } : {}),
       ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
       ...(unit.surface === 'runs' || unit.surface === 'releases' ? { scanFloor: floor } : {}),
@@ -766,6 +780,23 @@ export class AssistantWatchService {
     });
     if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
     return 'completed';
+  }
+
+  /**
+   * Identity markers for runs that were already underway at a baseline boundary.
+   *
+   * Their start is history, but an UPDATE after the cursor would otherwise announce it. Each
+   * marker is the `ci_started` identity, settled at birth, with an EMPTY payload (no text from
+   * the repository), written only in the baseline's atomic commit, so nothing is half-visible
+   * and nothing is ever delivered for it. It is dedupe state, not a delivery: a settlement
+   * time on it says "known", never "told".
+   */
+  private underwayMarkers(ctx: UnitCtx, ids: readonly string[] | undefined): ObservedEventWrite[] {
+    if (ctx.boundaryMs === null || !ids) return [];
+    return ids.map((id) => ({
+      id: randomUUID(), kind: 'ci_started' as const, identity: `${id}:ci_started`,
+      occurredAt: isoOf(ctx.boundaryMs!), payloadJson: '{}', settled: true,
+    }));
   }
 
   private write(e: DerivedEvent): ObservedEventWrite {
@@ -1163,9 +1194,10 @@ export class AssistantWatchService {
     if (blocked.systemCancelled > 0) {
       parts.push(`${blocked.systemCancelled} target(s) cancelled because the repository stopped being shown`);
     }
-    if (blocked.windowExceeded + blocked.identityChanged > 0) {
+    if (blocked.windowExceeded + blocked.identityChanged + blocked.releaseUntrackable > 0) {
       parts.push(
         `blocked: ${blocked.windowExceeded} surface(s) with a window too deep to prove, ` +
+          `${blocked.releaseUntrackable} releases surface(s) with a release that cannot be placed, ` +
           `${blocked.identityChanged} target(s) whose repository was renamed or transferred`,
       );
     }

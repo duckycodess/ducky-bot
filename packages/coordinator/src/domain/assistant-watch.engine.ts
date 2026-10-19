@@ -358,6 +358,12 @@ export interface RunsRead extends SurfaceRead {
    * moved while the baseline was being read and nothing has announced it yet.
    */
   readonly touchedFloorMs: number | null;
+  /**
+   * Ids of runs that were ALREADY queued or running at the baseline boundary (created at
+   * or before it). Their start is history; the baseline records each as an identity
+   * marker settled at birth, so a later update never announces it. Empty outside a baseline.
+   */
+  readonly underwayIds: readonly string[];
 }
 
 /**
@@ -405,6 +411,7 @@ export function deriveRuns(
   let unsettledFloor: number | null = null;
   let unsettledStamp: number | null = null;
   let touchedFloor: number | null = null;
+  const underway: string[] = [];
   const events: DerivedEvent[] = [];
   for (const r of items) {
     const stamp = r.updatedAt ?? r.createdAt;
@@ -422,15 +429,20 @@ export function deriveRuns(
     if (boundaryMs !== null && ms > boundaryMs) {
       touchedFloor = touchedFloor === null || created < touchedFloor ? created : touchedFloor;
     }
+    if (boundaryMs !== null && (status === 'queued' || status === 'in_progress') && created <= boundaryMs) {
+      underway.push(r.id);
+    }
     // STRICTLY before: items created in the same second as the threshold can span a page
     // boundary, and the one that matters may sit on the next page.
     if (threshold !== null && created < threshold) reached = true;
     if (sinceMs === null || at_.old(ms)) continue;
     const conclusion = (r.conclusion ?? '').toLowerCase();
     let kind: WatchEventKind | undefined;
-    // A run already underway when it was first seen started before anything here was
-    // watching, so its start is history. Only a run CREATED after the cursor announces one.
-    if (status === 'queued' || status === 'in_progress') kind = at_.fresh(created) ? 'ci_started' : undefined;
+    // A start is announced from an UPDATE after the cursor, whenever the run is seen queued
+    // or running. Judging it by creation against a moving cursor loses it (a run inserted
+    // late, with an older run's conclusion carrying the cursor past its creation); a run
+    // already underway at a baseline is silenced by identity marker instead (`underwayIds`).
+    if (status === 'queued' || status === 'in_progress') kind = 'ci_started';
     else if (FAILED.has(conclusion)) kind = 'ci_failed';
     else if (conclusion === 'success') kind = previouslyFailing ? 'ci_recovered' : undefined;
     if (newestConclusion === null && conclusion) newestConclusion = conclusion;
@@ -443,7 +455,7 @@ export function deriveRuns(
   }
   return {
     events, newestMs: newest, reachedCursor: reached, unsettledFloorMs: unsettledFloor,
-    unsettledStampMs: unsettledStamp, touchedFloorMs: touchedFloor,
+    unsettledStampMs: unsettledStamp, touchedFloorMs: touchedFloor, underwayIds: underway,
     ciState: newestConclusion === null ? null : FAILED.has(newestConclusion) ? 'failing' : 'passing',
   };
 }
@@ -455,8 +467,13 @@ export interface ReleasesRead extends SurfaceRead {
   readonly unsettledFloorMs: number | null;
   /** The oldest creation time (ms) of a release published AFTER the baseline boundary, or null. */
   readonly touchedFloorMs: number | null;
-  /** A draft with no usable creation time cannot be placed in a window, so it cannot be tracked. */
-  readonly untrackableDraft: boolean;
+  /**
+   * A release whose position in a creation-sorted window is unknown and matters: a draft
+   * with no usable creation time, or (in a baseline) a published release with none whose
+   * publication is after the boundary. Neither can be floored, so the next window could
+   * close before reaching it; the surface is refused instead.
+   */
+  readonly untrackable: boolean;
 }
 
 export function deriveReleases(
@@ -473,7 +490,7 @@ export function deriveReleases(
   let reached = false;
   let unsettledFloor: number | null = null;
   let touchedFloor: number | null = null;
-  let untrackableDraft = false;
+  let untrackable = false;
   const events: DerivedEvent[] = [];
   for (const r of items) {
     const created = r.createdAt ? at(r.createdAt) : null;
@@ -482,7 +499,7 @@ export function deriveReleases(
     // the window reaches back to where it sits, and it announces nothing now.
     // There is no age cutoff, and a draft that cannot be placed is refused, not ignored.
     if (r.draft) {
-      if (created === null) untrackableDraft = true;
+      if (created === null) untrackable = true;
       else unsettledFloor = unsettledFloor === null || created < unsettledFloor ? created : unsettledFloor;
       continue;
     }
@@ -490,8 +507,9 @@ export function deriveReleases(
     if (!stamp) continue;
     const ms = at(stamp);
     newest = maxOf(newest, ms);
-    if (boundaryMs !== null && ms > boundaryMs && created !== null) {
-      touchedFloor = touchedFloor === null || created < touchedFloor ? created : touchedFloor;
+    if (boundaryMs !== null && ms > boundaryMs) {
+      if (created === null) untrackable = true;
+      else touchedFloor = touchedFloor === null || created < touchedFloor ? created : touchedFloor;
     }
     if (sinceMs === null || at_.old(ms)) continue;
     events.push({
@@ -501,7 +519,7 @@ export function deriveReleases(
   }
   return {
     events, newestMs: newest, reachedCursor: reached, unsettledFloorMs: unsettledFloor,
-    touchedFloorMs: touchedFloor, untrackableDraft,
+    touchedFloorMs: touchedFloor, untrackable,
   };
 }
 

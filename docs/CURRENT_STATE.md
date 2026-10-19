@@ -1285,18 +1285,34 @@ fail-closed form of the blocker, not a decision to drop it.
   strict (re-reading its boundary could announce history). Unit-tested only.
 - **Paging and completeness of the real reader.** Runs and releases sort on creation
   while their events carry a later time, so the engine no longer assumes one read
-  closes them: a window closes on creation time at or before both the cursor and the
-  oldest item that was unsettled at the last close (`scan_floor`), pages are separate
-  units, and a window that spanned pages is committed only after its last page is
-  re-read and held still. A window past its cap is blocked as `window_exceeded`.
-  **Named residuals, each a required blocker until accepted or closed:** multi-page
+  closes them: a window closes on an item created STRICTLY before both the cursor and the
+  oldest item that was unsettled at the last close (`scan_floor`, which has no age cutoff:
+  only settlement, publication or absence releases it), pages are separate units, and a
+  window that spanned pages is committed only after its last page is re-read and held
+  still. A window past its cap is blocked as `window_exceeded`, with cursor, floor and held
+  events kept.
+- **First observation of runs and releases (ADR 0031).** A NEW baseline reads the whole
+  bounded inventory and commits a boundary frozen before its first request
+  (`floorToSecond(now) - 1ms`, written before that request so a failed first call cannot
+  re-anchor the retry; kept across a drift restart with the creation floor so far). It
+  delivers nothing; the next ordinary pass announces, once, what moved after the boundary,
+  including an older-created run or draft that settled or published while later pages were
+  being read. A run already running at the boundary announces no historical `ci_started`.
+  **Limits that remain required blockers, not claims of completeness:** a first inventory
+  of 100 or more runs or releases is REFUSED as `window_exceeded` (page cardinality cannot
+  tell a full tenth page from a longer list, so at most 99 can be proven), which leaves
+  that surface unobserved with the CI state unset and no recovery control; a first
+  observation costs up to eleven requests per surface and a deep steady-state floor costs
+  its depth plus one per 15-minute pass; imported and preexisting targets keep the floors
+  they already lost, and a source cursor carries no unsettled inventory; the boundary is
+  local time, so skew beyond the one-second floor is unproven; a run re-run long after it
+  settled is outside the floor. Synthetic tests only, no live evidence.
+- **Other named residuals, each a required blocker until accepted or closed:** multi-page
   completeness is not proven (the last-page re-read narrows the window for a miss and
   cannot see a deletion that left that page untouched, or a deletion paired with an
-  insertion); a draft release or
-  run that sat beyond the first page when a target was first seen; a run re-run long
-  after it settled, a run unsettled for over a day and a draft untouched for over
-  thirty days; a pull request with over 100 reviews. Unit-tested and probed for
-  shape on a public repository only.
+  insertion); a pull request with over 100 reviews; release ordering and the runs/releases
+  schemas are unprobed on real data (the live answers were empty). Unit-tested and probed
+  for shape on a public repository only.
 - **A real typed reader, the rollback-delta export and every operational gate**
   (above).
 

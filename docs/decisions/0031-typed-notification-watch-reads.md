@@ -83,11 +83,19 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   also returns pull requests; `hasMore` is judged on the RAW page and the raw last
   row's time can close the window when a page held no issue at all.
 - Runs and releases sort on CREATION but their events carry a later time, so the
-  event time cannot close the window. A window closes on an item CREATED at or
-  before both the cursor and the creation time of the oldest item that was still
-  unsettled (a running workflow, a draft release) when the last window closed. The
-  engine persists that floor (`scan_floor`) and tracks an unsettled run for a day
-  and a draft for thirty days, so one stuck item cannot hold a window open.
+  event time cannot close the window. A window closes on an item CREATED STRICTLY
+  BEFORE both the cursor and the creation time of the oldest item that was still
+  unsettled (a running workflow, a draft release) when the last window closed;
+  strictly, because items created in one second can span a page boundary and the one
+  that matters may sit on the next page. The engine persists that floor (`scan_floor`)
+  and it has **no age cutoff**: it is recomputed from what each window actually
+  observed, and only settlement, publication or an item's absence from a window that
+  reached its creation time releases it. A floor deeper than the page cap blocks as
+  `window_exceeded` with the cursor, the floor and the held events kept; it never
+  expires or resets. A draft with no usable creation time cannot be placed in a window
+  and blocks (`draft_untrackable`) instead of being skipped. A draft's cursor cap is the
+  start of the second it was read in (less a millisecond), because the provider stamps
+  whole seconds and a publication in the read's own second must still be later.
 - A window that spanned pages is committed only after the LAST page is re-read and
   shows the window held still: the original items, shifted down by insertions
   above and possibly with their tail pushed off. A deleted row above slides the
@@ -125,6 +133,46 @@ ten minutes and fail only the unit that met them, never advancing a cursor.
   releases or review pages) is **blocked as `window_exceeded`** with the cursor and
   the held events untouched. It is a counted, visible blocker, not a partial scan.
 
+### The first observation of runs and releases
+
+A NEW null-cursor runs or releases checkpoint is not baselined by one page. It reads the
+whole bounded inventory, one request per unit, and re-reads the last page like any other
+multi-page window.
+
+- **A frozen boundary, not the newest time seen.** Before its first request the pass
+  takes `floorToSecond(now) - 1ms` and stores it in the scan JSON (`baseline.boundaryMs`;
+  no schema change). Every such baseline, one page or many, commits EXACTLY that boundary
+  with a strict boundary flag. Committing the newest stamp would swallow a transition that
+  happened while later pages were still being read: an old run that settled between the
+  page-one read and its own page's read carries a stamp newer than anything it would have
+  been judged against. The one millisecond keeps events stamped in the first second (the
+  provider stamps whole seconds) on the announced side.
+- **Nothing before the boundary is delivered.** The baseline itself delivers nothing. The
+  following ordinary pass reads from the boundary, so only what moved after it is announced,
+  once, by identity. A run that was already running at the boundary announces no
+  `ci_started` (a run announces a start only if it was created after the cursor); it still
+  announces its conclusion.
+- **The next pass can reach what moved.** The creation floor committed with the baseline
+  covers every unsettled item AND every item that moved after the boundary (a run's last
+  update, a release's publication), so an older-created item that settled or published
+  before its page was read is inside the next window. It is recomputed normally afterwards.
+- **The boundary survives every retry.** It is written BEFORE the first request, so a
+  failure of that request (the repository metadata read included) cannot re-anchor the
+  retry later. A transient failure keeps the whole scan. A drift restart keeps only the
+  original boundary and the creation floor so far and drops page, last page, total, CI
+  state, cap and queue. A marker beside a real cursor, or a null-cursor read with progress
+  but no marker (written by earlier code), resets positional progress and starts over.
+  Importing a source cursor into an unbaselined checkpoint clears any half-read position.
+- **Capacity, honestly.** `hasMore` is judged by page cardinality, so a full tenth page
+  cannot be told from a longer list: **at most 99 runs (or releases) can be proven**; a
+  branch with 100 or more is refused as `window_exceeded` with the cursor still null. A
+  runs total from the provider never ends a window (a stale total would hide items) but
+  refuses early: a total of 100 or more is refused on page one for one call instead of
+  nine more. A refused surface leaves the CI state unset and `observes()` false, so native
+  coverage is kept and the other surfaces still work. **There is no recovery control for
+  `window_exceeded`**: it persists until the situation changes and `unblockObservable`
+  runs, and it re-blocks if the list is still too deep.
+
 ### Late reviews at the cursor
 
 When the items at the cursor were processed by a Ducky pass
@@ -139,13 +187,23 @@ one by its id. A baseline or a source cursor stays strict.
   shift from a deletion paired with insertions that cancel out, so a multi-page
   window can still miss an item at a page boundary. This is a **required
   completeness blocker** until the owner accepts it or a stronger scheme exists, not
-  a passed gate. The other residuals are named, not hidden: (1) the one above; (2) a draft release
-  or an in-flight run that sat BEYOND the first page when a target was first seen
-  is not tracked, because the first sight reads one page; (3) a run re-run long
-  after it settled, a run unsettled for more than a day and a draft untouched for
-  more than thirty days are outside the tracked floor; (4) a pull request with more
-  than 100 reviews cannot be read whole and blocks. Each remains a required
-  parity blocker until the owner accepts or a stronger scheme exists.
+  a passed gate. The other residuals are named, not hidden: (1) the one above; (2) the
+  first-observation residual is REPLACED by a bounded refusal, not closed: a mature
+  branch with 100 or more runs (or releases) refuses its first inventory, so that surface
+  is not observed at all until that changes; (3) a run re-run long after it settled is
+  outside the tracked floor, and a floor that falls deeper than the page cap blocks that
+  surface; (4) a pull request with more than 100 reviews cannot be read whole and blocks;
+  (5) imported and preexisting targets that were baselined shallowly before this change
+  keep the floors they already lost, and a source cursor carries no unsettled inventory;
+  (6) the boundary is a LOCAL clock time: skew beyond the one-second floor can still drop
+  a transition or announce a few events of history, which is an evidence blocker, not a
+  lossless claim; (7) release creation-versus-publication ordering is not certified live,
+  and the probe's runs and releases answers were empty, so those schemas rest on the
+  documented shape. **Costs:** a first observation is up to ten pages plus a re-read per
+  surface (eleven requests, not one), and a deep steady-state floor costs its depth plus
+  one request per 15-minute pass, all inside the existing 20-per-tick and 2,400-per-hour
+  budgets. Each remains a required parity blocker until the owner accepts or a stronger
+  scheme exists.
 - **No live certification of completeness or latency.** `pnpm
   probe:watch-reader` showed real, non-empty answers for the repository, pull
   request, issue and commit surfaces on the public probe repository, and EMPTY
@@ -206,8 +264,8 @@ one by its id. A baseline or a source cursor stays strict.
   cancellation has no owner control to undo it; a success in between resets the count.
   The row, its events and the owner's Forget control remain, and `/status` counts these.
 - Discovery that ran before the import is ADOPTED by it, never a collision: the source's
-  mute wins over discovery's default (an unsettled floor a pending runs or releases read already
-  had is kept); a surface Ducky has not read takes the source's cursor;
+  mute wins over discovery's default (an unsettled floor a COMMITTED runs or releases read
+  already had is kept; a half-read baseline is dropped and its boundary with it); a surface Ducky has not read takes the source's cursor;
   one it HAS baselined (silently, announcing nothing) takes the EARLIER of the two cursors with
   a strict boundary, so what happened between them is read and told once rather than skipped;
   events are added where unknown, and where an event is known on both sides the source's

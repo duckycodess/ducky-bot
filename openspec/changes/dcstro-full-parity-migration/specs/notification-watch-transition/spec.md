@@ -29,6 +29,14 @@ The system SHALL preserve audited typed checkpoint and event identity semantics 
 - **WHEN** a required page/surface fails or cannot yet be represented
 - **THEN** that surface's cursor does not falsely advance, retry progress remains durable and no lossless-parity claim is made
 
+#### Scenario: Transition while a first observation spans pages
+- **WHEN** a new runs or releases baseline spans pages and an older-created item settles or publishes before its own page is read
+- **THEN** the baseline commits the boundary frozen before its first request, delivers no history, and the next pass announces that transition exactly once, including across a failed first request or a drift restart
+
+#### Scenario: First inventory beyond the bounded capacity
+- **WHEN** a new runs or releases baseline cannot prove its whole inventory within the page cap (100 or more items)
+- **THEN** the surface is refused visibly as `window_exceeded` with its cursor still null and no recovery claimed, never baselined shallowly, and the limitation stays a named required blocker
+
 ### Requirement: Owner monitoring control that never replays native notifications
 The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp and write no audit row. A change SHALL be audited in the same transaction. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget. The switch is global. Turning monitoring on SHALL be refused for ALL targets while any ordinary watch row is retained (its repository cannot be proven, because its allowlist mapping is rewritten at every boot) or a selected feed repository, active or cancelled, overlaps an active target, because pause provenance and native delivery history are not proven; a repeated import SHALL NOT be a workaround; it SHALL NOT reset a checkpoint, SHALL NOT offer deleting native rows as a remedy, and exact cross-path reconciliation remains a required blocker. A repeated import of an unchanged document SHALL NOT override the owner's choice, and verification SHALL report the difference.
 

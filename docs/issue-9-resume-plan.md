@@ -1,6 +1,6 @@
 # Issue 9 resumed implementation plan
 
-Run: agent-flow 566d08edde, continuing 8c7fb474fd. Existing branch `codex/issue-9`, draft PR #16.
+Run: agent-flow a497333429, continuing 566d08edde and 8c7fb474fd. Existing branch `codex/issue-9`, draft PR #16.
 
 ## Authority and preserved gates
 
@@ -109,6 +109,135 @@ rebuild is incorrect and must be corrected, not implemented around.
   manifests remain unchanged. Public codes/replies contain no schedule labels,
   course codes or repository selections. Command registration is not performed by
   this dispatcher and remains part of real operational control certification.
+
+## Run a497333429: bounded unsettled-observation continuation
+
+At resume, the preserved pushed head is
+`f62407b42c49900b488f22a0808d0b3352f44e0d`. Live integration `main` remains
+`0a58ef01fe34ad60b91180d6e32fc6aae3b0925f`, already an ancestor; no incoming
+CI fix currently requires a merge. Recheck before push and exact-head review;
+use a normal merge, never rebase or force-push, if a necessary fix arrives.
+The manager's session records openai-codex/gpt-6.1-sol with high reasoning.
+Both prescribed isolated claude.ai preflights succeeded, and the startup panes
+report Team subscription, Sonnet 5.5/high and Opus 5.5/high respectively.
+
+### Implementation scope and stop condition
+
+Remove two concrete watch gaps without declaring full parity: newly baselined
+runs/releases must discover unsettled items beyond page one, and tracking must
+not silently expire a still-unsettled run after one day or a draft after thirty
+days. Use the existing typed reader, durable scan progress, atomic event/cursor
+commit and budgets. No new endpoints, authorization, live settings, source access
+or production mutation. The implementer remains sole code writer after independent
+plan review. This manager-owned plan is the only concurrent repository edit.
+
+1. Remove age-cutoff inputs/constants and age-based clearing of `scan_floor`.
+   Recompute the floor from actual observations; settlement, publication or
+   confirmed absence can release it, elapsed time alone cannot. Identity-based
+   event deduplication and retained event history remain unchanged. A floor that
+   falls beyond the existing page cap must block visibly with committed cursor
+   and held events preserved, never expire or silently reset.
+2. For a NEW null-cursor runs/releases baseline only, page to the end of the
+   bounded inventory, durably resuming one existing request unit at a time.
+   Apply the existing drift re-read also to these multi-page baselines. Other
+   surfaces retain their existing initial behavior. Exceeding the unchanged
+   ten-page cap must leave the cursor null and report `window_exceeded`.
+   Busy-repository refusal is a required parity/capacity blocker, not an accepted
+   omission or a reason to raise budgets or request a reduced migration.
+3. A multi-request baseline must not announce pre-baseline history or silently
+   suppress a transition that occurs while it is running. Freeze a baseline
+   boundary before its first request and persist it across restart/retry.
+   Commit no historical events; the following normal pass must reconcile all
+   transitions since that boundary, including an older-created item that settled
+   or published before its later baseline page was read. A bounded conservative
+   creation floor covering the initial inventory may be needed for that first
+   reconciliation. The reviewer must check this design before implementation;
+   merely committing the newest observed timestamp would lose those transitions.
+4. Do not reset existing/imported checkpoints or invent source provenance.
+   Existing targets that were previously baselined shallowly, source-cursor
+   unsettled inventory reconciliation, arbitrary pagination drift, late reruns of
+   already settled runs, and review depth remain required blockers until separately
+   proven. No migration is expected; if the existing persistence contract cannot
+   represent safe progress, stop and revise the reviewed plan rather than silently
+   corrupting old state.
+5. Synthetic regressions: deep initial draft/run observation and later settlement;
+   transitions during baseline and restart; no initial historical delivery;
+   old unsettled items retained beyond both former cutoffs; floor recomputation
+   after settlement/absence; page-cap refusal including held-event preservation;
+   drift restart with null cursor; per-unit/tick/hour call bounds; unchanged other
+   surfaces; exact identity deduplication across repeated scans. Test existing
+   saved-state compatibility and document added initial scan/quota costs honestly.
+6. Independently review this plan once. Implement and verify in meaningful batches
+   (at least code/regression and contract/documentation commits, no artificial
+   split). Run narrow tests then lint/typecheck/full suite/build, full-PR diff
+   check and existing strict OpenSpec validation. Update ADR 0031, current-state,
+   runbook and existing OpenSpec contracts without checking off remaining parity.
+7. Run a fresh real Gitleaks scan on final pushed history including merges and an
+   exact archived tree. Preserve raw evidence; allow only independently classified
+   exact synthetic-fixture fingerprints, never path/rule exceptions. Obtain a
+   separate final full-diff review and explicit exact-pushed-head approval; fix and
+   re-review every new BLOCKER/IMPORTANT. Retain all prior required blockers,
+   draft PR, Bead in_progress and `ready_to_merge=false`. No live Discord or
+   operational evidence is implied by synthetic tests.
+
+### Independent plan-review requirements C1–C11
+
+The separate Opus reviewer conditionally approved the continuation with the
+following mandatory safety amendments, recorded before code changes. These
+supersede any conflicting suggestions in the exploratory investigation.
+
+- C1: Store `baseline.boundaryMs` in the existing scan JSON, not as a ratcheting
+  newest timestamp. Every new runs/releases baseline commits exactly this
+  boundary. Marker/cursor mismatch or old null-cursor pending state without the
+  marker restarts safely; test compatibility and adoption.
+- C2: The boundary is `floorToSecond(pre-request nowMs) - 1ms` so provider
+  whole-second timestamps in the first second are not dropped. Any additional
+  skew margin must be a documented constant. Skew beyond it remains a required
+  evidence blocker, not a lossless claim. Test same-second and just-after events.
+- C3: Use this boundary path for single-page AND multi-page new runs/releases
+  baselines, with `boundaryKnown=false`. Other surfaces keep their current path.
+- C4: A drift restart preserves only the original boundary and the minimum
+  creation floor seen so far; discard page, last, total, CI state, cap and queue.
+  Transient failures preserve the whole scan. Prove process-restart and
+  drift/retry/commit continuity using the original boundary.
+- C5: For the first following normal pass, preserve a creation floor covering
+  every unsettled item and every old-created run/release touched/published after
+  the boundary. A conservative oldest-inventory floor is allowed if its cost is
+  documented. Recompute normally after reconciliation, with NO age cutoff.
+  Prove a mid-baseline settlement/publication is announced exactly once.
+- C6: Creation-sorted windows close only at `created < threshold`, not equality,
+  or at the true end. Same-second items can span pages; test the unsettled one
+  on the following page.
+- C7: A draft's normal-pass cursor cap is also
+  `floorToSecond(read nowMs) - 1ms`, not raw local milliseconds. Keep a run's
+  update-minus-1ms cap. Test publication in the read's same second.
+- C8: Import adoption of an unbaselined checkpoint clears pending cursor/page/
+  state atomically, preventing a source cursor from inheriting a half-read
+  baseline. Prove already-read-page events are reconciled after adoption.
+- C9: A run already running at the boundary must not announce a historical
+  `ci_started`. Require creation after the observation cursor or retain settled
+  identity markers; choose explicitly and test. No baseline delivery is added.
+- C10: Preserve multi-page drift re-read, runs total-shrink detection and ten-page
+  refusal with null committed cursor. Refuse runs on page one if `total_count`
+  exceeds the bounded inventory capacity. Charge every call and preserve the
+  existing per-unit/tick/hour bounds. Block a draft with no usable creation time
+  rather than silently leave it untracked.
+- C11: Update ADR/current-state/runbook/OpenSpec honestly: mature branches with
+  over 100 runs refuse initial inventory; deep steady-state floors cost depth
+  plus one calls per 15-minute pass; `window_exceeded` has no recovery control.
+  First-observation residual is replaced by bounded refusal, NOT declared full
+  parity. Previously lost/cleared floors, imported/preexisting shallow targets,
+  clock skew beyond the margin, uncertified release ordering and all prior
+  required blockers remain explicit. Test refusal leaves CI state unset and
+  `observes()` false, so native coverage is retained and other surfaces work.
+
+No schema change is expected; stop and revise if scan-state preservation cannot
+be represented safely. Old-code rollback mid-baseline degrades to its shallow
+behavior and must be documented; monitoring pauses, cycle exclusion and backoff
+retain an old boundary and later reconcile from it. The reviewer made no edits
+or publications. Conditional approval becomes effective with these conditions
+included; deviations require scoped re-review. This is code-safety plan approval,
+not issue acceptance or readiness approval.
 
 ## Required operational gates, not waived
 

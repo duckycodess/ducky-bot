@@ -125,6 +125,16 @@ One engineering job at a time per Ducky database, with an uncertain stop holding
 everything until an owner decides. The cost is availability: an orphan blocks all
 engineering, not one repository.
 
+**Upgrade preconditions.** Migration 28 is not a data migration. It backfills
+neither a slot nor an attempt deadline for a job that is already running, so the
+database must hold no non-terminal job and no open agent workspace when it is
+applied. The branch first numbered this table 27 before merging published main,
+whose 27 is `github_feed`. The migrator compares version numbers only, so any
+non-scratch database that applied the branch-only 27 would skip `github_feed` and
+then fail migration 28; that must be ruled out by reading `schema_migrations`
+before upgrading. The exact checks are in the
+[runbook](../runbooks/remote-linux-runtime.md#4-start-restart-logout-recovery-backup).
+
 **Open blockers (acceptance and merge), all required.** The same numbered list
 is kept in full, with the reason for each, in
 [CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and the

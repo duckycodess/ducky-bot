@@ -936,6 +936,17 @@ exists, so on this host the provider route, subscription eligibility, quota and
 sign-in are all **unverified**, and the memory-and-environment guard above is not
 a substitute for recording them.
 
+**Upgrade preconditions (not yet exercised on any live database).** Migration 28
+creates an empty `engineering_admission` table and a nullable
+`jobs.attempt_deadline_at`; it backfills nothing, so a job running at upgrade
+would hold no slot and have no deadline. The upgrade therefore requires no
+non-terminal job and no open agent workspace. The branch's engineering table was
+first numbered 27 and published main's 27 is `github_feed`; the migrator compares
+version numbers only, so a non-scratch database that applied the branch-only 27
+must be ruled out (`schema_migrations`, version 27 named `github_feed` or
+absent) before upgrading. Details and queries:
+[runbook](runbooks/remote-linux-runtime.md#4-start-restart-logout-recovery-backup).
+
 **Unresolved, and blocking acceptance and merge of issue #8.** This is the
 complete required list. [ADR 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md)
 and the [runbook](runbooks/remote-linux-runtime.md) carry the same numbered

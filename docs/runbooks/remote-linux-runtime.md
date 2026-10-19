@@ -156,6 +156,42 @@ journalctl --user -u ducky-coordinator@development -n 100 --no-pager
   supported pairing. Stop both units with engineering off (it is off by
   default), take a backup, update, migrate, then start the coordinator and the
   executor together.
+- **Upgrade preconditions (all must hold before the first stop; any miss means
+  do not upgrade, not "upgrade carefully").** Run the checks on a copy taken from
+  the verified backup below, or with the database opened read-only, never by
+  editing the live file:
+
+  1. **No live jobs and no open agent workspaces.** Migration 28 only creates the
+     empty `engineering_admission` table and adds `jobs.attempt_deadline_at`. It
+     does **not** backfill admission for a job that is already running: that job
+     holds no slot and has no attempt deadline, so a second job could be admitted
+     beside it and the coordinator backstop would never time it out. The agent
+     also lives in Herdr, outside either unit, and survives the stop.
+
+     ```sql
+     SELECT id, state FROM jobs WHERE state NOT IN ('completed','failed','cancelled');
+     SELECT workspace_id, job_id FROM herdr_workspaces WHERE closed_at IS NULL;
+     SELECT repo_slug, job_id, reason FROM repo_reservations;
+     ```
+
+     All three must return no rows. Finish, cancel, or `/job cleanup` first.
+  2. **No non-scratch database ever applied the unpublished migration 27.** While
+     this branch was developed, `engineering_admission` was numbered 27 (commit
+     `3d507bf`). Published main's 27 is `github_feed`, and the branch now carries
+     `engineering_admission` as 28. The migrator records and compares **version
+     numbers only** (`packages/persistence/src/migrate.ts`), so a database that
+     applied the branch-only 27 would skip `github_feed` as already done and then
+     fail migration 28 on a table that already exists.
+
+     ```sql
+     SELECT version, name FROM schema_migrations WHERE version >= 27 ORDER BY version;
+     ```
+
+     Version 27 must be absent or named `github_feed`. If it is named
+     `engineering_admission`, stop: that database needs a hand-reconciled
+     schema plan and a verified backup, and this runbook does not provide one.
+     Synthetic scratch databases used by the tests are not affected.
+  3. **A verified backup exists** (the next bullet), and engineering is still off.
 - **Restart** is safe: leases expire, a job that lost its executor is requeued
   for recovery and KEEPS its engineering slot and its original attempt deadline,
   and the coordinator never assumes the agent stopped.

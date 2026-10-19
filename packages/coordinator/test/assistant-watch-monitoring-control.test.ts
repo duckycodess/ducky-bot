@@ -224,7 +224,7 @@ describe('resuming never duplicates what a native path told the owner while it w
     h.close();
   });
 
-  it('still refuses after the ordinary watch is cancelled, because it was active during the pause', () => {
+  it('still refuses after the ordinary watch is cancelled, and never invites removing it', () => {
     const { h, clock } = boot();
     pauseWithTarget(h);
     turn(h, false);
@@ -239,58 +239,92 @@ describe('resuming never duplicates what a native path told the owner while it w
     h.close();
   });
 
-  it('allows it when the ordinary watch ended before the pause began', () => {
+  it('refuses even when the ordinary watch was cancelled BEFORE the pause, or at the very instant it began', () => {
+    // An imported pause carries only the import time, so a native watch cancelled earlier can
+    // still have spoken after the source's pause began: all retained history counts.
+    const before = boot();
+    pauseWithTarget(before.h);
+    const w = before.h.app.githubWatches.add(before.h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    before.clock.advance(MIN);
+    before.h.app.githubWatches.cancel(before.h.owner, w.publicId);
+    before.clock.advance(MIN);
+    turn(before.h, false);
+    before.clock.advance(MIN);
+    expect(turn(before.h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    before.h.close();
+
+    const same = boot();
+    pauseWithTarget(same.h);
+    const w2 = same.h.app.githubWatches.add(same.h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    same.h.app.githubWatches.cancel(same.h.owner, w2.publicId); // cancelled_at === the OFF stamp below
+    turn(same.h, false);
+    expect(setting(same.h)[0]!['updated_at']).toBe(
+      (same.h.store.db.prepare('SELECT cancelled_at AS c FROM github_watches').get() as { c: string }).c,
+    );
+    expect(turn(same.h, true)).toMatchObject({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    same.h.close();
+  });
+
+  it('refuses an imported pause stamped after a native watch that was cancelled long before it', () => {
     const { h, clock } = boot();
     pauseWithTarget(h);
     const w = h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
     clock.advance(MIN);
     h.app.githubWatches.cancel(h.owner, w.publicId);
+    clock.advance(30 * 24 * 60 * MIN);
+    h.store.assistantWatch.setMonitoring(OWNER, false, clock.nowIso()); // as an import writes it
     clock.advance(MIN);
-    turn(h, false);
-    clock.advance(MIN);
-    expect(turn(h, true)).toEqual({ ok: true, changed: true, enabled: true });
+    expect(turn(h, true)).toMatchObject({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
     h.close();
   });
 
-  it('refuses for a selected GitHub feed repository on the same key, and ignores unrelated ones', () => {
+  it('does not let a native notification still pending from before the pause create a bypass', () => {
     const { h, clock } = boot();
-    pauseWithTarget(h, 'acme/other-thing');
+    pauseWithTarget(h);
+    const w = h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    h.store.db.prepare(
+      "INSERT INTO github_watch_events (id, watch_id, fingerprint, summary, created_at) VALUES ('pe1', ?, 'fp', 'pending', ?)",
+    ).run((h.store.db.prepare('SELECT id FROM github_watches').get() as { id: string }).id, NOW);
+    clock.advance(MIN);
+    h.app.githubWatches.cancel(h.owner, w.publicId); // cancelling does not settle it
+    turn(h, false);
+    clock.advance(MIN);
+    expect(turn(h, true)).toMatchObject({ ok: false, reason: 'ordinary_overlap' });
+    h.close();
+  });
+
+  it('allows it for a repository no native path has ever had a row for', () => {
+    const { h, clock } = boot();
+    pauseWithTarget(h, 'acme/unrelated');
     turn(h, false);
     clock.advance(MIN);
     // An ordinary watch on a DIFFERENT repository does not overlap.
     h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
-    expect(turn(h, true)).toMatchObject({ ok: true, changed: true });
-    turn(h, false);
-    clock.advance(MIN);
-    h.store.githubFeed.insertRepo({ repoKey: 'acme/other-thing', display: 'acme/other-thing', source: 'explicit', atIso: clock.nowIso() });
-    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    expect(turn(h, true)).toEqual({ ok: true, changed: true, enabled: true });
     h.close();
   });
 
-  it('refuses for a feed repository that was selected during the pause and removed before resume', () => {
-    const { h, clock } = boot();
-    pauseWithTarget(h, 'acme/other-thing');
-    turn(h, false);
-    clock.advance(MIN);
-    h.store.githubFeed.insertRepo({ repoKey: 'acme/other-thing', display: 'x', source: 'explicit', atIso: clock.nowIso() });
-    clock.advance(MIN);
-    h.store.githubFeed.cancelRepo('acme/other-thing', clock.nowIso());
-    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
-    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
-    h.close();
-  });
-
-  it('allows it when the feed repository was removed before the pause began', () => {
+  it('refuses for a selected feed repository, active or cancelled, at any time', () => {
     const { h, clock } = boot();
     pauseWithTarget(h, 'acme/other-thing');
     h.store.githubFeed.insertRepo({ repoKey: 'acme/other-thing', display: 'x', source: 'explicit', atIso: clock.nowIso() });
     clock.advance(MIN);
-    h.store.githubFeed.cancelRepo('acme/other-thing', clock.nowIso());
+    h.store.githubFeed.cancelRepo('acme/other-thing', clock.nowIso()); // gone before the pause
     clock.advance(MIN);
     turn(h, false);
     clock.advance(MIN);
-    expect(turn(h, true)).toMatchObject({ ok: true, changed: true });
+    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    // And one selected during the pause and removed before the resume.
     h.close();
+    const during = boot();
+    pauseWithTarget(during.h, 'acme/other-thing');
+    turn(during.h, false);
+    during.clock.advance(MIN);
+    during.h.store.githubFeed.insertRepo({ repoKey: 'acme/other-thing', display: 'x', source: 'explicit', atIso: during.clock.nowIso() });
+    during.clock.advance(MIN);
+    during.h.store.githubFeed.cancelRepo('acme/other-thing', during.clock.nowIso());
+    expect(turn(during.h, true)).toMatchObject({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    during.h.close();
   });
 
   it('counts one overlapping repository once, however many native paths cover it', () => {
@@ -386,7 +420,7 @@ describe('/watch monitoring through the command', () => {
     const out = await dispatch(h, OWNER, { state: 'on' });
     expect(out?.ephemeral).toBe(true);
     expect(replyText(out)).toMatch(/Monitoring stays off\. 1 repository/);
-    expect(replyText(out)).not.toMatch(/acme|demo/);
+    expect(replyText(out)).not.toMatch(/acme|demo|\/watch remove|remove/i);
     expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
     h.close();
   });

@@ -53,13 +53,13 @@ export interface AssistantWatchServiceDeps {
    */
   readonly digestDeliverable?: () => boolean;
   /**
-   * The repositories the owner's NATIVE paths (an ordinary watch, the GitHub feed's
-   * selected list) were active on at any moment since `sinceIso`, as `owner/repo`
-   * keys, plus how many could not be resolved to one. Frozen configuration decides
-   * the mapping, so it is injected. Absent means the overlap cannot be established,
-   * and turning monitoring back on is refused rather than guessed.
+   * Every repository the owner's NATIVE paths (an ordinary watch, the GitHub feed's selected
+   * list) still have a row for, active or cancelled, as `owner/repo` keys, plus how many
+   * could not be resolved to one. Frozen configuration decides the mapping, so it is
+   * injected. Absent means the overlap cannot be established, and turning monitoring back
+   * on is refused rather than guessed.
    */
-  readonly nativeWatchedSince?: (sinceIso: string) => { readonly keys: ReadonlySet<string>; readonly unresolved: number };
+  readonly nativeWatchedEver?: () => { readonly keys: ReadonlySet<string>; readonly unresolved: number };
 }
 
 export type SetMonitoringOutcome =
@@ -67,9 +67,9 @@ export type SetMonitoringOutcome =
   | {
     readonly ok: false;
     /**
-     * `ordinary_overlap`: a native path was active on a repository a target also
-     * watches while monitoring was off, so it may already have told the owner what the
-     * target's old checkpoint would tell again. `overlap_unverifiable`: the native
+     * `ordinary_overlap`: a native path has a retained row on a repository a target also
+     * watches, so it may have told the owner what the target's old checkpoint would tell
+     * again, and nothing stored can say when it spoke. `overlap_unverifiable`: the native
      * side could not be consulted. Both refuse; neither resets a checkpoint.
      */
     readonly reason: 'ordinary_overlap' | 'overlap_unverifiable';
@@ -213,7 +213,7 @@ export class AssistantWatchService {
   private readonly reader: AssistantWatchReader;
   private readonly cfg: AssistantWatchConfig | undefined;
   private readonly digestDeliverable: () => boolean;
-  private readonly nativeWatchedSince: AssistantWatchServiceDeps['nativeWatchedSince'];
+  private readonly nativeWatchedEver: AssistantWatchServiceDeps['nativeWatchedEver'];
   private ticking: Promise<AssistantWatchTickResult> | null = null;
   /** Until when a rate limit or an authentication failure has stopped the cycle. */
   private pausedUntilMs = 0;
@@ -227,7 +227,7 @@ export class AssistantWatchService {
     this.reader = deps.reader;
     this.cfg = deps.watchConfig;
     this.digestDeliverable = deps.digestDeliverable ?? (() => false);
-    this.nativeWatchedSince = deps.nativeWatchedSince;
+    this.nativeWatchedEver = deps.nativeWatchedEver;
   }
 
   // ---- the tick ---------------------------------------------------------------
@@ -1001,15 +1001,22 @@ export class AssistantWatchService {
    * backoff: pausing takes effect at the NEXT tick (the tick in flight read the switch
    * once at its start), and resuming makes every cursor due again exactly where it stood.
    *
-   * Turning monitoring back ON is refused while a native path could have reported the
-   * same repositories during the pause. While monitoring is off a native notification is
-   * not trimmed for what a target covers (`covers` is false), so it may already have told
-   * the owner what the target's untouched checkpoint would tell a second time. Exact
-   * cross-path reconciliation has no evidence in the stored data, and resetting a
-   * checkpoint would silently baseline away events nobody was told, so the only safe
-   * answer is to refuse. Counts only; the remedy is the owner's (remove the overlapping
-   * native watch or feed repository and say so again), and the refusal stays a named
-   * full-parity blocker rather than an accepted omission.
+   * Turning monitoring back ON is refused wherever a native path could have reported the
+   * same repositories. While monitoring is off an ordinary snapshot DM or feed card is not
+   * trimmed for what a target covers, so it may already have told the owner what the
+   * target's untouched checkpoint would tell a second time. Nothing stored proves when a
+   * pause really began (an imported pause carries only the import time, so a native watch
+   * cancelled before the import can have spoken after the source's pause began), what a native
+   * path delivered, or that a pending native notification was settled. Exact cross-path
+   * reconciliation therefore has no evidence, and resetting a checkpoint would silently
+   * baseline away events nobody was told. So the guard counts, inside the transaction, every
+   * repository on which an ordinary watch or a feed selection still has a row, active or
+   * cancelled, whenever it ran, that an active target also watches (plus any it cannot
+   * resolve), and refuses if there is one. The cost is deliberate and owned: a target whose
+   * repository ever had a native row cannot be resumed until reconciliation exists, and
+   * removing the native row is NOT a way round it (that would delete the very history the
+   * guard exists to honour). The reply gives a count and no remedy. It stays a named
+   * full-parity blocker, not an accepted omission.
    */
   setMonitoring(actor: ActorContext, enabled: boolean): SetMonitoringOutcome {
     this.authz.requireOwner(actor);
@@ -1020,12 +1027,10 @@ export class AssistantWatchService {
       const was = current === undefined || current.enabled;
       if (was === enabled) return { ok: true as const, changed: false, enabled };
       if (enabled) {
-        // `was` is false, so a stored OFF row exists and says when the pause began.
-        const since = current!.updatedAt;
-        if (!this.nativeWatchedSince) {
+        if (!this.nativeWatchedEver) {
           return { ok: false as const, reason: 'overlap_unverifiable' as const, overlapping: 0 };
         }
-        const native = this.nativeWatchedSince(since);
+        const native = this.nativeWatchedEver();
         const targets = new Set(repo.activeTargetKeys(owner));
         const overlapping = [...native.keys].filter((k) => targets.has(k)).length + native.unresolved;
         if (overlapping > 0) return { ok: false as const, reason: 'ordinary_overlap' as const, overlapping };

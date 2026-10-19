@@ -119,12 +119,10 @@ export class GitHubFeedRepo {
     return rows.map((r) => mapRepo(r as Record<string, unknown>));
   }
 
-  /** Selected repositories that were on the list at any moment since `sinceIso`. */
-  repoKeysActiveSince(sinceIso: string): string[] {
+  /** Every repository the feed's list still has a row for, active or cancelled (a tombstone is kept). */
+  repoKeysEver(): string[] {
     return (
-      this.db
-        .prepare("SELECT repo_key AS k FROM github_feed_repos WHERE state = 'active' OR cancelled_at > ?")
-        .all(sinceIso) as { k: string }[]
+      this.db.prepare('SELECT repo_key AS k FROM github_feed_repos').all() as { k: string }[]
     ).map((r) => String(r.k));
   }
 

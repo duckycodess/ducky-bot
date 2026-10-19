@@ -291,10 +291,10 @@ export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
       content: out.reason === 'overlap_unverifiable'
         ? 'Monitoring stays off: this build cannot check whether your ordinary watches or the GitHub feed already ' +
           'told you what the notification targets would repeat. Nothing was changed.'
-        : `Monitoring stays off. ${out.overlapping} repositor${out.overlapping === 1 ? 'y' : 'ies'} also had an ordinary ` +
-          'watch or feed entry active while it was off, which may already have told you what the notification ' +
-          'targets would repeat. Nothing was changed or reset. Remove those with `/watch remove` (or the feed list) ' +
-          'and say it again. Exact reconciliation is not built, so this is a refusal, not a decision.',
+        : `Monitoring stays off. ${out.overlapping} repositor${out.overlapping === 1 ? 'y' : 'ies'} also ` +
+          'has (or once had) an ordinary watch or feed entry that may already have told you what the notification ' +
+          'targets would repeat, and I cannot prove otherwise. Nothing was changed or reset. Exact reconciliation ' +
+          'is not built, so this is a refusal, not a decision.',
       ephemeral: true,
     };
   }

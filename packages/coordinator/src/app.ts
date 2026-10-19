@@ -526,13 +526,13 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
-    // What the native paths could have told the owner while monitoring was off, as the
-    // repository keys frozen configuration maps them to. A slug that no longer resolves
-    // is counted, never skipped: an overlap that cannot be ruled out is an overlap.
-    nativeWatchedSince: (sinceIso) => {
+    // Every repository a native path (an ordinary watch, the feed's list) still has a row for,
+    // active or cancelled, as the keys frozen configuration maps them to. A slug that no longer
+    // resolves is counted, never skipped: an overlap that cannot be ruled out is an overlap.
+    nativeWatchedEver: () => {
       const keys = new Set<string>();
       let unresolved = 0;
-      for (const slug of store.githubWatches.slugsActiveSince(authz.ownerId, sinceIso)) {
+      for (const slug of store.githubWatches.slugsEver(authz.ownerId)) {
         try {
           const gh = allowlist.resolve(slug).github;
           if (gh) keys.add(`${gh.owner}/${gh.repo}`.toLowerCase());
@@ -541,7 +541,7 @@ export function createApp(
           unresolved += 1;
         }
       }
-      for (const key of store.githubFeed.repoKeysActiveSince(sinceIso)) keys.add(key.toLowerCase());
+      for (const key of store.githubFeed.repoKeysEver()) keys.add(key.toLowerCase());
       return { keys, unresolved };
     },
     digestDeliverable: () => {

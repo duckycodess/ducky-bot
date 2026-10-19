@@ -45,18 +45,17 @@ export class GitHubWatchesRepo {
   constructor(private readonly db: Db) {}
 
   /**
-   * The allowlist slugs of the owner's ordinary watches that were active at any moment
-   * since `sinceIso`: active now, or cancelled after it. A watch cancelled before
-   * `sinceIso` cannot have told the owner anything in the window, so it is not here.
+   * The allowlist slugs of EVERY ordinary watch the owner still has a row for, cancelled
+   * or not, whenever it ran. A cancelled watch keeps its row (and any undelivered event),
+   * and nothing here can say when a pause really began or what a watch delivered
+   * during it, so a resume guard that needs to know where a native path may have
+   * spoken has to treat all retained history as possible.
    */
-  slugsActiveSince(ownerId: string, sinceIso: string): string[] {
+  slugsEver(ownerId: string): string[] {
     return (
       this.db
-        .prepare(
-          `SELECT DISTINCT repo_slug AS s FROM github_watches
-            WHERE discord_user_id = ? AND (state = 'active' OR cancelled_at > ?)`,
-        )
-        .all(ownerId, sinceIso) as { s: string }[]
+        .prepare('SELECT DISTINCT repo_slug AS s FROM github_watches WHERE discord_user_id = ?')
+        .all(ownerId) as { s: string }[]
     ).map((r) => String(r.s));
   }
 

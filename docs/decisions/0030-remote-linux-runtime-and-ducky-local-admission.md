@@ -1,6 +1,6 @@
 # 0030. The remote Linux runtime, and a Ducky-local engineering slot
 
-**Status:** Accepted, with open merge blockers listed below
+**Status:** Accepted as preparation, with open merge blockers listed below (all required)
 
 ## Context
 
@@ -125,12 +125,38 @@ One engineering job at a time per Ducky database, with an uncertain stop holding
 everything until an owner decides. The cost is availability: an orphan blocks all
 engineering, not one repository.
 
-**Open blockers (acceptance and merge):** cross-program admission with agent-flow;
-an authorized stop probe for a working agent and with it owned-descendant
-termination; the idle or no-result pause that must not consume retry budget (a
-turn that ends idle without a result is still an ordinary `no_result` failure);
-a recorded supported subscription route and quota on this host; Herdr session
-pinning; live Discord, Tailscale and logout checks.
+**Open blockers (acceptance and merge), all required.** The same numbered list
+is kept in full, with the reason for each, in
+[CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and the
+[runbook](../runbooks/remote-linux-runtime.md#6-what-is-not-implemented-and-what-blocks-merge-and-deployment):
+
+1. Atomic cross-program and cross-profile admission with agent-flow.
+2. Effective, ancestor-aware memory headroom. The guard reads one slice
+   directory, not its ancestors or the lower ceiling of the unit holding the Herdr
+   server, and is a check followed by a claim, not a shared reservation.
+3. An authorized stop probe for a working agent, and with it confirmed
+   owned-descendant cancel and timeout.
+4. The idle or no-result pause that must not consume retry budget (a turn that
+   ends idle without a result is still an ordinary `no_result` failure).
+5. A recorded, supported subscription route, sign-in and quota on this host.
+6. Herdr session pinning, separate from the dispatcher's.
+7. Safe periodic orphan, workspace and temp reclamation that preserves active
+   work (the reconciler only lists candidates).
+8. Active-job temp-artifact protection for long-lived artifacts.
+9. Deterministic reminders and GitHub events observed continuing through a quota
+   pause.
+10. Tailscale Serve, private listener, no Funnel.
+11. Remote restart, logout and laptop or app-disconnect continuity.
+12. No-billed-API fallback across provider and Herdr environments (the
+    environment-key refusal is partial evidence).
+13. Real development evidence: provider, Discord, a controlled job with a second
+    admission attempt, cancel, timeout, notification, logout, phone and recovery.
+14. Closure policy: the dispatcher requires `Closes #8` in the PR body, so an
+    early merge would close the issue with the criteria unmet. Draft status and
+    `ready_to_merge=false` are not a technical guard against a manual merge.
+
+This ADR is accepted as the design of the preparation code. Accepting it does not
+clear any item above.
 
 ## Follow-up
 

@@ -207,29 +207,53 @@ not wired: `Reconciler.reapableWorkspaces` only reports candidates.
 ## 6. What is not implemented, and what blocks merge and deployment
 
 Do not call the bot deployed, and do not close issue 8, while any of these is
-open:
+open. All fourteen are required, and the list matches
+[CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and
+[decision 0030](../decisions/0030-remote-linux-runtime-and-ducky-local-admission.md):
 
-1. **Cross-program admission.** No supported protocol exists with agent-flow.
-   The Ducky slot is local to one coordinator database.
-2. **Active-agent stop.** The recorded Herdr adapter has no supported way to stop
+1. **Cross-program and cross-profile admission.** No supported protocol exists
+   with agent-flow. The Ducky slot is local to one coordinator database.
+2. **Effective, ancestor-aware headroom.** The guard in section 1 reads one slice
+   directory. It does not read ancestor cgroups or the lower ceiling of the unit
+   that holds the Herdr server, and a passing check is not a reservation another
+   program also respects.
+3. **Active-agent stop.** The recorded Herdr adapter has no supported way to stop
    a working agent. A timeout of a working agent becomes an orphan that holds the
-   repository and the slot for the owner; owned-descendant termination needs an
-   authorized real-agent stop probe.
-3. **Idle or no-result model stop without consuming retry budget.** Not
+   repository and the slot for the owner; confirmed owned-descendant cancel and
+   timeout need an authorized real-agent stop probe.
+4. **Idle or no-result model stop without consuming retry budget.** Not
    implemented. A turn that ends idle with no result is still reported as an
    ordinary `no_result` failure. The quota-pause criterion in the issue is
    therefore NOT met, and there is no provider quota state, counter or
    sign-in-versus-quota distinction to build on until a real response is
    recorded.
-4. **Supported subscription route and quota on this host.** No `openclaw` binary
-   or provider profile exists in this account at the time of writing. Route,
-   eligibility and quota are unverified.
-5. **Live checks:** Discord, Tailscale Serve and logout continuity, phone access,
-   and a controlled managed job with an attempted second admission and a
-   timeout. None has been run.
+5. **Supported subscription route, sign-in and quota on this host.** No
+   `openclaw` binary or provider profile exists in this account at the time of
+   writing. Route, eligibility and quota are unverified, and the binary's absence
+   is not a passed integration.
 6. **Herdr session pinning** for Ducky, separate from the dispatcher's, is
    undocumented in this repository and therefore not configured.
-7. **Provider and Herdr environment** are checked by the commands above, by hand.
+7. **Periodic orphan, workspace and temp reclamation** that preserves active work
+   is not wired (section 5): the reconciler only reports candidates.
+8. **Active-job temp-artifact protection.** The owned-temp sweep is by staleness
+   and does not prove that an arbitrarily long-lived temp artifact of a live job
+   is safe.
+9. **Reminders and GitHub events during a quota pause.** Independent of the model
+   by construction, never observed through a real pause.
+10. **Tailscale Serve, private listener and no Funnel**, verified on the host.
+11. **Restart, logout and laptop or app-disconnect continuity**, verified by an
+    actual cycle.
+12. **No-billed-API fallback across provider and Herdr environments.** The
+    startup refusal sees only the coordinator's and executor's own environment.
+    The provider and Herdr checks in section 3 are manual and unrun. Never inspect
+    secret values.
+13. **Live checks:** provider, Discord round trip, a controlled managed job with
+    an attempted second admission, cancel, a timeout, a notification, logout,
+    phone access and recovery. None has been run.
+14. **Closure policy.** The dispatcher requires `Closes #8` in the PR body. Merging
+    early would close #8 with items 1 to 13 open. A draft PR and
+    `ready_to_merge=false` are signals the dispatcher honours and do not
+    technically prevent a manual merge.
 
 Before calling it deployed: provider sign-in on this account, a Discord round
 trip, a job path under a development profile, the phone over the tailnet, a

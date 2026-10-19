@@ -936,16 +936,35 @@ exists, so on this host the provider route, subscription eligibility, quota and
 sign-in are all **unverified**, and the memory-and-environment guard above is not
 a substitute for recording them.
 
-**Unresolved, and blocking acceptance and merge of issue #8:**
+**Unresolved, and blocking acceptance and merge of issue #8.** This is the
+complete required list. [ADR 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md)
+and the [runbook](runbooks/remote-linux-runtime.md) carry the same numbered
+items; none was waived, and a later edit may add to it but not drop one without
+recorded evidence.
 
-| Open | Why |
-|---|---|
-| Cross-program single engineering job | agent-flow exposes only internal worker slots and a singleton lock; no supported external admission protocol, and its state was not touched. The Ducky slot is local to one database and does not cover the other profile either |
-| Stopping a working agent | the recorded Herdr adapter has no supported interruption, so a working agent that outlives its budget is an orphan. Owned-descendant termination needs an authorized real-agent stop probe |
-| Idle or no-result model stop that does not consume retry budget | **not implemented.** The runner still reports an idle turn with no result as an ordinary `no_result` failure, so the quota-pause criterion is not met. No provider quota state exists to build on until a real response is recorded |
-| Supported subscription route and quota on this host | unverified, as above |
-| Herdr session pinned to Ducky, separate from the dispatcher | no setting is recorded in this repository |
-| Discord, Tailscale Serve, logout continuity, phone, a controlled job with a second admission attempt and a timeout | none run |
+| # | Open | Why |
+|---|---|---|
+| 1 | Cross-program, cross-profile atomic admission | agent-flow exposes only internal worker slots and a singleton lock; no supported external admission protocol, and its state was not touched. The Ducky slot is local to one database and covers neither the other profile nor agent-flow |
+| 2 | Effective, ancestor-aware memory headroom | The guard reads `memory.current`, `memory.max` and `memory.high` of the one account-slice directory it is given. It does not walk to ancestor cgroups, does not read the lower ceiling of the unit that actually contains the Herdr server (`agent-flow-herdr.service`), and is a check followed by a claim, not an atomic reservation shared with another program. It cannot prove headroom against a tighter ancestor or a concurrent claimer |
+| 3 | Stopping a working agent | the recorded Herdr adapter has no supported interruption, so a working agent that outlives its budget is an orphan. Confirmed owned-descendant cancel and timeout need an authorized real-agent stop probe |
+| 4 | Retry-preserving quota pause | **not implemented.** The runner still reports an idle turn with no result as an ordinary `no_result` failure, so the quota-pause criterion is not met. No provider quota state exists to build on until a real response is recorded |
+| 5 | Supported live subscription eligibility, auth and quota on this host | unverified: `openclaw` is absent here and no provider profile exists. OpenClaw's absence is not a passed integration |
+| 6 | Herdr session pinned to Ducky, separate from the dispatcher | no setting is recorded in this repository |
+| 7 | Safe periodic orphan, workspace and temp reclamation that preserves active work | not wired. `Reconciler.reapableWorkspaces` only lists candidates, nothing reaps on a schedule, and `devwork-cleanup.timer` understands neither Ducky's activity nor its orphan records |
+| 8 | Active-job temp-artifact protection | the owned-temp sweep is hardened (real directories, owned by the running user) but removes by staleness. It does not establish that an arbitrarily long-lived temp artifact of a live job is safe |
+| 9 | Deterministic reminders and GitHub events continuing during a quota pause | unit-level independence from the model only; never observed during a real pause, because no pause exists (item 4) |
+| 10 | Tailscale Serve, private listener, no Funnel | the shared loopback listener and phone page are templates and tests only; `tailscale serve status` reported no serve config on 2026-10-13 and none has been configured since |
+| 11 | Remote restart, logout, and laptop or app-disconnect continuity | `Linger=yes` was read; no logout, restart or disconnect cycle was run |
+| 12 | No-billed-API fallback across provider and Herdr environments | the names-only `*_API_KEY` refusal covers the coordinator's and executor's own environment only. The provider's private configuration and the Herdr server's environment are checked by hand in the runbook and were not checked here. Partial evidence, not a pass |
+| 13 | Real development evidence: provider, Discord, a controlled job with a second admission attempt, cancel, timeout, notification, logout, phone, and recovery | none run |
+| 14 | Closure policy | The dispatcher requires the PR body to carry `Closes #8`. Merging this PR before items 1 to 13 are cleared would close #8 with the acceptance criteria unmet. Draft status and `ready_to_merge=false` are signals the dispatcher honours; they do not technically prevent a manual merge. Unresolved, and not waived, until full issue acceptance |
+
+Items 1 to 14 are all **required**. The unit tests, backup and verification
+runs, scans and host readbacks recorded here do not clear any of them.
+Separately, the unbounded default `pnpm test` failure recorded in the
+[plan](plans/issue-8-remote-runtime.md#resume-verification-evidence-2026-10-19)
+is unexplained and tracked as `ducky-xdy`; the suite passes under an explicit
+two-worker bound, which is not a diagnosis.
 
 ## Detail: what the smoke-test evidence actually shows
 

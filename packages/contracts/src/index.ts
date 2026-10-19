@@ -28,3 +28,4 @@ export * from './audit.js';
 export * from './schedule-rules.js';
 export * from './assistant-watch.js';
 export * from './assistant-import.js';
+export * from './watch-baseline-marker.js';

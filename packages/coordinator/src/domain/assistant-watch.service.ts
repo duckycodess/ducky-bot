@@ -7,7 +7,7 @@ import {
   ASSISTANT_WATCH_CYCLE_TARGETS, ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS, ASSISTANT_WATCH_MAX_TARGETS,
   ASSISTANT_WATCH_METADATA_INTERVAL_HOURS, GH_OWNER_RE, GH_REPO_RE, isPlainRepoName, WATCH_API_DISCOVERY_MAX_PAGES,
   WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, newPublicWatchId, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
-  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
+  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, encodeBaselineMarker, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import {
   withTransaction, type DueCheckpoint, type ObservedEventWrite, type PollCycle, type Store,
@@ -553,9 +553,31 @@ export class AssistantWatchService {
           return 'blocked';
         }
         const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
+        // This target's own validated baseline markers: a start already underway at the
+        // baseline stays silent while the cursor is at or after its boundary. A lookup that
+        // cannot see every marker (overflow) decides nothing and fails the surface closed.
+        let startMarkers: ReadonlyMap<string, number> | null = null;
+        if (boundaryMs === null && sinceMs !== null) {
+          const found = repo.baselineMarkers(unit.targetId);
+          if (found.overflow) {
+            repo.block(unit.targetId, unit.surface, 'baseline_marker_overflow', isoOf(ctx.nowMs));
+            return 'blocked';
+          }
+          startMarkers = found.markers;
+        }
         const runs = deriveRuns(
           f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs, boundaryMs,
+          startMarkers,
         );
+        // A run underway at the boundary that cannot be recorded (an id that is not plain
+        // decimal, a boundary of the wrong shape) would announce history or lose it: the
+        // surface is refused visibly, never skipped.
+        if (boundaryMs !== null && runs.underwayIds.some(
+          (rid) => encodeBaselineMarker(rid, boundaryMs, isoOf(ctx.nowMs)) === null,
+        )) {
+          repo.block(unit.targetId, unit.surface, 'baseline_marker_invalid', isoOf(ctx.nowMs));
+          return 'blocked';
+        }
         read = runs;
         ci = runs.ciState;
         pageFloorMs = minMs(runs.unsettledFloorMs, runs.touchedFloorMs);
@@ -764,11 +786,18 @@ export class AssistantWatchService {
     // No age cutoff: the floor is whatever this window observed still unsettled (or, for
     // a boundary baseline, still unannounced). Settlement or absence releases it.
     const floor = scan.floorMs == null ? null : isoOf(scan.floorMs);
+    const markers = this.underwayMarkers(ctx, scan.underway);
+    if (markers === null) {
+      // The generator and the classifier disagree, or an id cannot be encoded: nothing is
+      // committed, the surface is refused, and no start is announced as history.
+      repo.block(unit.targetId, unit.surface, 'baseline_marker_invalid', nowIso);
+      return 'blocked';
+    }
     const committed = repo.commitObservation({
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
       cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : ctx.nowMs),
       nextDueAt: this.nextDue(ctx.nowMs), atIso: nowIso,
-      events: [...a.events.map((e) => this.write(e)), ...this.underwayMarkers(ctx, scan.underway)],
+      events: [...a.events.map((e) => this.write(e)), ...markers],
       ...(!baseline && ci !== null ? { alsoSet: { surface: 'ci_state' as const, cursor: ci } } : {}),
       ...(advanced ? { boundaryKnown: true } : baseline ? { boundaryKnown: false } : {}),
       ...(unit.surface === 'runs' || unit.surface === 'releases' ? { scanFloor: floor } : {}),
@@ -783,20 +812,31 @@ export class AssistantWatchService {
   }
 
   /**
-   * Identity markers for runs that were already underway at a baseline boundary.
+   * Markers for runs that were already underway at a baseline boundary, or null when one
+   * cannot be encoded.
    *
    * Their start is history, but an UPDATE after the cursor would otherwise announce it. Each
-   * marker is the `ci_started` identity, settled at birth, with an EMPTY payload (no text from
-   * the repository), written only in the baseline's atomic commit, so nothing is half-visible
-   * and nothing is ever delivered for it. It is dedupe state, not a delivery: a settlement
-   * time on it says "known", never "told".
+   * marker is a reserved-namespace event (`baseline-marker:v1:ci_started:<run>:<boundary>`),
+   * deliberately NOT the real `<run>:ci_started` identity, settled at birth with an EMPTY
+   * payload (no text from the repository), written only in the baseline's atomic commit, so
+   * nothing is half-visible and nothing is ever delivered for it. It is dedupe state, not a
+   * delivery: a settlement time on it says "known", never "told". Suppression is a rule
+   * applied with the pass's own cursor (`deriveRuns`), so a cursor an import rewound below
+   * the boundary still announces the start under its real identity.
    */
-  private underwayMarkers(ctx: UnitCtx, ids: readonly string[] | undefined): ObservedEventWrite[] {
+  private underwayMarkers(ctx: UnitCtx, ids: readonly string[] | undefined): ObservedEventWrite[] | null {
     if (ctx.boundaryMs === null || !ids) return [];
-    return ids.map((id) => ({
-      id: randomUUID(), kind: 'ci_started' as const, identity: `${id}:ci_started`,
-      occurredAt: isoOf(ctx.boundaryMs!), payloadJson: '{}', settled: true,
-    }));
+    const nowIso = isoOf(ctx.nowMs);
+    const out: ObservedEventWrite[] = [];
+    for (const id of ids) {
+      const m = encodeBaselineMarker(id, ctx.boundaryMs, nowIso);
+      if (m === null) return null;
+      out.push({
+        id: randomUUID(), kind: 'ci_started' as const, identity: m.identity, occurredAt: m.occurredAt,
+        payloadJson: '{}', settled: true,
+      });
+    }
+    return out;
   }
 
   private write(e: DerivedEvent): ObservedEventWrite {
@@ -1194,10 +1234,12 @@ export class AssistantWatchService {
     if (blocked.systemCancelled > 0) {
       parts.push(`${blocked.systemCancelled} target(s) cancelled because the repository stopped being shown`);
     }
-    if (blocked.windowExceeded + blocked.identityChanged + blocked.releaseUntrackable > 0) {
+    const markerBlocked = blocked.baselineMarkerInvalid + blocked.baselineMarkerOverflow;
+    if (blocked.windowExceeded + blocked.identityChanged + blocked.releaseUntrackable + markerBlocked > 0) {
       parts.push(
         `blocked: ${blocked.windowExceeded} surface(s) with a window too deep to prove, ` +
           `${blocked.releaseUntrackable} releases surface(s) with a release that cannot be placed, ` +
+          `${markerBlocked} runs surface(s) whose baseline history cannot be recorded or checked, ` +
           `${blocked.identityChanged} target(s) whose repository was renamed or transferred`,
       );
     }

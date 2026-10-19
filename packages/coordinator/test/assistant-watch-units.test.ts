@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ASSISTANT_WATCH_CALLS_PER_TICK, type WatchSurface } from '@ducky/contracts';
+import { ASSISTANT_WATCH_CALLS_PER_TICK, classifyBaselineMarker, type WatchSurface } from '@ducky/contracts';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { WatchReadError } from '../src/domain/assistant-watch.reader.js';
 import { OWNER, TestClock, makeHarness, type Harness } from './helpers.js';
@@ -39,9 +39,8 @@ const checkpoint = (
 const cp = (h: Harness, id: string, surface: WatchSurface) => h.store.assistantWatch.checkpoint(id, surface)!;
 const events = (h: Harness, id: string) => h.store.assistantWatch.eventsFor(id);
 const ids = (h: Harness, id: string) => events(h, id).map((e) => e.identity).sort();
-/** A baseline's identity marker: observed, empty payload, settled at birth. Dedupe state, never news. */
-const isMarker = (e: ReturnType<typeof events>[number]) =>
-  e.origin === 'observed' && e.payloadJson === '{}' && e.alertedAt === e.createdAt && e.digestedAt === e.createdAt;
+/** A baseline's marker, decided by the one shared classifier. Dedupe state, never news. */
+const isMarker = (e: ReturnType<typeof events>[number]) => classifyBaselineMarker({ ...e, held: e.held }) !== null;
 const news = (h: Harness, id: string) => events(h, id).filter((e) => !isMarker(e));
 
 const issue = (n: number, updated: string, over: Record<string, unknown> = {}) => ({

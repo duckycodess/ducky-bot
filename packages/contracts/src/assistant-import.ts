@@ -18,6 +18,7 @@ import {
   WatchEventPayloadSchema, watchTargetKey,
 } from './assistant-watch.js';
 import { GH_OWNER_RE, GH_REPO_RE } from './github.js';
+import { isReservedMarkerIdentity } from './watch-baseline-marker.js';
 
 /**
  * The interchange document: what an operator-run transformer hands the importer.
@@ -442,6 +443,9 @@ function semanticChecks(doc: AssistantImportDocument, bag: IssueBag): void {
       events += t.events.length;
       bag.add('watch', 'duplicate_checkpoint', dupes(t.checkpoints, (c) => c.surface));
       bag.add('watch', 'duplicate_event', dupes(t.events, (e) => `${e.kind}|${e.identity}`));
+      // The baseline-marker namespace is reserved to a first observation: refused broadly,
+      // counted only, no value named.
+      bag.add('watch', 'reserved_event_identity', t.events.filter((e) => isReservedMarkerIdentity(e.identity)).length);
       for (const c of t.checkpoints) {
         if (
           (TIME_CURSOR_SURFACES as readonly string[]).includes(c.surface) &&

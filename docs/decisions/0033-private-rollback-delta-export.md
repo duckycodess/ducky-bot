@@ -90,10 +90,16 @@ only. **State** is one latest value per key, applied idempotently: watch checkpo
 events Ducky observed or settled since the import, briefing slots, the monitoring switch
 and discovery tombstones. A table past a 20,000-row read cap is reported incomplete rather
 than cut.
-A watch event with an empty payload whose alert and digest time equal its creation time is
-an identity marker a first observation wrote for a run already underway (ADR 0031): state
-meaning "this start is known", never a record that anything was delivered, and a reverse
-bridge must not read its settlement time as a delivery.
+**Baseline markers and the schema version.** Every exported watch event carries a
+`baselineMarker` boolean decided by the one shared classifier (ADR 0031): a first-observation
+suppression marker in the reserved `baseline-marker:v1:` namespace. It means "this start is
+known", never that anything was delivered, so a reverse bridge announces nothing and settles
+nothing from it. Because a v1 document cannot tell an exporter that lacked the flag from a real
+`false`, the schema is bumped to `ducky-rollback-delta/v2`. **A v1 document has no such flag, so
+its marker status is UNKNOWN**: it must not be inferred from a payload, a timestamp or an
+identity, and an unflagged v1 row must not be read as "not a marker". No consumer of v1 exists in
+this repository, no v1 file is rewritten, no stored row is migrated or contracted, and the
+private source reverse bridge remains unproven.
 
 ### Replay semantics
 

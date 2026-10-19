@@ -360,8 +360,9 @@ export interface RunsRead extends SurfaceRead {
   readonly touchedFloorMs: number | null;
   /**
    * Ids of runs that were ALREADY queued or running at the baseline boundary (created at
-   * or before it). Their start is history; the baseline records each as an identity
-   * marker settled at birth, so a later update never announces it. Empty outside a baseline.
+   * or before it). Their start is history; the baseline records each as a reserved-namespace
+   * marker (`@ducky/contracts` watch-baseline-marker), applied as suppression with the
+   * pass's own cursor. Empty outside a baseline.
    */
   readonly underwayIds: readonly string[];
 }
@@ -402,6 +403,13 @@ export function deriveRuns(
   floorMs: number | null = null,
   /** A baseline read's frozen boundary: runs updated after it are `touchedFloorMs`. */
   boundaryMs: number | null = null,
+  /**
+   * Run id -> the boundary at which that run was recorded as already underway (this target's
+   * own validated baseline markers). A `ci_started` for such a run is history, and is
+   * suppressed ONLY while the committed cursor is at or after that boundary: a cursor an
+   * import rewound below it must still announce the start. Nothing else is suppressed.
+   */
+  startMarkers: ReadonlyMap<string, number> | null = null,
 ): RunsRead {
   const at_ = edges(sinceMs, inclusive);
   const threshold = windowThresholdMs(sinceMs, floorMs);
@@ -442,8 +450,10 @@ export function deriveRuns(
     // or running. Judging it by creation against a moving cursor loses it (a run inserted
     // late, with an older run's conclusion carrying the cursor past its creation); a run
     // already underway at a baseline is silenced by identity marker instead (`underwayIds`).
-    if (status === 'queued' || status === 'in_progress') kind = 'ci_started';
-    else if (FAILED.has(conclusion)) kind = 'ci_failed';
+    if (status === 'queued' || status === 'in_progress') {
+      const markedAt = startMarkers?.get(r.id);
+      kind = markedAt !== undefined && sinceMs !== null && sinceMs >= markedAt ? undefined : 'ci_started';
+    } else if (FAILED.has(conclusion)) kind = 'ci_failed';
     else if (conclusion === 'success') kind = previouslyFailing ? 'ci_recovered' : undefined;
     if (newestConclusion === null && conclusion) newestConclusion = conclusion;
     if (kind) {

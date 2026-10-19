@@ -1,5 +1,7 @@
 import {
-  TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS, WATCH_EVENT_SURFACE, type WatchEventKind, type WatchSurface,
+  BASELINE_MARKER_CANDIDATE_LIMIT, BASELINE_MARKER_PREFIX, TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS,
+  WATCH_EVENT_SURFACE, classifyBaselineMarker, isReservedMarkerIdentity, type MarkerCandidate,
+  type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
@@ -162,6 +164,19 @@ const mapEvent = (r: Record<string, unknown>): WatchEventRow => ({
   alertedAt: r['alerted_at'] == null ? null : String(r['alerted_at']),
   alertAttempts: Number(r['alert_attempts']),
   alertAbandonedAt: r['alert_abandoned_at'] == null ? null : String(r['alert_abandoned_at']),
+  digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
+  createdAt: String(r['created_at']),
+});
+
+/** The columns the baseline-marker classifier reads, from a raw `assistant_watch_events` row. */
+export const markerCandidateOf = (r: Record<string, unknown>): MarkerCandidate => ({
+  kind: String(r['kind']),
+  origin: String(r['origin']),
+  identity: String(r['identity']),
+  occurredAt: String(r['occurred_at']),
+  payloadJson: String(r['payload_json']),
+  held: Number(r['held']),
+  alertedAt: r['alerted_at'] == null ? null : String(r['alerted_at']),
   digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
   createdAt: String(r['created_at']),
 });
@@ -477,7 +492,8 @@ export class AssistantWatchRepo {
 
   /** Counts of blocked surfaces by reason: never a repository name. */
   blockedCounts(ownerId: string): {
-    windowExceeded: number; identityChanged: number; releaseUntrackable: number; systemCancelled: number;
+    windowExceeded: number; identityChanged: number; releaseUntrackable: number;
+    baselineMarkerInvalid: number; baselineMarkerOverflow: number; systemCancelled: number;
   } {
     const one = (reason: string): number =>
       Number(
@@ -499,7 +515,9 @@ export class AssistantWatchRepo {
     );
     return {
       windowExceeded: one('window_exceeded'), identityChanged: one('identity_changed'),
-      releaseUntrackable: one('release_untrackable'), systemCancelled,
+      releaseUntrackable: one('release_untrackable'),
+      baselineMarkerInvalid: one('baseline_marker_invalid'),
+      baselineMarkerOverflow: one('baseline_marker_overflow'), systemCancelled,
     };
   }
 
@@ -966,6 +984,9 @@ export class AssistantWatchRepo {
     digestedAt: string | null;
     createdAt: string;
   }): void {
+    // The reserved namespace belongs to a baseline alone. Import validation refuses it
+    // first; this is the second line of defence at the write itself, and it names no value.
+    if (isReservedMarkerIdentity(row.identity)) throw new Error('reserved watch event identity');
     this.db
       .prepare(
         `INSERT INTO assistant_watch_events
@@ -1077,6 +1098,30 @@ export class AssistantWatchRepo {
     }
     this.insertImportedEvent(row);
     return true;
+  }
+
+  /**
+   * The runs this target recorded as already underway at its baseline boundary, by run id.
+   *
+   * Reads the reserved-prefix candidates (an exact `substr` comparison, no pattern), one more
+   * than the bound allows, and lets `classifyBaselineMarker` alone decide which are markers.
+   * An overflow is returned, never truncated: a caller that cannot see every marker must not
+   * decide suppression and fails the surface closed. When a run somehow has two markers the
+   * LATER boundary wins, which suppresses less.
+   */
+  baselineMarkers(targetId: string): { readonly markers: ReadonlyMap<string, number>; readonly overflow: boolean } {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM assistant_watch_events
+          WHERE target_id = ? AND substr(identity, 1, ?) = ? LIMIT ?`,
+      )
+      .all(targetId, BASELINE_MARKER_PREFIX.length, BASELINE_MARKER_PREFIX, BASELINE_MARKER_CANDIDATE_LIMIT + 1);
+    const markers = new Map<string, number>();
+    for (const r of rows.slice(0, BASELINE_MARKER_CANDIDATE_LIMIT)) {
+      const m = classifyBaselineMarker(markerCandidateOf(r as Record<string, unknown>));
+      if (m && (markers.get(m.runId) ?? -1) < m.boundaryMs) markers.set(m.runId, m.boundaryMs);
+    }
+    return { markers, overflow: rows.length > BASELINE_MARKER_CANDIDATE_LIMIT };
   }
 
   eventExists(targetId: string, kind: WatchEventKind, identity: string): boolean {
@@ -1240,11 +1285,24 @@ export class AssistantWatchRepo {
     active: number;
     cancelled: number;
     checkpoints: number;
+    /** Every watch event EXCEPT the baseline markers the classifier accepts. */
     events: number;
+    /** Baseline markers (dedupe state, not events); only rows the classifier accepts. */
+    baselineMarkers: number;
     undigested: number;
   } {
     const one = (sql: string, ...args: string[]): number =>
       Number((this.db.prepare(sql).get(...args) as { n: number }).n);
+    // A SQL prefilter only NARROWS the candidates; the classifier alone decides, so a row
+    // that nearly matches stays an ordinary event and cannot vanish from a count.
+    const markerCount = this.db
+      .prepare(
+        `SELECT e.* FROM assistant_watch_events e
+           JOIN assistant_watch_targets t ON t.id = e.target_id
+          WHERE t.discord_user_id = ? AND substr(e.identity, 1, ?) = ?`,
+      )
+      .all(ownerId, BASELINE_MARKER_PREFIX.length, BASELINE_MARKER_PREFIX)
+      .filter((r) => classifyBaselineMarker(markerCandidateOf(r as Record<string, unknown>)) !== null).length;
     return {
       targets: one('SELECT COUNT(*) AS n FROM assistant_watch_targets WHERE discord_user_id = ?', ownerId),
       active: one(
@@ -1264,7 +1322,8 @@ export class AssistantWatchRepo {
         `SELECT COUNT(*) AS n FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id WHERE t.discord_user_id = ?`,
         ownerId,
-      ),
+      ) - markerCount,
+      baselineMarkers: markerCount,
       undigested: one(
         `SELECT COUNT(*) AS n FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id

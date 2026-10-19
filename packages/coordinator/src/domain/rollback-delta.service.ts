@@ -1,5 +1,6 @@
 import type { IdentityCategory, IdentityRow, OwnerStateSnapshot, RawRow, Store } from '@ducky/persistence';
-import { baselineHash } from '@ducky/persistence';
+import { classifyBaselineMarker } from '@ducky/contracts';
+import { baselineHash, markerCandidateOf } from '@ducky/persistence';
 
 /**
  * The rollback-delta export (ADR 0033): everything that changed in Ducky since an
@@ -26,7 +27,14 @@ import { baselineHash } from '@ducky/persistence';
  * test proves the export is complete and idempotent; it does not prove a source
  * bridge exists, and it never authorizes restoring stale data.
  */
-export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v1';
+export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v2';
+/*
+ * v2 adds `state.watchEvents[].baselineMarker`, decided by the one shared classifier
+ * (`classifyBaselineMarker`). A v1 document has no such field, so its marker status is
+ * UNKNOWN: a reader must not infer one from a payload, a timestamp or an identity, and must
+ * not read an unflagged v1 row as "not a marker". No consumer of v1 exists in this
+ * repository, no v1 file is rewritten, and nothing here contracts or migrates a stored row.
+ */
 /** The most rows of any one table an export reads before it calls itself incomplete. */
 export const ROLLBACK_DELTA_ROW_CAP = 20_000;
 
@@ -103,6 +111,7 @@ export const REPLAY_RULES: readonly string[] = [
   '`deleted` with cause import_suppressed: the import chose not to write it (deleted at the source, or superseded by what the owner did since); nothing to undo.',
   '`deleted` with cause unknown: STOP. The export is incomplete; history already lost is not reconstructible.',
   '`state`: one latest value per key, applied idempotently; applying it twice changes nothing.',
+  '`state.watchEvents[].baselineMarker` true: a first-observation suppression marker. It means this start is KNOWN, never that anything was delivered; announce nothing and settle nothing from it. A document whose schema is v1 has no such flag: its marker status is unknown and must not be inferred.',
   'This export is not a bridge and authorizes no restore of stale data.',
 ];
 
@@ -271,7 +280,12 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
         (e['alert_abandoned_at'] != null && String(e['alert_abandoned_at']) > baselineAt)
       );
     })
-    .map((e) => ({ repoKey: targetKeys.get(String(e['target_id'])) ?? String(e['repo_key']), ...rec(e, ['id', 'target_id', 'repo_key']) }));
+    .map((e) => ({
+      repoKey: targetKeys.get(String(e['target_id'])) ?? String(e['repo_key']),
+      ...rec(e, ['id', 'target_id', 'repo_key']),
+      // First-observation suppression marker: exact shared classifier, never a heuristic.
+      baselineMarker: classifyBaselineMarker(markerCandidateOf(e)) !== null,
+    }));
 
   const out: RollbackDelta = {
     schema: ROLLBACK_DELTA_SCHEMA,

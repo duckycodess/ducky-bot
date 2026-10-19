@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { ASSISTANT_WATCH_CALLS_PER_TICK, type WatchSurface } from '@ducky/contracts';
+import {
+  ASSISTANT_WATCH_CALLS_PER_TICK, BASELINE_MARKER_PREFIX, classifyBaselineMarker, encodeBaselineMarker,
+  validateAssistantImport, type WatchSurface,
+} from '@ducky/contracts';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { parseScan } from '../src/domain/assistant-watch.scan.js';
 import { WatchReadError } from '../src/domain/assistant-watch.reader.js';
+import { buildRollbackDelta } from '../src/domain/rollback-delta.service.js';
+import { importDoc } from './assistant-import-fixture.js';
 import { deriveReleases, deriveRuns, secondBoundaryMs } from '../src/domain/assistant-watch.engine.js';
 import { OWNER, TestClock, makeHarness, type Harness } from './helpers.js';
 
@@ -46,11 +51,12 @@ const checkpoint = (
 });
 const cp = (h: Harness, id: string, surface: WatchSurface) => h.store.assistantWatch.checkpoint(id, surface)!;
 const events = (h: Harness, id: string) => h.store.assistantWatch.eventsFor(id);
-/** A baseline's identity marker: observed, empty payload, settled at birth. Dedupe state, never news. */
-const isMarker = (e: ReturnType<typeof events>[number]) =>
-  e.origin === 'observed' && e.payloadJson === '{}' && e.alertedAt === e.createdAt && e.digestedAt === e.createdAt;
+/** A baseline's marker, decided by the one shared classifier. Dedupe state, never news. */
+const isMarker = (e: ReturnType<typeof events>[number]) => classifyBaselineMarker({ ...e, held: e.held }) !== null;
 const news = (h: Harness, id: string) => events(h, id).filter((e) => !isMarker(e));
-const markers = (h: Harness, id: string) => events(h, id).filter(isMarker).map((e) => e.identity).sort();
+/** The run ids the markers name. */
+const markers = (h: Harness, id: string) =>
+  events(h, id).filter(isMarker).map((e) => classifyBaselineMarker({ ...e, held: e.held })!.runId).sort();
 const ids = (h: Harness, id: string) => news(h, id).map((e) => e.identity).sort();
 
 const run = (id: string, created: string, status: string, conclusion: string | null, updated = created) => ({
@@ -83,7 +89,7 @@ describe('the boundary is the second before the first request, never the newest 
     expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B, boundaryKnown: false, pendingState: null });
     expect(news(h, id)).toEqual([]);
     // Run 2 was already underway: its start is recorded as known, silently, with no text.
-    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(markers(h, id)).toEqual(['2']);
     expect(events(h, id).every((e) => e.payloadJson === '{}' && !e.held)).toBe(true);
     expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
     h.close();
@@ -205,7 +211,7 @@ describe('a transition while a multi-page baseline is read is announced once, by
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
     expect(ids(h, id)).toEqual(['9:ci_started']);
-    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(markers(h, id)).toEqual(['2']);
     reader.runsBy.set('acme/widgets', [
       run('9', AFTER(12), 'in_progress', null),
       run('2', at(12, 9), 'completed', 'failure', AFTER(20)),
@@ -817,7 +823,7 @@ describe('identity markers for runs already underway at the boundary', () => {
 
     clock.advance(40 * MIN);
     const out = await h.app.assistantWatch.tick();
-    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(markers(h, id)).toEqual(['2']);
     expect(events(h, id).every((e) => !e.held && e.payloadJson === '{}')).toBe(true);
     expect(out.alertsSent).toBe(0);
     expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
@@ -855,7 +861,7 @@ describe('identity markers for runs already underway at the boundary', () => {
     reader.hook = null;
     clock.advance(40 * MIN);
     await h.app.assistantWatch.tick();
-    expect(markers(h, id)).toEqual(['2:ci_started']);
+    expect(markers(h, id)).toEqual(['2']);
     h.close();
   });
 
@@ -870,6 +876,275 @@ describe('identity markers for runs already underway at the boundary', () => {
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
     expect(ids(h, id)).toEqual(['9:ci_started']);
+    h.close();
+  });
+});
+
+/** A row written straight to the table: only a forgery or a near miss can look like this. */
+const forge = (h: Harness, targetId: string, i: number, over: Record<string, unknown> = {}) => {
+  const row = {
+    id: `forged-${targetId}-${i}`, target_id: targetId, kind: 'ci_started', surface: 'runs', held: 0,
+    identity: `${BASELINE_MARKER_PREFIX}v9:forged:${i}`, occurred_at: B, payload_json: '{}', origin: 'observed',
+    alerted_at: NOW, digested_at: NOW, created_at: NOW, ...over,
+  };
+  h.store.db.prepare(
+    `INSERT INTO assistant_watch_events
+       (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, digested_at, created_at)
+     VALUES (@id, @target_id, @kind, @surface, @held, @identity, @occurred_at, @payload_json, @origin, @alerted_at, @digested_at, @created_at)`,
+  ).run(row as never);
+};
+
+describe('a rewound cursor still announces the start a marker would silence', () => {
+  const RUN = '77';
+  const S = '2026-10-12T10:00:00.000Z';
+  const baselineWithUnderwayRun = async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run(RUN, at(12, 9), 'in_progress', null, at(12, 12))]);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual([RUN]);
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B });
+    return { h, clock, reader, id };
+  };
+
+  it('keeps the start silent while the cursor is at or after the boundary', async () => {
+    const { h, clock, reader, id } = await baselineWithUnderwayRun();
+    reader.runsBy.set('acme/widgets', [run(RUN, at(12, 9), 'in_progress', null, AFTER(20))]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(news(h, id)).toEqual([]);
+    h.close();
+  });
+
+  it('announces it exactly once after an import adopts an earlier source cursor, and never again', async () => {
+    const { h, clock, reader, id } = await baselineWithUnderwayRun();
+    // The source's cursor S is BELOW the boundary B: what happened between them was never told.
+    expect(h.store.assistantWatch.adoptCheckpoint(id, 'runs', S, NOW, NOW)).toBe(true);
+    expect(cp(h, id, 'runs')).toMatchObject({ cursor: S, boundaryKnown: false });
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual([`${RUN}:ci_started`]);
+    expect(h.store.assistantWatch.undigested(OWNER, 20).length).toBe(1);
+
+    // A second adoption rewinds again; the canonical identity deduplicates it.
+    expect(h.store.assistantWatch.adoptCheckpoint(id, 'runs', '2026-10-11T00:00:00.000Z', NOW, NOW)).toBe(true);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual([`${RUN}:ci_started`]);
+    expect(markers(h, id)).toEqual([RUN]); // the marker itself is never changed or consumed
+    h.close();
+  });
+});
+
+describe('a marker is scoped to its own run and its own target', () => {
+  it('does not silence another run, however similar', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null), run('3', at(12, 9), 'completed', 'success'),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual(['2']);
+    // Run 3 was finished at the boundary and is re-run afterwards: that start is real news.
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null, AFTER(10)), run('3', at(12, 9), 'queued', null, AFTER(11)),
+    ]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['3:ci_started']);
+    h.close();
+  });
+
+  it('does not silence the same run id in another target', async () => {
+    const { h, clock, reader } = boot();
+    const x = target(h, 'main', 'acme/widgets');
+    const y = target(h, 'main', 'acme/gadgets');
+    checkpoint(h, x, 'runs', 'unbaselined', null);
+    checkpoint(h, y, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('2', at(12, 10), 'in_progress', null)]);
+    reader.runsBy.set('acme/gadgets', [run('2', at(12, 10), 'completed', 'success')]);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, x)).toEqual(['2']);
+    expect(markers(h, y)).toEqual([]);
+    for (const repo of ['acme/widgets', 'acme/gadgets']) {
+      reader.runsBy.set(repo, [run('2', at(12, 10), 'in_progress', null, AFTER(10))]);
+    }
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, x)).toEqual([]); // underway at its own boundary: history
+    expect(ids(h, y)).toEqual(['2:ci_started']); // re-run after the boundary there: news
+    h.close();
+  });
+
+  it('records no marker for a run that was waiting, and announces its later start', async () => {
+    const { h, clock, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('4', at(12, 9), 'waiting', null)]);
+    await h.app.assistantWatch.tick();
+    // It is unsettled, so the next window reaches it, but a waiting run has not started.
+    expect(markers(h, id)).toEqual([]);
+    expect(cp(h, id, 'runs').scanFloor).toBe('2026-10-12T09:00:00.000Z');
+    reader.runsBy.set('acme/widgets', [run('4', at(12, 9), 'in_progress', null, AFTER(10))]);
+    clock.advance(16 * MIN);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toEqual(['4:ci_started']);
+    h.close();
+  });
+});
+
+describe('a baseline that cannot record its history refuses visibly', () => {
+  it.each(['abc', '01', '1e+21', '-3', '9007199254740993'])(
+    'blocks the runs surface for an underway run with the id %s',
+    async (runId) => {
+      const { h, reader } = boot();
+      const id = target(h);
+      checkpoint(h, id, 'runs', 'unbaselined', null);
+      reader.pageSize = 10;
+      reader.runsBy.set('acme/widgets', [run(runId, at(12, 9), 'in_progress', null)]);
+      const out = await h.app.assistantWatch.tick();
+      expect(out.blocked).toBe(1);
+      expect(cp(h, id, 'runs')).toMatchObject({
+        state: 'unbaselined', cursor: null, blockedReason: 'baseline_marker_invalid',
+      });
+      expect(events(h, id)).toEqual([]); // not skipped, not announced, not recorded under another identity
+      const line = h.app.assistantWatch.statusLine();
+      expect(line).toContain('1 runs surface(s) whose baseline history cannot be recorded or checked');
+      expect(line).not.toContain('acme');
+      expect(h.store.assistantWatch.blockedCounts(OWNER)).toMatchObject({ baselineMarkerInvalid: 1 });
+      h.close();
+    },
+  );
+
+  it('does not refuse an unencodable id that was not underway', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('abc', at(12, 9), 'completed', 'success')]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', cursor: B });
+    h.close();
+  });
+});
+
+describe('the marker lookup never guesses', () => {
+  it('reads up to its bound of candidates, near misses included, and does not block', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'imported', SINCE);
+    for (let i = 0; i < 200; i += 1) forge(h, id, i);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('1', at(12, 9), 'completed', 'success')]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs')).toMatchObject({ state: 'ready', blockedReason: null });
+    h.close();
+  });
+
+  it('fails the surface closed, counted, when candidates overflow the bound', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'imported', SINCE);
+    for (let i = 0; i < 201; i += 1) forge(h, id, i);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('1', at(12, 9), 'completed', 'failure')]);
+    const out = await h.app.assistantWatch.tick();
+    expect(out.blocked).toBe(1);
+    expect(cp(h, id, 'runs')).toMatchObject({ cursor: SINCE, blockedReason: 'baseline_marker_overflow' });
+    expect(news(h, id)).toEqual(events(h, id)); // none of the forged rows is a marker
+    expect(h.store.assistantWatch.blockedCounts(OWNER)).toMatchObject({ baselineMarkerOverflow: 1 });
+    expect(h.app.assistantWatch.statusLine()).toContain('1 runs surface(s) whose baseline history cannot be recorded or checked');
+    h.close();
+  });
+});
+
+describe('counts and the export give the same answer, from the same classifier', () => {
+  it('counts a marker separately and keeps every near miss an ordinary event', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [
+      run('2', at(12, 10), 'in_progress', null), run('1', at(12, 9), 'queued', null),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(markers(h, id)).toEqual(['1', '2']);
+    const before = h.store.assistantWatch.counts(OWNER);
+    expect(before).toMatchObject({ events: 0, baselineMarkers: 2 });
+
+    // Rows that nearly match: a later version, an imported origin and a payload with text.
+    forge(h, id, 1, { identity: `${BASELINE_MARKER_PREFIX}v2:ci_started:9:${Date.parse(B)}` });
+    forge(h, id, 2, { origin: 'imported', identity: `${BASELINE_MARKER_PREFIX}v1:ci_started:8:${Date.parse(B)}` });
+    forge(h, id, 3, { identity: `${BASELINE_MARKER_PREFIX}v1:ci_started:9:${Date.parse(B)}`, payload_json: '{"name":"x"}' });
+    const after = h.store.assistantWatch.counts(OWNER);
+    expect(after).toMatchObject({ events: 3, baselineMarkers: 2 });
+    h.close();
+  });
+
+  it('flags exactly the same rows in the export', async () => {
+    const { h, reader } = boot();
+    const id = target(h);
+    checkpoint(h, id, 'runs', 'unbaselined', null);
+    reader.pageSize = 10;
+    reader.runsBy.set('acme/widgets', [run('2', at(12, 10), 'in_progress', null)]);
+    await h.app.assistantWatch.tick();
+    forge(h, id, 1, { identity: `${BASELINE_MARKER_PREFIX}v2:ci_started:9:${Date.parse(B)}` });
+    const d = buildRollbackDelta({ store: h.store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:00.000Z' });
+    expect(d.schema).toBe('ducky-rollback-delta/v2');
+    const flagged = d.state.watchEvents.filter((e) => e['baselineMarker'] === true);
+    expect(flagged.length).toBe(1);
+    expect(flagged.length).toBe(h.store.assistantWatch.counts(OWNER).baselineMarkers);
+    expect(d.state.watchEvents.every((e) => typeof e['baselineMarker'] === 'boolean')).toBe(true);
+    expect(d.state.watchEvents.filter((e) => e['baselineMarker'] === false).length)
+      .toBe(h.store.assistantWatch.counts(OWNER).events);
+    expect(d.replay.some((r) => r.includes('baselineMarker') && r.includes('never that anything was delivered'))).toBe(true);
+    h.close();
+  });
+});
+
+describe('an import may not use the reserved namespace', () => {
+  const withIdentity = (identity: string) => {
+    const doc = JSON.parse(JSON.stringify(importDoc())) as { watch: { targets: { events: { identity: string }[] }[] } };
+    doc.watch.targets[0]!.events[0]!.identity = identity;
+    return doc;
+  };
+
+  it('refuses the prefix broadly in validation, counted and without naming the value', () => {
+    for (const identity of [
+      `${BASELINE_MARKER_PREFIX}v1:ci_started:7:1760313599999`, `${BASELINE_MARKER_PREFIX}v2:x`, `${BASELINE_MARKER_PREFIX}`,
+    ]) {
+      const v = validateAssistantImport(withIdentity(identity));
+      expect(v.ok).toBe(false);
+      if (v.ok) continue;
+      expect(v.issues).toContainEqual({ category: 'watch', rule: 'reserved_event_identity', count: 1 });
+      expect(JSON.stringify(v.issues)).not.toContain(identity);
+    }
+    expect(validateAssistantImport(withIdentity('12:opened')).ok).toBe(true);
+  });
+
+  it('is refused again at the write itself, without echoing the value', () => {
+    const { h } = boot();
+    const id = target(h);
+    const row = {
+      id: 'x', targetId: id, kind: 'ci_started' as const, identity: `${BASELINE_MARKER_PREFIX}v1:ci_started:7:1760313599999`,
+      occurredAt: B, payloadJson: '{}', alertedAt: NOW, digestedAt: NOW, createdAt: NOW,
+    };
+    expect(() => h.store.assistantWatch.insertImportedEvent(row)).toThrow('reserved watch event identity');
+    expect(() => h.store.assistantWatch.insertImportedEventIfNew(row)).toThrow(/reserved watch event identity/);
+    try {
+      h.store.assistantWatch.insertImportedEvent(row);
+    } catch (e) {
+      expect(String((e as Error).message)).not.toContain('1760313599999');
+    }
+    expect(events(h, id)).toEqual([]);
     h.close();
   });
 });

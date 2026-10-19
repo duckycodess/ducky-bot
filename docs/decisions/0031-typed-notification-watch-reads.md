@@ -153,23 +153,65 @@ multi-page window.
 - **Nothing before the boundary is delivered.** The baseline itself delivers nothing. The
   following ordinary pass reads from the boundary, so only what moved after it is announced,
   once, by identity. A run that was already running at the boundary announces no
-  `ci_started`; it still announces its conclusion. This is done with DURABLE IDENTITY
-  MARKERS, not by a rule on the moving cursor: the baseline's atomic commit also writes, for
-  each run created at or before the boundary and queued or running when read, the
-  `<run>:ci_started` identity as an event **settled at birth with an empty payload** (the
-  existing `settled` write, no schema change). Nothing is held, shown or delivered for it, it
-  carries no text from the repository, and it is dedupe state meaning "known", never "told":
-  it is never counted as undigested, never an alert, and never a delivery claim. It is
-  retained like every watch event (the retention manifest forbids touching the table), and in
-  the rollback export it is a settled observed event with an empty payload, replayed as state
-  (the identity is known), which is the right meaning. A run created AFTER the boundary
-  gets no marker, so its start is announced. A drift restart drops the markers gathered so
-  far and the pass that commits recomputes them.
-  *Superseded design:* an earlier review-approved rule announced a start only when the run
-  was created after the observation cursor. That was unsafe and was removed: a run inserted
-  late whose creation sits before a cursor that an older run's later conclusion carried
-  forward would never announce its start. A start is announced from an UPDATE after the
-  cursor again, as before, and only the baseline's markers silence history.
+  `ci_started`; it still announces its conclusion. This is done with a DURABLE MARKER and a
+  cursor-scoped rule, never by settling the real identity and never by a rule on the moving
+  cursor alone.
+  - **The marker.** The baseline's atomic commit writes, for each run created at or before the
+    boundary and queued or running when read, one watch event of kind `ci_started` in a RESERVED
+    namespace, `baseline-marker:v1:ci_started:<runId>:<boundaryMs>`: observed, settled at birth,
+    empty payload, never held, written only in that commit. It is NOT the real
+    `<run>:ci_started` identity, so it shares no uniqueness slot with it. A marker says only
+    "this run was underway at boundary B"; whether a start is silenced is a rule applied with the
+    pass's own cursor.
+  - **One classifier.** `classifyBaselineMarker` (pure, `@ducky/contracts`) is the only
+    authority. A row is a marker only if kind is `ci_started`, origin `observed`, the identity
+    matches `^baseline-marker:v1:ci_started:(0|[1-9]\d{0,15}):([1-9]\d{12})$` with a safe run id
+    and a boundary with `B % 1000 === 999`, `occurred_at` equals that boundary, the payload is
+    exactly `{}`, it is not held, and alert, digest and creation times are all set, equal and at
+    or after the boundary. Anything else (another version, a near miss, an imported row) is an
+    ordinary event that never suppresses and is never counted as a marker. Suppression, the
+    counts, the export flag and the tests all call it. The namespace is refused BROADLY and
+    classified NARROWLY: the importer rejects any imported event identity that starts with
+    `baseline-marker:` (counted, no value named; and the same refusal is repeated at the write
+    seam), because only the engine and the baseline can otherwise write one.
+  - **Fail closed.** Markers are built by one encoder that checks its own output against the
+    classifier. An underway run whose id cannot be encoded (not plain decimal, not a safe
+    integer) refuses the runs surface as `baseline_marker_invalid`, cursor still null, nothing
+    recorded; it is never skipped (that would announce history) and never settled under the real
+    identity. The lookup reads at most 200 candidates plus one: an overflow refuses the surface
+    as `baseline_marker_overflow` instead of silently taking the first 99. Both are counted by
+    reason in `/status`, never by repository.
+  - **Suppression is cursor-scoped.** An ordinary runs pass loads this target's own validated
+    markers and drops a `ci_started` for a marked run ONLY while the pass's committed cursor is
+    at or after that marker's boundary. All other kinds, other runs and other targets are
+    untouched. If an import adopts a source cursor BELOW the boundary, the start is announced
+    once under its real identity, and a repeated adoption or pass deduplicates on that identity:
+    the marker is never consumed or rewritten.
+  - **Counts and export.** `counts().events` excludes exactly the rows the classifier accepts
+    (a SQL prefix filter only narrows candidates) and `baselineMarkers` reports them, so a near
+    miss or forged row stays visible in the event count. The export adds a per-row
+    `baselineMarker` boolean from the same classifier (ADR 0033, schema v2).
+  - **Not a delivery.** A marker is never undigested, never an alert and never a delivery claim.
+    It is retained like every watch event (the retention manifest forbids touching the table).
+  - **Waiting, pending, requested.** A run unsettled in one of those states at the boundary sets
+    the floor but gets no marker: it has not started. If it later becomes queued or running, that
+    start is announced as news.
+  - **Limitation that stays required (D8).** Commit `b88b701` is PUSHED but was never deployed,
+    released or imported into a live runtime. It wrote its markers under the CANONICAL
+    `<run>:ci_started` identity (settled, empty payload). A development or scratch database that
+    ran that code keeps those rows: they are ordinary settled events, still deduplicate those
+    runs' starts, and so keep the rewind defect for those runs only. They are never reinterpreted,
+    unmarked or migrated, and nothing is inferred from an empty payload or a settlement time,
+    because that could rewrite genuine delivery history. A fresh baseline, or an explicit
+    owner-run offline step, is the only remedy.
+  A run created AFTER the boundary gets no marker, so its start is announced. A drift restart
+  drops the markers gathered so far and the pass that commits recomputes them.
+  *Superseded designs:* (1) a rule announcing a start only when the run was created after the
+  observation cursor: unsafe, because a late-inserted run whose creation sits before a cursor an
+  older run's conclusion carried forward would never announce; (2) markers under the canonical
+  identity: unsafe, because a rewound cursor (an import adopting a source cursor below the
+  boundary) could not announce a start the canonical row had silenced. A start is announced from
+  an UPDATE after the cursor, and only a boundary-scoped marker silences history.
 - **The next pass can reach what moved.** The creation floor committed with the baseline
   covers every unsettled item AND every item that moved after the boundary (a run's last
   update, a release's publication), so an older-created item that settled or published

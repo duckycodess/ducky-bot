@@ -1298,9 +1298,16 @@ fail-closed form of the blocker, not a decision to drop it.
   delivers nothing; the next ordinary pass announces, once, what moved after the boundary,
   including an older-created run or draft that settled or published while later pages were
   being read. A run already running at the boundary announces no historical `ci_started`: the baseline's
-  commit records that identity as a settled-at-birth marker with an empty payload (dedupe state,
-  never a delivery, never news), while a start is otherwise announced from an update after the
-  cursor. A release with no creation time that is a draft, or was published after the boundary,
+  commit records it as a marker in a RESERVED identity namespace (`baseline-marker:v1:...`, settled,
+  empty payload, never the real `<run>:ci_started` identity), decided everywhere by one exact classifier
+  and applied only while the pass's cursor is at or after the marker's boundary, so an import adopting
+  an earlier source cursor still announces the start once. A start is otherwise announced from an update
+  after the cursor. An id that cannot be encoded, or a marker lookup that overflows its bound, refuses
+  the surface visibly (`baseline_marker_invalid` / `baseline_marker_overflow`); the importer refuses the
+  reserved prefix; counts report markers separately; the rollback export is now schema v2 with a per-row
+  `baselineMarker` flag (a v1 document's marker status is unknown). **Required limitation:** commit
+  `b88b701` is pushed but never deployed, and a development or scratch database that ran it holds
+  canonical-identity markers that are not reinterpreted or migrated. A release with no creation time that is a draft, or was published after the boundary,
   is refused (`release_untrackable`, counted by reason in `/status`).
   **Limits that remain required blockers, not claims of completeness:** a first inventory
   of 100 or more runs or releases is REFUSED as `window_exceeded` (page cardinality cannot

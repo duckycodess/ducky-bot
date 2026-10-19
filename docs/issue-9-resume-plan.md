@@ -258,6 +258,41 @@ naming a repository; (M2) a tick ends rather than re-picking a unit that made no
 and did not move. All C1-C11 limits, the 99-item capacity, the cost, skew, imported and
 shallow targets and every earlier blocker remain required.
 
+### Marker design review D1-D10 (I3, M3, M4)
+
+The reviewer rejected the canonical-identity markers (I3): a canonical `<run>:ci_started`
+settled as suppression silenced a start that an import adopting an earlier source cursor
+(below the boundary) must announce, and the unique identity kept the real event out for good.
+Approved, with these conditions, and implemented exactly:
+
+- D1 one exact pure shared classifier (`classifyBaselineMarker`, `@ducky/contracts`): kind
+  `ci_started`, origin `observed`, identity
+  `^baseline-marker:v1:ci_started:(0|[1-9]\d{0,15}):([1-9]\d{12})$`, safe run id, `B % 1000 === 999`,
+  `occurred_at === iso(B)`, payload `{}`, not held, alert/digest/created all set, equal and at or after
+  the boundary; anything else is an ordinary event. Suppression, counts, export and tests all use it.
+- D2 generation through one encoder that checks itself against the classifier; an unencodable id
+  refuses the runs surface (`baseline_marker_invalid`, counted), never skipped, never announced.
+- D3 suppression only for a marked run, only while the committed cursor is at or after its boundary;
+  the lookup reads a bounded candidate set plus one and an overflow fails the surface closed
+  (`baseline_marker_overflow`, counted), never silently truncated.
+- D4 below the boundary the real identity is announced once and deduplicates; markers exist only in
+  the baseline's atomic commit.
+- D5 import refuses the reserved prefix broadly (validation, counted, no value) and again at the write.
+- D6 counts exclude exactly the classifier's rows (SQL only narrows) and report `baselineMarkers`.
+- D7 export: per-row `baselineMarker` boolean and a replay rule; schema bumped to
+  `ducky-rollback-delta/v2` (a v1 document's marker status is UNKNOWN, never inferred; no consumer of
+  v1 exists here, nothing is rewritten, migrated or contracted).
+- D8 `b88b701` is PUSHED, never deployed, released or imported live. Databases that ran it keep their
+  canonical, settled, empty-payload `<run>:ci_started` rows; they are not reinterpreted, unmarked or
+  migrated and nothing is inferred from them, so the rewind defect persists for those development or
+  scratch databases only. This stays a REQUIRED limitation.
+- D9 waiting, pending or requested runs at the boundary set the floor and get no marker; a later start
+  is announced. D10 the near-miss table, cross-run and cross-target isolation, drift-restart
+  recomputation, unencodable ids, the 200-character identity bound, count/export agreement and the I3
+  reproduction (earlier adopted cursor announces exactly once; repeated adoption nothing more; a cursor
+  at or after the boundary stays silent) are tested. No database migration. All earlier limits and
+  blockers, the private reverse bridge, and `ready_to_merge=false` stand.
+
 ## Required operational gates, not waived
 
 - Fresh live source/config backup with separate restore and academic-health proof, plus stopped target backup/restore.

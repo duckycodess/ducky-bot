@@ -103,8 +103,10 @@ describe('what the owner and Ducky did since', () => {
       id: 'disc-1', publicId: 'wzzzzz', discordUserId: OWNER, repoKey: 'acme/found', display: 'acme/found',
       defaultBranch: null, state: 'active', lastObservedAt: null, createdAt: clock.nowIso(), cancelledAt: null,
     });
-    h.store.assistantWatch.setMonitoring(OWNER, false, clock.nowIso());
-    expect(h.app.schedules.rollbackBatch(h.owner, clock.nowIso())).toMatchObject({ ok: true });
+    // Both owner controls, through their services: the same writes the commands make.
+    expect(h.app.assistantWatch.setMonitoring(h.owner, false)).toMatchObject({ ok: true, changed: true });
+    const preview = h.app.schedules.previewRollback(h.owner);
+    expect(preview.ok && h.app.schedules.confirmRollback(h.owner, preview.code)).toMatchObject({ ok: true });
     h.store.briefings.insertSettled({
       id: 'slot-new', discordUserId: OWNER, kind: 'evening', dayKey: '2026-10-13', target: 'owner_dm',
       dueAt: clock.nowIso(), status: 'delivered', settledAt: clock.nowIso(),

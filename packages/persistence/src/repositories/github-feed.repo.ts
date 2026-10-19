@@ -119,6 +119,15 @@ export class GitHubFeedRepo {
     return rows.map((r) => mapRepo(r as Record<string, unknown>));
   }
 
+  /** Selected repositories that were on the list at any moment since `sinceIso`. */
+  repoKeysActiveSince(sinceIso: string): string[] {
+    return (
+      this.db
+        .prepare("SELECT repo_key AS k FROM github_feed_repos WHERE state = 'active' OR cancelled_at > ?")
+        .all(sinceIso) as { k: string }[]
+    ).map((r) => String(r.k));
+  }
+
   repoByKey(repoKey: string): GitHubFeedRepoRow | undefined {
     const r = this.db.prepare('SELECT * FROM github_feed_repos WHERE repo_key = ?').get(repoKey);
     return r ? mapRepo(r as Record<string, unknown>) : undefined;

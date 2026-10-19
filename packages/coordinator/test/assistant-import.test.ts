@@ -27,6 +27,11 @@ const apply = (h: Harness, svc: AssistantImportService, doc: unknown = importDoc
     lock.release();
   }
 };
+/** A deliberate rollback: a fresh preview, then the code it issued. */
+const rollBack = (h: Harness) => {
+  const p = h.app.schedules.previewRollback(h.owner);
+  return p.ok ? h.app.schedules.confirmRollback(h.owner, p.code) : p;
+};
 const task = (h: Harness, ns: string, sourceId: string) => {
   const id = h.store.assistantImport.identity(ns, 'task', sourceId)!;
   return h.store.tasks.byId(OWNER, id.targetId!)!;
@@ -538,16 +543,38 @@ describe('the source global monitoring switch', () => {
     return doc;
   };
 
-  it('is carried over when it is off, and the watch reads nothing until it is on again', () => {
+  it('is carried over when it is off, and the watch reads nothing until the owner turns it on', () => {
     const { h, svc } = boot();
     expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(true);
     const out = apply(h, svc(), paused(false));
     expect(out.ok).toBe(true);
     expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
     expect(svc().verify(paused(false)).categories['watchSwitch']).toMatchObject({ expected: 1, present: 1, drifted: 0 });
-    // The operator states the switch: importing a document with it on resumes watching.
-    apply(h, svc(), paused(true));
+    // The document states the switch ONCE. The owner resumes it natively...
+    expect(h.app.assistantWatch.setMonitoring(h.owner, true)).toMatchObject({ ok: true, changed: true });
+    // ...and a repeat of the unchanged document neither re-pauses it nor hides the difference.
+    expect(apply(h, svc(), paused(false)).ok).toBe(true);
     expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(true);
+    expect(svc().verify(paused(false)).categories['watchSwitch']).toMatchObject({ drifted: 1 });
+    h.close();
+  });
+
+  it('keeps a native pause across a repeat of a document that says it is on', () => {
+    const { h, svc } = boot();
+    apply(h, svc(), paused(true));
+    expect(h.app.assistantWatch.setMonitoring(h.owner, false)).toMatchObject({ ok: true, changed: true });
+    expect(apply(h, svc(), paused(true)).ok).toBe(true);
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
+    expect(svc().verify(paused(true)).categories['watchSwitch']).toMatchObject({ drifted: 1 });
+    h.close();
+  });
+
+  it('keeps the owner’s choice made BEFORE the first import, and reports it as drift', () => {
+    const { h, svc } = boot();
+    h.app.assistantWatch.setMonitoring(h.owner, false);
+    expect(apply(h, svc(), paused(true)).ok).toBe(true);
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
+    expect(svc().verify(paused(true)).categories['watchSwitch']).toMatchObject({ drifted: 1 });
     h.close();
   });
 
@@ -569,14 +596,39 @@ describe('a replaced schedule batch carries when it was replaced', () => {
     const doc = importDoc() as Record<string, any>;
     doc['schedule'].batches[1].replacedAt = '2026-09-20T00:00:00Z'; // b-0, the replaced one
     expect(apply(h, svc(), doc).ok).toBe(true);
-    expect(h.app.schedules.rollbackBatch(h.owner, NOW)).toMatchObject({ ok: true, restoredRules: 1, replacedRules: 1 });
+    expect(rollBack(h)).toMatchObject({ ok: true, restoredRules: 1, replacedRules: 1 });
     expect(h.store.scheduleRules.activeRules(OWNER).map((r) => r.label)).toEqual(['Old class']);
     h.close();
 
     const second = boot();
     expect(apply(second.h, second.svc()).ok).toBe(true); // no replacedAt in the fixture
-    expect(second.h.app.schedules.rollbackBatch(second.h.owner, NOW)).toEqual({ ok: false, reason: 'order_unknown' });
+    expect(rollBack(second.h)).toEqual({ ok: false, reason: 'order_unknown' });
     second.h.close();
+  });
+});
+
+describe('a native schedule rollback survives a repeated import', () => {
+  it('leaves the owner’s active batch alone, and verification reports the drift', () => {
+    const { h, clock, svc } = boot();
+    const doc = importDoc() as Record<string, any>;
+    doc['schedule'].batches[1].replacedAt = '2026-09-20T00:00:00Z';
+    expect(apply(h, svc(), doc).ok).toBe(true);
+    expect(h.store.scheduleRules.activeRules(OWNER).map((r) => r.label)).not.toEqual(['Old class']);
+    expect(svc().verify(doc).parity).toBe(true);
+    clock.advance(60_000);
+    expect(rollBack(h)).toMatchObject({ ok: true });
+    const after = h.store.scheduleRules.activeRules(OWNER).map((r) => r.label);
+    expect(after).toEqual(['Old class']);
+
+    const again = apply(h, svc(), doc);
+    expect(again.ok).toBe(true);
+    expect(again.counts.scheduleRules).toMatchObject({ created: 0, conflicts: 0 });
+    expect(h.store.scheduleRules.activeRules(OWNER).map((r) => r.label)).toEqual(after);
+    const report = svc().verify(doc);
+    expect(report.ok).toBe(true);
+    expect(report.parity).toBe(false);
+    expect(report.categories['scheduleRules']!.drifted).toBeGreaterThan(0);
+    h.close();
   });
 });
 

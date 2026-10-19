@@ -763,6 +763,27 @@ export class AssistantWatchRepo {
     return r === undefined || Number(r.m) === 1;
   }
 
+  /**
+   * The stored switch and when it last changed, or undefined when none was ever stored
+   * (which means on). `updatedAt` of an OFF row is the earliest moment the owner's
+   * native paths could have been reporting what the targets were not.
+   */
+  monitoringSetting(ownerId: string): { enabled: boolean; updatedAt: string } | undefined {
+    const r = this.db
+      .prepare('SELECT monitoring_enabled AS m, updated_at AS u FROM assistant_watch_settings WHERE discord_user_id = ?')
+      .get(ownerId) as { m: number; u: string } | undefined;
+    return r === undefined ? undefined : { enabled: Number(r.m) === 1, updatedAt: String(r.u) };
+  }
+
+  /** The keys of the owner's ACTIVE notification targets (at most the 1,000-target cap). */
+  activeTargetKeys(ownerId: string): string[] {
+    return (
+      this.db
+        .prepare("SELECT repo_key AS k FROM assistant_watch_targets WHERE discord_user_id = ? AND state = 'active'")
+        .all(ownerId) as { k: string }[]
+    ).map((r) => String(r.k));
+  }
+
   setMonitoring(ownerId: string, enabled: boolean, atIso: string): void {
     this.db
       .prepare(

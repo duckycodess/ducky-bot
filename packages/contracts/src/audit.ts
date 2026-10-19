@@ -151,6 +151,18 @@ export const AUDIT_EVENTS = [
    * covers a Discord surface.
    */
   'workflow.requested',
+
+  // ---- owner controls over imported parity state (ADR 0032) ----------------
+  //
+  // Both are written by a STRICT audit method inside the transaction that makes
+  // the change, with the injected clock, so a change that cannot be recorded does
+  // not happen. `event` carries no CHECK constraint and `config` is an existing
+  // subject kind, so neither needs a migration. They record the transition and
+  // counts only: never a batch key, a label, a course code or a repository.
+  /** The owner rolled the weekly schedule back one batch. Counts only. */
+  'schedule.batch_rolled_back',
+  /** The owner turned global notification-watch monitoring on or off. State only. */
+  'watch.monitoring_changed',
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

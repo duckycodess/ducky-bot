@@ -9,6 +9,8 @@ import type {
   GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleExceptionRow,
   ScheduleRow, TaskRow, WatchEventWithTarget, WatchTargetRow,
 } from '@ducky/persistence';
+import type { RollbackOutcome, RollbackPreview } from '@ducky/persistence';
+import type { SetMonitoringOutcome } from '../domain/assistant-watch.service.js';
 import type { Briefing, BriefingSection } from '../domain/briefing.service.js';
 import { bareRepoName } from '../domain/assistant-watch.engine.js';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
@@ -277,6 +279,77 @@ export function assistantWatchesList(
     }],
     ephemeral: true,
   };
+}
+
+/**
+ * The owner's global monitoring switch. Private and counts-only: it never names a
+ * repository, and a refusal says how many native paths overlap, not which.
+ */
+export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
+  if (!out.ok) {
+    return {
+      content: out.reason === 'overlap_unverifiable'
+        ? 'Monitoring stays off: this build cannot check whether your ordinary watches or the GitHub feed already ' +
+          'told you what the notification targets would repeat. Nothing was changed.'
+        : `Monitoring stays off. ${out.overlapping} repositor${out.overlapping === 1 ? 'y' : 'ies'} also had an ordinary ` +
+          'watch or feed entry active while it was off, which may already have told you what the notification ' +
+          'targets would repeat. Nothing was changed or reset. Remove those with `/watch remove` (or the feed list) ' +
+          'and say it again. Exact reconciliation is not built, so this is a refusal, not a decision.',
+      ephemeral: true,
+    };
+  }
+  if (!out.changed) {
+    return { content: `Notification monitoring is already ${out.enabled ? 'on' : 'off'}. Nothing changed.`, ephemeral: true };
+  }
+  return {
+    content: out.enabled
+      ? 'Notification monitoring is on. Every target resumes exactly where it stood; nothing was reset.'
+      : 'Notification monitoring is off. A read already in progress finishes; nothing starts after it. ' +
+        'No target, cursor or pending notification was changed.',
+    ephemeral: true,
+  };
+}
+
+/** Counts and the confirmation code only: never a batch, a label or a course. */
+export function scheduleRollbackPreview(p: RollbackPreview): OutboundMessage {
+  if (!p.ok) return { content: scheduleRollbackRefusal(p.reason), ephemeral: true };
+  return {
+    content:
+      `Rolling back would replace ${p.activeBatches} active batch${p.activeBatches === 1 ? '' : 'es'} ` +
+      `(${p.activeRules} rule${p.activeRules === 1 ? '' : 's'}) and restore the most recently replaced one ` +
+      `(${p.restoreRules} rule${p.restoreRules === 1 ? '' : 's'}). Nothing is deleted and no exception changes.\n` +
+      `To confirm exactly this, send \`/schedule rollback:${p.code}\`. The code stops working the moment ` +
+      'anything about your schedule batches changes, and a used code cannot be used again.',
+    ephemeral: true,
+  };
+}
+
+export function scheduleRollbackResult(out: RollbackOutcome): OutboundMessage {
+  if (!out.ok) return { content: scheduleRollbackRefusal(out.reason), ephemeral: true };
+  return {
+    content:
+      `Schedule rolled back: ${out.replacedRules} rule${out.replacedRules === 1 ? '' : 's'} replaced, ` +
+      `${out.restoredRules} restored. Nothing was deleted.`,
+    ephemeral: true,
+  };
+}
+
+function scheduleRollbackRefusal(
+  reason: 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch' | 'stale',
+): string {
+  switch (reason) {
+    case 'nothing_to_restore':
+      return 'There is no replaced schedule batch to restore. Nothing was changed.';
+    case 'order_unknown':
+      return 'I cannot tell which replaced batch is the most recent (a replaced batch has no known time, or two are tied), so I will not ' +
+        'guess. Nothing was changed.';
+    case 'inconsistent_batch':
+      return 'A schedule batch is split (some of its rules are active and some are not, or they were replaced at ' +
+        'different times), so I cannot tell what a rollback would restore. Nothing was changed.';
+    case 'stale':
+      return 'That confirmation no longer matches your schedule batches (they changed, or it was already used). ' +
+        'Nothing was changed. Send `/schedule rollback:preview` to start again.';
+  }
 }
 
 export function watchCancelled(row: GitHubWatchRow): OutboundMessage {

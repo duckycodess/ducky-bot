@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { SCHEDULE_ROLLBACK_CODE_LENGTH, canonicalJson } from '@ducky/contracts';
 import type { ScheduleExceptionInput, ScheduleExceptionKind, ScheduleRuleInput } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
@@ -52,6 +54,27 @@ const mapException = (r: Record<string, unknown>): ScheduleExceptionRow => ({
   createdAt: String(r['created_at']),
 });
 
+/**
+ * Why a rollback is refused: nothing replaced to restore, a replaced batch whose order is
+ * unknown or tied, or a batch that is split (some rules active, some not, or with differing
+ * replacement times). None of them is resolved by guessing.
+ */
+export type RollbackRefusal = 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch';
+
+export type RollbackPreview =
+  | {
+    readonly ok: true;
+    readonly code: string;
+    readonly activeBatches: number;
+    readonly activeRules: number;
+    readonly restoreRules: number;
+  }
+  | { readonly ok: false; readonly reason: RollbackRefusal };
+
+export type RollbackOutcome =
+  | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
+  | { readonly ok: false; readonly reason: RollbackRefusal | 'stale' };
+
 /** What kind of schedule record a handle named. */
 export type ScheduleRecordKind = 'rule' | 'exception';
 
@@ -101,36 +124,52 @@ export class ScheduleRulesRepo {
   }
 
   /**
-   * Flips the schedule back one batch, deleting nothing.
+   * What a rollback would do right now, as counts, plus the code that binds a
+   * confirmation to exactly this state.
    *
-   * The batch that is active becomes replaced (stamped `atIso`), and the most
-   * recently replaced batch with a KNOWN replacement time becomes active. A
-   * replaced batch whose order is unknown is never chosen: guessing which one the
-   * owner meant would swap in a schedule nobody asked for. Returns what happened as
-   * counts only, never a label.
+   * The code is a digest of EVERY batch (key, active flag, replacement time, rule
+   * count) and the selected target. It is therefore stale the moment anything it
+   * covers moves: a rollback, an import, a deleted rule, a second active batch. A
+   * replay of a used code cannot match, because the flip it authorised changed the
+   * state it was computed from. The digest is hashed, never shown, so the reply
+   * carries counts and the short code only (no batch key, label or course).
    */
-  rollbackBatch(ownerId: string, atIso: string):
-    | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
-    | { readonly ok: false; readonly reason: 'nothing_to_restore' | 'order_unknown' } {
+  rollbackPreview(ownerId: string): RollbackPreview {
+    const s = this.rollbackState(ownerId);
+    if (!s.ok) return s;
+    return {
+      ok: true, code: s.code, activeBatches: s.activeBatches, activeRules: s.activeRules,
+      restoreRules: s.restoreRules,
+    };
+  }
+
+  /**
+   * Flips the schedule back one batch, deleting nothing, only if `code` still
+   * matches the state it was issued for.
+   *
+   * Compare, flip and `audit` run in ONE atomic unit, so a stale code never
+   * flips and an `audit` that throws undoes the flip. The batch that is active
+   * becomes replaced (stamped `atIso`), and the most recently replaced batch becomes
+   * active. EVERY replaced batch must have a known replacement time (an unknown one
+   * might be the latest, even beside batches of known order), no two may share an
+   * instant, and no batch may be split; anything else is refused rather than guessed.
+   * So is a stamp that is not strictly newer than every stamp already stored, because
+   * it would create the very tie this refuses. Counts only, never a label.
+   */
+  rollbackBatch(
+    ownerId: string,
+    atIso: string,
+    code: string,
+    audit: (done: { restoredRules: number; replacedRules: number }) => void,
+  ): RollbackOutcome {
     return atomically(this.db, () => {
-      const target = this.db
-        .prepare(
-          `SELECT batch_key AS k, MAX(replaced_at) AS at FROM schedule_rules
-            WHERE discord_user_id = ? AND active = 0 AND replaced_at IS NOT NULL
-            GROUP BY batch_key ORDER BY MAX(replaced_at) DESC, batch_key ASC LIMIT 2`,
-        )
-        .all(ownerId) as { k: string; at: string }[];
-      if (target.length === 0) {
-        const unknown = this.db
-          .prepare('SELECT COUNT(*) AS n FROM schedule_rules WHERE discord_user_id = ? AND active = 0')
-          .get(ownerId) as { n: number };
-        return { ok: false as const, reason: Number(unknown.n) > 0 ? ('order_unknown' as const) : ('nothing_to_restore' as const) };
-      }
-      // Two batches stamped the same instant: which is "most recent" is not known.
-      if (target.length === 2 && target[0]!.at === target[1]!.at) {
+      const s = this.rollbackState(ownerId);
+      if (!s.ok) return s;
+      if (s.code !== code) return { ok: false as const, reason: 'stale' as const };
+      const at = Date.parse(atIso);
+      if (!Number.isFinite(at) || at <= s.newestStampMs) {
         return { ok: false as const, reason: 'order_unknown' as const };
       }
-      const restore = target[0]!.k;
       const replaced = this.db
         .prepare(
           `UPDATE schedule_rules SET active = 0, replaced_at = ?
@@ -142,9 +181,76 @@ export class ScheduleRulesRepo {
           `UPDATE schedule_rules SET active = 1, replaced_at = NULL
             WHERE discord_user_id = ? AND batch_key = ? AND active = 0`,
         )
-        .run(ownerId, restore);
-      return { ok: true as const, restoredRules: Number(restored.changes), replacedRules: Number(replaced.changes) };
+        .run(ownerId, s.targetKey);
+      const done = { restoredRules: Number(restored.changes), replacedRules: Number(replaced.changes) };
+      audit(done);
+      return { ok: true as const, ...done };
     });
+  }
+
+  private rollbackState(ownerId: string):
+    | { ok: false; reason: RollbackRefusal }
+    | {
+      ok: true; code: string; targetKey: string; activeBatches: number; activeRules: number;
+      restoreRules: number; newestStampMs: number;
+    } {
+    const rules = this.db
+      .prepare(
+        `SELECT id, batch_key AS k, active AS a, replaced_at AS r FROM schedule_rules
+          WHERE discord_user_id = ? ORDER BY id`,
+      )
+      .all(ownerId) as { id: string; k: string; a: number; r: string | null }[];
+
+    // Group per batch, and refuse anything that is not a clean, ordered history. A batch is
+    // wholly active, or wholly replaced at ONE known instant; one that is split, or whose
+    // stamp is missing or unreadable, could be the latest, so the choice would be a guess.
+    type Batch = { active: boolean; rules: number; stamps: Set<string | null>; mixed: boolean };
+    const batches = new Map<string, Batch>();
+    for (const r of rules) {
+      const b = batches.get(r.k) ?? { active: Number(r.a) === 1, rules: 0, stamps: new Set(), mixed: false };
+      if ((Number(r.a) === 1) !== b.active) b.mixed = true;
+      b.rules += 1;
+      b.stamps.add(r.r);
+      batches.set(r.k, b);
+    }
+    if ([...batches.values()].some((b) => b.mixed)) return { ok: false, reason: 'inconsistent_batch' };
+    const replaced = [...batches.entries()].filter(([, b]) => !b.active);
+    for (const b of batches.values()) {
+      // An active batch carries no replacement time; a replaced one carries exactly one.
+      if (b.active ? b.stamps.size !== 1 || !b.stamps.has(null) : b.stamps.size !== 1) {
+        return { ok: false, reason: 'inconsistent_batch' };
+      }
+    }
+    if (replaced.length === 0) return { ok: false, reason: 'nothing_to_restore' };
+    const stamp = new Map<string, number>();
+    for (const [k, b] of replaced) {
+      const at = [...b.stamps][0];
+      const ms = at === null || at === undefined ? Number.NaN : Date.parse(at);
+      // ANY replaced batch of unknown order, even beside batches of known order.
+      if (!Number.isFinite(ms)) return { ok: false, reason: 'order_unknown' };
+      stamp.set(k, ms);
+    }
+    const ranked = [...stamp.entries()].sort(([ka, a], [kb, b]) => b - a || (ka < kb ? -1 : 1));
+    if (ranked.length > 1 && ranked[0]![1] === ranked[1]![1]) return { ok: false, reason: 'order_unknown' };
+
+    const targetKey = ranked[0]![0];
+    // Binds every rule by identity, batch, flag and stamp, so replacing one rule with another
+    // of the same batch (the same counts) is stale too. Hashed; never shown.
+    const code = createHash('sha256')
+      .update(canonicalJson({
+        v: 2, owner: ownerId, target: targetKey,
+        rules: rules.map((r) => [r.id, r.k, Number(r.a), r.r]),
+      }))
+      .digest('hex')
+      .slice(0, SCHEDULE_ROLLBACK_CODE_LENGTH);
+    const activeRules = rules.filter((r) => Number(r.a) === 1).length;
+    return {
+      ok: true, code, targetKey,
+      activeBatches: [...batches.values()].filter((b) => b.active).length,
+      activeRules,
+      restoreRules: batches.get(targetKey)!.rules,
+      newestStampMs: Math.max(...stamp.values()),
+    };
   }
 
   insertException(row: {

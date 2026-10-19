@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { DuckyError, ScheduleDraftSchema, WEEKDAY_NAMES, type ScheduleDraft } from '@ducky/contracts';
+import {
+  AUDIT_OWNER_REF, DuckyError, ScheduleDraftSchema, WEEKDAY_NAMES, type ScheduleDraft,
+} from '@ducky/contracts';
 import type { ScheduleExtractionProvider, ScheduleSource } from '@ducky/adapters';
-import { withTransaction, type Store } from '@ducky/persistence';
+import {
+  withTransaction, type RollbackOutcome, type RollbackPreview, type Store,
+} from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { PendingDraft, PendingScheduleStore } from './pending-schedules.js';
 
@@ -10,6 +14,8 @@ export interface SchedulesServiceDeps {
   readonly authz: Authorizer;
   readonly pending: PendingScheduleStore;
   readonly extractor: ScheduleExtractionProvider;
+  /** The injected clock: a rollback is stamped and audited at this time. */
+  readonly nowIso: () => string;
 }
 
 export type PreviewOutcome =
@@ -29,12 +35,14 @@ export class SchedulesService {
   private readonly authz: Authorizer;
   private readonly pending: PendingScheduleStore;
   private readonly extractor: ScheduleExtractionProvider;
+  private readonly nowIso: () => string;
 
   constructor(deps: SchedulesServiceDeps) {
     this.store = deps.store;
     this.authz = deps.authz;
     this.pending = deps.pending;
     this.extractor = deps.extractor;
+    this.nowIso = deps.nowIso;
   }
 
   get providerName(): string {
@@ -137,24 +145,45 @@ export class SchedulesService {
   }
 
   /**
-   * Flips the weekly schedule back one batch: the active batch becomes replaced
-   * and the most recently replaced one with a KNOWN replacement time becomes
-   * active, which is the source's "roll back to the previous schedule".
-   *
-   * It changes state and deletes no row, touches no exception, and returns counts
-   * only. A replaced batch whose order is unknown (or two stamped the same
-   * instant) is never chosen: that is a refusal, not a guess. Owner-only, like
-   * every other schedule control.
-   *
-   * NOTE: this is a SERVICE control. The owner-only command manifest was not
-   * widened for it, so no Discord command reaches it yet; that missing control is
-   * a named blocker in `docs/CURRENT_STATE.md`.
+   * What rolling the weekly schedule back one batch would do, in counts, and the
+   * code that confirms exactly that. Writes nothing and nothing it returns names a
+   * batch, a label or a course. Owner-only.
    */
-  rollbackBatch(actor: ActorContext, atIso: string):
-    | { readonly ok: true; readonly restoredRules: number; readonly replacedRules: number }
-    | { readonly ok: false; readonly reason: 'nothing_to_restore' | 'order_unknown' } {
+  previewRollback(actor: ActorContext): RollbackPreview {
     this.authz.requireOwner(actor);
-    return this.store.scheduleRules.rollbackBatch(actor.discordUserId, atIso);
+    return this.store.scheduleRules.rollbackPreview(actor.discordUserId);
+  }
+
+  /**
+   * Flips the weekly schedule back one batch, but only for a code that still names
+   * the state it was issued for (ADR 0032).
+   *
+   * The flip is the existing semantics: the active batch becomes replaced and the
+   * most recently replaced one with a KNOWN replacement time becomes active. Here
+   * the code is recomputed, compared, the flip made and the audit row written in
+   * ONE transaction with the injected clock, so a stale or replayed code changes
+   * nothing and a failed audit write undoes the flip. It deletes no row and
+   * touches no exception. A deliberate second rollback, from a fresh preview, flips
+   * again, as the source does; whether the source's repeated rollback is the same
+   * is a private-audit question this repository cannot answer (named blocker).
+   */
+  confirmRollback(actor: ActorContext, code: string): RollbackOutcome {
+    this.authz.requireOwner(actor);
+    const at = this.nowIso();
+    return withTransaction(this.store.db, () =>
+      this.store.scheduleRules.rollbackBatch(actor.discordUserId, at, code, (done) => {
+        this.store.auditLog.recordStrict({
+          at,
+          event: 'schedule.batch_rolled_back',
+          actorKind: 'owner',
+          actorRef: AUDIT_OWNER_REF,
+          subjectKind: 'config',
+          subjectRef: 'schedule.batches',
+          outcome: 'ok',
+          detail: `restored ${done.restoredRules} replaced ${done.replacedRules}`,
+        });
+      }),
+    );
   }
 
   private expiredMessage(): string {

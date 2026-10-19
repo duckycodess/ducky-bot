@@ -173,6 +173,36 @@ describe('command registration', () => {
   });
 });
 
+describe('the owner controls for imported parity state add no command and no interaction kind', () => {
+  type Opt = { name: string; type: number; required?: boolean; choices?: { value: string }[]; options?: Opt[] };
+  const command = (name: string) => (commandPayload() as { name: string; options?: Opt[] }[]).find((c) => c.name === name)!;
+
+  it('/watch gains one subcommand with an explicit on/off choice, and /schedule one optional string', () => {
+    const watch = command('watch').options!;
+    expect(watch.map((o) => o.name)).toEqual(['add', 'list', 'remove', 'monitoring']);
+    const monitoring = watch.find((o) => o.name === 'monitoring')!;
+    expect(monitoring.type).toBe(1);
+    expect(monitoring.options).toEqual([expect.objectContaining({
+      name: 'state', type: 3, required: true, choices: [{ name: 'on', value: 'on' }, { name: 'off', value: 'off' }],
+    })]);
+    const schedule = command('schedule').options!;
+    expect(schedule.map((o) => [o.name, o.type, o.required])).toEqual([
+      ['text', 3, false], ['file', 11, false], ['rollback', 3, false],
+    ]);
+    // No subcommand on /schedule: the text and file flow keeps its shape.
+    expect(schedule.some((o) => o.type === 1)).toBe(false);
+  });
+
+  it('leaves both manifests exactly as they were', () => {
+    expect([...OWNER_ONLY_COMMANDS]).toHaveLength(12);
+    expect(OWNER_ONLY_INTERACTION_KINDS as readonly string[]).not.toContain('schedule_rollback');
+    expect(OWNER_ONLY_INTERACTION_KINDS as readonly string[]).not.toContain('watch_monitoring');
+    expect(SHARED_READABLE_ROUTES.map((r) => `${r.command}/${r.subcommand ?? ''}`)).toEqual(['jobs/', 'job/status']);
+    expect(isSharedReadableRoute('watch', 'monitoring')).toBe(false);
+    expect(isSharedReadableRoute('schedule')).toBe(false);
+  });
+});
+
 describe('the new task controls are privileged, and only that', () => {
   it('is on the owner-only interaction manifest, every one of them', () => {
     for (const kind of ['task_edit', 'task_snooze', 'bulk_save', 'bulk_edit', 'bulk_discard']) {

@@ -7,10 +7,11 @@ import {
   ASSISTANT_WATCH_CYCLE_TARGETS, ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS, ASSISTANT_WATCH_MAX_TARGETS,
   ASSISTANT_WATCH_METADATA_INTERVAL_HOURS, GH_OWNER_RE, GH_REPO_RE, isPlainRepoName, WATCH_API_DISCOVERY_MAX_PAGES,
   WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, newPublicWatchId, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
-  WATCH_RUNS_MAX_PAGES, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
+  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
-import type {
-  DueCheckpoint, ObservedEventWrite, PollCycle, Store, WatchEventWithTarget, WatchTargetRow,
+import {
+  withTransaction, type DueCheckpoint, type ObservedEventWrite, type PollCycle, type Store,
+  type WatchEventWithTarget, type WatchTargetRow,
 } from '@ducky/persistence';
 import { dmTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
@@ -51,7 +52,29 @@ export interface AssistantWatchServiceDeps {
    * Absent means no: a digest nobody can receive covers nothing.
    */
   readonly digestDeliverable?: () => boolean;
+  /**
+   * The repositories the owner's NATIVE paths (an ordinary watch, the GitHub feed's
+   * selected list) were active on at any moment since `sinceIso`, as `owner/repo`
+   * keys, plus how many could not be resolved to one. Frozen configuration decides
+   * the mapping, so it is injected. Absent means the overlap cannot be established,
+   * and turning monitoring back on is refused rather than guessed.
+   */
+  readonly nativeWatchedSince?: (sinceIso: string) => { readonly keys: ReadonlySet<string>; readonly unresolved: number };
 }
+
+export type SetMonitoringOutcome =
+  | { readonly ok: true; readonly changed: boolean; readonly enabled: boolean }
+  | {
+    readonly ok: false;
+    /**
+     * `ordinary_overlap`: a native path was active on a repository a target also
+     * watches while monitoring was off, so it may already have told the owner what the
+     * target's old checkpoint would tell again. `overlap_unverifiable`: the native
+     * side could not be consulted. Both refuse; neither resets a checkpoint.
+     */
+    readonly reason: 'ordinary_overlap' | 'overlap_unverifiable';
+    readonly overlapping: number;
+  };
 
 export interface AssistantWatchConfig {
   /** The GitHub login that IS the owner, used to classify a repository's relationship. */
@@ -190,6 +213,7 @@ export class AssistantWatchService {
   private readonly reader: AssistantWatchReader;
   private readonly cfg: AssistantWatchConfig | undefined;
   private readonly digestDeliverable: () => boolean;
+  private readonly nativeWatchedSince: AssistantWatchServiceDeps['nativeWatchedSince'];
   private ticking: Promise<AssistantWatchTickResult> | null = null;
   /** Until when a rate limit or an authentication failure has stopped the cycle. */
   private pausedUntilMs = 0;
@@ -203,6 +227,7 @@ export class AssistantWatchService {
     this.reader = deps.reader;
     this.cfg = deps.watchConfig;
     this.digestDeliverable = deps.digestDeliverable ?? (() => false);
+    this.nativeWatchedSince = deps.nativeWatchedSince;
   }
 
   // ---- the tick ---------------------------------------------------------------
@@ -964,6 +989,61 @@ export class AssistantWatchService {
       throw new DuckyError('invalid_input', 'That watch is already cancelled.');
     }
     return this.store.assistantWatch.byPublicId(actor.discordUserId, row.publicId)!;
+  }
+
+  /**
+   * The owner's explicit choice of the global monitoring switch (ADR 0032), not a toggle.
+   *
+   * Saying the state it already has changes nothing: no row, no timestamp, no audit
+   * row and no delta. A real change writes the switch and a STRICT audit row in one
+   * transaction at the injected time, so a failed audit write undoes the change.
+   * Neither direction touches a target, a checkpoint, a pending event or the rate-limit
+   * backoff: pausing takes effect at the NEXT tick (the tick in flight read the switch
+   * once at its start), and resuming makes every cursor due again exactly where it stood.
+   *
+   * Turning monitoring back ON is refused while a native path could have reported the
+   * same repositories during the pause. While monitoring is off a native notification is
+   * not trimmed for what a target covers (`covers` is false), so it may already have told
+   * the owner what the target's untouched checkpoint would tell a second time. Exact
+   * cross-path reconciliation has no evidence in the stored data, and resetting a
+   * checkpoint would silently baseline away events nobody was told, so the only safe
+   * answer is to refuse. Counts only; the remedy is the owner's (remove the overlapping
+   * native watch or feed repository and say so again), and the refusal stays a named
+   * full-parity blocker rather than an accepted omission.
+   */
+  setMonitoring(actor: ActorContext, enabled: boolean): SetMonitoringOutcome {
+    this.authz.requireOwner(actor);
+    const repo = this.store.assistantWatch;
+    const owner = actor.discordUserId;
+    return withTransaction(this.store.db, () => {
+      const current = repo.monitoringSetting(owner);
+      const was = current === undefined || current.enabled;
+      if (was === enabled) return { ok: true as const, changed: false, enabled };
+      if (enabled) {
+        // `was` is false, so a stored OFF row exists and says when the pause began.
+        const since = current!.updatedAt;
+        if (!this.nativeWatchedSince) {
+          return { ok: false as const, reason: 'overlap_unverifiable' as const, overlapping: 0 };
+        }
+        const native = this.nativeWatchedSince(since);
+        const targets = new Set(repo.activeTargetKeys(owner));
+        const overlapping = [...native.keys].filter((k) => targets.has(k)).length + native.unresolved;
+        if (overlapping > 0) return { ok: false as const, reason: 'ordinary_overlap' as const, overlapping };
+      }
+      const at = this.clock.nowIso();
+      repo.setMonitoring(owner, enabled, at);
+      this.store.auditLog.recordStrict({
+        at,
+        event: 'watch.monitoring_changed',
+        actorKind: 'owner',
+        actorRef: AUDIT_OWNER_REF,
+        subjectKind: 'config',
+        subjectRef: 'watch.monitoring',
+        outcome: 'ok',
+        detail: enabled ? 'off to on' : 'on to off',
+      });
+      return { ok: true as const, changed: true, enabled };
+    });
   }
 
   /** For `/status`: counts only, never a repository name. */

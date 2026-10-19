@@ -183,3 +183,10 @@ export function expandScheduleWindow(
   out.sort((a, b) => (a.startsAt < b.startsAt ? -1 : a.startsAt > b.startsAt ? 1 : 0));
   return { occurrences: out, exceptions: inWindow };
 }
+
+/**
+ * Hex characters of the digest an owner types back to confirm a schedule rollback
+ * (`/schedule rollback:<code>`). The persistence layer derives it and the router
+ * validates its shape, so the two cannot disagree about what a code looks like.
+ */
+export const SCHEDULE_ROLLBACK_CODE_LENGTH = 16;

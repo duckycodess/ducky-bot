@@ -44,6 +44,22 @@ const mapEvent = (r: Record<string, unknown>): GitHubWatchEventRow => ({
 export class GitHubWatchesRepo {
   constructor(private readonly db: Db) {}
 
+  /**
+   * The allowlist slugs of the owner's ordinary watches that were active at any moment
+   * since `sinceIso`: active now, or cancelled after it. A watch cancelled before
+   * `sinceIso` cannot have told the owner anything in the window, so it is not here.
+   */
+  slugsActiveSince(ownerId: string, sinceIso: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT repo_slug AS s FROM github_watches
+            WHERE discord_user_id = ? AND (state = 'active' OR cancelled_at > ?)`,
+        )
+        .all(ownerId, sinceIso) as { s: string }[]
+    ).map((r) => String(r.s));
+  }
+
   insert(row: {
     id: string;
     publicId: string;

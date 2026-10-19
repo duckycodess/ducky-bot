@@ -3,7 +3,7 @@ import {
   ALL_INTERACTION_KINDS, CONVERSATIONAL_INTERACTION_KINDS, CONVERSATIONAL_ROUTE,
   CONVERSATION_ANCHOR_TEXT_MAX, CONVERSATION_MAX_ATTACHMENTS_PER_MESSAGE,
   DuckyError, JobAnswerInputSchema, JobSubmitInputSchema,
-  OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SHARED_READABLE_ROUTES,
+  OWNER_ONLY_COMMANDS, OWNER_ONLY_INTERACTION_KINDS, SCHEDULE_ROLLBACK_CODE_LENGTH, SHARED_READABLE_ROUTES,
   cleanUntrusted,
   isBriefingKind, isConversationalInteractionKind, isDuckyError, isSharedReadableRoute,
   isTaskListFilter, looksLikeBulkTaskList,
@@ -1195,6 +1195,18 @@ export class DuckyRouter {
 
     this.commands.set('schedule', async (actor, e) => {
       this.buckets.check('schedule', actor.discordUserId);
+      // The rollback is its own mode of this command, never mixed with a preview: a
+      // pasted schedule and a state flip must not share one invocation.
+      const rollback = e.options['rollback'];
+      if (rollback !== undefined && rollback !== null) {
+        if (e.options['text'] !== undefined || e.attachment) {
+          return {
+            content: 'Use `rollback` on its own, without `text` or a file. Nothing was changed.',
+            ephemeral: true,
+          };
+        }
+        return this.scheduleRollback(actor, String(rollback).trim().toLowerCase());
+      }
       let text = String(e.options['text'] ?? '');
       let kind: 'text' | 'file' = 'text';
       if (e.attachment) {
@@ -1380,6 +1392,15 @@ export class DuckyRouter {
         case 'remove':
         case 'cancel':
           return this.cancelWatch(actor, String(e.options['id'] ?? ''));
+        case 'monitoring': {
+          // An explicit state, never a toggle: repeating it is harmless, and a typo is
+          // refused rather than read as the other value.
+          const state = String(e.options['state'] ?? '').trim().toLowerCase();
+          if (state !== 'on' && state !== 'off') {
+            return { content: 'Say `/watch monitoring state:on` or `state:off`. Nothing was changed.', ephemeral: true };
+          }
+          return assistant.watchMonitoring(d.assistantWatch.setMonitoring(actor, state === 'on'));
+        }
         default: {
           // `targets` lists the notification-only selection, a page at a time.
           if (e.options['filter'] === 'targets') {
@@ -1535,6 +1556,20 @@ export class DuckyRouter {
    * looked up in its own table. The handle namespace is shared and allocated
    * against both, so one handle names exactly one watch.
    */
+  /** `preview` shows what a rollback would do and its code; the code (and only it) confirms. */
+  private scheduleRollback(actor: ActorContext, arg: string): OutboundMessage {
+    const schedules = this.deps.schedules;
+    if (arg === 'preview') return assistant.scheduleRollbackPreview(schedules.previewRollback(actor));
+    if (new RegExp(`^[0-9a-f]{${SCHEDULE_ROLLBACK_CODE_LENGTH}}$`).test(arg)) {
+      return assistant.scheduleRollbackResult(schedules.confirmRollback(actor, arg));
+    }
+    return {
+      content: 'Send `/schedule rollback:preview` first, then `/schedule rollback:<code>` with the code it shows. ' +
+        'Nothing was changed.',
+      ephemeral: true,
+    };
+  }
+
   private cancelWatch(actor: ActorContext, id: string): OutboundMessage {
     const d = this.deps;
     if (d.assistantWatch.owns(actor, id)) {

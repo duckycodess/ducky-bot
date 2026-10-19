@@ -354,7 +354,7 @@ export function createApp(
 
   const pending = new PendingScheduleStore();
   const captures = new CapturesService(store, authz);
-  const schedules = new SchedulesService({ store, authz, pending, extractor });
+  const schedules = new SchedulesService({ store, authz, pending, extractor, nowIso: () => clock.nowIso() });
   const jobs = new JobsService({ store, authz, allowlist });
   const actionPerformer = overrides.actionPerformer ?? new GitActionPerformer({
     allowlist,
@@ -526,6 +526,24 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
+    // What the native paths could have told the owner while monitoring was off, as the
+    // repository keys frozen configuration maps them to. A slug that no longer resolves
+    // is counted, never skipped: an overlap that cannot be ruled out is an overlap.
+    nativeWatchedSince: (sinceIso) => {
+      const keys = new Set<string>();
+      let unresolved = 0;
+      for (const slug of store.githubWatches.slugsActiveSince(authz.ownerId, sinceIso)) {
+        try {
+          const gh = allowlist.resolve(slug).github;
+          if (gh) keys.add(`${gh.owner}/${gh.repo}`.toLowerCase());
+          else unresolved += 1;
+        } catch {
+          unresolved += 1;
+        }
+      }
+      for (const key of store.githubFeed.repoKeysActiveSince(sinceIso)) keys.add(key.toLowerCase());
+      return { keys, unresolved };
+    },
     digestDeliverable: () => {
       const schedule = resolveBriefingSchedule(env);
       return schedule.enabled && schedule.delivery !== 'channel' &&

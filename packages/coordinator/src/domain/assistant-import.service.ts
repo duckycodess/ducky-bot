@@ -507,10 +507,15 @@ export class AssistantImportService {
       watch.events += counted.events;
       imp.recordLive({ namespace: ns, category: 'watch_target', sourceId: t.sourceId, targetId: id, fingerprint: d.fp, at, storedHash: this.baseline('watch_target', id) });
     }
-    // The source's global switch. It gates reads only (no target or cursor changes),
-    // and the document is an explicit operator act, so it states the switch: an
-    // import of a switch that is back on resumes watching.
-    if (doc.watch) this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at);
+    // The source's global switch. It gates reads only (no target or cursor changes). The
+    // document states it ONCE: when nothing has ever been stored. Once a row exists (an
+    // earlier import wrote it, or the owner chose with `/watch monitoring`) the owner's
+    // state stands, so a repeated import of an unchanged document can neither undo a
+    // native choice nor re-pause what the owner resumed. `verify` reports the difference
+    // as drift rather than this pass silently erasing it.
+    if (doc.watch && this.store.assistantWatch.monitoringSetting(owner) === undefined) {
+      this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at);
+    }
   }
 
   /** The baseline version of a record just written, read back inside the same transaction. */

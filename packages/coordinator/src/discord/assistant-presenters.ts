@@ -291,10 +291,10 @@ export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
       content: out.reason === 'overlap_unverifiable'
         ? 'Monitoring stays off: this build cannot check whether your ordinary watches or the GitHub feed already ' +
           'told you what the notification targets would repeat. Nothing was changed.'
-        : `Monitoring stays off. ${out.overlapping} repositor${out.overlapping === 1 ? 'y' : 'ies'} also ` +
-          'has (or once had) an ordinary watch or feed entry that may already have told you what the notification ' +
-          'targets would repeat, and I cannot prove otherwise. Nothing was changed or reset. Exact reconciliation ' +
-          'is not built, so this is a refusal, not a decision.',
+        : `Monitoring stays off. ${out.overlapping} native watch or feed entr${out.overlapping === 1 ? 'y' : 'ies'} ` +
+          'may already have told you what the notification targets would repeat, and I cannot prove otherwise. ' +
+          'This switch is global, so that blocks resuming every target. Nothing was changed or reset. Exact ' +
+          'reconciliation is not built, so this is a refusal, not a decision.',
       ephemeral: true,
     };
   }
@@ -335,7 +335,7 @@ export function scheduleRollbackResult(out: RollbackOutcome): OutboundMessage {
 }
 
 function scheduleRollbackRefusal(
-  reason: 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch' | 'stale',
+  reason: 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch' | 'clock_not_newer' | 'stale',
 ): string {
   switch (reason) {
     case 'nothing_to_restore':
@@ -346,6 +346,9 @@ function scheduleRollbackRefusal(
     case 'inconsistent_batch':
       return 'A schedule batch is split (some of its rules are active and some are not, or they were replaced at ' +
         'different times), so I cannot tell what a rollback would restore. Nothing was changed.';
+    case 'clock_not_newer':
+      return 'The time now is not after your latest schedule change (a replaced batch is stamped at this instant ' +
+        'or in the future), so a new rollback cannot be ordered safely. Nothing was changed.';
     case 'stale':
       return 'That confirmation no longer matches your schedule batches (they changed, or it was already used). ' +
         'Nothing was changed. Send `/schedule rollback:preview` to start again.';

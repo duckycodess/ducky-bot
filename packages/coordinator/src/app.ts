@@ -526,24 +526,14 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
-    // Every repository a native path (an ordinary watch, the feed's list) still has a row for,
-    // active or cancelled, as the keys frozen configuration maps them to. A slug that no longer
-    // resolves is counted, never skipped: an overlap that cannot be ruled out is an overlap.
-    nativeWatchedEver: () => {
-      const keys = new Set<string>();
-      let unresolved = 0;
-      for (const slug of store.githubWatches.slugsEver(authz.ownerId)) {
-        try {
-          const gh = allowlist.resolve(slug).github;
-          if (gh) keys.add(`${gh.owner}/${gh.repo}`.toLowerCase());
-          else unresolved += 1;
-        } catch {
-          unresolved += 1;
-        }
-      }
-      for (const key of store.githubFeed.repoKeysEver()) keys.add(key.toLowerCase());
-      return { keys, unresolved };
-    },
+    // What the native paths retain. Ordinary watches are only COUNTED: their slug is mapped to a
+    // repository by the allowlist, which is overwritten at every boot, so no current mapping can
+    // say what a retained row watched when it ran. The feed's rows are keyed by the repository
+    // itself (a durable identity), so those are matched against the targets' keys directly.
+    nativeWatchedEver: () => ({
+      keys: new Set(store.githubFeed.repoKeysEver().map((k) => k.toLowerCase())),
+      unprovenOrdinary: store.githubWatches.retainedSlugCount(authz.ownerId),
+    }),
     digestDeliverable: () => {
       const schedule = resolveBriefingSchedule(env);
       return schedule.enabled && schedule.delivery !== 'channel' &&

@@ -1549,13 +1549,6 @@ export class DuckyRouter {
     return { done: sign('task_done'), edit: sign('task_edit'), snooze: sign('task_snooze') };
   }
 
-  /**
-   * Cancels a watch by its handle, whichever kind it is.
-   *
-   * An ordinary watch keeps its allowlist rules; a notification-only target is
-   * looked up in its own table. The handle namespace is shared and allocated
-   * against both, so one handle names exactly one watch.
-   */
   /** `preview` shows what a rollback would do and its code; the code (and only it) confirms. */
   private scheduleRollback(actor: ActorContext, arg: string): OutboundMessage {
     const schedules = this.deps.schedules;
@@ -1570,6 +1563,13 @@ export class DuckyRouter {
     };
   }
 
+  /**
+   * Cancels a watch by its handle, whichever kind it is.
+   *
+   * An ordinary watch keeps its allowlist rules; a notification-only target is
+   * looked up in its own table. The handle namespace is shared and allocated
+   * against both, so one handle names exactly one watch.
+   */
   private cancelWatch(actor: ActorContext, id: string): OutboundMessage {
     const d = this.deps;
     if (d.assistantWatch.owns(actor, id)) {

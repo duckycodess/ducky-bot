@@ -56,10 +56,11 @@ const mapException = (r: Record<string, unknown>): ScheduleExceptionRow => ({
 
 /**
  * Why a rollback is refused: nothing replaced to restore, a replaced batch whose order is
- * unknown or tied, or a batch that is split (some rules active, some not, or with differing
- * replacement times). None of them is resolved by guessing.
+ * unknown or tied, a batch that is split (some rules active, some not, or with differing
+ * replacement times), or a clock that is not after the newest stored stamp (a new stamp could
+ * not be ordered). None of them is resolved by guessing.
  */
-export type RollbackRefusal = 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch';
+export type RollbackRefusal = 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch' | 'clock_not_newer';
 
 export type RollbackPreview =
   | {
@@ -134,9 +135,10 @@ export class ScheduleRulesRepo {
    * state it was computed from. The digest is hashed, never shown, so the reply
    * carries counts and the short code only (no batch key, label or course).
    */
-  rollbackPreview(ownerId: string): RollbackPreview {
+  rollbackPreview(ownerId: string, atIso: string): RollbackPreview {
     const s = this.rollbackState(ownerId);
     if (!s.ok) return s;
+    if (!this.clockIsAfter(atIso, s.newestStampMs)) return { ok: false, reason: 'clock_not_newer' };
     return {
       ok: true, code: s.code, activeBatches: s.activeBatches, activeRules: s.activeRules,
       restoreRules: s.restoreRules,
@@ -153,8 +155,9 @@ export class ScheduleRulesRepo {
    * active. EVERY replaced batch must have a known replacement time (an unknown one
    * might be the latest, even beside batches of known order), no two may share an
    * instant, and no batch may be split; anything else is refused rather than guessed.
-   * So is a stamp that is not strictly newer than every stamp already stored, because
-   * it would create the very tie this refuses. Counts only, never a label.
+   * A stamp that is not strictly newer than every stamp already stored is refused as
+   * `clock_not_newer` (the preview refuses it too), because it would create the very tie
+   * refused above. Counts only, never a label.
    */
   rollbackBatch(
     ownerId: string,
@@ -165,11 +168,11 @@ export class ScheduleRulesRepo {
     return atomically(this.db, () => {
       const s = this.rollbackState(ownerId);
       if (!s.ok) return s;
-      if (s.code !== code) return { ok: false as const, reason: 'stale' as const };
-      const at = Date.parse(atIso);
-      if (!Number.isFinite(at) || at <= s.newestStampMs) {
-        return { ok: false as const, reason: 'order_unknown' as const };
+      // Before the code: a preview would have refused too, so the answer cannot depend on one.
+      if (!this.clockIsAfter(atIso, s.newestStampMs)) {
+        return { ok: false as const, reason: 'clock_not_newer' as const };
       }
+      if (s.code !== code) return { ok: false as const, reason: 'stale' as const };
       const replaced = this.db
         .prepare(
           `UPDATE schedule_rules SET active = 0, replaced_at = ?
@@ -186,6 +189,12 @@ export class ScheduleRulesRepo {
       audit(done);
       return { ok: true as const, ...done };
     });
+  }
+
+  /** A new stamp must be strictly newer than every stored one, or it could tie with it. */
+  private clockIsAfter(atIso: string, newestStampMs: number): boolean {
+    const at = Date.parse(atIso);
+    return Number.isFinite(at) && at > newestStampMs;
   }
 
   private rollbackState(ownerId: string):

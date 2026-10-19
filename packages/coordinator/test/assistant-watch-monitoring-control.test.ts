@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { WATCH_EVENT_KINDS, type WatchSurface } from '@ducky/contracts';
+import { createStore, openDatabase, runMigrations } from '@ducky/persistence';
 import { AssistantWatchService } from '../src/domain/assistant-watch.service.js';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
-import { OWNER, STRANGER, TestClock, makeHarness, replyText, type Harness } from './helpers.js';
+import { OWNER, REPOS_JSON, STRANGER, TestClock, makeHarness, replyText, type Harness } from './helpers.js';
 
 /**
  * The owner's explicit on/off control over the global monitoring switch, through the
@@ -293,13 +294,55 @@ describe('resuming never duplicates what a native path told the owner while it w
     h.close();
   });
 
-  it('allows it for a repository no native path has ever had a row for', () => {
+  it('refuses on ANY retained ordinary watch, even on a different repository: the switch is global', () => {
     const { h, clock } = boot();
     pauseWithTarget(h, 'acme/unrelated');
     turn(h, false);
     clock.advance(MIN);
-    // An ordinary watch on a DIFFERENT repository does not overlap.
+    // Its repository cannot be proven (the slug's mapping is rewritten at every boot), so one
+    // ordinary watch blocks resuming EVERY target, whichever repository it names today.
     h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
+    h.close();
+  });
+
+  it('still refuses when the same slug was remapped to other repositories across boots', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const store = createStore(db);
+    const clock = new TestClock(NOW, 'UTC');
+    const first = makeHarness({ clock, store });
+    // Boot one: `demo` is acme/demo, which a target watches.
+    const id = addTarget(first, 'acme/demo');
+    checkpoint(first, id, 'pulls');
+    first.app.githubWatches.add(first.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    clock.advance(MIN);
+    first.app.githubWatches.cancel(first.owner, first.app.githubWatches.list(first.owner, true)[0]!.publicId);
+    turn(first, false);
+
+    // Boot two over the same rows: the allowlist now maps `demo` to a different repository.
+    const remapped = JSON.stringify({
+      version: 1,
+      repos: [{ ...(JSON.parse(REPOS_JSON) as { repos: object[] }).repos[0], github: { owner: 'zeta', repo: 'moved' } }],
+    });
+    const second = makeHarness({ clock, store, allowlistJson: remapped });
+    // The mirror really was rewritten: history cannot be recovered from the current mapping.
+    expect((store.db.prepare("SELECT github_owner AS o FROM repos WHERE slug = 'demo'").get() as { o: string }).o).toBe('zeta');
+    clock.advance(MIN);
+    expect(turn(second, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    expect(store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
+    second.close();
+    first.close();
+    db.close();
+  });
+
+  it('allows it with no ordinary watch row at all and a feed repository that no target watches', () => {
+    const { h, clock } = boot();
+    pauseWithTarget(h, 'acme/unrelated');
+    turn(h, false);
+    clock.advance(MIN);
+    h.store.githubFeed.insertRepo({ repoKey: 'acme/elsewhere', display: 'x', source: 'explicit', atIso: clock.nowIso() });
     expect(turn(h, true)).toEqual({ ok: true, changed: true, enabled: true });
     h.close();
   });
@@ -327,14 +370,14 @@ describe('resuming never duplicates what a native path told the owner while it w
     during.h.close();
   });
 
-  it('counts one overlapping repository once, however many native paths cover it', () => {
+  it('counts a feed overlap and the retained ordinary watch each once', () => {
     const { h, clock } = boot();
     pauseWithTarget(h, 'acme/demo');
     turn(h, false);
     clock.advance(MIN);
     h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
     h.store.githubFeed.insertRepo({ repoKey: 'acme/demo', display: 'x', source: 'explicit', atIso: clock.nowIso() });
-    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 1 });
+    expect(turn(h, true)).toEqual({ ok: false, reason: 'ordinary_overlap', overlapping: 2 });
     h.close();
   });
 
@@ -344,7 +387,7 @@ describe('resuming never duplicates what a native path told the owner while it w
     checkpoint(h, id, 'pulls');
     turn(h, false);
     clock.advance(MIN);
-    h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    h.store.githubFeed.insertRepo({ repoKey: 'acme/demo', display: 'x', source: 'explicit', atIso: clock.nowIso() });
     expect(turn(h, true)).toMatchObject({ ok: true, changed: true });
     h.close();
   });
@@ -419,7 +462,7 @@ describe('/watch monitoring through the command', () => {
     h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
     const out = await dispatch(h, OWNER, { state: 'on' });
     expect(out?.ephemeral).toBe(true);
-    expect(replyText(out)).toMatch(/Monitoring stays off\. 1 repository/);
+    expect(replyText(out)).toMatch(/Monitoring stays off\. 1 native watch or feed entry.*global.*every target/);
     expect(replyText(out)).not.toMatch(/acme|demo|\/watch remove|remove/i);
     expect(h.store.assistantWatch.monitoringEnabled(OWNER)).toBe(false);
     h.close();

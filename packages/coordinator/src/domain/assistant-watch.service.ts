@@ -53,13 +53,14 @@ export interface AssistantWatchServiceDeps {
    */
   readonly digestDeliverable?: () => boolean;
   /**
-   * Every repository the owner's NATIVE paths (an ordinary watch, the GitHub feed's selected
-   * list) still have a row for, active or cancelled, as `owner/repo` keys, plus how many
-   * could not be resolved to one. Frozen configuration decides the mapping, so it is
-   * injected. Absent means the overlap cannot be established, and turning monitoring back
-   * on is refused rather than guessed.
+   * What the owner's NATIVE paths retain, as `owner/repo` keys of the GitHub feed's selected
+   * list (a durable repository identity, active or cancelled) and a count of the distinct
+   * ordinary watches whose repository cannot be proven (`unprovenOrdinary`): an ordinary
+   * watch is stored by an allowlist slug whose meaning is overwritten every boot, so every
+   * retained one counts, whatever it maps to today. Absent means the native side cannot be
+   * consulted, and turning monitoring back on is refused rather than guessed.
    */
-  readonly nativeWatchedEver?: () => { readonly keys: ReadonlySet<string>; readonly unresolved: number };
+  readonly nativeWatchedEver?: () => { readonly keys: ReadonlySet<string>; readonly unprovenOrdinary: number };
 }
 
 export type SetMonitoringOutcome =
@@ -67,9 +68,10 @@ export type SetMonitoringOutcome =
   | {
     readonly ok: false;
     /**
-     * `ordinary_overlap`: a native path has a retained row on a repository a target also
-     * watches, so it may have told the owner what the target's old checkpoint would tell
-     * again, and nothing stored can say when it spoke. `overlap_unverifiable`: the native
+     * `ordinary_overlap`: a feed selection is retained on a repository an active target also
+     * watches, OR any ordinary watch row is retained at all (its repository cannot be proven),
+     * so a native path may have told the owner what a target's old checkpoint would tell again,
+     * and nothing stored says when or about what. `overlap_unverifiable`: the native
      * side could not be consulted. Both refuse; neither resets a checkpoint.
      */
     readonly reason: 'ordinary_overlap' | 'overlap_unverifiable';
@@ -1002,21 +1004,25 @@ export class AssistantWatchService {
    * once at its start), and resuming makes every cursor due again exactly where it stood.
    *
    * Turning monitoring back ON is refused wherever a native path could have reported the
-   * same repositories. While monitoring is off an ordinary snapshot DM or feed card is not
-   * trimmed for what a target covers, so it may already have told the owner what the
-   * target's untouched checkpoint would tell a second time. Nothing stored proves when a
-   * pause really began (an imported pause carries only the import time, so a native watch
-   * cancelled before the import can have spoken after the source's pause began), what a native
-   * path delivered, or that a pending native notification was settled. Exact cross-path
-   * reconciliation therefore has no evidence, and resetting a checkpoint would silently
-   * baseline away events nobody was told. So the guard counts, inside the transaction, every
-   * repository on which an ordinary watch or a feed selection still has a row, active or
-   * cancelled, whenever it ran, that an active target also watches (plus any it cannot
-   * resolve), and refuses if there is one. The cost is deliberate and owned: a target whose
-   * repository ever had a native row cannot be resumed until reconciliation exists, and
-   * removing the native row is NOT a way round it (that would delete the very history the
-   * guard exists to honour). The reply gives a count and no remedy. It stays a named
-   * full-parity blocker, not an accepted omission.
+   * same repositories, and **the switch is GLOBAL**: one overlap, or any retained ordinary-watch
+   * row at all, blocks resuming EVERY target (up to the 1,000-target cap), not just the one that
+   * overlaps. While monitoring is off an ordinary snapshot DM or feed card is not trimmed for
+   * what a target covers, so it may already have told the owner what a target's untouched
+   * checkpoint would tell a second time. Nothing stored proves when a pause really began (an
+   * imported pause carries only the import time), what a native path delivered, whether a
+   * pending native notification was settled, or what an ordinary watch's allowlist slug named
+   * when it ran (the mapping is rewritten at every boot). Exact cross-path reconciliation has no
+   * evidence, and resetting a checkpoint would silently baseline away events nobody was told.
+   * So the guard, inside the transaction, counts every selected-feed repository (active or
+   * cancelled, a durable identity) that an active target also watches, plus every distinct
+   * retained ordinary watch, and refuses if there is any. Cancelled targets are not counted
+   * (they are not read).
+   *
+   * The cost is deliberate and owned: with any ordinary-watch history, no target can be resumed
+   * until reconciliation exists. Removing a native row is NOT a way round it (that would delete
+   * the history the guard honours), and a repeated import preserves the stored switch, so there
+   * is no operator-import workaround either. The reply gives a count and no remedy. This is a
+   * REQUIRED full-parity and cutover blocker, not an accepted omission.
    */
   setMonitoring(actor: ActorContext, enabled: boolean): SetMonitoringOutcome {
     this.authz.requireOwner(actor);
@@ -1032,7 +1038,7 @@ export class AssistantWatchService {
         }
         const native = this.nativeWatchedEver();
         const targets = new Set(repo.activeTargetKeys(owner));
-        const overlapping = [...native.keys].filter((k) => targets.has(k)).length + native.unresolved;
+        const overlapping = [...native.keys].filter((k) => targets.has(k)).length + native.unprovenOrdinary;
         if (overlapping > 0) return { ok: false as const, reason: 'ordinary_overlap' as const, overlapping };
       }
       const at = this.clock.nowIso();

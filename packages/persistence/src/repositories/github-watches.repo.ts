@@ -45,18 +45,21 @@ export class GitHubWatchesRepo {
   constructor(private readonly db: Db) {}
 
   /**
-   * The allowlist slugs of EVERY ordinary watch the owner still has a row for, cancelled
-   * or not, whenever it ran. A cancelled watch keeps its row (and any undelivered event),
-   * and nothing here can say when a pause really began or what a watch delivered
-   * during it, so a resume guard that needs to know where a native path may have
-   * spoken has to treat all retained history as possible.
+   * How many distinct repositories (by allowlist slug) the owner still has an ordinary-watch
+   * row for, cancelled or not, whenever it ran.
+   *
+   * A COUNT, deliberately not a list of repositories: a slug is mapped to a GitHub repository
+   * by the allowlist, which is frozen configuration and is mirrored over `repos` on every boot,
+   * so the same slug can name a different repository now than when the watch ran. Nothing
+   * stored records what it named then, so the current mapping can prove nothing about
+   * history, and the only honest use of these rows is "some native watch existed".
    */
-  slugsEver(ownerId: string): string[] {
-    return (
-      this.db
-        .prepare('SELECT DISTINCT repo_slug AS s FROM github_watches WHERE discord_user_id = ?')
-        .all(ownerId) as { s: string }[]
-    ).map((r) => String(r.s));
+  retainedSlugCount(ownerId: string): number {
+    return Number(
+      (this.db
+        .prepare('SELECT COUNT(DISTINCT repo_slug) AS n FROM github_watches WHERE discord_user_id = ?')
+        .get(ownerId) as { n: number }).n,
+    );
   }
 
   insert(row: {

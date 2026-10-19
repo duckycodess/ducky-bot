@@ -46,7 +46,7 @@ describe('previewing a rollback', () => {
     expect(p).toMatchObject({ ok: true, activeBatches: 1, activeRules: 2, restoreRules: 1 });
     if (!p.ok) throw new Error('unreachable');
     expect(p.code).toMatch(/^[0-9a-f]{16}$/);
-    expect(JSON.stringify(p)).not.toMatch(/Secret|Another|Hidden|b3|b2/);
+    expect(JSON.stringify({ ...p, code: '' })).not.toMatch(/Secret|Another|Hidden|b3|b2/); // the code is hex, so judge the rest
     expect(state(h)).toEqual(before);
     expect(auditRows(h)).toHaveLength(0);
     h.close();
@@ -244,14 +244,40 @@ describe('rolling the schedule back one batch', () => {
     h.close();
   });
 
-  it('refuses a stamp that is not newer than every stored one, because it would create a tie', () => {
+  it('refuses, in preview AND confirm, a clock that is not after the newest stored stamp', () => {
+    for (const [name, now] of [['equal', '2026-09-01T00:00:00.000Z'], ['earlier', '2026-08-30T00:00:00.000Z']] as const) {
+      const h = boot();
+      rule(h, 'b3', true, 'current', null);
+      rule(h, 'b2', false, 'older', '2026-09-01T00:00:00Z');
+      const p = preview(h);
+      if (!p.ok) throw new Error('unreachable');
+      clock.set(now); // the clock is (or has gone back) to the stored stamp
+      expect(preview(h), name).toEqual({ ok: false, reason: 'clock_not_newer' });
+      // Even the code that was valid a moment ago cannot confirm, and the answer is the same
+      // for a code that never existed: it does not depend on one.
+      expect(h.app.schedules.confirmRollback(h.owner, p.code), name).toEqual({ ok: false, reason: 'clock_not_newer' });
+      expect(h.app.schedules.confirmRollback(h.owner, '0'.repeat(16)), name).toEqual({ ok: false, reason: 'clock_not_newer' });
+      expect(state(h)).toEqual(['current:on', 'older:off']);
+      expect(auditRows(h)).toHaveLength(0);
+      // One millisecond later it is orderable again, with the same code (nothing else moved).
+      clock.set('2026-09-01T00:00:00.001Z');
+      expect(h.app.schedules.confirmRollback(h.owner, p.code), name).toMatchObject({ ok: true });
+      h.close();
+    }
+  });
+
+  it('refuses a stamp stored in the FUTURE the same way, and the command says why', async () => {
     const h = boot();
+    await h.transport.start((e) => h.app.router.handle(e));
     rule(h, 'b3', true, 'current', null);
-    rule(h, 'b2', false, 'older', '2026-09-01T00:00:00Z');
-    clock.set('2026-09-01T00:00:00.000Z'); // the same instant as the stored stamp
-    expect(roll(h)).toEqual({ ok: false, reason: 'order_unknown' });
+    rule(h, 'b2', false, 'older', '2099-01-01T00:00:00Z');
+    expect(preview(h)).toEqual({ ok: false, reason: 'clock_not_newer' });
+    const out = await h.transport.dispatch({
+      kind: 'command', name: 'schedule', userId: OWNER, options: { rollback: 'preview' },
+    } as never);
+    expect(replyText(out)).toMatch(/not after your latest schedule change/);
+    expect(replyText(out)).not.toMatch(/tied|unknown/i);
     expect(state(h)).toEqual(['current:on', 'older:off']);
-    expect(auditRows(h)).toHaveLength(0);
     h.close();
   });
 
@@ -347,7 +373,7 @@ describe('/schedule rollback through the command', () => {
     expect(shown?.ephemeral).toBe(true);
     const code = /rollback:([0-9a-f]{16})/.exec(replyText(shown))?.[1];
     expect(code).toBeDefined();
-    expect(replyText(shown)).not.toMatch(/Secret|Hidden|b3|b2/);
+    expect(replyText(shown).replace(code!, '')).not.toMatch(/Secret|Hidden|b3|b2/);
     expect(state(h)).toEqual(['Hidden Older:off', 'Secret Course:on']);
 
     const done = await dispatch(h, { rollback: code! });

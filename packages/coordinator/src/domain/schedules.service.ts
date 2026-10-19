@@ -151,7 +151,7 @@ export class SchedulesService {
    */
   previewRollback(actor: ActorContext): RollbackPreview {
     this.authz.requireOwner(actor);
-    return this.store.scheduleRules.rollbackPreview(actor.discordUserId);
+    return this.store.scheduleRules.rollbackPreview(actor.discordUserId, this.nowIso());
   }
 
   /**
@@ -164,8 +164,9 @@ export class SchedulesService {
    * ONE transaction with the injected clock, so a stale or replayed code changes
    * nothing and a failed audit write undoes the flip. It deletes no row and
    * touches no exception. A deliberate second rollback, from a fresh preview, flips
-   * again, as the source does; whether the source's repeated rollback is the same
-   * is a private-audit question this repository cannot answer (named blocker).
+   * again, as the service always did; whether the source's repeated rollback is the
+   * same is a private-audit question this repository cannot answer (its semantics are
+   * UNPROVEN, a named parity blocker).
    */
   confirmRollback(actor: ActorContext, code: string): RollbackOutcome {
     this.authz.requireOwner(actor);

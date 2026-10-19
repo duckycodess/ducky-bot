@@ -74,7 +74,7 @@ rollback is the same is a private-audit question and **stays a required parity g
 Ambiguity is refused, never guessed: ANY replaced batch with no known or an unreadable
 replacement time (even beside batches of known order), two batches at the same instant, a
 batch split between active and replaced rules or across replacement times, or a stamp not
-strictly newer than every stored one (it would create the very tie refused above).
+strictly newer than every stored one, which is its own refusal (`clock_not_newer`, shown with its own message, and checked by the preview as well as the confirmation, with the injected time, so neither depends on a code). A stored stamp in the future, or the clock going back to one, is that refusal too.
 Replies carry counts and the code, never a batch, label or course.
 
 A successful rollback is audited with the typed event `schedule.batch_rolled_back` (counts
@@ -94,26 +94,38 @@ checkpoint, a pending event, a failure count or the call budget. Pausing applies
 next tick (the tick in flight read the switch once, at its start and finishes); resuming
 makes every cursor due again exactly where it stood.
 
-Resuming (off to on) is **refused** wherever a native path could have told the owner the
-same things. While monitoring is off an ordinary snapshot DM or feed card is not trimmed for
-what a target covers, so it may already have told the owner what the target's untouched
-checkpoint would tell a second time. Nothing stored proves when a pause really began (an
-imported pause carries only the import time, so a native watch cancelled before the import
-can have spoken after the source's pause began), what a native path delivered, or whether a
-pending native notification was settled; exact cross-path reconciliation has no evidence,
-and resetting a checkpoint would silently baseline away events nobody was told. So, inside
-the transaction, the guard counts every repository on which an ordinary watch or a feed
-selection still has a row, active or cancelled, whenever it ran, that an active target also
-watches, plus any it cannot resolve, and refuses if there is one. Cancelled targets are not
-counted (they are not read), and unrelated repositories do not block.
+**The switch is GLOBAL.** Resuming (off to on) turns on every target at once (up to the
+1,000-target cap), so one overlap, or any ordinary-watch history whose repository cannot be
+proven, blocks resuming ALL of them, not only the overlapping one.
 
-The cost is deliberate and owned: a target whose repository ever had a native row cannot be
-resumed until reconciliation exists. Removing the native row is **not** a way round it (that
-would delete the history the guard honours), so the reply gives a count and no remedy, and
-an operator import cannot override it either (an import never overwrites a stored switch).
-Pause provenance (whether the pause was the owner's, with a known start, or imported) and
-fuller native dedup history are not recorded; recording them, and reconciling, is a required
-full-parity blocker, not an accepted omission and not a completed acceptance criterion.
+Resuming is **refused** wherever a native path could have told the owner the same things.
+While monitoring is off an ordinary snapshot DM or feed card is not trimmed for what a target
+covers, so it may already have told the owner what the target's untouched checkpoint would tell
+a second time. Nothing stored proves when a pause really began (an imported pause carries only
+the import time, so a native watch cancelled before the import can have spoken after the
+source's pause began), what a native path delivered, whether a pending native notification was
+settled, or what an ordinary watch's allowlist slug named when it ran: `repos` is a mirror of
+frozen configuration overwritten at every boot, so the same slug can name different
+repositories now. Exact cross-path reconciliation has no evidence, and resetting a checkpoint
+would silently baseline away events nobody was told. So, inside the transaction, the guard
+counts (a) every selected-feed repository, active or cancelled, that an active target also
+watches (a feed row is keyed by the repository itself, a durable identity) and (b) every
+distinct retained ordinary watch, cancelled or not, **whatever it maps to today**, and refuses
+if there is any. Cancelled targets are not counted (they are not read). No mapping-history
+migration was added.
+
+The cost is deliberate and owned: with any ordinary-watch history at all, no target can be
+resumed until reconciliation exists. Removing a native row is **not** a way round it (that
+would delete the history the guard honours), and a repeated import preserves the stored switch,
+so there is no operator-import workaround either; the reply gives a count and no remedy. Pause
+provenance and fuller native dedup history are not recorded; recording them, and reconciling,
+is a **required full-parity and cutover blocker**, not an accepted omission and not a completed
+acceptance criterion.
+
+An import that adds a NEW active target on a repository an ordinary watch already covers is
+older than this work and is unchanged: events between the source's last observation and the
+import are not reconciled across the two paths. That named blocker, and the duplicate-free
+observation gate, stand.
 
 A repeated import of an unchanged document states the switch only when nothing has ever
 been stored, so it can neither undo a native choice nor re-pause what the owner resumed;
@@ -145,7 +157,7 @@ rollback as drift. Both changes appear in the rollback-delta export.
   parity and is not. It needs an owner-supplied catalog and a contract for it; until then
   the importer refuses an active meal preference.
 - **Cross-path reconciliation and pause provenance on resume.** Resuming is an owner control now
-  (above), but only where no native path has ever had a row on the target's repository;
+  (above), but only while no ordinary watch row is retained at all and no feed row overlaps an active target;
   reconciling what the ordinary watch and the feed told the owner against a target's checkpoint,
   and recording where a pause began, have no evidence in the stored data and are not built.
   Refusal is the safe form, and it stays a required parity blocker.

@@ -1217,12 +1217,16 @@ fail-closed form of the blocker, not a decision to drop it.
   unchanged. Unit-tested only. The paused
   global watch switch is carried over and gates reads, and the owner now sets it with
   `/watch monitoring state:on|off` (explicit, never a toggle; the same state changes no
-  row, timestamp, audit row or delta). **Resuming is refused wherever an ordinary watch or a
-  selected feed repository has ever had a retained row (active or cancelled) on a repository
-  an active target also watches** (ADR 0032): nothing stored proves when a pause began or what
-  a native path delivered, exact cross-path reconciliation is not built, a checkpoint is never
-  reset to get past it, and removing the native row is not a way round it. A named full-parity
-  blocker, with a real cost: such a target cannot be resumed until reconciliation exists.
+  row, timestamp, audit row or delta). **The switch is GLOBAL, and resuming is refused
+  wherever a feed repository (active or cancelled) overlaps an active target, or ANY ordinary
+  watch row is retained at all** (ADR 0032): one such overlap or unprovable history blocks
+  resuming ALL targets, up to 1,000. An ordinary watch is stored by an allowlist slug whose
+  mapping is overwritten every boot, so no current mapping can say what it watched; nothing
+  stored proves when a pause began or what a native path delivered; exact cross-path
+  reconciliation is not built; a checkpoint is never reset to get past it; removing native rows
+  is not a way round it; and a repeated import preserves the stored switch, so there is no
+  operator-import workaround. **A REQUIRED full-parity and cutover blocker, not an accepted
+  omission**, with a real cost: with any ordinary-watch history no target can be resumed.
   Unit-tested only; command registration with Discord is not performed here.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned". The review BODY is now read (and is the only approved source: file and
@@ -1243,7 +1247,8 @@ fail-closed form of the blocker, not a decision to drop it.
   is rechecked in the flipping transaction, so a stale or replayed code changes nothing; any
   replaced batch of unknown or unreadable order (even beside known ones), a tie, a split
   batch or a non-newer stamp is refused. A successful flip is audited as
-  `schedule.batch_rolled_back` (counts only) in the same transaction (ADR 0032 corrects the
+  `schedule.batch_rolled_back` (counts only) in the same transaction; a clock that is not after the
+  newest stored stamp is refused as `clock_not_newer`, in the preview as well (ADR 0032 corrects the
   earlier claim that this needed a table rebuild: `audit_log.event` has no CHECK).
   Unit-tested only; the Discord command definition is not registered by this build. **Still
   required:** the private source's repeated-rollback semantics (a fresh second preview flips
@@ -1267,6 +1272,11 @@ fail-closed form of the blocker, not a decision to drop it.
   feed's duplicate cards are retired the same way, for the kinds an imported surface
   sees in full, under the same conditions. Paused, outside the cycle, preferences off,
   no GitHub section or briefings off keep the native DM and card. Unit-tested only.
+  **What this does NOT do (required blockers):** it trims native output prospectively only. It
+  does not reconcile what the two paths told the owner while monitoring was paused, nor across
+  an import that adds a new active target on an already-watched repository (events between the
+  source's last observation and the import), and a resume is refused rather than reconciled
+  (above). The duplicate-free observation gate stands.
 - **Equal-time late reviews:** a late event that shares the cursor's timestamp is
   reconciled by identity for commits, pull-request-level events, reviews, issues,
   runs and releases once Ducky has processed the boundary (a pull request touched at

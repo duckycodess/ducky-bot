@@ -13,7 +13,7 @@ Read first, because it shapes everything after it:
   development and production profiles (separate databases), and not with the
   separate agent-flow dispatcher, which has its own slots and no supported
   shared-admission protocol. Turning engineering on before that protocol exists
-  means two programs can each start an agent against the one 8 GiB account. See
+  means two programs can each start an agent against the one shared account. See
   [decision 0030](../decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
 - **Additional-user AI stays OFF** (`DUCKY_ADDITIONAL_USER_AI_ENABLED`).
 - Reminders, tasks, briefings and GitHub watches do not depend on the model and
@@ -25,8 +25,9 @@ Record what you actually see; do not copy these numbers into a report.
 
 ```bash
 uid=$(id -u)
-# Account-wide ceiling. The recorded host reads MemoryMax=8589934592,
-# MemoryHigh=7516192768, MemorySwapMax=0, TasksMax=1536.
+# Account-wide ceiling. Read on 2026-10-19: MemoryMax=17179869184 (16 GiB),
+# MemoryHigh=15032385536 (14 GiB), MemorySwapMax=0, TasksMax=1536, and the owner
+# authorized that envelope. (2026-10-13 read 8589934592 / 7516192768; historical.)
 systemctl show -p MemoryMax,MemoryHigh,MemorySwapMax,TasksMax "user-$uid.slice"
 # What the executor's memory guard will actually read:
 cat /sys/fs/cgroup/user.slice/user-$uid.slice/{memory.max,memory.high,memory.current,memory.swap.max,pids.max}
@@ -39,18 +40,31 @@ tailscale status --peers=false
 tailscale serve status        # must NOT show a Funnel
 ```
 
-Two facts the numbers do not show:
+Limits of these readbacks:
 
 - The guard compares `min(memory.max, memory.high)` minus `memory.current`
   against the engineering plus notification reserves. `memory.current` includes
   page cache, so it can refuse when there is reclaimable room. That is the safe
-  direction. At the time of writing the recorded host used about 4 GiB of its
-  7 GiB high mark with nothing of Ducky running, so a 2.5 GiB reserve is already
-  close to the edge.
-- Herdr's server owns the agent processes. They are outside every Ducky unit's
-  cgroup, so no unit limit bounds them. Only the slice limit does, and a user
-  unit may set its own limits only if the user manager has controllers
-  delegated, which is a host change this repository does not make.
+  direction. On 2026-10-13, under the then 7 GiB high mark, the host used about
+  4 GiB with nothing of Ducky running; the high mark is 14 GiB as of 2026-10-19,
+  so re-read `memory.current` rather than carrying that figure forward.
+- The account slice is not the dispatcher's worker service. The worker unit
+  `agent-flow-herdr.service` has its own limits (7 GiB high, 8 GiB max,
+  `TasksMax` 512) and the lightweight `agent-flow.service` dispatcher is a
+  third, separate unit; Ducky's guard reads the slice, not either of them.
+  The dispatcher's configured global-2 / per-repository-1 concurrency is its own
+  authorized setting, not proof of Ducky's cross-program admission.
+- Herdr's server owns the agent processes, and a Ducky unit's limits do not
+  reach them. Verified on 2026-10-19 (read-only, by the manager): the **current**
+  Herdr server runs inside `agent-flow-herdr.service`, so descendants that stay in
+  that cgroup inherit its 7 GiB high / 8 GiB max / `TasksMax` 512, and every
+  account process shares the 16 / 14 GiB slice. **Not verified:** that any
+  individual agent, tool, scope or provider process is such a descendant (tool
+  processes can run in separate scopes such as a `devwork-job` scope), so do not
+  assume it. Ducky's executor unit limits alone do not bound a separate Herdr
+  server, and none of this shows a Ducky-dedicated session or cross-program
+  admission. A user unit may set its own limits only if the user manager has
+  controllers delegated, which is a host change this repository does not make.
 
 ## 2. Install shape (not performed)
 

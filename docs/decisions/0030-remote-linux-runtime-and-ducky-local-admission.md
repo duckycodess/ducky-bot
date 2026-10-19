@@ -6,8 +6,14 @@
 
 Issue 8 moves Ducky onto an existing remote Linux account that already provides
 Tailscale, the tools, a registered clone, an account-wide 8 GiB `MemoryMax`
-(7 GiB `MemoryHigh`, no swap, `TasksMax` 1536), lingering and a periodic cleanup
-timer. This supersedes the Azure coordinator and WSL executor placement in
+(7 GiB `MemoryHigh`, no swap, `TasksMax` 1536) as read on 2026-10-13, lingering and
+a periodic cleanup timer. **Correction, 2026-10-19:** the account slice now reads
+16 GiB `MemoryMax` / 14 GiB `MemoryHigh` (swap 0, `TasksMax` 1536), and the owner
+explicitly authorized that envelope; it is no longer an open requirement. The
+dispatcher's separate worker service `agent-flow-herdr.service` carries its own
+7 GiB high / 8 GiB max / `TasksMax` 512 and is not the account cap. The earlier
+figures are kept as the history this decision was written against. This
+supersedes the Azure coordinator and WSL executor placement in
 [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) for this host; those templates are kept
 for history and are not deleted. ADR 0010 assumed one writer per repository and
 nothing global.
@@ -76,8 +82,11 @@ outlives its budget is an orphan, never a fabricated stop.
 refuses to claim unless the lower of `memory.max` and `memory.high` minus
 `memory.current` of the user slice covers an engineering reserve plus a
 notification reserve. Unreadable, non-numeric or unlimited readings refuse. The
-reserves are operator estimates. The guard reads the slice that contains Herdr's
-agents, which no Ducky unit's own limit bounds.
+reserves are operator estimates. The guard reads the account slice that contains
+Herdr's agents; a Ducky unit's own limit does not bound them. On 2026-10-19 the
+current Herdr server was read as running inside `agent-flow-herdr.service`, whose
+limits apply to descendants that remain in its cgroup, but membership of any
+individual agent, tool or provider process is unverified.
 
 **No friend-facing model by default.** `DUCKY_ADDITIONAL_USER_AI_ENABLED`
 (default off) is frozen into the Authorizer. `Authorizer.mayConverse` is the one

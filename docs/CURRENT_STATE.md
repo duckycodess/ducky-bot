@@ -868,9 +868,10 @@ evidence of one.** Nothing was installed, enabled, started, probed against a rea
 agent or changed on the host.
 
 **Host readbacks** (read-only, taken from this account while preparing this
-change; re-read before relying on them):
+change; re-read before relying on them). The first table is the **2026-10-13**
+reading and stays as history; the correction below it is current:
 
-| Readback | Value seen |
+| Readback | Value seen (2026-10-13, historical) |
 |---|---|
 | user slice `MemoryMax` / `MemoryHigh` / `MemorySwapMax` / `TasksMax` | 8589934592 / 7516192768 / 0 / 1536 |
 | cgroup `memory.current` at that moment | about 4.3 GB, with nothing of Ducky running |
@@ -879,6 +880,38 @@ change; re-read before relying on them):
 | Tailscale | up on the tailnet; `tailscale serve status` reported no serve config |
 | `herdr`, `pi` | present on `PATH` |
 | `openclaw` | **absent** from `PATH`; no `~/.openclaw-dev` store |
+
+**Correction, 2026-10-19 (current).** The account slice now reads, from the same
+`systemctl show user-1003.slice` command, `MemoryMax` 17179869184 (16 GiB),
+`MemoryHigh` 15032385536 (14 GiB), `MemorySwapMax` 0 and `TasksMax` 1536, with
+linger `yes` and `devwork-cleanup.timer` `active`. The owner explicitly
+authorized the 16 GiB / 14 GiB account envelope, so it is the accepted
+requirement and **not** an open product blocker; the 8 GiB / 7 GiB figures above
+describe the earlier host state only. Two different ceilings must not be
+conflated:
+
+- the **account slice** (`user-1003.slice`, 16 GiB / 14 GiB), which bounds
+  everything running as that user, including Herdr and its agents, and is the
+  ceiling Ducky's executor memory guard reads;
+- the dispatcher's **worker service** `agent-flow-herdr.service`
+  (`MemoryHigh` 7516192768, `MemoryMax` 8589934592, `TasksMax` 512), a separate
+  unit under the account. The dispatcher's own `agent-flow.service` is a
+  lightweight unit (512 MiB high, 768 MiB max, `TasksMax` 256) and is not that
+  worker. No unit was changed by this work.
+
+**What is and is not verified about Herdr membership (2026-10-19).** A read-only
+readback by the manager of the current Herdr server's cgroup membership and of
+`agent-flow-herdr.service` agree that the **current Herdr server runs inside
+`agent-flow-herdr.service`**. Descendants that remain in that cgroup inherit its
+limits (7 GiB high, 8 GiB max, `TasksMax` 512), and every process of the account
+shares the 16 GiB / 14 GiB slice. **Not verified:** that any individual agent,
+tool, scope or provider process is such a descendant. The manager's own tool
+process runs in a separate `devwork-job` scope, so membership must not be
+inferred for all tools or providers. Ducky's executor unit limits alone do not
+bound a separate Herdr server. None of this establishes a dedicated Ducky Herdr
+session, Ducky's runtime headroom, or cross-program admission; the dispatcher's
+configured concurrency (global 2, per repository 1) is its own authorized
+setting and is no evidence of them either. They stay open blockers below.
 
 **What the code now does** (all unit-tested, none run live):
 

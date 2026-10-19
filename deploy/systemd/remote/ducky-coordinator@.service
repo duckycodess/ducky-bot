@@ -7,9 +7,10 @@
 #
 # This unit does NOT set MemoryMax and does not claim to bound anything. The
 # account-wide ceiling is the user slice's. A user unit can only tighten its own
-# cgroup if controllers are delegated to the user manager, and no unit here can
-# bound Herdr's agents, which are children of the Herdr server rather than of
-# any Ducky unit.
+# cgroup if controllers are delegated to the user manager, and no limit set here
+# reaches Herdr's agents, which are children of the Herdr server rather than of
+# any Ducky unit (see the runbook for what is verified about the server's own
+# cgroup).
 #
 # Engineering stays OFF. DUCKY_ENGINEERING_ENABLED is deliberately absent from
 # the env example; see docs/runbooks/remote-linux-runtime.md before it is set.

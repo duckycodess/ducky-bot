@@ -52,8 +52,9 @@ instance is never ambiguous.
 ## Remote Linux account (issue 8): the selected placement
 
 The chosen runtime is the existing remote Linux account with Tailscale, a
-registered clone, an account-wide 8 GiB cap, lingering and a cleanup timer. The
-Azure and WSL material below is kept for history; it describes an older
+registered clone, an account-wide memory cap (16 GiB `MemoryMax` / 14 GiB
+`MemoryHigh` as read on 2026-10-19, owner-authorized), lingering and a cleanup
+timer. The Azure and WSL material below is kept for history; it describes an older
 placement and is **superseded for this host** by
 [decision 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
 Preparation only: nothing is installed or started. The templates are in

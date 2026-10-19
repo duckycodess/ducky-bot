@@ -1215,9 +1215,15 @@ fail-closed form of the blocker, not a decision to drop it.
   high in lists and the lookahead and is shown as urgent, and the category is shown
   with the task; no native command sets either, and the task command definitions are
   unchanged. Unit-tested only. The paused
-  global watch switch is now carried over and gates reads, but **no owner control
-  can flip it** (the owner-only manifest is not expanded), so resuming needs an
-  operator import: a named blocker.
+  global watch switch is carried over and gates reads, and the owner now sets it with
+  `/watch monitoring state:on|off` (explicit, never a toggle; the same state changes no
+  row, timestamp, audit row or delta). **Resuming is refused wherever an ordinary watch or a
+  selected feed repository has ever had a retained row (active or cancelled) on a repository
+  an active target also watches** (ADR 0032): nothing stored proves when a pause began or what
+  a native path delivered, exact cross-path reconciliation is not built, a checkpoint is never
+  reset to get past it, and removing the native row is not a way round it. A named full-parity
+  blocker, with a real cost: such a target cannot be resumed until reconciliation exists.
+  Unit-tested only; command registration with Discord is not performed here.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned". The review BODY is now read (and is the only approved source: file and
   review-comment endpoints are not approved), but the private audit does not define
@@ -1229,13 +1235,19 @@ fail-closed form of the blocker, not a decision to drop it.
   evening briefing is due until the end of its day, and nothing survives into a later
   day (ADR 0032). Without imported preferences the native six-hour rule is unchanged.
   Unit-tested only.
-- **Schedule batches:** an owner-scoped service flips the schedule back one batch
-  (the active batch becomes replaced and the most recently replaced batch with a known
-  replacement time becomes active), deleting nothing; a batch of unknown order is never
-  chosen. **No Discord command reaches it: the owner-only command manifest was not
-  expanded, so the control is a named blocker.** It is not on the audit log (the event
-  set is closed and widening it needs a table rebuild), and the source's
-  keep-three-versions retention is not mirrored.
+- **Schedule batches:** the owner flips the schedule back one batch with `/schedule
+  rollback:preview` and then `/schedule rollback:<code>` (never with text or a file; no new
+  command, subcommand or interaction kind). The active batch becomes replaced and the most
+  recently replaced one becomes active, deleting nothing and touching no exception. The
+  code digests every rule by identity, batch, flag and replacement time plus the target and
+  is rechecked in the flipping transaction, so a stale or replayed code changes nothing; any
+  replaced batch of unknown or unreadable order (even beside known ones), a tie, a split
+  batch or a non-newer stamp is refused. A successful flip is audited as
+  `schedule.batch_rolled_back` (counts only) in the same transaction (ADR 0032 corrects the
+  earlier claim that this needed a table rebuild: `audit_log.event` has no CHECK).
+  Unit-tested only; the Discord command definition is not registered by this build. **Still
+  required:** the private source's repeated-rollback semantics (a fresh second preview flips
+  again here), and the source's keep-three-versions retention is not mirrored.
 - **Repository discovery and the polling cycle:** the source discovers new
   repositories on a schedule and polls the 40 most recently pushed per cycle. With
   the real reader enabled Ducky now does the same (ADR 0031): scoped, tombstone- and

@@ -28,3 +28,14 @@ The system SHALL preserve audited typed checkpoint and event identity semantics 
 #### Scenario: Incomplete observation
 - **WHEN** a required page/surface fails or cannot yet be represented
 - **THEN** that surface's cursor does not falsely advance, retry progress remains durable and no lossless-parity claim is made
+
+### Requirement: Owner monitoring control that never replays native notifications
+The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp and write no audit row. A change SHALL be audited in the same transaction. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget. Turning monitoring on SHALL be refused wherever an ordinary watch or selected feed repository has a retained row, active or cancelled and whenever it ran, on a repository an active target also watches, because pause provenance and native delivery history are not proven; it SHALL NOT reset a checkpoint, SHALL NOT offer deleting native rows as a remedy, and exact cross-path reconciliation remains a required blocker. A repeated import of an unchanged document SHALL NOT override the owner's choice, and verification SHALL report the difference.
+
+#### Scenario: Native coverage cancelled before the pause or before resume
+- **WHEN** an ordinary watch on a target's repository was cancelled at any time, including before an imported pause's stamp or at the same instant
+- **THEN** turning monitoring on is refused with a count and no remedy, and the switch and every checkpoint are unchanged
+
+#### Scenario: Same state again
+- **WHEN** the owner sets the state monitoring already has
+- **THEN** nothing is written and the reply says nothing changed

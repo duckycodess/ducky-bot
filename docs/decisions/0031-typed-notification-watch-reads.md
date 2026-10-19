@@ -176,9 +176,10 @@ one by its id. A baseline or a source cursor stays strict.
   `/status`. Whether this meets the source's timing under the real quota and the real
   selection is unproven.
 - **The global monitoring switch** is carried over from the import and gates reads
-  only (no target or cursor changes). There is no owner control to flip it: the
-  owner-only command manifest is not expanded, so an operator states it by importing
-  a document. **That missing control is a named blocker.**
+  only (no target or cursor changes). The owner flips it with `/watch monitoring`
+  (explicit on or off), and resuming is refused while a native path overlapped a target
+  during the pause (ADR 0032): the control exists, the cross-path reconciliation does
+  not, and that stays a named blocker.
 - It adds no engineering permission, no owner command and no write.
 
 ## Alternatives considered

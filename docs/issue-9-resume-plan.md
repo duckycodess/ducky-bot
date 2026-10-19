@@ -1,6 +1,6 @@
 # Issue 9 resumed implementation plan
 
-Run: agent-flow 8c7fb474fd. Existing branch `codex/issue-9`, draft PR #16.
+Run: agent-flow 566d08edde, continuing 8c7fb474fd. Existing branch `codex/issue-9`, draft PR #16.
 
 ## Authority and preserved gates
 
@@ -33,6 +33,82 @@ The independent reviewer conditionally approved the direction with seven IMPORTA
 7. New reader shapes require a read-only live probe with explicit selection and no disclosure of provider bodies/private identity, non-zero on missing/incomplete evidence, no writes or notifications. Probe each approved shape on an owner-approved public repository and separately gate discovery authorization; synthetic schemas are not live certification. Real reader completeness/latency and runtime eligibility remain required operational checks until proven.
 
 No owner-only command manifest expansion is authorized: use existing owner-scoped service/control boundaries for schedule rollback, or report the missing control as a blocker. “Areas mentioned” may use the approved review body; separate file/review-comment endpoints are not approved and must not be added implicitly. The manager observed both role startup panes reporting Claude Team with the exact pinned model/high-effort flags; a role's inability to introspect its own billing is not substituted for that evidence.
+
+## 2026-10-19 continuation plan
+
+The manager rechecked live `main` and the PR branch: `main` remains
+`0a58ef01fe34ad60b91180d6e32fc6aae3b0925f`, already an ancestor of the
+preserved pushed issue head `de0746dd0c4d9117a4ab5d22de8a93f89dbd0166`.
+No incoming CI fix currently requires a merge. Recheck before publication and
+use a normal merge if a necessary fix arrives; never rewrite existing history.
+
+This continuation targets two concrete public implementation blockers, without
+claiming that they exhaust full parity:
+
+1. Expose the imported notification-only global monitoring switch through the
+   existing owner-only `/watch` boundary. Preserve ordinary engineering watches,
+   frozen authorization, target selection, checkpoints, pending events and budgets.
+   Make setting the same state idempotent; neither resume nor replay may reset or
+   baseline observation state. Keep replies private and audit state changes without
+   record contents. Do not enable discovery or change any live runtime setting.
+2. Expose the existing recurring schedule-batch rollback through the existing
+   owner-only `/schedule` boundary, preserving its current text/file preview flow.
+   Require explicit, stale-safe confirmation of the selected batch transition;
+   replay must not toggle the schedule a second time. Reject ambiguous ordering,
+   preserve indefinite rules and exceptions, and atomically audit successful
+   changes by counts only. Use additive persistence if the existing closed audit
+   event set cannot represent this without rebuilding a parent table. Do not
+   expand the owner command/interaction manifests or introduce a second write path.
+3. Obtain one independent plan review before implementation. The prescribed
+   Sonnet 5.5/high subscription session is the sole implementer; the separate
+   Opus 5.5/high session is read-only. Incorporate required review conditions.
+   Verify owner/non-owner routing, shared-channel privacy, replay/staleness,
+   rollback atomicity and repeated-import behavior with synthetic regressions.
+   Update the existing ADR, current-state and migration/runbook contracts honestly.
+4. Commit meaningful implementation batches, run focused tests then deterministic
+   lint/typecheck, full tests, build, diff and existing strict OpenSpec checks.
+   Run a fresh real scanner on final history and tree; audit any exact synthetic
+   fixture finding rather than hide a rule/path. Recheck base, push normally and
+   obtain independent approval of the exact pushed head and complete final diff.
+5. Keep the draft PR, Bead in_progress and `ready_to_merge=false` while any prior
+   parity, runtime or operational gate remains. Controls implemented and tested
+   synthetically are not live Discord/control certification. In particular the
+   reader completeness/timing, AI/meals/areas, private reverse bridge, runtime
+   eligibility and every gate below remain required, not waived by this scope.
+
+### Independent continuation-plan conditions
+
+The separate reviewer approved the direction conditionally, with these required
+implementation amendments. This records the source/ADR contradiction explicitly:
+`audit_log.event` is unconstrained text in the actual migration; only its subject
+kind is constrained. ADR 0032's assertion that new audit events require a table
+rebuild is incorrect and must be corrected, not implemented around.
+
+- Preserve `/schedule text/file`; add an optional rollback preview/confirmation
+  string, not subcommands or repurposed signed button kinds. Refuse mixed inputs.
+  Confirmation binds all active batch keys/counts and the selected target/order,
+  recomputed inside the transaction. Stale and replayed confirmations cannot flip
+  again. A fresh deliberate second rollback follows the existing service behavior;
+  its private source-semantic parity remains a required evidence gate.
+- Audit successful transitions with new typed event names using an error-propagating
+  write inside the same transaction and injected time. Fixed owner actor identity,
+  NULL or fixed config subject, counts/state only. Audit failure rolls state back.
+- Owner monitoring choices win over unchanged repeated imports, which must report
+  drift instead of silently undoing a native change. The same applies to schedule
+  active-state changes. Both transitions must appear in rollback exports.
+- Monitoring takes explicit on/off state. A no-op creates no settings row, changes
+  no timestamp and produces no spurious delta or transition audit. Resume preserves
+  checkpoints, pending state and rate-limit backoff. A pause during a running tick
+  applies at the next tick, and this must be tested/documented.
+- Resume must not silently replay native notifications delivered while paused.
+  If exact cross-path reconciliation cannot be proven in this continuation, refuse
+  resume when an active ordinary watch overlaps rather than reset a checkpoint or
+  introduce duplicates. Such refusal remains a named full-parity blocker, not an
+  approved omission or completed resume acceptance criterion.
+- Owner-only gates precede services; shared and GitHub-role responses stay private;
+  manifests remain unchanged. Public codes/replies contain no schedule labels,
+  course codes or repository selections. Command registration is not performed by
+  this dispatcher and remains part of real operational control certification.
 
 ## Required operational gates, not waived
 

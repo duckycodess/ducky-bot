@@ -712,6 +712,7 @@ export class AssistantWatchRepo {
    * untouched, events already found stay HELD (they are real and deduplicate by
    * identity), and the restart is a FAILURE for backoff purposes, so a window
    * that keeps moving is retried with growing delay rather than in a loop.
+   * The caller may keep one position across it (`pendingState`): a baseline's boundary.
    */
   restartPass(input: {
     targetId: string;
@@ -720,15 +721,17 @@ export class AssistantWatchRepo {
     nextDueAt: string;
     errorCode: string;
     atIso: string;
+    /** The only position kept across the restart (a baseline's boundary), or none. */
+    pendingState?: string | null;
   }): boolean {
     const info = this.db
       .prepare(
         `UPDATE assistant_watch_checkpoints
-            SET pending_cursor = NULL, pending_page = 0, pending_state = NULL,
+            SET pending_cursor = NULL, pending_page = 0, pending_state = ?,
                 failures = failures + 1, last_error = ?, next_due_at = ?, updated_at = ?
           WHERE target_id = ? AND surface = ? AND updated_at = ?`,
       )
-      .run(input.errorCode, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);
+      .run(input.pendingState ?? null, input.errorCode, input.nextDueAt, input.atIso, input.targetId, input.surface, input.expectedUpdatedAt);
     return Number(info.changes) === 1;
   }
 
@@ -1029,7 +1032,8 @@ export class AssistantWatchRepo {
       const info = this.db
         .prepare(
           `UPDATE assistant_watch_checkpoints
-              SET state = 'imported', cursor = ?, boundary_known = 0, updated_at = ?
+              SET state = 'imported', cursor = ?, boundary_known = 0,
+                  pending_cursor = NULL, pending_page = 0, pending_state = NULL, updated_at = ?
             WHERE target_id = ? AND surface = ? AND state = 'unbaselined'`,
         )
         .run(cursor, atIso, targetId, surface);

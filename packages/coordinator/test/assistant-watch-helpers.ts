@@ -21,6 +21,11 @@ export class FakeWatchReader implements AssistantWatchReader {
     discovery: false,
   };
   pageSize = 2;
+  /**
+   * Judge `hasMore` the way the real reader does: a FULL page might be followed by another,
+   * whatever the list's true length. Off by default so older scripts keep an exact end.
+   */
+  cardinalityHasMore = false;
   calls = 0;
   log: string[] = [];
   failNext = new Set<string>();
@@ -71,7 +76,11 @@ export class FakeWatchReader implements AssistantWatchReader {
   private paged<T>(items: readonly T[] | undefined, page: number): Page<T> {
     const all = items ?? [];
     const start = (page - 1) * this.pageSize;
-    return { items: all.slice(start, start + this.pageSize), hasMore: start + this.pageSize < all.length };
+    const slice = all.slice(start, start + this.pageSize);
+    return {
+      items: slice,
+      hasMore: this.cardinalityHasMore ? slice.length >= this.pageSize : start + this.pageSize < all.length,
+    };
   }
 
   async repository(ref: WatchRepoRef): Promise<RepositoryRecord> {

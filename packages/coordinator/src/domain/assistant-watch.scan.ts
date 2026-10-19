@@ -34,6 +34,15 @@ export interface ScanState {
   readonly capMs?: number | null;
   /** What the newest NEW conclusion on a runs pass said. */
   readonly ci?: 'failing' | 'passing' | null;
+  /**
+   * Present only while a NEW runs or releases baseline is being read: the boundary it
+   * was frozen at, before its first request. The pass commits exactly this time as the
+   * cursor, never the newest time it saw, so a transition that happened while later
+   * pages were still being read is announced by the next ordinary pass. It survives a
+   * drift restart (with the creation floor so far), and is ignored unless the
+   * checkpoint's cursor is still null.
+   */
+  readonly baseline?: { readonly boundaryMs: number };
   /** Pull requests whose reviews remain to be read, in order. */
   readonly queue?: readonly ReviewTarget[];
   /** Progress through the review pages of `queue[0]`. */
@@ -46,7 +55,15 @@ export function parseScan(json: string | null): ScanState {
   if (json === null) return EMPTY_SCAN;
   try {
     const v = JSON.parse(json) as unknown;
-    if (v && typeof v === 'object' && (v as { v?: unknown }).v === 1) return v as ScanState;
+    if (v && typeof v === 'object' && (v as { v?: unknown }).v === 1) {
+      const b = (v as { baseline?: { boundaryMs?: unknown } }).baseline;
+      // A marker that is not a usable time is no marker: the baseline starts over.
+      if (b !== undefined && !(b && typeof b.boundaryMs === 'number' && Number.isFinite(b.boundaryMs))) {
+        const { baseline: _bad, ...rest } = v as ScanState;
+        return rest as ScanState;
+      }
+      return v as ScanState;
+    }
   } catch {
     /* an unreadable state is a fresh read: the cursor was never touched */
   }

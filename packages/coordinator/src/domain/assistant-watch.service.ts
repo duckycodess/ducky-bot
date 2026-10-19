@@ -18,9 +18,9 @@ import type { DiscordTransport } from '../discord/transport.js';
 import { assistantWatchAlert } from '../discord/assistant-presenters.js';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import {
-  DRAFT_TRACK_MAX_AGE_MS, RUN_TRACK_MAX_AGE_MS, UnreadableTimestamp, bareRepoName, deriveCommits,
+  UnreadableTimestamp, bareRepoName, deriveCommits,
   deriveDefaultBranch, deriveIssues, derivePullList, deriveReleases, deriveReviews, deriveRuns,
-  reviewPendingMarker, scrubText, type DerivedEvent, type SurfaceRead,
+  reviewPendingMarker, scrubText, secondBoundaryMs, type DerivedEvent, type SurfaceRead,
 } from './assistant-watch.engine.js';
 import {
   EMPTY_SCAN, keyOf, parseScan, serializeScan, windowHeldStill, type ScanState,
@@ -176,6 +176,18 @@ const PAGE_CAP: Readonly<Record<'commits' | 'pulls' | 'issues' | 'runs' | 'relea
   runs: WATCH_RUNS_MAX_PAGES,
   releases: WATCH_RELEASES_MAX_PAGES,
 };
+
+/**
+ * The most runs a first observation can PROVE it inventoried.
+ *
+ * The provider says there may be more by page cardinality: a full page might be
+ * followed by another. The tenth page (the page cap) is full at exactly this many, so
+ * a list of this size cannot be told from a longer one and is refused as
+ * `window_exceeded`; 99 is the most that can be proven. `total_count` never ends a
+ * window (a stale total would hide items), but it can refuse EARLY: a branch whose
+ * total already reaches this is refused on page one instead of after nine more calls.
+ */
+const RUNS_INVENTORY_CAPACITY = WATCH_RUNS_MAX_PAGES * ASSISTANT_WATCH_PAGE_SIZE;
 
 /** After a rate limit or an authentication failure the whole cycle stops for this long. */
 const PAUSE_MS = 10 * MINUTE;
@@ -346,12 +358,50 @@ export class AssistantWatchService {
     const timeCursor = unit.surface === 'default_branch' || baseline ? null : unit.cursor;
     const sinceMs = timeCursor === null ? null : Date.parse(timeCursor);
     if (timeCursor !== null && Number.isNaN(sinceMs)) return this.fail(unit, nowMs, 'unreadable_cursor');
+
+    // A NEW runs or releases baseline is frozen at a boundary taken before its first
+    // request, and commits exactly that boundary (see ScanState.baseline). A marker
+    // belongs to a null cursor only, and a null-cursor read with progress but no marker
+    // (state written before the marker existed) starts over rather than guess one.
+    let scan = parseScan(unit.pendingState);
+    let current = unit;
+    let boundaryMs: number | null = null;
+    if (baseline && (unit.surface === 'runs' || unit.surface === 'releases')) {
+      if (scan.baseline) {
+        boundaryMs = scan.baseline.boundaryMs;
+      } else {
+        boundaryMs = secondBoundaryMs(nowMs);
+        scan = { v: 1, baseline: { boundaryMs } };
+        // Written BEFORE the first request. A failure on that request (the repository
+        // metadata read included) would otherwise leave nothing durable, and the retry
+        // would re-anchor later and quietly drop what moved in between. This also
+        // discards pending progress that predates the marker. The write moves the
+        // checkpoint's version, so every later write of this unit expects the new one.
+        const nowIso = isoOf(nowMs);
+        const pendingState = serializeScan(scan);
+        const saved = this.store.assistantWatch.savePending({
+          targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
+          pendingCursor: isoOf(boundaryMs), pendingPage: 0, pendingState,
+          nextDueAt: unit.nextDueAt, atIso: nowIso,
+        });
+        if (!saved) return 'incomplete';
+        current = {
+          ...unit, pendingPage: 0, pendingCursor: isoOf(boundaryMs), pendingState, updatedAt: nowIso,
+        };
+      }
+    } else if (scan.baseline) {
+      // A baseline marker on a checkpoint that has a real cursor (an adoption, or state
+      // that is not trustworthy) says nothing about where THIS scan stands. Reset the
+      // positional progress as well as the marker, so no page is skipped as already read.
+      scan = EMPTY_SCAN;
+      current = { ...unit, pendingPage: 0, pendingCursor: null, pendingState: null };
+    }
     const ctx: UnitCtx = {
-      unit, ref, call, nowMs, baseline, sinceMs,
+      unit: current, ref, call, nowMs, baseline, sinceMs, boundaryMs,
       // Items at the cursor are re-read (and told from known ones by identity) only
       // when Ducky itself processed them; a baseline or a source cursor stays strict.
       inclusive: unit.state === 'ready' && unit.boundaryKnown,
-      scan: parseScan(unit.pendingState),
+      scan,
     };
 
     try {
@@ -445,6 +495,7 @@ export class AssistantWatchService {
     const page = unit.pendingPage + 1;
     const branch = unit.surface === 'commits' || unit.surface === 'runs' ? await this.branchFor(ctx) : '';
     const f = await this.fetchList(ctx, page, branch);
+    const boundaryMs = ctx.boundaryMs;
     const floorMs = unit.scanFloor ? Date.parse(unit.scanFloor) : null;
     // After a multi-page window, lifecycle times count from where THAT window started, so
     // an item that moved between page reads still has its merge, open or close announced.
@@ -480,16 +531,21 @@ export class AssistantWatchService {
         // A provider total that SHRINKS while the window is being read means rows were
         // deleted above the read point, and one of them may have slid past a page.
         if (scan.total != null && f.res.total != null && f.res.total < scan.total) {
-          return this.restart(unit, ctx.nowMs, 'window_unstable');
+          return this.restart(ctx, 'window_unstable');
+        }
+        // A first observation of a branch whose runs already fill the inventory is refused on
+        // page one: reading nine pages first would only end in the same refusal.
+        if (boundaryMs !== null && page === 1 && f.res.total != null && f.res.total >= RUNS_INVENTORY_CAPACITY) {
+          repo.block(unit.targetId, unit.surface, 'window_exceeded', isoOf(ctx.nowMs));
+          return 'blocked';
         }
         const failing = repo.checkpoint(unit.targetId, 'ci_state')?.cursor === 'failing';
         const runs = deriveRuns(
-          f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs,
-          ctx.nowMs - RUN_TRACK_MAX_AGE_MS,
+          f.res.items, sinceMs, failing, inclusive, Number.isNaN(floorMs) ? null : floorMs, boundaryMs,
         );
         read = runs;
         ci = runs.ciState;
-        pageFloorMs = runs.unsettledFloorMs;
+        pageFloorMs = minMs(runs.unsettledFloorMs, runs.touchedFloorMs);
         // A run that settles after it was read has a later update than the one read,
         // so the cursor must not be carried past it by something else on the pass.
         pageCapMs = runs.unsettledStampMs === null ? null : runs.unsettledStampMs - 1;
@@ -498,22 +554,31 @@ export class AssistantWatchService {
       case 'releases': {
         hasMore = f.res.hasMore;
         const rel = deriveReleases(
-          f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs,
-          ctx.nowMs - DRAFT_TRACK_MAX_AGE_MS,
+          f.res.items, sinceMs, inclusive, Number.isNaN(floorMs) ? null : floorMs, boundaryMs,
         );
+        // A draft with no creation time cannot be placed in a window, so it cannot be
+        // tracked: refused visibly, cursor and held events untouched, never skipped.
+        if (rel.untrackableDraft) {
+          repo.block(unit.targetId, unit.surface, 'draft_untrackable', isoOf(ctx.nowMs));
+          return 'blocked';
+        }
         read = rel;
-        pageFloorMs = rel.unsettledFloorMs;
-        // A draft published after this read is published AFTER this moment.
-        pageCapMs = rel.unsettledFloorMs === null ? null : ctx.nowMs;
+        pageFloorMs = minMs(rel.unsettledFloorMs, rel.touchedFloorMs);
+        // A draft published after this read is published AFTER this moment. Whole-second
+        // stamps mean one published in the read's own second must still count as later.
+        pageCapMs = rel.unsettledFloorMs === null ? null : secondBoundaryMs(ctx.nowMs);
         break;
       }
     }
 
     const priorNewest = unit.pendingCursor === null ? null : Date.parse(unit.pendingCursor);
-    const newest = maxMs(priorNewest, read.newestMs);
-    const complete = ctx.baseline || read.reachedCursor || !hasMore;
+    // A boundary baseline never ratchets: its pending cursor IS the boundary, and the
+    // window is the whole bounded inventory, to the last page.
+    const newest = boundaryMs !== null ? boundaryMs : maxMs(priorNewest, read.newestMs);
+    const complete = boundaryMs !== null ? !hasMore : ctx.baseline || read.reachedCursor || !hasMore;
     const next: ScanState = {
       v: 1,
+      ...(boundaryMs !== null ? { baseline: { boundaryMs } } : {}),
       ...(branch ? { branch } : {}),
       // The last NONEMPTY page: an empty page proves nothing about a boundary, so a
       // window that closes on one is verified against the page before it.
@@ -553,7 +618,7 @@ export class AssistantWatchService {
     const repo = this.store.assistantWatch;
     const queue = scan.queue ?? [];
     const target = queue[0]!;
-    if (ctx.sinceMs === null) return this.restart(unit, ctx.nowMs, 'review_without_cursor');
+    if (ctx.sinceMs === null) return this.restart(ctx, 'review_without_cursor');
     const rvPage = scan.rv?.page ?? 1;
     const res = await ctx.call(() => this.reader.pullReviews(ctx.ref, target.n, rvPage));
     if (res.items.length > ASSISTANT_WATCH_PAGE_SIZE) throw new WatchReadError('malformed');
@@ -605,10 +670,10 @@ export class AssistantWatchService {
   private async verifyStep(ctx: UnitCtx): Promise<UnitResult> {
     const { unit, scan } = ctx;
     const last = scan.last;
-    if (!last) return this.restart(unit, ctx.nowMs, 'window_unstable');
+    if (!last) return this.restart(ctx, 'window_unstable');
     const branch = unit.surface === 'commits' || unit.surface === 'runs' ? await this.branchFor(ctx) : '';
     const again = await this.fetchList(ctx, last.page, branch);
-    if (!windowHeldStill(last.keys, again.keys)) return this.restart(unit, ctx.nowMs, 'window_unstable');
+    if (!windowHeldStill(last.keys, again.keys)) return this.restart(ctx, 'window_unstable');
     return this.advance(ctx, {
       page: last.page, complete: true, newestMs: unit.pendingCursor ? Date.parse(unit.pendingCursor) : null,
       events: [], scan: { ...scan, verify: false }, verified: true,
@@ -651,7 +716,8 @@ export class AssistantWatchService {
       return 'incomplete';
     }
 
-    if (!baseline && a.page >= 2 && !a.verified) {
+    // A multi-page boundary baseline proves its window held still like any other.
+    if ((!baseline || ctx.boundaryMs !== null) && a.page >= 2 && !a.verified) {
       repo.savePending({
         targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
         pendingCursor: isoOf(a.newestMs ?? ctx.nowMs), pendingPage: a.page,
@@ -666,14 +732,21 @@ export class AssistantWatchService {
     // announce history.
     const cap = baseline ? null : scan.capMs ?? null;
     const newestMs = a.newestMs !== null && cap !== null ? Math.min(a.newestMs, cap) : a.newestMs;
-    const cursorMs = Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, newestMs ?? Number.NEGATIVE_INFINITY);
+    // A boundary baseline commits exactly its frozen boundary, never the newest time it
+    // saw: what moved after the boundary while later pages were read is announced by the
+    // next ordinary pass, which the creation floor below makes reach it.
+    const cursorMs = ctx.boundaryMs !== null
+      ? ctx.boundaryMs
+      : Math.max(sinceMs ?? Number.NEGATIVE_INFINITY, newestMs ?? Number.NEGATIVE_INFINITY);
     // The cursor moving to an item newer than the old one means that item went
     // through THIS pass and its events (if any) were recorded: the items at the
     // new cursor are then known. A baseline, or a pass that moved nothing, says
     // nothing new about the boundary.
     const advanced = !baseline && sinceMs !== null && newestMs !== null && newestMs > sinceMs;
     const ci = scan.ci ?? null;
-    const floor = this.trackedFloor(unit.surface, scan.floorMs ?? null, ctx.nowMs);
+    // No age cutoff: the floor is whatever this window observed still unsettled (or, for
+    // a boundary baseline, still unannounced). Settlement or absence releases it.
+    const floor = scan.floorMs == null ? null : isoOf(scan.floorMs);
     const committed = repo.commitObservation({
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
       cursor: isoOf(Number.isFinite(cursorMs) ? cursorMs : ctx.nowMs),
@@ -690,20 +763,6 @@ export class AssistantWatchService {
     });
     if (committed !== undefined) repo.touchObserved(unit.targetId, nowIso);
     return 'completed';
-  }
-
-  /**
-   * The creation time the NEXT window must reach back to, or null.
-   *
-   * Only an item young enough to be tracked counts: a run queued for a day, or a
-   * draft untouched for a month, is treated as abandoned, so one stuck item cannot
-   * hold a window open without bound. What settles after that is the named
-   * residual of this scheme, not something it claims to see.
-   */
-  private trackedFloor(surface: WatchSurface, floorMs: number | null, nowMs: number): string | null {
-    if (floorMs === null) return null;
-    const maxAge = surface === 'runs' ? RUN_TRACK_MAX_AGE_MS : DRAFT_TRACK_MAX_AGE_MS;
-    return nowMs - floorMs > maxAge ? null : isoOf(floorMs);
   }
 
   private write(e: DerivedEvent): ObservedEventWrite {
@@ -741,10 +800,22 @@ export class AssistantWatchService {
   }
 
   /** A read whose window moved while it was being read: start it again, later. */
-  private restart(unit: DueCheckpoint, nowMs: number, code: string): 'failed' {
+  private restart(ctx: UnitCtx, code: string): 'failed' {
+    const { unit, nowMs } = ctx;
+    // A boundary baseline keeps its ORIGINAL boundary and the creation floor seen so far,
+    // and drops everything positional (page, last page, total, CI state, cap, queue): the
+    // new pass re-reads from page one but anchors where the first attempt began, so
+    // nothing that moved since is quietly re-baselined away.
+    const keep = ctx.boundaryMs === null
+      ? null
+      : serializeScan({
+        v: 1, baseline: { boundaryMs: ctx.boundaryMs },
+        ...(ctx.scan.floorMs != null ? { floorMs: ctx.scan.floorMs } : {}),
+      });
     this.store.assistantWatch.restartPass({
       targetId: unit.targetId, surface: unit.surface, expectedUpdatedAt: unit.updatedAt,
       nextDueAt: isoOf(nowMs + this.backoff(unit)), errorCode: code, atIso: isoOf(nowMs),
+      pendingState: keep,
     });
     return 'failed';
   }
@@ -1106,6 +1177,8 @@ interface UnitCtx {
   readonly call: <T>(fn: () => Promise<T>) => Promise<T>;
   readonly nowMs: number;
   readonly baseline: boolean;
+  /** The frozen boundary of a NEW runs or releases baseline, or null for any other read. */
+  readonly boundaryMs: number | null;
   readonly sinceMs: number | null;
   readonly inclusive: boolean;
   readonly scan: ScanState;

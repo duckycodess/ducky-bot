@@ -337,10 +337,11 @@ describe('workflow runs sort by creation, so the window reaches back to what was
     // Later: run 3 failed, and two NEWER completed runs sit above it. A window closed at the
     // cursor alone would stop on page 1 (run 4 was created after the cursor but run 2 before),
     // never reaching run 3 on page 2.
+    // Everything below happens AFTER the baseline (NOW is the 13th at midnight).
     reader.runsBy.set('acme/widgets', [
-      run('5', at(12, 20), 'completed', 'success'),
-      run('4', at(12, 12), 'completed', 'success'),
-      run('3', at(12, 9), 'completed', 'failure', at(12, 15)),
+      run('5', '2026-10-13T00:12:00Z', 'completed', 'success'),
+      run('4', '2026-10-13T00:05:00Z', 'completed', 'success'),
+      run('3', at(12, 9), 'completed', 'failure', '2026-10-13T00:10:00Z'),
     ]);
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
@@ -350,14 +351,33 @@ describe('workflow runs sort by creation, so the window reaches back to what was
     h.close();
   });
 
-  it('stops tracking a run that never settled after a day', async () => {
+  it('keeps tracking a run that is still unsettled after a day, and announces it when it settles', async () => {
     const { h, clock, reader } = boot();
     const id = target(h);
     checkpoint(h, id, 'runs', 'unbaselined', null);
     reader.runsBy.set('acme/widgets', [run('3', '2026-10-11T00:00:00Z', 'queued', null)]);
     await h.app.assistantWatch.tick();
-    expect(cp(h, id, 'runs').scanFloor).toBeNull(); // created more than a day before NOW
-    clock.advance(1);
+    // Created two days before NOW: the old one-day cutoff dropped this floor.
+    expect(cp(h, id, 'runs').scanFloor).toBe('2026-10-11T00:00:00.000Z');
+    expect(events(h, id)).toEqual([]);
+
+    // Still queued weeks later, and newer settled runs sit above it: the floor survives each pass.
+    clock.advance(40 * 24 * 60 * MIN);
+    const later = new Date(clock.nowMs()).toISOString();
+    reader.runsBy.set('acme/widgets', [
+      run('4', later, 'completed', 'success'), run('3', '2026-10-11T00:00:00Z', 'queued', null),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(cp(h, id, 'runs').scanFloor).toBe('2026-10-11T00:00:00.000Z');
+
+    clock.advance(16 * MIN);
+    const settled = new Date(clock.nowMs()).toISOString();
+    reader.runsBy.set('acme/widgets', [
+      run('4', later, 'completed', 'success'), run('3', '2026-10-11T00:00:00Z', 'completed', 'failure', settled),
+    ]);
+    await h.app.assistantWatch.tick();
+    expect(ids(h, id)).toContain('3:ci_failed');
+    expect(cp(h, id, 'runs').scanFloor).toBeNull(); // released by settlement, not by elapsed time
     h.close();
   });
 
@@ -393,7 +413,6 @@ describe('releases are listed by creation but announced by publication', () => {
     const id = target(h);
     checkpoint(h, id, 'releases', 'unbaselined', null);
     reader.releasesBy.set('acme/widgets', [rel('2', at(12, 1), at(12, 1)), rel('1', at(11), null, true)]);
-    // The first sight reads one page: a draft that sat beyond it would not be tracked.
     reader.pageSize = 10;
     await h.app.assistantWatch.tick();
     reader.pageSize = 1;
@@ -403,7 +422,8 @@ describe('releases are listed by creation but announced by publication', () => {
 
     // The draft is published; a newer release exists too. The window must reach the draft.
     reader.releasesBy.set('acme/widgets', [
-      rel('3', at(12, 20), at(12, 20)), rel('2', at(12, 1), at(12, 1)), rel('1', at(11), at(12, 22)),
+      rel('3', '2026-10-13T00:10:00Z', '2026-10-13T00:10:00Z'), rel('2', at(12, 1), at(12, 1)),
+      rel('1', at(11), '2026-10-13T00:05:00Z'),
     ]);
     clock.advance(16 * MIN);
     await h.app.assistantWatch.tick();
@@ -644,7 +664,7 @@ describe('what settles in the middle of a pass is not jumped over', () => {
     h.close();
   });
 
-  it('does not cap the very first look: nothing was announced for it', async () => {
+  it('commits the frozen boundary on the first look, and delivers no history', async () => {
     const { h, reader } = boot();
     const id = target(h);
     checkpoint(h, id, 'runs', 'unbaselined', null);
@@ -654,8 +674,11 @@ describe('what settles in the middle of a pass is not jumped over', () => {
       run('1', at(12, 9), 'completed', 'failure', at(12, 20)),
     ]);
     await h.app.assistantWatch.tick();
-    expect(cp(h, id, 'runs').cursor).toBe('2026-10-12T20:00:00.000Z');
+    // Not the newest time seen (20:00 on the 12th): the boundary, one millisecond before
+    // the second NOW falls in, so a transition after it is never swallowed.
+    expect(cp(h, id, 'runs').cursor).toBe('2026-10-12T23:59:59.999Z');
     expect(events(h, id)).toEqual([]);
+    expect(h.store.assistantWatch.undigested(OWNER, 20)).toEqual([]);
     h.close();
   });
 

@@ -200,7 +200,14 @@ cannot charge, exhaust or supersede it), and that claim is the ordinary recovery
 always was, charging once, with an exhausted budget ending the job and orphaning
 the holds exactly as before. The reservation timer skips such a job rather than
 failing it, so no fixed grace ever exhausts a durable pause; the owner's cancel,
-which orphans the holds for `/job cleanup`, is the other exit. A report for the
+which orphans the holds for `/job cleanup`, is the other exit. Because the hold has
+no timer, the expiry DMs the owner (durable, retried through the ordinary
+notification ledger, dropped if the wait is already over by the time it is sent,
+never posted to a shared channel): what is held, why nothing was charged or
+released, and `/job cancel` then `/job cleanup` as the way out. It cannot finish if
+the original executor's host is gone or if a preferred executor other than the
+original is online (placement preference hides the repository from it); the owner's
+cancel is the exit then, and the DM says so. A report for the
 expired lease is a lease-free reconcile on the edge `waiting_for_executor ->
 needs_owner_input`, in one transaction: the executor, the original lease's open
 expiry row, the recorded workspace and agent, the repository and the slot (the
@@ -226,7 +233,25 @@ entry that is absent, unreadable, about another agent or still `dispatching` is 
 orphan (`orphan_prompt_unsettled`), never a pause, a release or a prompt. This
 closes the earlier gap where, after a restart or a recovery claim replaced the
 in-memory turn, an idle reading looked like a finished agent. A job in flight when
-this was deployed has no record and therefore orphans, deliberately.
+this was deployed has no record and therefore orphans, deliberately. An agent that
+VANISHES is never recorded as settled (absence is not a settle, and a fresh
+same-name agent could later appear). The journal is bounded (1024 records), and the
+bound is a managed resource: entries are dropped on the COORDINATOR's word through a
+read-only, executor-bound status route (completed, failed, cancelled, awaiting
+approval or unknown; never running, queued, waiting, paused, owed, unreadable or
+unanswered, and never by age), at startup, periodically and whenever it is full (a
+routine sweep is bounded and resumes where the last one stopped, so finished records
+behind a run of live ones are reached; a full journal scans its whole capacity and
+stops the moment there is room; only removals that actually happened are counted); a
+full journal makes no claim, so no agent is started that cannot be journaled; and a
+refusal by the executor's own durable state is reported as
+`executor_state_unavailable`, not `no_result`.
+
+*No mock in production.* The executor always builds the real orchestrator. With Herdr
+down it fails closed (no claim, no proof, no stop) until Herdr answers; the mock is
+tests-only, proves nothing by default, and a source scan refuses any production
+reference to it. (An earlier fallback ran a mock when Herdr was down at boot, which
+would have vouched for a quiet agent it never looked at.)
 
 *The executor's state is new persistence.* It lives at an explicit
 `DUCKY_EXECUTOR_STATE_DIR` per profile with no default and no executor-id fallback,

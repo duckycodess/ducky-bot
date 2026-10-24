@@ -16,9 +16,18 @@ the coordinator never received. For such a lease the expiry is **not charged**:
 the job waits as `waiting_for_executor` with its repository, engineering slot and
 workspace kept, and only the original executor can finish it (by delivering its
 report, which pauses the job for you with the attempt budget intact, or by its
-ordinary recovery claim). No timer fails it. If that executor is gone for good,
-`/job cancel` ends the job and converts its holds to an orphan, and `/job
-cleanup` clears them after you have looked.
+ordinary recovery claim). No timer fails it, so **you are told**: when the lease
+expires this way you get a DM saying the repository and the engineering slot are
+held for that executor, that nothing was charged or released, and the two commands
+that end it. If that executor is gone for good, `/job cancel id:<id>` ends the job
+and converts its holds to an orphan, and `/job cleanup id:<id>` clears them after
+you have looked.
+
+Two things can keep the original executor from finishing it, and then cancel is the
+only way out: the executor's host is gone, or the repository names a **preferred**
+executor that is online and is not the original, which hides the repository from
+the original (placement preference hides it from every other executor while the
+preferred one is live). Do not wait for either to resolve on its own.
 
 ## When a repository stays blocked
 

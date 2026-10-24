@@ -76,8 +76,15 @@ try {
   // a current-schema file without it is a damaged one, and a backup that
   // silently dropped the slot would restore as "nothing holds engineering".
   const ENGINEERING_ADMISSION_VERSION = 28;
+  // Durable pause delivery arrived in migration 29: the expiry ledger, the pause
+  // receipts and the job's negotiated-protocol column. A current-schema file
+  // without them is a damaged one, and a backup that silently dropped them would
+  // restore a deferred expiry as an ordinary, already-charged one (or lose the
+  // receipt that makes a replayed report idempotent).
+  const PAUSE_DELIVERY_VERSION = 29;
   const tables = ['jobs', 'repos', 'tasks', 'reminders', 'schedules', 'captures'];
   if (version >= ENGINEERING_ADMISSION_VERSION) tables.push('engineering_admission');
+  if (version >= PAUSE_DELIVERY_VERSION) tables.push('job_lease_expiries', 'job_pause_receipts');
   const counts = tables.map((table) => {
     try {
       const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
@@ -87,6 +94,15 @@ try {
       return `${table}=?`;
     }
   });
+
+  if (version >= PAUSE_DELIVERY_VERSION) {
+    try {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map((c) => c.name);
+      if (!cols.includes('delivery_protocol')) problems.push('column jobs.delivery_protocol is missing');
+    } catch {
+      problems.push('column jobs.delivery_protocol could not be checked');
+    }
+  }
 
   process.stdout.write(`file:      ${target}\n`);
   process.stdout.write(`integrity: ${verdict}\n`);

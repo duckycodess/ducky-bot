@@ -116,3 +116,22 @@ export type JobStatusResponse = z.infer<typeof JobStatusResponseSchema>;
 
 /** The transition reason of a lease expiry whose charge was deferred (protocol 1). */
 export const LEASE_EXPIRED_DEFERRED_REASON = 'lease_expired_deferred';
+
+/**
+ * What the owner reads when a lease expired and its charge was deferred: what is
+ * held, why nothing was charged or released, and the way out. Private to the
+ * owner's DM; it names the slot and the repository, so it is never shared.
+ */
+export const deferredExpiryOwnerText = (
+  publicId: string,
+  repoSlug: string,
+): { readonly reason: string; readonly next: string } => ({
+  reason:
+    'The executor stopped reporting on this job. Nothing was charged and nothing was released: ' +
+    'it may still hold a pause report for you.',
+  next:
+    `\`${repoSlug}\` and the engineering slot stay held (so no other engineering job starts) for that ` +
+    'executor. When it returns it either pauses the job for you or recovers it. If it is gone for good, ' +
+    `run /job cancel id:${publicId}, then /job cleanup id:${publicId} to release the holds. ` +
+    'Nothing expires these holds on a timer.',
+});

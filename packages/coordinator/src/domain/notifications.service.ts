@@ -1,5 +1,5 @@
 import {
-  PAUSE_OVERTAKEN_OWNER_TEXT, SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel,
+  LEASE_EXPIRED_DEFERRED_REASON, deferredExpiryOwnerText, PAUSE_OVERTAKEN_OWNER_TEXT, SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel,
   parsePauseOvertakenReason, parseSystemPauseReason,
   type JobState,
 } from '@ducky/contracts';
@@ -205,6 +205,11 @@ export class JobNotifier {
    */
   private shouldNotifyOwner(row: PendingNotificationRow): boolean {
     if (row.actor.startsWith('owner:')) return false;
+    // A deferred lease expiry is the one `waiting_for_executor` move worth a DM: it
+    // is a hold with no timer, so the owner must be told what is held and how to
+    // end it. Only while it is STILL true -- if the job has since been reconciled,
+    // recovered, cancelled or expired again, this row describes a wait that is over.
+    if (this.isDeferredExpiry(row)) return this.deferredExpiryStillHolds(row);
     if (!NOTIFIABLE_STATES.has(row.toState)) return false;
     // A delayed pause or question row that a LATER pause or question has
     // superseded is dropped entirely. Its text and its button describe a wait
@@ -217,6 +222,18 @@ export class JobNotifier {
       if (latest !== undefined && latest.id !== row.transitionId) return false;
     }
     return true;
+  }
+
+  private isDeferredExpiry(row: PendingNotificationRow): boolean {
+    return row.toState === 'waiting_for_executor' && row.reason === LEASE_EXPIRED_DEFERRED_REASON;
+  }
+
+  private deferredExpiryStillHolds(row: PendingNotificationRow): boolean {
+    const job = this.store.jobs.byId(row.jobId);
+    if (!job || job.state !== 'waiting_for_executor') return false;
+    if (this.store.jobs.pendingExpiry(job.id) === undefined) return false;
+    const latest = this.store.jobs.latestTransitionInto(job.id, 'waiting_for_executor');
+    return latest === undefined || latest.id === row.transitionId;
   }
 
   /**
@@ -276,6 +293,21 @@ export class JobNotifier {
     // Decided from THIS transition's own reason, never from the job's latest
     // state: a sweep can run after the job has resumed or paused again, and the
     // row must describe the pause it was written for.
+    if (this.isDeferredExpiry(row)) {
+      const text = deferredExpiryOwnerText(row.publicId, row.repoSlug);
+      return {
+        embeds: [
+          {
+            title: `Job ${row.publicId}`,
+            description: `${row.repoSlug} — held for its executor`,
+            fields: [
+              { name: 'Reason', value: text.reason },
+              { name: 'What happens next', value: text.next },
+            ],
+          },
+        ],
+      };
+    }
     const systemPause = row.toState === 'needs_owner_input' ? parseSystemPauseReason(row.reason) : undefined;
     const overtaken = parsePauseOvertakenReason(row.reason);
     const fields: OutboundEmbedField[] = [

@@ -787,3 +787,91 @@ describe('an executor-state failure', () => {
     h.close();
   });
 });
+
+describe('the owner is told about a deferred hold', () => {
+  const notifierFor = (h: H) =>
+    new JobNotifier({ store: h.store, transport: h.transport, ownerId: OWNER, signer: h.app.signer });
+  const dms = (h: H) => h.transport.sent.map((s) => JSON.stringify(s));
+  const held = (h: H) => dms(h).filter((m) => m.includes('held for its executor'));
+
+  it('sends one DM naming what is held and the way out, retried after a failed send, never repeated', async () => {
+    const h = makeHarness();
+    const job = submit(h);
+    claimRegistered(h, 'k1');
+    at(h, EXPIRED).expireLeases();
+    const notifier = notifierFor(h);
+
+    h.transport.failSends = true;
+    await notifier.deliverPending();
+    expect(held(h)).toHaveLength(0);
+    h.transport.failSends = false;
+    await notifier.deliverPending();
+    await notifier.deliverPending();
+
+    const msgs = held(h);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain('demo');
+    expect(msgs[0]).toContain('engineering slot');
+    expect(msgs[0]).toContain(`/job cancel id:${job.publicId}`);
+    expect(msgs[0]).toContain(`/job cleanup id:${job.publicId}`);
+    expect(msgs[0]).toContain('Nothing expires these holds on a timer');
+    // It offers no button that could act on the job.
+    expect(msgs[0]).not.toContain('Resume');
+    h.close();
+  });
+
+  it('is dropped when the wait is already over: reconciled, recovered, or cancelled before the sweep', async () => {
+    // Reconciled by the executor's report.
+    const a = makeHarness();
+    submit(a);
+    const ca = claimRegistered(a, 'k1');
+    at(a, EXPIRED).expireLeases();
+    a.app.jobs.deliverPause(a.executorId, ca.jobId, report(ca.leaseId));
+    await notifierFor(a).deliverPending();
+    expect(held(a)).toHaveLength(0);
+    expect(dms(a).filter((m) => m.includes('Resume'))).toHaveLength(1);
+    a.close();
+
+    // Recovered by the attested claim.
+    const b = makeHarness();
+    submit(b);
+    claimRegistered(b, 'k1');
+    at(b, EXPIRED).expireLeases();
+    b.app.jobs.claim(b.executorId, 'k2', NEGOTIATE);
+    await notifierFor(b).deliverPending();
+    expect(held(b)).toHaveLength(0);
+    b.close();
+
+    // Cancelled by the owner (who already got a synchronous reply).
+    const c = makeHarness();
+    const job = submit(c);
+    claimRegistered(c, 'k1');
+    at(c, EXPIRED).expireLeases();
+    c.app.jobs.requestCancel(c.owner, job.publicId);
+    await notifierFor(c).deliverPending();
+    expect(held(c)).toHaveLength(0);
+    c.close();
+  });
+
+  it('after a repeated deferral only the current hold speaks', async () => {
+    const h = makeHarness();
+    submit(h);
+    claimRegistered(h, 'k1');
+    at(h, EXPIRED).expireLeases();
+    h.app.jobs.claim(h.executorId, 'k2', NEGOTIATE);
+    at(h, 2 * EXPIRED).expireLeases();
+    await notifierFor(h).deliverPending();
+    expect(held(h)).toHaveLength(1);
+    h.close();
+  });
+
+  it('says nothing for an ordinary expiry, which was always charged and visible as before', async () => {
+    const h = makeHarness();
+    submit(h);
+    claimRegistered(h, 'k1', ['herdr-pi']);
+    at(h, EXPIRED).expireLeases();
+    await notifierFor(h).deliverPending();
+    expect(held(h)).toHaveLength(0);
+    h.close();
+  });
+});

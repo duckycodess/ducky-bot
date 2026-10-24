@@ -39,6 +39,24 @@ different place, and treat it like the secret it is:
 install -m 0600 config/executor-credentials.dev.json /some/other/place/
 ```
 
+The **executor's durable state directory** (`DUCKY_EXECUTOR_STATE_DIR`: the pause
+outbox and the dispatch journal). It lives on the executor host, not in the
+coordinator's database, so `pnpm backup` does not carry it, and it must not be
+restored independently of the database it belongs to. Treat the two as a pair that
+can drift:
+
+- **The state directory is lost but the database is intact:** the executor attests
+  truthfully that it holds no pause report, so a deferred expiry is charged once by
+  its attested claim, and recovery reads an empty journal and orphans the job
+  rather than pausing it. Safe, but not retry-preserving.
+- **The database is restored to an older state than the executor's directory:** a
+  held intent answers `mismatch` or `not_found` for a report the restored database
+  never saw, and stays held (the executor makes no claim) until you look and remove
+  that one file by hand. A restored pending expiry whose intent is gone is charged
+  once by the attested claim, exactly as above.
+- **Never** delete `dispatch-journal/` to clear a problem: a job with no entry is
+  treated as unproven and orphaned, on purpose.
+
 Rotating credentials is a different procedure again — see
 [credential-rotation.md](credential-rotation.md).
 
@@ -51,7 +69,11 @@ pnpm backup:verify --file ./data/backups/ducky-development-<stamp>.db
 A backup nobody has opened is a hope. The verifier opens the copy read-only,
 runs SQLite's own `integrity_check`, confirms `schema_migrations` carries a
 version **this build understands**, and counts rows so an empty-but-valid file
-cannot pass as a good one.
+cannot pass as a good one. From schema 28 it also requires the engineering slot
+table, and from schema 29 the durable pause delivery ledgers
+(`job_lease_expiries`, `job_pause_receipts`) and the `jobs.delivery_protocol`
+column: a copy that lost any of them would restore a deferred expiry as an ordinary
+charged one, or lose the receipt that makes a replayed report idempotent.
 
 | Exit | Meaning |
 |---|---|
@@ -97,6 +119,8 @@ nothing in this repository overwrites a live database.
 
 - **Jobs that were running are not running.** The executor lease has expired; the
   reconciler will fail or recover them, and a repository may need `/job cleanup`.
+  A lease that negotiated durable pause delivery is not failed: it waits holding its
+  repository and slot for its executor (see the orphan runbook).
 - **Notifications between the backup and now are gone**, and the ones in the
   restored ledger may be re-delivered — the ledger is keyed per transition and
   target, so nothing is double-sent from the RESTORED state, but state after the

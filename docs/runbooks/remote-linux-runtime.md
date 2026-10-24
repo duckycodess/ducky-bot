@@ -287,6 +287,19 @@ open. All fourteen are required, and the list matches
      deleted or repaired; read it, decide, and move it aside by hand. If a held
      intent's job was forgotten (`/forget`) the coordinator answers `not_found`
      forever; confirm that through `/jobs`, then remove that one file by hand.
+   - **`the dispatch journal is full`** means every record belongs to a job the
+     coordinator says can still run (running, queued, paused, waiting). Finished
+     jobs' records are dropped on the coordinator's word, at startup, on a schedule
+     and whenever the journal is full; nothing is aged out. Claims stop until one
+     finishes, so no agent is started that could not be journaled. Resolve a stuck
+     job (`/job cancel`, `/job cleanup`) and the next sweep frees its record.
+   - **A deferred hold** (a lease that expired with a negotiated pause owed)
+     DMs you and holds the repository and slot with no timer; see the orphan
+     runbook. It needs the ORIGINAL executor to return, and `/job cancel` then
+     `/job cleanup` is the exit if it cannot.
+   - **There is no mock fallback.** If Herdr is down at boot the executor still
+     runs the real orchestrator, which fails closed: it claims nothing, proves
+     nothing and stops nothing until Herdr answers.
    - **Never** place the state directory under a temp or runtime path, share it
      between profiles, or delete `dispatch-journal/` to "clear" a job: a job with no
      journal entry is treated as unproven and orphaned, deliberately.

@@ -27,13 +27,20 @@ import { baselineHash, markerCandidateOf } from '@ducky/persistence';
  * test proves the export is complete and idempotent; it does not prove a source
  * bridge exists, and it never authorizes restoring stale data.
  */
-export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v2';
+export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v3';
 /*
  * v2 adds `state.watchEvents[].baselineMarker`, decided by the one shared classifier
  * (`classifyBaselineMarker`). A v1 document has no such field, so its marker status is
  * UNKNOWN: a reader must not infer one from a payload, a timestamp or an identity, and must
  * not read an unflagged v1 row as "not a marker". No consumer of v1 exists in this
  * repository, no v1 file is rewritten, and nothing here contracts or migrates a stored row.
+ *
+ * v3 adds what exact native reconciliation records (ADR 0034): `state.pausePeriods`,
+ * `state.nativeLedger` (the boundary and every receipt and reservation, by exact transition,
+ * identifiers only) and, on each watch event, `withheldReason`, `settledBy`, `providerHash` (a
+ * hash, never the id) and `attempt`. A v1 or v2 document carries none of them: whether an event was
+ * withheld, settled by a native receipt, or paused-over is UNKNOWN there and must not be inferred,
+ * and no older file is rewritten.
  */
 /** The most rows of any one table an export reads before it calls itself incomplete. */
 export const ROLLBACK_DELTA_ROW_CAP = 20_000;
@@ -61,7 +68,7 @@ export interface IncompleteReason {
   readonly category: string;
   readonly rule:
     | 'baseline_unknown' | 'deletion_cause_unknown' | 'over_cap' | 'ledger_orphan'
-    | 'deletion_context_stale' | 'foreign_key_violation';
+    | 'deletion_context_stale' | 'foreign_key_violation' | 'native_ledger_unreadable';
   readonly count: number;
 }
 
@@ -99,6 +106,13 @@ export interface RollbackDelta {
     /** True or false once stated; null when never stated (watching was never paused). */
     readonly watchMonitoringEnabled: boolean | null;
     readonly discoveryTombstones: readonly string[];
+    /** When monitoring was paused and by whom; a null start means the real start is unknown. */
+    readonly pausePeriods: readonly Record<string, unknown>[];
+    /** The native ledger: its boundary and every receipt and reservation. Identifiers only. */
+    readonly nativeLedger: {
+      readonly boundary: Record<string, unknown> | null;
+      readonly claims: readonly Record<string, unknown>[];
+    };
   };
 }
 
@@ -111,6 +125,8 @@ export const REPLAY_RULES: readonly string[] = [
   '`deleted` with cause import_suppressed: the import chose not to write it (deleted at the source, or superseded by what the owner did since); nothing to undo.',
   '`deleted` with cause unknown: STOP. The export is incomplete; history already lost is not reconstructible.',
   '`state`: one latest value per key, applied idempotently; applying it twice changes nothing.',
+  '`state.watchEvents[].withheldReason` set: the target never delivered it and never settled it (nothing could place it exactly). Do NOT treat it as told, and do not announce it from here: it is a counted, required cutover blocker. An event whose `settledBy` is `native_receipt` was told by a native path, not by the target: settle it, tell nothing. A v1 or v2 document has neither field: unknown, never inferred.',
+  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
   '`state.watchEvents[].baselineMarker` true: a first-observation suppression marker. It means this start is KNOWN, never that anything was delivered; announce nothing and settle nothing from it. A document whose schema is v1 has no such flag: its marker status is unknown and must not be inferred.',
   'This export is not a bridge and authorizes no restore of stale data.',
 ];
@@ -162,6 +178,8 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
   // that breaks a foreign key is not one consistent state.
   if (snap.deletionContext !== null) note('deletion', 'deletion_context_stale');
   if (snap.foreignKeyViolations > 0) note('snapshot', 'foreign_key_violation', snap.foreignKeyViolations);
+  // Without its boundary nothing about what native paths told the owner can be said.
+  if (snap.nativeBoundary === null) note('native_ledger', 'native_ledger_unreadable');
 
   // ---- the ledger: what was imported, and what is gone ----
   const ledger: IdentityRow[] = snap.identities.map((r) => ({
@@ -272,6 +290,8 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
   const watchEvents = snap.watchEvents
     .filter((e) => {
       if (String(e['origin']) === 'observed') return true;
+      // A withheld or receipt-settled imported event is a fact about the target's own state.
+      if (e['withheld_reason'] != null || e['settled_by'] != null) return true;
       // An imported event Ducky settled after the import: its alert or digest time is
       // later than the import itself, which no time in the source document can be.
       return baselineAt !== null && (
@@ -308,6 +328,11 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
       briefingSlots: snap.briefingSlots.map((r) => rec(r, ['id', 'discord_user_id'])),
       watchMonitoringEnabled: snap.watchSwitch === null ? null : Number(snap.watchSwitch['monitoring_enabled']) === 1,
       discoveryTombstones: snap.discoveryTombstones.map((r) => String(r['repo_key'])),
+      pausePeriods: snap.pausePeriods.map((r) => rec(r, ['id', 'discord_user_id'])),
+      nativeLedger: {
+        boundary: snap.nativeBoundary === null ? null : rec(snap.nativeBoundary, ['id']),
+        claims: snap.nativeClaims.map((r) => rec(r, ['owner_id'])),
+      },
     },
   };
   return out;
@@ -332,6 +357,10 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
     state: {
       watchCheckpoints: d.state.watchCheckpoints.length, watchEvents: d.state.watchEvents.length,
       briefingSlots: d.state.briefingSlots.length, discoveryTombstones: d.state.discoveryTombstones.length,
+      pausePeriods: d.state.pausePeriods.length,
+      nativeClaims: d.state.nativeLedger.claims.length,
+      watchEventsWithheld: d.state.watchEvents.filter((e) => e['withheldReason'] != null).length,
+      watchEventsSettledByNativeReceipt: d.state.watchEvents.filter((e) => e['settledBy'] != null).length,
       // A presence count, never the value: the setting is a preference and the terminal
       // output is counts only.
       watchMonitoringSettingPresent: d.state.watchMonitoringEnabled === null ? 0 : 1,

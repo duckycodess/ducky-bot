@@ -6,8 +6,8 @@ import {
   GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS, GITHUB_WATCH_MAX_FOLLOWUPS,
   GITHUB_WATCH_MAX_ISSUES, GITHUB_WATCH_MAX_PR_CHECKS, GITHUB_WATCH_MAX_RUNS,
   GITHUB_WATCH_SUMMARY_MAX, GitHubWatchAddInputSchema, newPublicWatchId,
-  PublicWatchIdSchema,
-  type PrChecks, type PrList, type RepoView,
+  PublicWatchIdSchema, NATIVE_SUMMARY_NAMED_MAX, mergedTransition, transitionKey, transitionRepoKey,
+  updatedTransition, type PrChecks, type PrList, type RepoView, type Transition,
 } from '@ducky/contracts';
 import { redact, type GitHubReader } from '@ducky/adapters';
 import { withTransaction, type GitHubWatchRow, type Store } from '@ducky/persistence';
@@ -77,6 +77,10 @@ export interface GitHubWatchTickResult {
   delivered: number;
   deliveryFailed: number;
   abandoned: number;
+  /** Observations put off because an imported send of an item they would tell was in flight. */
+  deferred: number;
+  /** Watches the system stopped because their slug now names another repository. */
+  identityStopped: number;
 }
 
 export interface GitHubWatchServiceDeps {
@@ -87,12 +91,6 @@ export interface GitHubWatchServiceDeps {
   readonly transport: DiscordTransport;
   readonly ownerId: string;
   readonly clock: OwnerClock;
-  /**
-   * Whether an imported notification-only target for this repository is observing
-   * a surface right now, so a part of a snapshot summary that surface already
-   * reports is not told a second time. Absent means nothing is covered.
-   */
-  readonly importedCovers?: (repoKey: string, surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean;
 }
 
 /**
@@ -112,9 +110,6 @@ export class GitHubWatchService {
   private readonly transport: DiscordTransport;
   private readonly ownerId: string;
   private readonly clock: OwnerClock;
-  private readonly importedCovers:
-    | ((repoKey: string, surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean)
-    | undefined;
   private ticking: Promise<GitHubWatchTickResult> | null = null;
 
   constructor(deps: GitHubWatchServiceDeps) {
@@ -125,7 +120,6 @@ export class GitHubWatchService {
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
     this.clock = deps.clock;
-    this.importedCovers = deps.importedCovers;
   }
 
   add(actor: ActorContext, raw: unknown): GitHubWatchRow {
@@ -149,6 +143,8 @@ export class GitHubWatchService {
         intervalMinutes: input.everyMinutes,
         nextCheckAt: new Date(nowMs + input.everyMinutes * 60_000).toISOString(),
         createdAt: new Date(nowMs).toISOString(),
+        // The identity every observation of this watch will be recorded under, fixed now.
+        repoKey: transitionRepoKey(`${repo.github.owner}/${repo.github.repo}`),
       });
     } catch {
       // The active (owner, repository) unique index intentionally makes this
@@ -189,13 +185,22 @@ export class GitHubWatchService {
     const due = this.store.githubWatches.due(this.clock.nowIso(), GITHUB_WATCH_BATCH);
     const result: GitHubWatchTickResult = {
       observed: 0, changed: 0, failed: 0, delivered: 0, deliveryFailed: 0, abandoned: 0,
+      deferred: 0, identityStopped: 0,
     };
 
     for (const watch of due) {
       try {
-        const changed = await this.observe(watch);
+        const outcome = await this.observe(watch);
+        if (outcome === 'deferred') {
+          result.deferred += 1;
+          continue;
+        }
+        if (outcome === 'identity_stopped') {
+          result.identityStopped += 1;
+          continue;
+        }
         result.observed += 1;
-        if (changed) result.changed += 1;
+        if (outcome === 'changed') result.changed += 1;
       } catch (err) {
         // A repository removed from the allowlist is not a transient GitHub
         // outage. Retire that watch instead of polling forever against a
@@ -230,7 +235,11 @@ export class GitHubWatchService {
       }
       try {
         await this.transport.send(dmTarget(this.ownerId), githubWatchDm(event));
-        this.store.githubWatches.markEventDelivered(event.id, now);
+        // The receipt and the settlement are one step: the owner was told only once the send succeeded.
+        withTransaction(this.store.db, () => {
+          this.store.githubWatches.markEventDelivered(event.id, now);
+          this.store.nativeTransitions.markNativeDelivered('watch_summary', event.id, 'owner_dm', now);
+        });
         result.delivered += 1;
       } catch {
         this.store.githubWatches.recordEventFailure(
@@ -242,13 +251,26 @@ export class GitHubWatchService {
         else result.deliveryFailed += 1;
       }
     }
+    // An outbox row that will never be sent (abandoned, or its watch cancelled) must not keep an
+    // imported event waiting: its reservation is released, rows still pending keep theirs.
+    this.store.nativeTransitions.sweepOrphans();
     return result;
   }
 
-  private async observe(watch: GitHubWatchRow): Promise<boolean> {
+  private async observe(watch: GitHubWatchRow): Promise<'changed' | 'unchanged' | 'deferred' | 'identity_stopped'> {
     const repo = this.allowlist.resolve(watch.repoSlug);
     if (!repo.github) throw new DuckyError('invalid_input', 'The watched repository has no GitHub mapping.');
     const ref = { owner: repo.github.owner, repo: repo.github.repo };
+    // The repository this observation queries, fixed NOW and recorded with everything it
+    // produces: a mapping that changes while the reads are awaited cannot change what was queried.
+    const repoKey = transitionRepoKey(`${ref.owner}/${ref.repo}`);
+    if (repoKey === null) throw new DuckyError('invalid_input', 'The watched repository is not a valid reference.');
+    // A watch bound to one repository whose slug now names another is stopped, never silently
+    // retargeted: its snapshot and outbox describe the old repository and are kept as they are.
+    if (watch.repoKey !== null && watch.repoKey !== repoKey) {
+      withTransaction(this.store.db, () => this.store.githubWatches.cancelForIdentity(watch.id, this.clock.nowIso()));
+      return 'identity_stopped';
+    }
     // `prListAll` rather than `prList`: a merge is the disappearance of an open
     // pull request, and the open-only list could only ever report it as "gone".
     // Runs and issues are separate bounded reads; each is allowed to fail on its
@@ -262,45 +284,83 @@ export class GitHubWatchService {
     const fingerprint = createHash('sha256').update(snapshotJson).digest('hex');
     const previous = parseSnapshot(watch.snapshotJson);
     const changed = watch.snapshotHash !== fingerprint;
-    const repoKey = `${ref.owner}/${ref.repo}`.toLowerCase();
-    const summary = changed
-      ? summarizeChange(
-        repo.slug, previous, normalized,
-        (surface, delivery) => this.importedCovers?.(repoKey, surface, delivery) ?? false,
-      )
-      : '';
     const nowMs = this.clock.nowMs();
+    const atIso = new Date(nowMs).toISOString();
     const nextCheckAt = new Date(nowMs + watch.intervalMinutes * 60_000).toISOString();
 
     // Follow-up proposals are enqueued whether or not the whole snapshot moved:
     // a review that asked for changes is worth proposing once even if nothing
     // else about the repository differs. The unique `(watch, fingerprint)` index
-    // is what makes "once" true.
+    // is what makes "once" true. A follow-up is actionable content of its own, not a receipt
+    // for any review.
     const followUps = followUpProposals(repo.slug, normalized).map((f) => ({
       id: randomUUID(),
       fingerprint: f.fingerprint,
       summary: f.summary,
     }));
 
-    const events = [
-      // `summary === null`: every change is already told by an imported target.
-      ...(changed && summary !== null ? [{ id: randomUUID(), fingerprint, summary }] : []),
-      ...followUps,
-    ];
+    // One synchronous step: what may be told is decided against the ledger, the outbox rows and
+    // the cursor commit together, so a check and the reservation after it cannot be separated.
+    const outcome = withTransaction(this.store.db, () => {
+      const ledger = this.store.nativeTransitions;
+      ledger.requireBoundary();
+      ledger.ensureSeeded(this.ownerId, atIso);
 
-    const committed = withTransaction(this.store.db, () => this.store.githubWatches.observe({
-      id: watch.id,
-      expectedNextCheckAt: watch.nextCheckAt!,
-      snapshotHash: fingerprint,
-      snapshotJson,
-      nextCheckAt,
-      atIso: new Date(nowMs).toISOString(),
-      changed,
-      events,
-    }));
-    // `observe` reports whether the cursor CAS committed; the public tick
-    // metric reports whether the snapshot itself changed.
-    return committed && changed;
+      // An item an imported target has already DELIVERED is not told again, so it is taken out of
+      // the summary and the summary is rebuilt around exactly what remains. An item an imported
+      // send is in flight for is told by neither: the whole observation waits, unchanged.
+      const excluded = new Set<string>();
+      let rendered: Summary = { text: null, named: [] };
+      if (changed) {
+        for (let i = 0; i <= GITHUB_WATCH_MAX_PR_CHECKS * 2 + 2; i += 1) {
+          rendered = summarizeChange(repo.slug, previous, normalized, excluded);
+          let again = false;
+          for (const t of rendered.named) {
+            const probe = ledger.probeNative(this.ownerId, repoKey, t);
+            if (probe === 'target_in_flight') return 'deferred' as const;
+            if (probe === 'target_delivered') {
+              excluded.add(transitionKey(t));
+              again = true;
+            }
+          }
+          if (!again) break;
+        }
+      }
+      const summaryId = randomUUID();
+      const events = [
+        // `text === null`: everything that changed was an item an imported target delivered.
+        ...(changed && rendered.text !== null ? [{ id: summaryId, fingerprint, summary: rendered.text }] : []),
+        ...followUps,
+      ];
+      const committed = this.store.githubWatches.observe({
+        id: watch.id,
+        expectedNextCheckAt: watch.nextCheckAt!,
+        expectedRepoKey: watch.repoKey,
+        repoKey,
+        snapshotHash: fingerprint,
+        snapshotJson,
+        nextCheckAt,
+        atIso,
+        changed,
+        events,
+      });
+      if (!committed) return 'lost' as const;
+      // The named items are reserved with the outbox row that will tell them. INSERT OR IGNORE
+      // keeps the first owner; a fingerprint that already had an outbox row reserves nothing new.
+      if (events.some((e) => e.id === summaryId)) {
+        const stored = this.store.db
+          .prepare('SELECT id FROM github_watch_events WHERE id = ?')
+          .get(summaryId) as { id: string } | undefined;
+        if (stored) {
+          for (const t of rendered.named) ledger.reserveNative(this.ownerId, repoKey, t, 'watch_summary', summaryId, atIso, atIso);
+        }
+      }
+      return 'committed' as const;
+    });
+    if (outcome === 'deferred') return 'deferred';
+    // `committed` reports whether the cursor CAS held; the public tick metric
+    // reports whether the snapshot itself changed.
+    return outcome === 'committed' && changed ? 'changed' : 'unchanged';
   }
 
   private async normalize(
@@ -427,61 +487,78 @@ function normalizeChecks(checks: PrChecks): string[] {
     .sort();
 }
 
+/** A rendered summary and the exact items its text NAMES (never a count, never an unnamed aggregate). */
+interface Summary {
+  readonly text: string | null;
+  readonly named: readonly Transition[];
+}
+
 /**
- * What changed, in words, or null when EVERYTHING that changed is already being
- * reported by an imported notification target.
+ * What changed, in words, and which items the words actually name.
  *
- * `covers(surface)` says an imported target for this repository is observing
- * that surface right now. A part of the summary an imported surface sees in full
- * is left out, so one event is told once, by the imported digest or alert; a part
- * it cannot see (a check changing on a pull request head, a workflow run on any
- * branch, a pull request whose only change is its checks) is kept, so nothing
- * unrelated is lost. A snapshot whose every change was covered says nothing.
+ * `excluded` holds the transition keys of items an imported target has already DELIVERED; those
+ * items are left out of the lines that name them and the summary is built around the rest. Nothing
+ * else is left out: a count, an aggregate or an unnamed piece is never dropped on the theory that
+ * an imported target will eventually tell it, because there is no promise to rely on. `text` is
+ * null only when removing delivered items left nothing to say.
+ *
+ * The named items come from the SAME slices the text is written from, so a receipt can only exist
+ * for an item the owner was actually shown: at most three pull request updates and three merges.
+ * An update is named only when the provider's `updatedAt` itself moved (a check flipping on the
+ * head names the pull request but is not that update), and a pull request new to the snapshot is
+ * not an "opened" receipt (the list is capped; its absence before proves nothing about creation).
  */
 function summarizeChange(
   slug: string,
   previous: NormalizedSnapshot | undefined,
   current: NormalizedSnapshot,
-  covers: (surface: 'pulls' | 'issues', delivery: 'immediate' | 'digest') => boolean = () => false,
-): string | null {
-  // Pull request changes ride the digest, except a requested change, which an imported
-  // target ALERTS on immediately; the two are covered separately.
-  const pulls = covers('pulls', 'digest');
-  const pullAlerts = covers('pulls', 'immediate');
-  const issues = covers('issues', 'digest');
-  let suppressed = false;
+  excluded: ReadonlySet<string> = new Set(),
+): Summary {
   if (!previous) {
-    return clampSummary(
-      `Started watching \`${slug}\`: ${current.openPrCount} open pull request(s).`,
-    );
+    return {
+      text: clampSummary(`Started watching \`${slug}\`: ${current.openPrCount} open pull request(s).`),
+      named: [],
+    };
   }
+  const named: Transition[] = [];
+  let removed = false;
   const before = new Map(previous.prs.map((pr) => [pr.number, pr]));
-  const allUpdated = current.prs.filter((pr) => {
+  const updateOf = (pr: NormalizedPr): Transition | null => {
     const old = before.get(pr.number);
-    return !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt ||
+    return old !== undefined && old.updatedAt !== pr.updatedAt ? updatedTransition(pr.number, pr.updatedAt) : null;
+  };
+  const onlyUpdatedAtMoved = (pr: NormalizedPr): boolean => {
+    const old = before.get(pr.number);
+    return old !== undefined && canonicalJson(old.checks) === canonicalJson(pr.checks) &&
+      old.headRefOid === pr.headRefOid;
+  };
+  const newOrUpdated = current.prs.filter((pr) => {
+    const old = before.get(pr.number);
+    const changedPr = !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt ||
       canonicalJson(old.checks) !== canonicalJson(pr.checks) ||
       old.headRefOid !== pr.headRefOid;
+    if (!changedPr) return false;
+    const t = updateOf(pr);
+    if (t !== null && excluded.has(transitionKey(t)) && onlyUpdatedAtMoved(pr)) {
+      removed = true;
+      return false;
+    }
+    return true;
   });
-  // The imported pulls surface sees a pull request opened, its state, title and last
-  // update. It does NOT see a check flipping on the head, which touches none of those.
-  const pullLevel = (pr: NormalizedPr): boolean => {
-    const old = before.get(pr.number);
-    return !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt;
-  };
-  const newOrUpdated = pulls ? allUpdated.filter((pr) => !pullLevel(pr)) : allUpdated;
-  if (newOrUpdated.length !== allUpdated.length) suppressed = true;
   const currentNumbers = new Set(current.prs.map((pr) => pr.number));
   const closed = previous.prs.filter((pr) => !currentNumbers.has(pr.number));
   const failedChecks = current.prs.filter((pr) => pr.checks.some((check) => /fail|error|cancel/i.test(check)));
   const parts: string[] = [];
   if (newOrUpdated.length > 0) {
-    const names = newOrUpdated.slice(0, 3).map((pr) => `#${pr.number} ${pr.title}`).join('; ');
+    const shown = newOrUpdated.slice(0, NATIVE_SUMMARY_NAMED_MAX);
+    for (const pr of shown) {
+      const t = updateOf(pr);
+      if (t !== null) named.push(t);
+    }
+    const names = shown.map((pr) => `#${pr.number} ${pr.title}`).join('; ');
     parts.push(`${newOrUpdated.length} pull request update(s): ${names}`);
   }
-  if (closed.length > 0) {
-    if (pulls) suppressed = true;
-    else parts.push(`${closed.length} previously listed pull request(s) are no longer open`);
-  }
+  if (closed.length > 0) parts.push(`${closed.length} previously listed pull request(s) are no longer open`);
   if (failedChecks.length > 0) parts.push(`${failedChecks.length} pull request(s) have failing checks`);
 
   // ---- what the wider surface added -------------------------------------
@@ -491,55 +568,52 @@ function summarizeChange(
   // moved. Nothing here fetches anything.
   const merged = current.prs.filter((pr) => {
     const old = before.get(pr.number);
-    return isSet(pr.mergedAt) && (!old || !isSet(old.mergedAt));
+    if (!(isSet(pr.mergedAt) && (!old || !isSet(old.mergedAt)))) return false;
+    const t = mergedTransition(pr.number, pr.mergedAt);
+    if (t !== null && excluded.has(transitionKey(t))) {
+      removed = true;
+      return false;
+    }
+    return true;
   });
   if (merged.length > 0) {
-    if (pulls) suppressed = true;
-    else parts.push(`merged: ${merged.slice(0, 3).map((pr) => `#${pr.number} ${pr.title}`).join('; ')}`);
+    const shown = merged.slice(0, NATIVE_SUMMARY_NAMED_MAX);
+    for (const pr of shown) {
+      const t = mergedTransition(pr.number, pr.mergedAt);
+      if (t !== null) named.push(t);
+    }
+    parts.push(`merged: ${shown.map((pr) => `#${pr.number} ${pr.title}`).join('; ')}`);
   }
 
   const newlyApproved = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return /APPROVED/i.test(pr.reviewDecision ?? '') && !/APPROVED/i.test(old?.reviewDecision ?? '');
   });
-  if (newlyApproved.length > 0) {
-    if (pulls) suppressed = true;
-    else parts.push(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`);
-  }
+  if (newlyApproved.length > 0) parts.push(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`);
 
   const newlyBlocked = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return isChangesRequested(pr) &&
       (!old || old.latestChangeRequestAt !== pr.latestChangeRequestAt);
   });
-  if (newlyBlocked.length > 0) {
-    if (pullAlerts) suppressed = true;
-    else parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
-  }
+  if (newlyBlocked.length > 0) parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
 
   const moreComments = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return (pr.reviewComments ?? 0) > (old?.reviewComments ?? 0);
   });
-  if (moreComments.length > 0) {
-    if (pulls) suppressed = true;
-    else parts.push(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`);
-  }
+  if (moreComments.length > 0) parts.push(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`);
 
   const runSummary = summarizeRuns(previous.runs ?? [], current.runs ?? []);
   if (runSummary) parts.push(runSummary);
 
   const issueSummary = summarizeIssues(previous.openIssues ?? [], current.openIssues ?? []);
-  if (issueSummary) {
-    if (issues) suppressed = true;
-    else parts.push(issueSummary);
-  }
+  if (issueSummary) parts.push(issueSummary);
 
-  // Everything that changed is told by an imported target: this DM would be the
-  // same event twice, so it is not sent. (The snapshot itself still advances.)
-  if (parts.length === 0 && suppressed) return null;
+  // Only items an imported target DELIVERED were taken out, and nothing remains to say.
+  if (parts.length === 0 && removed) return { text: null, named: [] };
   if (parts.length === 0) parts.push('The repository snapshot changed.');
-  return clampSummary(`Update for \`${slug}\`: ${parts.join('. ')}.`);
+  return { text: clampSummary(`Update for \`${slug}\`: ${parts.join('. ')}.`), named };
 }
 
 const isSet = (v: string | undefined): boolean => typeof v === 'string' && v !== '';

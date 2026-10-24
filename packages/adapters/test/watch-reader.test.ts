@@ -127,6 +127,30 @@ describe('the watch reader runs only typed GET shapes through the policy', () =>
   });
 });
 
+describe('the review and run reads carry the exact ids a native card is compared with', () => {
+  it('maps the review node id and the run attempt, and keeps an unusable value from failing the page', async () => {
+    const h = harness([
+      { json: [
+        { id: 1, state: 'CHANGES_REQUESTED', submitted_at: T, node_id: 'PRR_abc' },
+        { id: 2, state: 'APPROVED', submitted_at: T },
+        { id: 3, state: 'APPROVED', submitted_at: T, node_id: 'x'.repeat(400) },
+      ] },
+      { json: { total_count: 2, workflow_runs: [
+        { id: 1, created_at: T, run_attempt: 3 }, { id: 2, created_at: T, run_attempt: 'x' },
+      ] } },
+    ]);
+    const reviews = await h.reader.pullReviews(REF, 1, 1);
+    expect(reviews.items.map((r) => r.nodeId)).toEqual(['PRR_abc', null, null]);
+    const runs = await h.reader.runs(REF, 'main', 1);
+    expect(runs.items.map((r) => r.attempt)).toEqual([3, null]);
+    // The approved endpoint shapes are unchanged: no new argument and no new field requested.
+    expect(h.argvs.map((a) => a[3])).toEqual([
+      'repos/acme/demo/pulls/1/reviews?per_page=10&page=1',
+      'repos/acme/demo/actions/runs?branch=main&per_page=10&page=1',
+    ]);
+  });
+});
+
 describe('the repository read checks identity', () => {
   it('returns the facts when the name is the one asked for, in any case', async () => {
     const h = harness([{ json: { full_name: 'Acme/Demo', default_branch: 'trunk', archived: true, fork: true, pushed_at: null } }]);

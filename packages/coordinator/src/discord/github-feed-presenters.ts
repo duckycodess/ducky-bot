@@ -118,6 +118,15 @@ export function githubDigestMessage(input: {
 const titleFor = (input: { dayLabel: string; part?: { index: number; of: number } }): string =>
   `Commit digest for ${input.dayLabel}${input.part && input.part.of > 1 ? `, part ${input.part.index} of ${input.part.of}` : ''}`;
 
+/**
+ * How many commits of each section the message NAMES, newest first; the rest are only counted
+ * ("and N more"). The delivery bookkeeping uses this exact number, so a commit is recorded as
+ * told only if its line was really written.
+ */
+export function digestNamedLineCap(sections: readonly GitHubCommitDigestSection[]): number {
+  return fitLines(sections);
+}
+
 /** The largest per-section line cap at which the whole message stays inside the budget. */
 function fitLines(sections: readonly GitHubCommitDigestSection[]): number {
   for (let cap = GITHUB_FEED_DIGEST_MAX_LINES; cap >= 1; cap -= 1) {

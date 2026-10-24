@@ -169,6 +169,7 @@ export class GhWatchReader implements AssistantWatchReader {
       state: r.state,
       submittedAt: r.submitted_at ?? null,
       body: (r.body ?? '').slice(0, WATCH_API_REVIEW_BODY_MAX),
+      nodeId: r.node_id ?? null,
     }));
     return { items, hasMore: rows.length >= WATCH_API_PAGE_SIZE };
   }
@@ -201,6 +202,7 @@ export class GhWatchReader implements AssistantWatchReader {
       conclusion: r.conclusion ?? null,
       createdAt: r.created_at,
       updatedAt: r.updated_at ?? null,
+      attempt: r.run_attempt ?? null,
     }));
     return {
       items, hasMore: items.length >= WATCH_API_PAGE_SIZE, total: res.total_count,

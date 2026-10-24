@@ -100,15 +100,19 @@ const start = async (
 };
 const sent = (h: Harness): string => JSON.stringify(h.transport.sent);
 
-describe('the ordinary watch does not repeat what an imported target tells', () => {
-  it('says nothing when every change is one the imported pulls and issues surfaces report', async () => {
+describe('the ordinary watch tells everything unless an imported target has DELIVERED the exact item', () => {
+  it('tells every change even while healthy imported pulls and issues surfaces observe the repository', async () => {
     const { h, reader, step } = await start(['pulls', 'issues']);
     reader.prs = [{ ...reader.prs[0]!, title: 'Improve the API safely', updatedAt: '2026-09-01T01:00:00.000Z' }];
     reader.issues = [{ number: 3, title: 'a bug', state: 'OPEN', updatedAt: '2026-09-01T01:00:00.000Z' }];
     const out = await step();
-    expect(out).toMatchObject({ observed: 1, changed: 1, delivered: 0 });
-    expect(h.transport.sent).toEqual([]);
-    // The snapshot still advanced, so the same change is not re-examined next pass.
+    // Previously this said nothing, on the promise that the imported surfaces would tell it. A promise is
+    // not a delivery: the update is told here and becomes an exact receipt.
+    expect(out).toMatchObject({ observed: 1, changed: 1, delivered: 1 });
+    expect(sent(h)).toContain('Improve the API safely');
+    expect(sent(h)).toContain('issue update');
+    expect(h.store.nativeTransitions.all().map((c) => `${c.path}:${c.state}:${c.transition.kind}:${c.transition.item}`))
+      .toEqual(['native:delivered:pr_updated:7']);
     expect((await step())).toMatchObject({ changed: 0 });
     h.close();
   });
@@ -139,18 +143,18 @@ describe('the ordinary watch does not repeat what an imported target tells', () 
     h.close();
   });
 
-  it('drops only the covered part of a mixed change', async () => {
+  it('keeps every part of a mixed change', async () => {
     const { h, reader, step } = await start(['pulls', 'issues']);
     reader.prs = [{ ...reader.prs[0]!, title: 'Improve the API safely', updatedAt: '2026-09-01T01:00:00.000Z' }];
     reader.runs = [{ workflowName: 'ci', headBranch: 'feature/x', headSha: 'sha2', status: 'completed', conclusion: 'failure' }];
     await step();
     const body = sent(h);
     expect(body).toContain('workflow failure(s): ci');
-    expect(body).not.toContain('pull request update');
+    expect(body).toContain('pull request update');
     h.close();
   });
 
-  it('keeps the follow-up proposal for a requested change, which is not a notification', async () => {
+  it('keeps the follow-up proposal and the snapshot line for a requested change: neither is a receipt for a review', async () => {
     const { h, reader, step } = await start(['pulls', 'issues']);
     reader.prs = [{
       ...reader.prs[0]!, reviewDecision: 'CHANGES_REQUESTED', updatedAt: '2026-09-01T03:00:00.000Z',
@@ -162,8 +166,9 @@ describe('the ordinary watch does not repeat what an imported target tells', () 
     await step();
     const body = sent(h);
     expect(body).toContain('/job submit repo:demo');
-    // The snapshot line about the same change is the imported alert's to tell.
-    expect(body).not.toContain('changes requested on #7');
+    expect(body).toContain('changes requested on #7');
+    // The ordinary summary names no review id and the follow-up is advice, so neither reserves a review.
+    expect(h.store.nativeTransitions.all().map((c) => c.transition.kind)).toEqual(['pr_updated']);
     h.close();
   });
 
@@ -198,19 +203,13 @@ describe('the ordinary watch does not repeat what an imported target tells', () 
   });
 });
 
-describe('an imported target only silences the native DM when it will really deliver', () => {
+describe('no imported coverage, however healthy, ever silences the native DM', () => {
   const change = (reader: MutableGitHubReader) => {
     reader.prs = [{ ...reader.prs[0]!, title: 'Improve the API safely', updatedAt: '2026-09-01T01:00:00.000Z' }];
   };
 
-  it('is silenced when watching is on, a briefing can carry the digest and the target is healthy (positive control)', async () => {
-    const { h, reader, step } = await start(['pulls', 'issues']);
-    change(reader);
-    expect((await step()).delivered).toBe(0);
-    h.close();
-  });
-
   it.each([
+    ['everything is in order (the old positive control)', {}, {}],
     ['watching is paused', {}, { paused: true }],
     ['imported preferences are not in force', {}, { prefs: 'none' as const }],
     ['the preferences leave the GitHub section out', {}, { prefs: 'no_github_section' as const }],
@@ -218,34 +217,49 @@ describe('an imported target only silences the native DM when it will really del
     ['briefings are off', {}, { briefing: false }],
     ['briefings go to a channel only, which never carries the digest', {}, { delivery: 'channel' as const }],
     ['the target is outside the poll cycle', {}, { cycle: { pushedAt: null } }],
-  ] as const)('keeps the native DM when %s', async (_name, over, world) => {
+    ['the target is inside the poll cycle', {}, { cycle: { pushedAt: '2026-09-01T00:00:00Z' } }],
+  ] as const)('sends the native DM when %s', async (_name, over, world) => {
     const { h, reader, step } = await start(['pulls', 'issues'], over, world);
     change(reader);
-    await step();
+    expect((await step()).delivered).toBe(1);
     expect(sent(h)).toContain('Improve the API safely');
     h.close();
   });
 
-  it('silences it again once the target is inside the poll cycle', async () => {
-    const { h, reader, step } = await start(['pulls', 'issues'], {}, { cycle: { pushedAt: '2026-09-01T00:00:00Z' } });
+  it('skips an item only after the imported target has DELIVERED that exact transition', async () => {
+    const { h, reader, step } = await start(['pulls', 'issues']);
     change(reader);
+    // The target delivered exactly this update: a receipt on the target path.
+    const t = { kind: 'pr_updated' as const, item: '7', stamp: '2026-09-01T01:00:00.000Z', hash: null, attempt: null };
+    h.store.nativeTransitions.reserveTarget(OWNER, 'acme/demo', {
+      kind: 'pr_updated', identity: '7:updated:2026-09-01T01:00:00.000Z', occurredAt: '2026-09-01T01:00:00.000Z',
+      providerHash: null, attempt: null,
+    }, 'target_digest', 'tgt-1', START);
+    h.store.nativeTransitions.markTargetDelivered('target_digest', 'tgt-1', START);
+    expect(h.store.nativeTransitions.probeNative(OWNER, 'acme/demo', t)).toBe('target_delivered');
     expect((await step()).delivered).toBe(0);
+    expect(h.transport.sent).toEqual([]);
+    // The snapshot still advanced, so it is not re-examined next pass.
+    expect((await step())).toMatchObject({ changed: 0 });
     h.close();
   });
 
-  it('silences a requested change on the imported ALERT alone, with no digest anywhere', async () => {
-    const { h, reader, step } = await start(['pulls', 'issues'], {}, { prefs: 'none', briefing: false });
-    reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'CHANGES_REQUESTED', updatedAt: '2026-09-01T03:00:00.000Z' }];
-    reader.reviews.set(7, {
-      number: 7, reviewDecision: 'CHANGES_REQUESTED',
-      latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-09-01T03:00:00.000Z' }],
-    });
-    await step();
-    const body = sent(h);
-    // The pull request's own update, which would ride a digest nobody can receive, is kept...
-    expect(body).toContain('pull request update');
-    // ...while the requested change is the imported alert's to tell.
-    expect(body).not.toContain('changes requested on #7');
+  it('waits, changing nothing, while an imported send of that exact item is in flight', async () => {
+    const { h, reader, step } = await start(['pulls', 'issues']);
+    change(reader);
+    h.store.nativeTransitions.reserveTarget(OWNER, 'acme/demo', {
+      kind: 'pr_updated', identity: '7:updated:2026-09-01T01:00:00.000Z', occurredAt: '2026-09-01T01:00:00.000Z',
+      providerHash: null, attempt: null,
+    }, 'target_digest', 'tgt-1', START);
+    const before = h.store.githubWatches.listForOwner(OWNER, false, 5)[0]!;
+    const out = await step();
+    expect(out).toMatchObject({ deferred: 1, delivered: 0, changed: 0 });
+    const after = h.store.githubWatches.listForOwner(OWNER, false, 5)[0]!;
+    // Neither the snapshot nor the check time moved, so the observation repeats unchanged.
+    expect([after.snapshotHash, after.nextCheckAt]).toEqual([before.snapshotHash, before.nextCheckAt]);
+    // The send fails: the reservation is released and the next pass tells it.
+    h.store.nativeTransitions.releaseTarget('target_digest', 'tgt-1');
+    expect((await step()).delivered).toBe(1);
     h.close();
   });
 });

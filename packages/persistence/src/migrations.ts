@@ -1,7 +1,16 @@
+import { captureNativeLedgerBoundary } from './native-ledger-boundary.js';
+
 export interface Migration {
   readonly version: number;
   readonly name: string;
   readonly sql: string;
+  /**
+   * TypeScript that must run in the SAME transaction right after `sql`. It exists for the one
+   * thing SQL cannot do: apply the shared codec to rows already stored. `fresh` is true when no
+   * migration had been applied before this run began (a new database, no history), which SQL
+   * cannot know. `at` is the injected clock reading.
+   */
+  readonly after?: (db: import('./db.js').Db, ctx: { readonly fresh: boolean; readonly at: string }) => void;
 }
 
 /**
@@ -1928,6 +1937,124 @@ END;
 -- later pass and then cleared. Lifecycle identities are stable, so what it makes the
 -- next pass look at again is deduplicated.
 ALTER TABLE assistant_watch_checkpoints ADD COLUMN lifecycle_floor TEXT;
+`,
+  },
+  {
+    version: 36,
+    name: 'native_transition_ledger_and_provenance',
+    after: (db, ctx) => captureNativeLedgerBoundary(db, ctx),
+    sql: `
+-- Exact native/target reconciliation (ADR 0034). Additive only: no table is rebuilt and no
+-- column is backfilled from the allowlist mirror, which is rewritten at every boot.
+
+-- The repository an ordinary watch actually queried, as owner/repo (canonical). NULL on every
+-- row that existed before this migration: the past of a legacy watch is unknown and stays so.
+ALTER TABLE github_watches ADD COLUMN repo_key TEXT;
+-- Why a watch was cancelled by the SYSTEM (a slug that now names another repository). The
+-- owner's own cancel leaves it NULL. Pending events of such a watch are not abandoned.
+ALTER TABLE github_watches ADD COLUMN cancel_reason TEXT CHECK (cancel_reason IS NULL OR cancel_reason IN ('identity_mismatch'));
+ALTER TABLE github_watch_events ADD COLUMN repo_key TEXT;
+
+-- Whether a commit that a digest consumed was NAMED in the message or only counted under
+-- "and N more". NULL on a legacy row: unknown, and never read as named.
+ALTER TABLE github_feed_commits ADD COLUMN told_as TEXT CHECK (told_as IS NULL OR told_as IN ('named','counted'));
+
+-- An imported event the target will not deliver, with the reason; and the receipt that settled
+-- one without a delivery of its own. provider_hash and attempt are comparison identities only.
+ALTER TABLE assistant_watch_events ADD COLUMN withheld_reason TEXT
+  CHECK (withheld_reason IS NULL OR withheld_reason IN ('legacy_unproven','ambiguous_evidence'));
+ALTER TABLE assistant_watch_events ADD COLUMN settled_by TEXT
+  CHECK (settled_by IS NULL OR settled_by IN ('native_receipt'));
+ALTER TABLE assistant_watch_events ADD COLUMN provider_hash TEXT;
+ALTER TABLE assistant_watch_events ADD COLUMN attempt TEXT;
+
+-- One row per exact transition and owner: a RESERVATION while a send is possible, a RECEIPT once
+-- it was delivered. The primary key is the whole protocol: whoever inserts it first owns the
+-- transition. Standalone on purpose (no foreign key, no cascade): an outbox row pruned or a
+-- watch deleted must not erase the memory that the owner was told. Identifiers only.
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+-- Every lookup is an indexed aggregate over one item's rows (path, then stamp), never a scan of the table.
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- ONE row: where the ledger starts. A native path told the owner things before this cutoff that
+-- left no transition identity, and the rows that might have said so may already have been pruned,
+-- so on any database that is not verifiably new EVERY imported event with a native counterpart at
+-- or before the cutoff (plus a skew margin) and no exact receipt is withheld, whatever rows survive.
+-- 'fresh' is a database created by one run of every migration: it never held native history.
+CREATE TABLE native_ledger_boundary (
+  id                  INTEGER PRIMARY KEY CHECK (id = 1),
+  cutoff_at           TEXT NOT NULL,
+  fresh               INTEGER NOT NULL CHECK (fresh IN (0,1)),
+  -- Set once, by the first reader that knows the owner, after the staged rows below became claims.
+  seeded_at           TEXT,
+  seeded_receipts     INTEGER NOT NULL DEFAULT 0,
+  seeded_reservations INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL
+);
+
+-- What the feed's own surviving rows said at the cutoff, read through the shared codec in this
+-- migration's transaction (so no retention can run first) and staged WITHOUT an owner, which a
+-- migration cannot know. The first reader that knows the owner turns them into claims and empties
+-- this table. A delivered row carries its own repository, key and time; nothing is inferred.
+CREATE TABLE native_legacy_seed (
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  via            TEXT NOT NULL CHECK (via IN ('feed_event','feed_commit')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT,
+  delivered_at   TEXT,
+  PRIMARY KEY (repo_key, transition_key)
+);
+
+-- When the owner's monitoring was paused, by whom, and (when known) since when. Provenance for
+-- status, export and import only: it never suppresses or authorizes anything. A pause that was
+-- imported, or that predates this table, has no real start: started_at is NULL and
+-- start_bound_at is the latest instant by which it is known to have begun.
+CREATE TABLE assistant_watch_pause_periods (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_user_id TEXT NOT NULL,
+  started_at      TEXT,
+  started_origin  TEXT NOT NULL CHECK (started_origin IN ('owner','import','unknown')),
+  start_bound_at  TEXT NOT NULL,
+  ended_at        TEXT,
+  ended_origin    TEXT CHECK (ended_origin IS NULL OR ended_origin = 'owner'),
+  CHECK ((started_origin = 'owner') = (started_at IS NOT NULL)),
+  CHECK ((ended_at IS NULL) = (ended_origin IS NULL))
+);
+CREATE UNIQUE INDEX ux_pause_open ON assistant_watch_pause_periods(discord_user_id) WHERE ended_at IS NULL;
+
+-- A pause that already exists has no recorded origin or start.
+INSERT INTO assistant_watch_pause_periods (discord_user_id, started_at, started_origin, start_bound_at)
+  SELECT discord_user_id, NULL, 'unknown', updated_at FROM assistant_watch_settings WHERE monitoring_enabled = 0;
 `,
   },
 ];

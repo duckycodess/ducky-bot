@@ -5,7 +5,8 @@ import {
 } from '@ducky/adapters';
 import { WATCH_EVENT_KINDS, type ImportedPreferences, type WatchEventKind } from '@ducky/contracts';
 import type { WatchEventWithTarget } from '@ducky/persistence';
-import { IMPORT_COVERS_NATIVE, buildWatchDigest } from '../src/domain/assistant-watch.service.js';
+import * as watchService from '../src/domain/assistant-watch.service.js';
+import { buildWatchDigest } from '../src/domain/assistant-watch.service.js';
 import { briefingMessage } from '../src/discord/assistant-presenters.js';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { FeedReader, issue, pr, review, run, sentTo, commit } from './github-feed-helpers.js';
@@ -31,7 +32,8 @@ const ev = (
   surface: 'pulls', held: false, identity: `${n}:${kind}`, occurredAt: T0,
   payloadJson: JSON.stringify(over.payload ?? { number: n, title: `Title ${n}` }), origin: 'observed',
   alertedAt: null, alertAttempts: 0, alertAbandonedAt: null, digestedAt: null, createdAt: T0,
-  display: over.display ?? 'acme/widgets', discordUserId: OWNER,
+  display: over.display ?? 'acme/widgets', discordUserId: OWNER, targetRepoKey: 'acme/widgets',
+  withheldReason: null, settledBy: null, providerHash: null, attempt: null,
 });
 
 describe('the digest', () => {
@@ -422,22 +424,26 @@ describe('overlap with the native feed', () => {
     reader.runs.set(DEMO, [run(11, { conclusion: 'failure', updatedAt: '2026-10-01T00:13:00Z' }), run(10, { conclusion: 'failure' })]);
   };
 
-  it('retires the native card for an event an imported target observes, and sends the rest', async () => {
+  it('sends every native card even while an imported target observes the repository: no promise of future coverage retires one', async () => {
     const { h, reader, tick } = boot();
     await baseline(reader, () => tick(0));
     observeDemo(h, { pulls: 'ready', issues: 'unbaselined', runs: 'blocked' });
     news(reader);
     await tick();
     const texts = sentTo(h.transport.sent).map((s) => s.text).join('\n');
-    // Pull requests are observed by the imported target: those two are retired.
-    expect(texts).not.toContain('Pull request opened');
-    expect(texts).not.toContain('Changes requested');
-    // Issues are unbaselined and runs are blocked there: nothing observes them, so they go.
+    // Previously the two new pull requests and the review were retired on the strength of the imported
+    // pulls surface merely being healthy. Nothing is retired now: only an exact transition an imported
+    // target has actually DELIVERED is skipped, and none has been.
+    expect(texts).toContain('Pull request opened');
+    expect(texts).toContain('Changes requested');
     expect(texts).toContain('Issue opened');
     expect(texts).toContain('Checks failed');
-    const skipped = h.store.githubFeed.listEvents('skipped').map((e) => e.kind).sort();
-    // Both new pull requests (3 and 2) and the review on 2 are observed by the import.
-    expect(skipped).toEqual(['changes_requested', 'pr_opened', 'pr_opened']);
+    expect(h.store.githubFeed.listEvents('skipped')).toEqual([]);
+    // Each card that was sent is now a receipt, so the imported target will not tell the same thing again.
+    const receipts = h.store.nativeTransitions.all().filter((c) => c.path === 'native' && c.state === 'delivered');
+    expect(receipts.map((c) => c.transition.kind).sort()).toEqual(
+      ['changes_requested', 'ci_failed', 'issue_opened', 'pr_opened', 'pr_opened'],
+    );
     h.close();
   });
 
@@ -455,33 +461,27 @@ describe('overlap with the native feed', () => {
     }
   });
 
-  it('keeps the card for a target outside the poll cycle, and retires it once inside', async () => {
-    const { h, reader, tick } = boot({ cycle: true });
-    await baseline(reader, () => tick(0));
-    observeDemo(h, { pulls: 'ready', issues: 'ready' }); // no recency yet: not covered
-    news(reader);
-    await tick();
-    expect(sentTo(h.transport.sent).map((s) => s.text).join('\n')).toContain('Pull request opened');
-    h.close();
-
-    const inside = boot({ cycle: true });
-    await baseline(inside.reader, () => inside.tick(0));
-    observeDemo(inside.h, { pulls: 'ready', issues: 'ready' });
-    inside.h.store.db.prepare("UPDATE assistant_watch_targets SET pushed_at = '2026-09-30T00:00:00Z'").run();
-    news(inside.reader);
-    await inside.tick();
-    expect(sentTo(inside.h.transport.sent).map((s) => s.text).join('\n')).not.toContain('Pull request opened');
-    inside.h.close();
+  it('is indifferent to the poll cycle: the card is sent whether or not the target is inside it', async () => {
+    for (const pushedAt of [null, '2026-09-30T00:00:00Z']) {
+      const { h, reader, tick } = boot({ cycle: true });
+      await baseline(reader, () => tick(0));
+      observeDemo(h, { pulls: 'ready', issues: 'ready' });
+      h.store.db.prepare('UPDATE assistant_watch_targets SET pushed_at = ?').run(pushedAt);
+      news(reader);
+      await tick();
+      expect(sentTo(h.transport.sent).map((s) => s.text).join('\n'), String(pushedAt)).toContain('Pull request opened');
+      h.close();
+    }
   });
 
-  it('retires a requested-changes card on the imported alert alone, with no digest to carry anything', async () => {
+  it('does not retire a requested-changes card because an imported alert is expected: only a delivered one counts', async () => {
     const { h, reader, tick } = boot({ prefs: false });
     await baseline(reader, () => tick(0));
     observeDemo(h, { pulls: 'ready', issues: 'ready' });
     news(reader);
     await tick();
     const texts = sentTo(h.transport.sent).map((s) => s.text).join('\n');
-    expect(texts).not.toContain('Changes requested');
+    expect(texts).toContain('Changes requested');
     expect(texts).toContain('Pull request opened');
     h.close();
   });
@@ -497,12 +497,12 @@ describe('overlap with the native feed', () => {
     h.close();
   });
 
-  it('suppresses only kinds an imported surface sees in full', () => {
-    expect(Object.keys(IMPORT_COVERS_NATIVE).sort()).toEqual(['changes_requested', 'issue_opened', 'pr_opened']);
-    // A review request is a cross-repository search; a failing check on a pull
-    // request head is invisible to the default-branch runs surface.
-    expect(IMPORT_COVERS_NATIVE['review_requested']).toBeUndefined();
-    expect(IMPORT_COVERS_NATIVE['check_failed']).toBeUndefined();
+  it('has no prospective suppression input left: nothing consults future coverage', () => {
+    // The coarse maps and the `covers` question were removed (ADR 0034): a native path skips an item
+    // only for an exact, actually delivered target transition, read from the ledger.
+    expect('IMPORT_COVERS_NATIVE' in watchService).toBe(false);
+    expect('IMPORT_COVER_DELIVERY' in watchService).toBe(false);
+    expect('covers' in watchService.AssistantWatchService.prototype).toBe(false);
   });
 
   it('still delivers a failing check even when an imported runs surface is healthy', async () => {
@@ -528,11 +528,14 @@ describe('overlap with the native feed', () => {
     h.close();
   });
 
-  it('is scoped to the owner who has the target', () => {
+  it('scopes a receipt to the owner it was delivered to', () => {
     const { h } = boot();
-    observeDemo(h, { pulls: 'ready' });
-    expect(h.store.assistantWatch.observes(OWNER, DEMO, 'pulls')).toBe(true);
-    expect(h.store.assistantWatch.observes('100000000000000099', DEMO, 'pulls')).toBe(false);
+    const t = { kind: 'pr_opened' as const, item: '7', stamp: null, hash: null, attempt: null };
+    h.store.nativeTransitions.reserveNative(OWNER, DEMO, t, 'feed_event', 'ev1', T0, T0);
+    h.store.nativeTransitions.markNativeDelivered('feed_event', 'ev1', 'owner_dm', T0);
+    const facts = { kind: 'pr_opened' as const, identity: '7:opened', occurredAt: T0, providerHash: null, attempt: null };
+    expect(h.store.nativeTransitions.resolveTarget(OWNER, DEMO, facts)).toEqual({ outcome: 'covered' });
+    expect(h.store.nativeTransitions.resolveTarget('100000000000000099', DEMO, facts)).toEqual({ outcome: 'deliver' });
     h.close();
   });
 

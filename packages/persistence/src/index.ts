@@ -29,6 +29,7 @@ export * from './repositories/rollback-delta.repo.js';
 export * from './repositories/schedule-rules.repo.js';
 export * from './repositories/owner-preferences.repo.js';
 export * from './repositories/assistant-watch.repo.js';
+export * from './repositories/native-transitions.repo.js';
 export * from './runtime-lock.js';
 export * from './backup-check.js';
 
@@ -60,6 +61,7 @@ import { RollbackDeltaRepo } from './repositories/rollback-delta.repo.js';
 import { ScheduleRulesRepo } from './repositories/schedule-rules.repo.js';
 import { OwnerPreferencesRepo } from './repositories/owner-preferences.repo.js';
 import { AssistantWatchRepo } from './repositories/assistant-watch.repo.js';
+import { NativeTransitionsRepo } from './repositories/native-transitions.repo.js';
 
 export interface Store {
   readonly db: Db;
@@ -135,6 +137,8 @@ export interface Store {
   readonly ownerPreferences: OwnerPreferencesRepo;
   /** Notification-only watch targets, typed checkpoints and events. */
   readonly assistantWatch: AssistantWatchRepo;
+  /** The exact native/target reconciliation ledger (ADR 0034). */
+  readonly nativeTransitions: NativeTransitionsRepo;
 }
 
 export function createStore(db: Db): Store {
@@ -184,5 +188,6 @@ export function createStore(db: Db): Store {
     scheduleRules: new ScheduleRulesRepo(db),
     ownerPreferences: new OwnerPreferencesRepo(db),
     assistantWatch: new AssistantWatchRepo(db),
+    nativeTransitions: new NativeTransitionsRepo(db),
   };
 }

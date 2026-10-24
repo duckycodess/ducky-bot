@@ -183,6 +183,14 @@ export interface GitHubWatchRow {
   createdAt: string;
   updatedAt: string;
   cancelledAt: string | null;
+  /**
+   * The repository (canonical `owner/repo`) this watch actually queried, bound at creation or at its
+   * first observation after the identity was recorded. NULL for a watch that predates it: its past is
+   * unknown and is never filled in from today's allowlist mapping.
+   */
+  repoKey: string | null;
+  /** Set when the SYSTEM cancelled the watch because its slug now names another repository. */
+  cancelReason: 'identity_mismatch' | null;
 }
 
 /** A meaningful watch change waiting for owner-DM delivery. */
@@ -199,6 +207,8 @@ export interface GitHubWatchEventRow {
   attempts: number;
   lastAttemptAt: string | null;
   abandonedAt: string | null;
+  /** The repository the observation that produced this event queried; NULL on a legacy event. */
+  repoKey: string | null;
 }
 
 /** One durable, at-most-once execution attempt for an approved action. */

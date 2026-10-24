@@ -6,7 +6,8 @@ import {
   GITHUB_FEED_MAX_PR_CHECKS, GITHUB_FEED_MAX_REVIEW_REQUESTS, GITHUB_FEED_MAX_SELECTED,
   GITHUB_FEED_UNIT_BATCH, GITHUB_DIGEST_STALE_AFTER_MS,
   GITHUB_DIGEST_SWEEP_GRACE_MS, GitHubFeedCardSchema,
-  canonicalRepoKey, githubFeedTarget, parseRepoKey, zonedDateKey,
+  canonicalRepoKey, commitTransition, feedEventTransition, githubFeedTarget, parseRepoKey,
+  zonedDateKey,
   type CommitsPage, type GitHubCommitDigestSection, type PrList, type GitHubFeedCard, type GitHubFeedKind,
   type GitHubFeedTarget,
 } from '@ducky/contracts';
@@ -26,7 +27,7 @@ import {
 } from './github-feed-cards.js';
 import { channelTarget, dmTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
-import { githubDigestMessage, githubFeedMessage } from '../discord/github-feed-presenters.js';
+import { digestNamedLineCap, githubDigestMessage, githubFeedMessage } from '../discord/github-feed-presenters.js';
 
 export interface GitHubFeedConfig {
   readonly enabled: boolean;
@@ -56,15 +57,6 @@ export interface GitHubFeedDeps {
   /** Read only, to seed the selected list. Nothing here ever writes to it. */
   readonly allowlist: RepoAllowlist;
   readonly config: GitHubFeedConfig;
-  /**
-   * Whether an imported notification-only target already observes this kind of
-   * event for a repository, so announcing it here as well would say it twice.
-   *
-   * It decides ONE thing -- that a native proactive card is skipped -- and it
-   * changes no job read and no authorization. Omitted means nothing is
-   * suppressed.
-   */
-  readonly coveredByImport?: ((repoKey: string, kind: GitHubFeedKind) => boolean) | undefined;
 }
 
 export interface GitHubFeedTickResult {
@@ -138,7 +130,6 @@ export class GitHubFeedService {
   private readonly clock: OwnerClock;
   private readonly allowlist: RepoAllowlist;
   private readonly config: GitHubFeedConfig;
-  private readonly coveredByImport: GitHubFeedDeps['coveredByImport'];
   private readonly visibility = new Map<string, { at: number; isPrivate: boolean }>();
   private ticking: Promise<GitHubFeedTickResult> | null = null;
   /** One open-PR read per repository per tick, shared by the `prs` and `checks` units. */
@@ -152,7 +143,6 @@ export class GitHubFeedService {
     this.clock = deps.clock;
     this.allowlist = deps.allowlist;
     this.config = deps.config;
-    this.coveredByImport = deps.coveredByImport;
   }
 
   get enabled(): boolean {
@@ -219,6 +209,8 @@ export class GitHubFeedService {
         if (!desired.has(row.repoKey) && repo.cancelRepo(row.repoKey, at)) out.cancelled += 1;
       }
     });
+    // A repository that left the list is no longer told about, so what it reserved is released.
+    this.store.nativeTransitions.sweepOrphans();
     return out;
   }
 
@@ -293,6 +285,8 @@ export class GitHubFeedService {
     this.expireStaleCommits();
     await this.deliverEvents(r);
     await this.deliverDigests(r);
+    // Commits retired unread, or whose repository left the list, release what they reserved.
+    this.store.nativeTransitions.sweepOrphans();
     return r;
   }
 
@@ -307,15 +301,22 @@ export class GitHubFeedService {
     const interval = this.config.intervalMinutes * 60_000;
     try {
       const read = await this.read(unit, nowIso);
-      const committed = withTransaction(this.store.db, () =>
-        this.store.githubFeed.recordSuccess({
+      const committed = withTransaction(this.store.db, () => {
+        // Nothing is observed against an unreadable ledger boundary.
+        this.store.nativeTransitions.requireBoundary();
+        this.store.nativeTransitions.ensureSeeded(this.ownerId, nowIso);
+        const ok = this.store.githubFeed.recordSuccess({
           scope: unit.scope, kind: unit.kind, expectedNextCheckAt: unit.nextCheckAt,
           nextCheckAt: new Date(nowMs + interval).toISOString(), atIso: nowIso,
           baseline: unit.baselinedAt === null,
           cursor: read.cursor, meta: read.meta ?? null,
           events: read.events,
           ...(read.commits ? { commits: read.commits } : {}),
-        }));
+        });
+        // The outbox rows and the reservations that go with them are one write.
+        if (ok) this.reserveRecorded(read, nowIso);
+        return ok;
+      });
       if (committed) {
         r.observed += 1;
         r.recorded += read.events.filter((e) => e.status === 'pending').length;
@@ -333,6 +334,41 @@ export class GitHubFeedService {
         error: 'The GitHub read failed.', atIso: nowIso,
       });
       r.failed += 1;
+    }
+  }
+
+  /**
+   * Reserves, in the transaction that recorded them, the exact transitions the new pending cards
+   * and buffered commits will tell. An item an imported target already DELIVERED is retired here
+   * instead (a skipped row, an unread commit marked consumed with no target), never sent; an item
+   * an imported send is in flight for is recorded unreserved and decided again when it is sent.
+   */
+  private reserveRecorded(read: UnitRead, atIso: string): void {
+    const ledger = this.store.nativeTransitions;
+    const feed = this.store.githubFeed;
+    for (const e of read.events) {
+      if (e.status !== 'pending') continue;
+      const parsed = feedEventTransition(e.eventKey, e.kind, e.repoKey);
+      if (!parsed) continue;
+      // Only the row this very read inserted (a deduplicated key keeps its first row).
+      if (feed.eventByKey(e.eventKey)?.id !== e.id) continue;
+      const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition);
+      if (probe === 'target_delivered') feed.markEventSkipped(e.id, atIso);
+      else if (probe === 'free') {
+        ledger.reserveNative(this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', e.id, atIso, atIso);
+      }
+    }
+    if (read.commits) {
+      for (const c of read.commits.rows) {
+        if (c.baseline) continue;
+        const t = commitTransition(c.sha);
+        if (!t || !feed.isOpenCommit(read.commits.repoKey, c.sha)) continue;
+        const probe = ledger.probeNative(this.ownerId, read.commits.repoKey, t);
+        if (probe === 'target_delivered') feed.skipCommit(read.commits.repoKey, c.sha, atIso);
+        else if (probe === 'free') {
+          ledger.reserveNative(this.ownerId, read.commits.repoKey, t, 'feed_commit', c.sha, atIso, atIso);
+        }
+      }
     }
   }
 
@@ -792,13 +828,27 @@ export class GitHubFeedService {
         r.skipped += 1;
         continue;
       }
-      // The imported typed observation takes precedence for the events it
-      // covers: the owner hears about it once, privately, and the shared channel
-      // card for the same fact is retired rather than sent.
-      if (this.coveredByImport?.(event.repoKey, event.kind)) {
-        feed.markEventSkipped(event.id, at);
-        r.skipped += 1;
-        continue;
+      // An exact transition an imported target already DELIVERED is not sent again; one it is sending
+      // right now waits (the row stays pending, no attempt is charged); anything else is reserved for
+      // this send. A promise of future coverage is never a reason to skip.
+      const parsed = feedEventTransition(event.eventKey, event.kind, event.repoKey);
+      if (parsed) {
+        const decision = withTransaction(this.store.db, () => {
+          const ledger = this.store.nativeTransitions;
+          const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition);
+          if (probe === 'target_delivered') {
+            feed.markEventSkipped(event.id, at);
+            return 'skipped' as const;
+          }
+          if (probe === 'target_in_flight') return 'wait' as const;
+          ledger.reserveNative(this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', event.id, event.createdAt, at);
+          return 'send' as const;
+        });
+        if (decision === 'skipped') {
+          r.skipped += 1;
+          continue;
+        }
+        if (decision === 'wait') continue;
       }
       const card = parseCard(event);
       if (!card) {
@@ -812,7 +862,12 @@ export class GitHubFeedService {
           target === 'github_channel' ? channelTarget(this.config.channelId!) : dmTarget(this.ownerId),
           githubFeedMessage(card),
         );
-        feed.markEventDelivered(event.id, at, target);
+        // A card sent to the configured public channel or to the owner's DM is a receipt alike;
+        // nothing that was not sent is. The receipt and the settlement are one step.
+        withTransaction(this.store.db, () => {
+          feed.markEventDelivered(event.id, at, target);
+          this.store.nativeTransitions.markNativeDelivered('feed_event', event.id, target, at);
+        });
         r.delivered += 1;
       } catch {
         feed.recordEventFailure(event.id, at, GITHUB_FEED_MAX_DELIVERY_ATTEMPTS);
@@ -820,6 +875,8 @@ export class GitHubFeedService {
         else r.deliveryFailed += 1;
       }
     }
+    // Retired, abandoned and deselected rows release what they reserved.
+    this.store.nativeTransitions.sweepOrphans();
   }
 
   /**
@@ -964,6 +1021,36 @@ export class GitHubFeedService {
     }
   }
 
+  /**
+   * The open commits of a repository this digest may tell. One an imported target already DELIVERED
+   * is retired instead (consumed with no target); one an imported send is in flight for stays open
+   * for a later digest; the rest are reserved for this digest (idempotent, so a repeat changes nothing).
+   */
+  private deliverableCommits(repoKey: string): GitHubFeedCommitRow[] {
+    const feed = this.store.githubFeed;
+    const ledger = this.store.nativeTransitions;
+    const open = feed.openCommits(repoKey);
+    if (open.length === 0) return open;
+    const atIso = this.clock.nowIso();
+    return withTransaction(this.store.db, () => {
+      const keep: GitHubFeedCommitRow[] = [];
+      for (const c of open) {
+        const t = commitTransition(c.sha);
+        if (!t) {
+          keep.push(c);
+          continue;
+        }
+        const probe = ledger.probeNative(this.ownerId, repoKey, t);
+        if (probe === 'target_delivered') feed.skipCommit(repoKey, c.sha, atIso);
+        else if (probe === 'free') {
+          ledger.reserveNative(this.ownerId, repoKey, t, 'feed_commit', c.sha, c.observedAt, atIso);
+          keep.push(c);
+        }
+      }
+      return keep;
+    });
+  }
+
   /** Builds both halves of the digest from one set of visibility reads. */
   private async planDigest(active: readonly GitHubFeedRepoRow[]): Promise<DigestPlan> {
     const feed = this.store.githubFeed;
@@ -971,7 +1058,7 @@ export class GitHubFeedService {
     const dm: PlanSection[] = [];
     const unreadable: string[] = [];
     for (const repo of active) {
-      const commits = feed.openCommits(repo.repoKey);
+      const commits = this.deliverableCommits(repo.repoKey);
       const cursor = feed.cursor(repo.repoKey, 'commits');
       if (cursor && cursor.failures > 0) unreadable.push(repo.display);
       if (commits.length === 0) continue;
@@ -1026,8 +1113,18 @@ export class GitHubFeedService {
         ...(last && omittedRepos > 0 ? { omittedRepos } : {}),
       }));
       const at = this.clock.nowIso();
+      // The message named only as many commits per section as fit; the rest were counted. A named
+      // commit is a receipt; a counted one proves nothing about itself and releases its reservation.
+      const cap = digestNamedLineCap(part.map((p) => p.section));
       for (const p of part) {
-        feed.consumeCommits(p.repoKey, p.shas, at, target);
+        const named = new Set(p.section.commits.slice(0, cap).map((c) => c.sha));
+        withTransaction(this.store.db, () => {
+          feed.consumeCommits(p.repoKey, p.shas, at, target, named);
+          for (const sha of p.shas) {
+            if (named.has(sha)) this.store.nativeTransitions.markNativeDelivered('feed_commit', sha, target, at, p.repoKey);
+            else this.store.nativeTransitions.releaseNative('feed_commit', sha, p.repoKey);
+          }
+        });
         if (p.section.truncated) feed.setCommitGap(p.repoKey, null);
       }
       sent += 1;

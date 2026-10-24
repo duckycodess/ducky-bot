@@ -62,6 +62,12 @@ export interface OwnerStateSnapshot {
   readonly watchEvents: RawRow[];
   readonly discoveryTombstones: RawRow[];
   readonly watchSwitch: RawRow | null;
+  /** When monitoring was paused and by whom: provenance, never authority. */
+  readonly pausePeriods: RawRow[];
+  /** Native receipts and reservations by exact transition (identifiers only, no text). */
+  readonly nativeClaims: RawRow[];
+  /** Where the native ledger starts; null when it cannot be read. */
+  readonly nativeBoundary: RawRow | null;
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
   /** A deletion cause row present at read time: a process died mid-deletion. */
@@ -163,6 +169,17 @@ export class RollbackDeltaRepo {
       watchSwitch:
         (this.db.prepare('SELECT * FROM assistant_watch_settings WHERE discord_user_id = ?').get(owner) as RawRow | undefined) ??
         null,
+      pausePeriods: read(
+        'assistant_watch_pause_periods',
+        'SELECT * FROM assistant_watch_pause_periods WHERE discord_user_id = ? ORDER BY id',
+        owner,
+      ),
+      nativeClaims: read(
+        'native_transition_claims',
+        'SELECT * FROM native_transition_claims WHERE owner_id = ? ORDER BY repo_key, transition_key',
+        owner,
+      ),
+      nativeBoundary: (this.db.prepare('SELECT * FROM native_ledger_boundary WHERE id = 1').get() as RawRow | undefined) ?? null,
       truncated,
       deletionContext: (this.db.prepare('SELECT * FROM deletion_context WHERE id = 1').get() as RawRow | undefined) ?? null,
       foreignKeyViolations: this.db.prepare('PRAGMA foreign_key_check').all().length,

@@ -123,7 +123,7 @@ describe('a complete export', () => {
     expect(r.code).toBe(0);
     expect(statSync(w.out).mode & 0o777).toBe(0o600);
     const body = JSON.parse(readFileSync(w.out, 'utf8'));
-    expect(body.schema).toBe('ducky-rollback-delta/v2');
+    expect(body.schema).toBe('ducky-rollback-delta/v3');
     expect(body.complete).toBe(true);
     for (const text of ['Water the plants', 'a loose thought', 'acme', 'Widgets', w.dir]) {
       expect(r.out).not.toContain(text);

@@ -58,6 +58,17 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'assistant_watch_discovery_tombstones',
   'assistant_watch_settings',
   'deletion_context',
+  /**
+   * What the native paths (the feed, the ordinary watch) told the owner, by exact
+   * transition, and the cutoff before which nothing was recorded (ADR 0034). A receipt pruned
+   * for being old would let a transition already told be told again, and the cutoff erased
+   * would hide that history exists. Identifiers only, no text; lifetime growth is accepted.
+   */
+  'native_transition_claims',
+  'native_ledger_boundary',
+  'native_legacy_seed',
+  /** When the owner's monitoring was paused and by whom: status and export provenance. */
+  'assistant_watch_pause_periods',
   /** Who may write this database right now. */
   'runtime_lock',
 ] as const;

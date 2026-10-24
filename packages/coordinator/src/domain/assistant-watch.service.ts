@@ -7,7 +7,7 @@ import {
   ASSISTANT_WATCH_CYCLE_TARGETS, ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS, ASSISTANT_WATCH_MAX_TARGETS,
   ASSISTANT_WATCH_METADATA_INTERVAL_HOURS, GH_OWNER_RE, GH_REPO_RE, isPlainRepoName, WATCH_API_DISCOVERY_MAX_PAGES,
   WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, newPublicWatchId, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
-  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, encodeBaselineMarker, type GitHubFeedKind, type WatchEventKind, type WatchSurface,
+  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, encodeBaselineMarker, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import {
   withTransaction, type DueCheckpoint, type ObservedEventWrite, type PollCycle, type Store,
@@ -46,21 +46,6 @@ export interface AssistantWatchServiceDeps {
    * is covered and nothing is discovered.
    */
   readonly watchConfig?: AssistantWatchConfig;
-  /**
-   * Whether the owner's briefing can actually carry the repository digest right now:
-   * briefings on, imported preferences in force with the GitHub section, and a DM copy.
-   * Absent means no: a digest nobody can receive covers nothing.
-   */
-  readonly digestDeliverable?: () => boolean;
-  /**
-   * What the owner's NATIVE paths retain, as `owner/repo` keys of the GitHub feed's selected
-   * list (a durable repository identity, active or cancelled) and a count of the distinct
-   * ordinary watches whose repository cannot be proven (`unprovenOrdinary`): an ordinary
-   * watch is stored by an allowlist slug whose meaning is overwritten every boot, so every
-   * retained one counts, whatever it maps to today. Absent means the native side cannot be
-   * consulted, and turning monitoring back on is refused rather than guessed.
-   */
-  readonly nativeWatchedEver?: () => { readonly keys: ReadonlySet<string>; readonly unprovenOrdinary: number };
 }
 
 export type SetMonitoringOutcome =
@@ -68,14 +53,11 @@ export type SetMonitoringOutcome =
   | {
     readonly ok: false;
     /**
-     * `ordinary_overlap`: a feed selection is retained on a repository an active target also
-     * watches, OR any ordinary watch row is retained at all (its repository cannot be proven),
-     * so a native path may have told the owner what a target's old checkpoint would tell again,
-     * and nothing stored says when or about what. `overlap_unverifiable`: the native
-     * side could not be consulted. Both refuse; neither resets a checkpoint.
+     * `ledger_unreadable`: the native ledger boundary could not be read, and nothing is observed or
+     * delivered against an unreadable one. History is NOT a reason: what native paths told the owner
+     * is reconciled event by event (ADR 0034), so a repeated or unprovable transition is never sent.
      */
-    readonly reason: 'ordinary_overlap' | 'overlap_unverifiable';
-    readonly overlapping: number;
+    readonly reason: 'ledger_unreadable';
   };
 
 export interface AssistantWatchConfig {
@@ -116,47 +98,13 @@ export interface WatchDigest {
 
 const MINUTE = 60_000;
 
+/** Undigested events scanned to build one digest, before the 400 the briefing may carry. */
+const ASSISTANT_WATCH_DIGEST_SCAN = 1_000;
+
 /** Every surface a target is read through; `ci_state` moves with `runs` and has no read of its own. */
 const WATCH_SURFACES_OBSERVED: readonly WatchSurface[] = [
   'commits', 'pulls', 'issues', 'runs', 'releases', 'default_branch',
 ];
-
-/**
- * Which native feed events an imported target's observation already covers, and
- * through which surface.
- *
- * Only a kind whose imported surface sees EVERY instance of it is listed. The
- * imported pulls surface reads every pull request of the repository and the
- * reviews on the open ones, and the issues surface every issue, so a native
- * pull-request, issue or change-request card is a duplicate of what that
- * surface will say.
- *
- * Deliberately absent:
- * - `review_requested`: a search across repositories, not a fact about a watched
- *   one, which nothing imported produces.
- * - `check_failed`: the native feed also reports failing checks and external
- *   statuses on PULL REQUEST heads, and the imported runs surface reads only the
- *   default branch's workflow runs. Suppressing on its behalf would silently
- *   drop a failure that only the native feed ever sees. Until an imported
- *   surface can carry the identity of a failing check exactly, it is not
- *   suppressed.
- *
- * The ORDINARY `github_watches` snapshot DM is trimmed the same way, part by part,
- * in `GitHubWatchService` (ADR 0032).
- */
-export const IMPORT_COVER_DELIVERY: Partial<Record<GitHubFeedKind, 'immediate' | 'digest'>> = {
-  // A requested change interrupts: an imported alert is sent the moment it is found.
-  changes_requested: 'immediate',
-  // Everything else an imported surface tells waits for a briefing digest.
-  pr_opened: 'digest',
-  issue_opened: 'digest',
-};
-
-export const IMPORT_COVERS_NATIVE: Partial<Record<GitHubFeedKind, WatchSurface>> = {
-  pr_opened: 'pulls',
-  issue_opened: 'issues',
-  changes_requested: 'pulls',
-};
 
 /**
  * The most calls one unit can make, so a unit is only started when it fits.
@@ -226,8 +174,6 @@ export class AssistantWatchService {
   private readonly clock: OwnerClock;
   private readonly reader: AssistantWatchReader;
   private readonly cfg: AssistantWatchConfig | undefined;
-  private readonly digestDeliverable: () => boolean;
-  private readonly nativeWatchedEver: AssistantWatchServiceDeps['nativeWatchedEver'];
   private ticking: Promise<AssistantWatchTickResult> | null = null;
   /** Until when a rate limit or an authentication failure has stopped the cycle. */
   private pausedUntilMs = 0;
@@ -240,8 +186,6 @@ export class AssistantWatchService {
     this.clock = deps.clock;
     this.reader = deps.reader;
     this.cfg = deps.watchConfig;
-    this.digestDeliverable = deps.digestDeliverable ?? (() => false);
-    this.nativeWatchedEver = deps.nativeWatchedEver;
   }
 
   // ---- the tick ---------------------------------------------------------------
@@ -267,6 +211,9 @@ export class AssistantWatchService {
     const repo = this.store.assistantWatch;
     const nowMs = this.clock.nowMs();
     let left = this.budgetLeft(nowMs);
+    // What native paths delivered since the last tick settles the imported events it duplicates, and
+    // what nothing can place is withheld. Decided in one step, before any alert or digest is built.
+    this.reconcile();
 
     // The source's global switch: off means no read at all. Alerts already owed,
     // the digest and maintenance still run, and nothing about a target changes.
@@ -847,6 +794,8 @@ export class AssistantWatchService {
       occurredAt: isoOf(Date.parse(e.occurredAt)),
       payloadJson: JSON.stringify(e.payload),
       settled: false,
+      ...(e.providerHash ? { providerHash: e.providerHash } : {}),
+      ...(e.attempt ? { attempt: e.attempt } : {}),
     };
   }
 
@@ -938,23 +887,6 @@ export class AssistantWatchService {
       }
     }
     return this.fail(unit, nowMs, 'read_failed');
-  }
-
-  /**
-   * Whether an imported target will really TELL the owner about this surface, so a
-   * native notification for the same thing can be left out without losing it.
-   *
-   * A healthy checkpoint on an active target is not delivery. Watching must be on (the
-   * global switch), the target must be inside the poll cycle's coverage where one
-   * applies, and what the target tells must have somewhere to go: an alert needs
-   * nothing more (it is sent as soon as it is found), but a digest-only kind needs a
-   * briefing that can carry it. Anything less keeps the native notification.
-   */
-  covers(repoKey: string, surface: WatchSurface, delivery: 'immediate' | 'digest'): boolean {
-    const repo = this.store.assistantWatch;
-    if (!repo.monitoringEnabled(this.ownerId)) return false;
-    if (delivery === 'digest' && !this.digestDeliverable()) return false;
-    return repo.observes(this.ownerId, repoKey, surface, this.cycle());
   }
 
   // ---- the poll cycle, relationships and discovery -----------------------------------
@@ -1069,14 +1001,20 @@ export class AssistantWatchService {
   private async deliverAlerts(): Promise<{ sent: number; failed: number }> {
     let sent = 0;
     let failed = 0;
-    for (const event of this.store.assistantWatch.pendingAlerts(this.ownerId, ASSISTANT_WATCH_EVENT_BATCH)) {
+    const repo = this.store.assistantWatch;
+    for (const event of repo.pendingAlerts(this.ownerId, ASSISTANT_WATCH_EVENT_BATCH)) {
       const at = this.clock.nowIso();
+      // One step decides this send: an exact transition a native path already delivered is settled by
+      // that receipt and not sent; one a native path holds waits (nothing is charged, nothing settled);
+      // one nothing can place is withheld; otherwise it is reserved for exactly this attempt.
+      const decision = repo.reserveSend(event, 'target_alert', at);
+      if (decision !== 'send') continue;
       try {
         await this.transport.send(dmTarget(this.ownerId), assistantWatchAlert(event));
-        this.store.assistantWatch.markAlerted(event.id, at);
+        repo.markAlerted(event.id, at);
         sent += 1;
       } catch {
-        this.store.assistantWatch.recordAlertFailure(event.id, at, ASSISTANT_WATCH_ALERT_MAX_ATTEMPTS);
+        repo.recordAlertFailure(event.id, at, ASSISTANT_WATCH_ALERT_MAX_ATTEMPTS);
         failed += 1;
       }
     }
@@ -1088,6 +1026,8 @@ export class AssistantWatchService {
     const repo = this.store.assistantWatch;
     const nowMs = this.clock.nowMs();
     repo.pruneCalls(isoOf(nowMs - 2 * 60 * MINUTE).slice(0, 16));
+    // A native reservation whose outbox row can no longer be sent is released, so nothing waits on it.
+    this.store.nativeTransitions.sweepOrphans();
     repo.settleSilent(isoOf(nowMs));
     repo.scrubSettledPayloads(isoOf(nowMs - ASSISTANT_WATCH_EVENT_KEEP_DAYS * 86_400_000));
   }
@@ -1102,12 +1042,56 @@ export class AssistantWatchService {
    * a failed delivery cannot swallow events, and a pulled preview cannot either.
    */
   digest(): WatchDigest {
-    const events = this.store.assistantWatch.undigested(this.ownerId, 400);
-    return buildWatchDigest(events);
+    // Only what can be told right now: an event a native path holds, delivered, or cannot be placed
+    // for is left out, and the briefing that does not carry it carries it forward.
+    const repo = this.store.assistantWatch;
+    const events = repo.undigested(this.ownerId, ASSISTANT_WATCH_DIGEST_SCAN).filter((e) => repo.deliverableNow(this.ownerId, e));
+    return buildWatchDigest(events.slice(0, 400));
+  }
+
+  /**
+   * Reserves, for ONE briefing send, the exact transitions the digest is about to tell, and returns
+   * the ids that may still be sent. An event a native path delivered in the meantime is settled by
+   * that receipt, one it holds waits, one nothing can place is withheld; the caller rebuilds the
+   * briefing when any id drops out, and calls `markDigested` after a successful send or
+   * `releaseDigest` when the send did not happen.
+   */
+  reserveDigest(eventIds: readonly string[]): string[] {
+    const repo = this.store.assistantWatch;
+    const at = this.clock.nowIso();
+    const events = new Map(repo.undigested(this.ownerId, ASSISTANT_WATCH_DIGEST_SCAN).map((e) => [e.id, e]));
+    const kept: string[] = [];
+    for (const id of eventIds) {
+      const e = events.get(id);
+      if (e && repo.reserveSend(e, 'target_digest', at) === 'send') kept.push(id);
+    }
+    return kept;
+  }
+
+  releaseDigest(eventIds: readonly string[]): void {
+    this.store.assistantWatch.releaseDigest(eventIds);
   }
 
   markDigested(eventIds: readonly string[]): number {
     return this.store.assistantWatch.markDigested(eventIds, this.clock.nowIso());
+  }
+
+  /** Decides every unsettled event against the native ledger now (idempotent, bounded). */
+  reconcile(): { settled: number; withheld: number } {
+    return this.store.assistantWatch.reconcileOwner(this.ownerId, this.clock.nowIso());
+  }
+
+  /**
+   * At start-up, after the runtime lock is held, so no earlier holder is alive: a target send that was
+   * in progress when the process died has an unknown outcome. It is released back to pending, never
+   * recorded as a receipt, and may be sent again (the existing at-least-once transport caveat). The
+   * ledger's legacy rows are read back for this owner before anything can prune them.
+   */
+  recoverAfterStart(opts: { readonly holdsRuntimeLock: boolean }): { releasedSends: number } {
+    const ledger = this.store.nativeTransitions;
+    ledger.ensureSeeded(this.ownerId, this.clock.nowIso());
+    // Only the process that holds the runtime lock may declare earlier holders dead.
+    return { releasedSends: opts.holdsRuntimeLock ? ledger.recoverTargetSends() : 0 };
   }
 
   // ---- the owner's controls --------------------------------------------------------------
@@ -1141,33 +1125,20 @@ export class AssistantWatchService {
   /**
    * The owner's explicit choice of the global monitoring switch (ADR 0032), not a toggle.
    *
-   * Saying the state it already has changes nothing: no row, no timestamp, no audit
-   * row and no delta. A real change writes the switch and a STRICT audit row in one
-   * transaction at the injected time, so a failed audit write undoes the change.
-   * Neither direction touches a target, a checkpoint, a pending event or the rate-limit
-   * backoff: pausing takes effect at the NEXT tick (the tick in flight read the switch
-   * once at its start), and resuming makes every cursor due again exactly where it stood.
+   * Saying the state it already has changes nothing: no row, no timestamp, no audit row, no pause
+   * period and no delta. A real change writes the switch, its pause provenance and a STRICT audit
+   * row in one transaction at the injected time, so a failed audit write undoes all of it. Neither
+   * direction touches a target, a checkpoint, a pending event or the rate-limit backoff: pausing
+   * takes effect at the NEXT tick (the tick in flight read the switch once at its start), and
+   * resuming makes every cursor due again exactly where it stood.
    *
-   * Turning monitoring back ON is refused wherever a native path could have reported the
-   * same repositories, and **the switch is GLOBAL**: one overlap, or any retained ordinary-watch
-   * row at all, blocks resuming EVERY target (up to the 1,000-target cap), not just the one that
-   * overlaps. While monitoring is off an ordinary snapshot DM or feed card is not trimmed for
-   * what a target covers, so it may already have told the owner what a target's untouched
-   * checkpoint would tell a second time. Nothing stored proves when a pause really began (an
-   * imported pause carries only the import time), what a native path delivered, whether a
-   * pending native notification was settled, or what an ordinary watch's allowlist slug named
-   * when it ran (the mapping is rewritten at every boot). Exact cross-path reconciliation has no
-   * evidence, and resetting a checkpoint would silently baseline away events nobody was told.
-   * So the guard, inside the transaction, counts every selected-feed repository (active or
-   * cancelled, a durable identity) that an active target also watches, plus every distinct
-   * retained ordinary watch, and refuses if there is any. Cancelled targets are not counted
-   * (they are not read).
-   *
-   * The cost is deliberate and owned: with any ordinary-watch history, no target can be resumed
-   * until reconciliation exists. Removing a native row is NOT a way round it (that would delete
-   * the history the guard honours), and a repeated import preserves the stored switch, so there
-   * is no operator-import workaround either. The reply gives a count and no remedy. This is a
-   * REQUIRED full-parity and cutover blocker, not an accepted omission.
+   * Resuming no longer refuses because history exists. What the ordinary watch and the feed told
+   * the owner while the switch was off is reconciled event by event as the targets observe: an
+   * imported event a native path already DELIVERED is settled by that receipt and never sent, one a
+   * native path holds waits, and one that predates the ledger (or cannot be placed exactly) is
+   * withheld and counted, never sent and never silently dropped. The only refusal is an unreadable
+   * ledger boundary, because nothing is observed against one. A pause interval is provenance for
+   * status and export; it never suppresses or authorizes a delivery.
    */
   setMonitoring(actor: ActorContext, enabled: boolean): SetMonitoringOutcome {
     this.authz.requireOwner(actor);
@@ -1177,17 +1148,11 @@ export class AssistantWatchService {
       const current = repo.monitoringSetting(owner);
       const was = current === undefined || current.enabled;
       if (was === enabled) return { ok: true as const, changed: false, enabled };
-      if (enabled) {
-        if (!this.nativeWatchedEver) {
-          return { ok: false as const, reason: 'overlap_unverifiable' as const, overlapping: 0 };
-        }
-        const native = this.nativeWatchedEver();
-        const targets = new Set(repo.activeTargetKeys(owner));
-        const overlapping = [...native.keys].filter((k) => targets.has(k)).length + native.unprovenOrdinary;
-        if (overlapping > 0) return { ok: false as const, reason: 'ordinary_overlap' as const, overlapping };
+      if (enabled && this.store.nativeTransitions.boundary() === undefined) {
+        return { ok: false as const, reason: 'ledger_unreadable' as const };
       }
       const at = this.clock.nowIso();
-      repo.setMonitoring(owner, enabled, at);
+      repo.setMonitoring(owner, enabled, at, 'owner');
       this.store.auditLog.recordStrict({
         at,
         event: 'watch.monitoring_changed',
@@ -1206,13 +1171,36 @@ export class AssistantWatchService {
   statusLine(): string {
     const repo = this.store.assistantWatch;
     const c = repo.counts(this.ownerId);
-    if (c.targets === 0 && !this.cfg?.discovery) return 'no notification targets';
+    if (c.targets === 0 && !this.cfg?.discovery && this.store.githubWatches.identityStoppedCount(this.ownerId) === 0) {
+      return 'no notification targets';
+    }
     const observing = this.reader.capabilities.observableKinds.length > 0;
     const parts = [
       `${c.active} active of ${c.targets} notification target(s)` +
         (observing ? '' : '; NOT observing (no typed reader in this build)'),
     ];
-    if (!repo.monitoringEnabled(this.ownerId)) parts.push('PAUSED (the imported global switch is off)');
+    if (!repo.monitoringEnabled(this.ownerId)) {
+      const open = repo.pausePeriods(this.ownerId).find((p) => p.endedAt === null);
+      parts.push(
+        'PAUSED (the imported global switch is off' +
+          (open?.startedAt ? `, since ${open.startedAt}` : ', start unknown: imported or recorded before provenance existed') + ')',
+      );
+    }
+    const held = repo.withheldCounts(this.ownerId);
+    const waiting = repo.waitingOnNative(this.ownerId);
+    if (waiting > 0) parts.push(`${waiting} event(s) waiting on a native notification still to be sent`);
+    if (held.legacyUnproven + held.ambiguousEvidence > 0) {
+      parts.push(
+        `WITHHELD and never sent: ${held.legacyUnproven} predating the native ledger, ` +
+          `${held.ambiguousEvidence} without the exact id needed to tell them from one already sent`,
+      );
+    }
+    if (held.settledByReceipt > 0) parts.push(`${held.settledByReceipt} settled by an exact native receipt`);
+    // Counts only: ordinary watches the system stopped because their slug now names another repository.
+    const stopped = this.store.githubWatches.identityStoppedCount(this.ownerId);
+    if (stopped > 0) {
+      parts.push(`${stopped} ordinary watch(es) stopped because their repository mapping changed (snapshot and notifications kept)`);
+    }
     const cycle = this.cycle();
     if (cycle) {
       const v = repo.cycleCoverage(cycle);

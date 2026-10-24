@@ -16,6 +16,8 @@ const mapWatch = (r: Record<string, unknown>): GitHubWatchRow => ({
   createdAt: String(r['created_at']),
   updatedAt: String(r['updated_at']),
   cancelledAt: r['cancelled_at'] == null ? null : String(r['cancelled_at']),
+  repoKey: r['repo_key'] == null ? null : String(r['repo_key']),
+  cancelReason: r['cancel_reason'] == null ? null : (String(r['cancel_reason']) as 'identity_mismatch'),
 });
 
 const mapEvent = (r: Record<string, unknown>): GitHubWatchEventRow => ({
@@ -31,6 +33,7 @@ const mapEvent = (r: Record<string, unknown>): GitHubWatchEventRow => ({
   attempts: Number(r['attempts']),
   lastAttemptAt: r['last_attempt_at'] == null ? null : String(r['last_attempt_at']),
   abandonedAt: r['abandoned_at'] == null ? null : String(r['abandoned_at']),
+  repoKey: r['repo_key'] == null ? null : String(r['repo_key']),
 });
 
 /**
@@ -44,24 +47,6 @@ const mapEvent = (r: Record<string, unknown>): GitHubWatchEventRow => ({
 export class GitHubWatchesRepo {
   constructor(private readonly db: Db) {}
 
-  /**
-   * How many distinct repositories (by allowlist slug) the owner still has an ordinary-watch
-   * row for, cancelled or not, whenever it ran.
-   *
-   * A COUNT, deliberately not a list of repositories: a slug is mapped to a GitHub repository
-   * by the allowlist, which is frozen configuration and is mirrored over `repos` on every boot,
-   * so the same slug can name a different repository now than when the watch ran. Nothing
-   * stored records what it named then, so the current mapping can prove nothing about
-   * history, and the only honest use of these rows is "some native watch existed".
-   */
-  retainedSlugCount(ownerId: string): number {
-    return Number(
-      (this.db
-        .prepare('SELECT COUNT(DISTINCT repo_slug) AS n FROM github_watches WHERE discord_user_id = ?')
-        .get(ownerId) as { n: number }).n,
-    );
-  }
-
   insert(row: {
     id: string;
     publicId: string;
@@ -70,17 +55,19 @@ export class GitHubWatchesRepo {
     intervalMinutes: number;
     nextCheckAt: string;
     createdAt: string;
+    /** The canonical repository the slug names RIGHT NOW, recorded as the identity of every observation. */
+    repoKey: string | null;
   }): GitHubWatchRow {
     this.db
       .prepare(
         `INSERT INTO github_watches
            (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at,
-            state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+            state, created_at, updated_at, repo_key)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
       )
       .run(
         row.id, row.publicId, row.discordUserId, row.repoSlug, row.intervalMinutes,
-        row.nextCheckAt, row.createdAt, row.createdAt,
+        row.nextCheckAt, row.createdAt, row.createdAt, row.repoKey,
       );
     return this.byId(row.id)!;
   }
@@ -137,6 +124,10 @@ export class GitHubWatchesRepo {
   observe(input: {
     id: string;
     expectedNextCheckAt: string;
+    /** What the row held when the observation began (NULL for an unbound legacy watch). */
+    expectedRepoKey: string | null;
+    /** The repository this observation queried, fixed BEFORE its awaited reads. */
+    repoKey: string;
     snapshotHash: string;
     snapshotJson: string;
     nextCheckAt: string;
@@ -155,12 +146,12 @@ export class GitHubWatchesRepo {
       .prepare(
         `UPDATE github_watches
             SET snapshot_hash = ?, snapshot_json = ?, next_check_at = ?,
-                last_error = NULL, updated_at = ?
-          WHERE id = ? AND state = 'active' AND next_check_at = ?`,
+                last_error = NULL, updated_at = ?, repo_key = ?
+          WHERE id = ? AND state = 'active' AND next_check_at = ? AND repo_key IS ?`,
       )
       .run(
-        input.snapshotHash, input.snapshotJson, input.nextCheckAt, input.atIso,
-        input.id, input.expectedNextCheckAt,
+        input.snapshotHash, input.snapshotJson, input.nextCheckAt, input.atIso, input.repoKey,
+        input.id, input.expectedNextCheckAt, input.expectedRepoKey,
       );
     if (Number(updated.changes) !== 1) return false;
 
@@ -171,10 +162,10 @@ export class GitHubWatchesRepo {
           // uniqueness IS the deduplication: the same requested-change review
           // observed on two passes must produce one proposal, not an error.
           `INSERT OR IGNORE INTO github_watch_events
-             (id, watch_id, fingerprint, summary, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+             (id, watch_id, fingerprint, summary, created_at, repo_key)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(event.id, input.id, event.fingerprint, event.summary, input.atIso);
+        .run(event.id, input.id, event.fingerprint, event.summary, input.atIso, input.repoKey);
     }
     return true;
   }
@@ -211,12 +202,38 @@ export class GitHubWatchesRepo {
     return true;
   }
 
+  /**
+   * Stops a watch whose slug now names another repository than the one it queried. Unlike the
+   * owner's cancel it abandons NOTHING: the snapshot and every outbox event stay exactly as they
+   * were (a pending event is still a true statement about the repository it was observed on).
+   */
+  cancelForIdentity(id: string, atIso: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE github_watches
+            SET state = 'cancelled', next_check_at = NULL, cancelled_at = ?, updated_at = ?,
+                cancel_reason = 'identity_mismatch'
+          WHERE id = ? AND state = 'active'`,
+      )
+      .run(atIso, atIso, id);
+    return Number(result.changes) === 1;
+  }
+
+  /** How many of the owner's watches the system stopped for an identity mismatch (counts only). */
+  identityStoppedCount(ownerId: string): number {
+    return Number(
+      (this.db
+        .prepare(`SELECT COUNT(*) AS n FROM github_watches WHERE discord_user_id = ? AND cancel_reason = 'identity_mismatch'`)
+        .get(ownerId) as { n: number }).n,
+    );
+  }
+
   pendingEvents(limit: number): GitHubWatchEventRow[] {
     return this.db
       .prepare(
         `SELECT e.id, e.watch_id, w.public_id, w.discord_user_id, w.repo_slug,
                 e.fingerprint, e.summary, e.created_at, e.delivered_at,
-                e.attempts, e.last_attempt_at, e.abandoned_at
+                e.attempts, e.last_attempt_at, e.abandoned_at, e.repo_key
            FROM github_watch_events e
            JOIN github_watches w ON w.id = e.watch_id
           WHERE e.delivered_at IS NULL AND e.abandoned_at IS NULL

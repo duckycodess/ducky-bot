@@ -328,3 +328,63 @@ describe('what a crash or a concurrent writer cannot be allowed to hide', () => 
     h.close();
   });
 });
+
+describe('the v3 export says what exact native reconciliation recorded', () => {
+  const claim = (h: Harness) => {
+    h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', { kind: 'pr_opened', item: '7', stamp: null, hash: null, attempt: null }, 'feed_event', 'f1', NOW, NOW);
+    h.store.nativeTransitions.markNativeDelivered('feed_event', 'f1', 'owner_dm', NOW);
+    h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', { kind: 'commit', item: 'abc1234', stamp: null, hash: null, attempt: null }, 'feed_commit', 'abc1234', NOW, NOW);
+  };
+
+  it('carries pause periods, the ledger boundary and every receipt and reservation, identifiers only', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    h.store.assistantWatch.setMonitoring(OWNER, false, NOW, 'import');
+    claim(h);
+    const d = exportDelta(h);
+    expect(d.schema).toBe('ducky-rollback-delta/v3');
+    expect(d.complete).toBe(true);
+    expect(d.state.pausePeriods).toEqual([
+      expect.objectContaining({ startedAt: null, startedOrigin: 'import', startBoundAt: NOW, endedAt: null }),
+    ]);
+    expect(d.state.nativeLedger.boundary).toMatchObject({ fresh: 1 });
+    expect(d.state.nativeLedger.claims.map((c) => `${c['state']}:${c['kind']}:${c['item']}`).sort())
+      .toEqual(['delivered:pr_opened:7', 'reserved:commit:abc1234']);
+    const counts = deltaCounts(d) as { state: Record<string, number> };
+    expect(counts.state).toMatchObject({ pausePeriods: 1, nativeClaims: 2 });
+    // Counts only on the terminal: nothing about a repository leaves it.
+    expect(JSON.stringify(counts)).not.toContain('acme');
+    h.close();
+  });
+
+  it('marks a withheld event and an event a native receipt settled, which is neither delivered nor baseline', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    const targetId = (h.store.db.prepare('SELECT id FROM assistant_watch_targets LIMIT 1').get() as { id: string }).id;
+    const ins = h.store.db.prepare(
+      `INSERT INTO assistant_watch_events (id, target_id, kind, surface, identity, occurred_at, payload_json, origin, created_at, withheld_reason, settled_by, digested_at)
+       VALUES (?, ?, 'pr_opened', 'pulls', ?, ?, '{}', 'observed', ?, ?, ?, ?)`,
+    );
+    ins.run('wh', targetId, '91:opened', NOW, NOW, 'legacy_unproven', null, null);
+    ins.run('st', targetId, '92:opened', NOW, NOW, null, 'native_receipt', NOW);
+    const d = exportDelta(h);
+    const by = (id: string) => d.state.watchEvents.find((e) => e['identity'] === id)!;
+    expect(by('91:opened')).toMatchObject({ withheldReason: 'legacy_unproven', settledBy: null, digestedAt: null, baselineMarker: false });
+    expect(by('92:opened')).toMatchObject({ withheldReason: null, settledBy: 'native_receipt', baselineMarker: false });
+    const counts = deltaCounts(d) as { state: Record<string, number> };
+    expect(counts.state).toMatchObject({ watchEventsWithheld: 1, watchEventsSettledByNativeReceipt: 1 });
+    expect(d.replay.join(' ')).toMatch(/withheldReason.*never delivered.*never settled/s);
+    h.close();
+  });
+
+  it('is incomplete, never guessed, when the ledger boundary cannot be read', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    h.store.db.exec('DELETE FROM native_ledger_boundary');
+    const d = exportDelta(h);
+    expect(d.complete).toBe(false);
+    expect(d.incomplete).toContainEqual({ category: 'native_ledger', rule: 'native_ledger_unreadable', count: 1 });
+    expect(d.state.nativeLedger.boundary).toBeNull();
+    h.close();
+  });
+});

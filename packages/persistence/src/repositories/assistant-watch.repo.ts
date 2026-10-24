@@ -5,6 +5,7 @@ import {
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
+import { NativeTransitionsRepo } from './native-transitions.repo.js';
 
 export type WatchCheckpointState = 'unbaselined' | 'imported' | 'ready';
 
@@ -67,12 +68,22 @@ export interface WatchEventRow {
   readonly alertAbandonedAt: string | null;
   readonly digestedAt: string | null;
   readonly createdAt: string;
+  /** Why the target will not deliver this event, or null. Never delivered, never settled. */
+  readonly withheldReason: 'legacy_unproven' | 'ambiguous_evidence' | null;
+  /** Set when a native receipt, not a delivery of its own, settled the event. */
+  readonly settledBy: 'native_receipt' | null;
+  /** Hash of the provider review id, for a requested-changes review; a comparison identity only. */
+  readonly providerHash: string | null;
+  /** The rerun attempt, for a failed run. */
+  readonly attempt: string | null;
 }
 
 /** An event with the target it belongs to, for rendering. */
 export interface WatchEventWithTarget extends WatchEventRow {
   readonly display: string;
   readonly discordUserId: string;
+  /** The canonical repository of the target, which is what every ledger decision is keyed on. */
+  readonly targetRepoKey: string;
 }
 
 /**
@@ -166,6 +177,10 @@ const mapEvent = (r: Record<string, unknown>): WatchEventRow => ({
   alertAbandonedAt: r['alert_abandoned_at'] == null ? null : String(r['alert_abandoned_at']),
   digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
   createdAt: String(r['created_at']),
+  withheldReason: r['withheld_reason'] == null ? null : (String(r['withheld_reason']) as 'legacy_unproven' | 'ambiguous_evidence'),
+  settledBy: r['settled_by'] == null ? null : (String(r['settled_by']) as 'native_receipt'),
+  providerHash: r['provider_hash'] == null ? null : String(r['provider_hash']),
+  attempt: r['attempt'] == null ? null : String(r['attempt']),
 });
 
 /** The columns the baseline-marker classifier reads, from a raw `assistant_watch_events` row. */
@@ -190,6 +205,10 @@ export interface ObservedEventWrite {
   readonly payloadJson: string;
   /** Settled at birth: an event that is already known must not be announced. */
   readonly settled: boolean;
+  /** Hash of the provider review id (requested changes only). */
+  readonly providerHash?: string | null;
+  /** The rerun attempt (failed runs only). */
+  readonly attempt?: string | null;
 }
 
 /**
@@ -227,7 +246,11 @@ const ALERT_LIST = WATCH_ALERT_KINDS.map((k) => `'${k}'`).join(',');
  * owner role; it only says "tell the owner about this repository".
  */
 export class AssistantWatchRepo {
-  constructor(private readonly db: Db) {}
+  private readonly ledger: NativeTransitionsRepo;
+
+  constructor(private readonly db: Db) {
+    this.ledger = new NativeTransitionsRepo(db);
+  }
 
   // ---- targets ------------------------------------------------------------
 
@@ -610,6 +633,10 @@ export class AssistantWatchRepo {
           WHERE target_id = ? AND surface = ? AND held = 1`,
       )
       .run(input.targetId, input.surface);
+    // Decided against the ledger in the same atomic step as the cursor: an event a native path
+    // already told is settled silently, one nothing can place is withheld, and a failure here
+    // leaves the checkpoint exactly where it was.
+    this.reconcileSurface(input.targetId, input.surface, input.atIso);
     if (input.alsoSet) {
       this.db
         .prepare(
@@ -673,12 +700,13 @@ export class AssistantWatchRepo {
         .prepare(
           `INSERT OR IGNORE INTO assistant_watch_events
              (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin,
-              alerted_at, digested_at, created_at)
-           VALUES (?,?,?,?,?,?,?,?, 'observed', ?, ?, ?)`,
+              alerted_at, digested_at, created_at, provider_hash, attempt)
+           VALUES (?,?,?,?,?,?,?,?, 'observed', ?, ?, ?, ?, ?)`,
         )
         .run(
           e.id, targetId, e.kind, WATCH_EVENT_SURFACE[e.kind], held ? 1 : 0, e.identity, e.occurredAt,
           e.payloadJson, e.settled ? atIso : null, e.settled ? atIso : null, atIso,
+          e.providerHash ?? null, e.attempt ?? null,
         );
       inserted += Number(res.changes);
     }
@@ -687,10 +715,10 @@ export class AssistantWatchRepo {
 
   /**
    * Whether an ACTIVE imported target is observing a surface for a repository,
-   * so a native proactive event the same observation would produce can be
-   * suppressed. A surface that is unbaselined or blocked is not observing, and
-   * suppressing on its behalf would lose the notification. So is one whose last
-   * read FAILED: while it is failing it observes nothing, however healthy it was.
+   * so a status or diagnostic read can say whether a surface is healthy. NO delivery path consults it:
+   * a native notification is never skipped on the strength of a healthy surface (ADR 0034). A surface
+   * that is unbaselined or blocked is not observing, and neither is one whose last read FAILED:
+   * while it is failing it observes nothing, however healthy it was.
    */
   observes(ownerId: string, repoKey: string, surface: WatchSurface, cycle?: PollCycle): boolean {
     // Under the source's poll cycle a target outside its coverage is not being read at
@@ -711,6 +739,7 @@ export class AssistantWatchRepo {
   }
 
   /** A failed read. The cursor and the pending progress are untouched. */
+
   recordFailure(input: {
     targetId: string;
     surface: WatchSurface;
@@ -810,15 +839,56 @@ export class AssistantWatchRepo {
     ).map((r) => String(r.k));
   }
 
-  setMonitoring(ownerId: string, enabled: boolean, atIso: string): void {
-    this.db
-      .prepare(
-        `INSERT INTO assistant_watch_settings (discord_user_id, monitoring_enabled, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(discord_user_id) DO UPDATE SET
-           monitoring_enabled = excluded.monitoring_enabled, updated_at = excluded.updated_at`,
-      )
-      .run(ownerId, enabled ? 1 : 0, atIso);
+  /**
+   * Writes the switch and its provenance together (the caller's transaction also writes the audit row).
+   * Turning it OFF opens a pause period: an owner's choice has a real start (the injected time), an
+   * import's or a legacy one has none and records only the latest instant it is known to have begun.
+   * Turning it ON closes the open period. Provenance only: it never suppresses or authorizes anything.
+   */
+  setMonitoring(ownerId: string, enabled: boolean, atIso: string, origin: 'owner' | 'import' = 'owner'): void {
+    atomically(this.db, () => {
+      this.db
+        .prepare(
+          `INSERT INTO assistant_watch_settings (discord_user_id, monitoring_enabled, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(discord_user_id) DO UPDATE SET
+             monitoring_enabled = excluded.monitoring_enabled, updated_at = excluded.updated_at`,
+        )
+        .run(ownerId, enabled ? 1 : 0, atIso);
+      if (enabled) {
+        this.db
+          .prepare(
+            `UPDATE assistant_watch_pause_periods SET ended_at = ?, ended_origin = 'owner'
+              WHERE discord_user_id = ? AND ended_at IS NULL`,
+          )
+          .run(atIso, ownerId);
+      } else {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO assistant_watch_pause_periods
+               (discord_user_id, started_at, started_origin, start_bound_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(ownerId, origin === 'owner' ? atIso : null, origin, atIso);
+      }
+    });
+  }
+
+  /** Pause provenance, oldest first. Counts and instants only; never a repository. */
+  pausePeriods(ownerId: string): {
+    readonly startedAt: string | null; readonly startedOrigin: 'owner' | 'import' | 'unknown';
+    readonly startBoundAt: string; readonly endedAt: string | null;
+  }[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM assistant_watch_pause_periods WHERE discord_user_id = ? ORDER BY id')
+        .all(ownerId) as Record<string, unknown>[]
+    ).map((r) => ({
+      startedAt: r['started_at'] == null ? null : String(r['started_at']),
+      startedOrigin: String(r['started_origin']) as 'owner' | 'import' | 'unknown',
+      startBoundAt: String(r['start_bound_at']),
+      endedAt: r['ended_at'] == null ? null : String(r['ended_at']),
+    }));
   }
 
   // ---- discovery ---------------------------------------------------------
@@ -998,6 +1068,17 @@ export class AssistantWatchRepo {
         row.id, row.targetId, row.kind, WATCH_EVENT_SURFACE[row.kind], row.identity, row.occurredAt,
         row.payloadJson, row.alertedAt, row.digestedAt, row.createdAt,
       );
+    // An imported event the source had not settled is decided against the ledger now, inside the
+    // import's own transaction: a native path may already have told it, or nothing can place it.
+    if (row.digestedAt === null) {
+      const t = this.db
+        .prepare('SELECT discord_user_id, repo_key FROM assistant_watch_targets WHERE id = ?')
+        .get(row.targetId) as { discord_user_id: string; repo_key: string } | undefined;
+      const raw = this.db.prepare('SELECT * FROM assistant_watch_events WHERE id = ?').get(row.id) as Record<string, unknown>;
+      if (t && row.kind !== 'review_pending') {
+        this.applyResolution(String(t.discord_user_id), String(t.repo_key), raw, row.createdAt);
+      }
+    }
   }
 
   /**
@@ -1132,6 +1213,189 @@ export class AssistantWatchRepo {
     );
   }
 
+  // ---- exact native reconciliation (ADR 0034) -----------------------------------------
+
+  /**
+   * Decides every still-unsettled event of one surface against the native ledger, in the caller's
+   * atomic step: an event a native path already DELIVERED settles silently (told, by a receipt),
+   * one nothing can place is withheld for good, the rest are left for delivery. An event a native
+   * path only HOLDS is left alone and decided again at delivery. A read, a write or an unreadable
+   * boundary that throws rolls the caller's whole step back.
+   */
+  reconcileSurface(targetId: string, surface: WatchSurface, atIso: string): void {
+    const t = this.db
+      .prepare('SELECT discord_user_id, repo_key FROM assistant_watch_targets WHERE id = ?')
+      .get(targetId) as { discord_user_id: string; repo_key: string } | undefined;
+    if (!t) return;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM assistant_watch_events
+          WHERE target_id = ? AND surface = ? AND digested_at IS NULL AND held = 0
+            AND withheld_reason IS NULL AND kind != 'review_pending'
+          ORDER BY created_at ASC LIMIT 500`,
+      )
+      .all(targetId, surface) as Record<string, unknown>[];
+    for (const r of rows) this.applyResolution(String(t.discord_user_id), String(t.repo_key), r, atIso);
+  }
+
+  /** The same decision for every active target's unsettled events: what native paths told since. */
+  reconcileOwner(ownerId: string, atIso: string, limit = 400): { settled: number; withheld: number } {
+    return atomically(this.db, () => {
+      const rows = this.db
+        .prepare(
+          `SELECT e.*, t.repo_key AS target_repo_key FROM assistant_watch_events e
+             JOIN assistant_watch_targets t ON t.id = e.target_id
+            WHERE t.discord_user_id = ? AND t.state = 'active' AND e.digested_at IS NULL AND e.held = 0
+              AND e.withheld_reason IS NULL AND e.kind != 'review_pending'
+            ORDER BY e.created_at ASC LIMIT ?`,
+        )
+        .all(ownerId, limit) as Record<string, unknown>[];
+      let settled = 0;
+      let withheld = 0;
+      for (const r of rows) {
+        const res = this.applyResolution(ownerId, String(r['target_repo_key']), r, atIso);
+        if (res.outcome === 'covered') settled += 1;
+        else if (res.outcome === 'withhold') withheld += 1;
+      }
+      return { settled, withheld };
+    });
+  }
+
+  private factsOf(r: Record<string, unknown>) {
+    return {
+      kind: String(r['kind']) as WatchEventKind, identity: String(r['identity']), occurredAt: String(r['occurred_at']),
+      providerHash: r['provider_hash'] == null ? null : String(r['provider_hash']),
+      attempt: r['attempt'] == null ? null : String(r['attempt']),
+    };
+  }
+
+  private applyResolution(ownerId: string, repoKey: string, r: Record<string, unknown>, atIso: string) {
+    const res = this.ledger.resolveTarget(ownerId, repoKey, this.factsOf(r));
+    if (res.outcome === 'covered') {
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events
+              SET alerted_at = COALESCE(alerted_at, ?), digested_at = ?, settled_by = 'native_receipt'
+            WHERE id = ? AND digested_at IS NULL`,
+        )
+        .run(atIso, atIso, String(r['id']));
+    } else if (res.outcome === 'withhold') {
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events SET withheld_reason = ?
+            WHERE id = ? AND digested_at IS NULL AND withheld_reason IS NULL`,
+        )
+        .run(res.reason, String(r['id']));
+    }
+    return res;
+  }
+
+  /**
+   * Gets one event ready for ONE send attempt, in one step. `send`: the transition is reserved for
+   * this send (or needs none). `settled`: a native path had already delivered it, so nothing is
+   * sent and the event is settled by that receipt. `wait`: a native path holds it; nothing changes.
+   * `withheld`: nothing can place it; it is never delivered.
+   */
+  reserveSend(
+    event: { readonly id: string; readonly targetRepoKey: string; readonly discordUserId: string } & Pick<
+      WatchEventRow, 'kind' | 'identity' | 'occurredAt' | 'providerHash' | 'attempt'
+    >,
+    via: 'target_alert' | 'target_digest',
+    atIso: string,
+  ): 'send' | 'settled' | 'wait' | 'withheld' {
+    return atomically(this.db, () => {
+      const facts = {
+        kind: event.kind, identity: event.identity, occurredAt: event.occurredAt,
+        providerHash: event.providerHash, attempt: event.attempt,
+      };
+      const out = this.ledger.reserveTarget(event.discordUserId, event.targetRepoKey, facts, via, event.id, atIso);
+      const raw = this.db.prepare('SELECT * FROM assistant_watch_events WHERE id = ?').get(event.id) as Record<string, unknown>;
+      if (out.selfCovered) {
+        // This target already told this very transition for another event: settled as told, by itself.
+        this.db
+          .prepare(
+            `UPDATE assistant_watch_events SET alerted_at = COALESCE(alerted_at, ?), digested_at = ?
+              WHERE id = ? AND digested_at IS NULL`,
+          )
+          .run(atIso, atIso, event.id);
+        return 'settled';
+      }
+      if (out.resolution.outcome === 'covered' || out.resolution.outcome === 'withhold') {
+        this.applyResolution(event.discordUserId, event.targetRepoKey, raw, atIso);
+        return out.resolution.outcome === 'covered' ? 'settled' : 'withheld';
+      }
+      return out.resolution.outcome === 'wait' ? 'wait' : 'send';
+    });
+  }
+
+  /** Whether an unsettled event may be told right now (a pure read: nothing is reserved or settled). */
+  deliverableNow(ownerId: string, e: WatchEventWithTarget): boolean {
+    return this.ledger.resolveTarget(ownerId, e.targetRepoKey, {
+      kind: e.kind, identity: e.identity, occurredAt: e.occurredAt, providerHash: e.providerHash, attempt: e.attempt,
+    }).outcome === 'deliver';
+  }
+
+  /** The digest's reservations go: the briefing was not sent. */
+  releaseDigest(ids: readonly string[]): void {
+    atomically(this.db, () => {
+      for (const id of ids) this.ledger.releaseTarget('target_digest', id);
+    });
+  }
+
+  /**
+   * How many time-surface cursors of ACTIVE targets sit at or before `thresholdMs` (the ledger
+   * cutoff plus its skew margin). Such a cursor will read events the ledger cannot place; counts only.
+   */
+  cursorsAtOrBefore(ownerId: string, thresholdMs: number): number {
+    const rows = this.db
+      .prepare(
+        `SELECT c.cursor AS cursor FROM assistant_watch_checkpoints c
+           JOIN assistant_watch_targets t ON t.id = c.target_id
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND c.cursor IS NOT NULL
+            AND c.surface IN (${TIME_CURSOR_SURFACES.map((x) => `'${x}'`).join(',')})`,
+      )
+      .all(ownerId) as { cursor: string }[];
+    return rows.filter((r) => {
+      const ms = Date.parse(r.cursor);
+      return Number.isFinite(ms) && ms <= thresholdMs;
+    }).length;
+  }
+
+  /** Counts only, by reason; waiting is the bounded number of unsettled events a native path holds. */
+  withheldCounts(ownerId: string): { legacyUnproven: number; ambiguousEvidence: number; settledByReceipt: number } {
+    const n = (where: string): number =>
+      Number(
+        (this.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM assistant_watch_events e
+               JOIN assistant_watch_targets t ON t.id = e.target_id
+              WHERE t.discord_user_id = ? AND ${where}`,
+          )
+          .get(ownerId) as { n: number }).n,
+      );
+    return {
+      legacyUnproven: n(`e.withheld_reason = 'legacy_unproven'`),
+      ambiguousEvidence: n(`e.withheld_reason = 'ambiguous_evidence'`),
+      settledByReceipt: n(`e.settled_by = 'native_receipt'`),
+    };
+  }
+
+  /** Unsettled events of active targets that a native path currently holds (bounded by `limit`). */
+  waitingOnNative(ownerId: string, limit = 400): number {
+    const rows = this.db
+      .prepare(
+        `SELECT e.*, t.repo_key AS target_repo_key FROM assistant_watch_events e
+           JOIN assistant_watch_targets t ON t.id = e.target_id
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.digested_at IS NULL AND e.held = 0
+            AND e.withheld_reason IS NULL AND e.kind != 'review_pending'
+          ORDER BY e.created_at ASC LIMIT ?`,
+      )
+      .all(ownerId, limit) as Record<string, unknown>[];
+    return rows.filter(
+      (r) => this.ledger.resolveTarget(ownerId, String(r['target_repo_key']), this.factsOf(r)).outcome === 'wait',
+    ).length;
+  }
+
   eventsFor(targetId: string): WatchEventRow[] {
     return this.db
       .prepare('SELECT * FROM assistant_watch_events WHERE target_id = ? ORDER BY occurred_at, id')
@@ -1143,10 +1407,10 @@ export class AssistantWatchRepo {
   pendingAlerts(ownerId: string, limit: number): WatchEventWithTarget[] {
     return this.db
       .prepare(
-        `SELECT e.*, t.display, t.discord_user_id
+        `SELECT e.*, t.display, t.discord_user_id, t.repo_key AS target_repo_key
            FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0 AND e.withheld_reason IS NULL
             AND e.kind IN (${ALERT_LIST})
             AND e.alerted_at IS NULL AND e.alert_abandoned_at IS NULL
           ORDER BY e.occurred_at ASC, e.id ASC LIMIT ?`,
@@ -1154,18 +1418,25 @@ export class AssistantWatchRepo {
       .all(ownerId, limit)
       .map((raw) => {
         const r = raw as Record<string, unknown>;
-        return { ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']) };
+        return {
+          ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']),
+          targetRepoKey: String(r['target_repo_key']),
+        };
       });
   }
 
   markAlerted(id: string, atIso: string): boolean {
-    const info = this.db
-      .prepare(
-        `UPDATE assistant_watch_events SET alerted_at = ?, alert_attempts = alert_attempts + 1
-          WHERE id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
-      )
-      .run(atIso, id);
-    return Number(info.changes) === 1;
+    return atomically(this.db, () => {
+      const info = this.db
+        .prepare(
+          `UPDATE assistant_watch_events SET alerted_at = ?, alert_attempts = alert_attempts + 1
+            WHERE id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
+        )
+        .run(atIso, id);
+      // The send succeeded: the reservation made for it becomes a receipt in the same step.
+      this.ledger.markTargetDelivered('target_alert', id, atIso);
+      return Number(info.changes) === 1;
+    });
   }
 
   /**
@@ -1174,14 +1445,18 @@ export class AssistantWatchRepo {
    * cannot be delivered must not be retried forever, and must not be lost.
    */
   recordAlertFailure(id: string, atIso: string, maxAttempts: number): void {
-    this.db
-      .prepare(
-        `UPDATE assistant_watch_events
-            SET alert_attempts = alert_attempts + 1,
-                alert_abandoned_at = CASE WHEN alert_attempts + 1 >= ? THEN ? ELSE alert_abandoned_at END
-          WHERE id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
-      )
-      .run(maxAttempts, atIso, id);
+    atomically(this.db, () => {
+      this.db
+        .prepare(
+          `UPDATE assistant_watch_events
+              SET alert_attempts = alert_attempts + 1,
+                  alert_abandoned_at = CASE WHEN alert_attempts + 1 >= ? THEN ? ELSE alert_abandoned_at END
+            WHERE id = ? AND alerted_at IS NULL AND alert_abandoned_at IS NULL`,
+        )
+        .run(maxAttempts, atIso, id);
+      // Nothing was sent: the reservation goes and the event stays as it was (or falls to the digest).
+      this.ledger.releaseTarget('target_alert', id);
+    });
   }
 
   /**
@@ -1193,10 +1468,10 @@ export class AssistantWatchRepo {
   undigested(ownerId: string, limit: number): WatchEventWithTarget[] {
     return this.db
       .prepare(
-        `SELECT e.*, t.display, t.discord_user_id
+        `SELECT e.*, t.display, t.discord_user_id, t.repo_key AS target_repo_key
            FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0 AND e.withheld_reason IS NULL
             AND e.digested_at IS NULL AND e.kind != 'review_pending'
             AND NOT (e.kind IN (${ALERT_LIST}) AND e.alerted_at IS NULL AND e.alert_abandoned_at IS NULL)
           ORDER BY t.display ASC, e.occurred_at ASC, e.id ASC LIMIT ?`,
@@ -1204,7 +1479,10 @@ export class AssistantWatchRepo {
       .all(ownerId, limit)
       .map((raw) => {
         const r = raw as Record<string, unknown>;
-        return { ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']) };
+        return {
+          ...mapEvent(r), display: String(r['display']), discordUserId: String(r['discord_user_id']),
+          targetRepoKey: String(r['target_repo_key']),
+        };
       });
   }
 
@@ -1220,13 +1498,19 @@ export class AssistantWatchRepo {
     );
   }
 
+  /** The briefing carrying these events was SENT: they settle, and their reservations become receipts. */
   markDigested(ids: readonly string[], atIso: string): number {
-    let n = 0;
-    const stmt = this.db.prepare(
-      'UPDATE assistant_watch_events SET digested_at = ? WHERE id = ? AND digested_at IS NULL',
-    );
-    for (const id of ids) n += Number(stmt.run(atIso, id).changes);
-    return n;
+    return atomically(this.db, () => {
+      let n = 0;
+      const stmt = this.db.prepare(
+        'UPDATE assistant_watch_events SET digested_at = ? WHERE id = ? AND digested_at IS NULL AND withheld_reason IS NULL',
+      );
+      for (const id of ids) {
+        n += Number(stmt.run(atIso, id).changes);
+        this.ledger.markTargetDelivered('target_digest', id, atIso);
+      }
+      return n;
+    });
   }
 
   /**
@@ -1327,7 +1611,7 @@ export class AssistantWatchRepo {
       undigested: one(
         `SELECT COUNT(*) AS n FROM assistant_watch_events e
            JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.discord_user_id = ? AND e.digested_at IS NULL`,
+          WHERE t.discord_user_id = ? AND e.digested_at IS NULL AND e.withheld_reason IS NULL`,
         ownerId,
       ),
     };

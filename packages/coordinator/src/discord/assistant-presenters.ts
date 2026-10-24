@@ -283,18 +283,13 @@ export function assistantWatchesList(
 
 /**
  * The owner's global monitoring switch. Private and counts-only: it never names a
- * repository, and a refusal says how many native paths overlap, not which.
+ * repository. The only refusal is an unreadable native ledger; history is reconciled event by event.
  */
 export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
   if (!out.ok) {
     return {
-      content: out.reason === 'overlap_unverifiable'
-        ? 'Monitoring stays off: this build cannot check whether your ordinary watches or the GitHub feed already ' +
-          'told you what the notification targets would repeat. Nothing was changed.'
-        : `Monitoring stays off. ${out.overlapping} native watch or feed entr${out.overlapping === 1 ? 'y' : 'ies'} ` +
-          'may already have told you what the notification targets would repeat, and I cannot prove otherwise. ' +
-          'This switch is global, so that blocks resuming every target. Nothing was changed or reset. Exact ' +
-          'reconciliation is not built, so this is a refusal, not a decision.',
+      content: 'Monitoring stays off: the record of what your other notifications already told you cannot be ' +
+        'read, and nothing is watched against it. Nothing was changed.',
       ephemeral: true,
     };
   }
@@ -303,7 +298,9 @@ export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
   }
   return {
     content: out.enabled
-      ? 'Notification monitoring is on. Every target resumes exactly where it stood; nothing was reset.'
+      ? 'Notification monitoring is on. Every target resumes exactly where it stood; nothing was reset. ' +
+        'Anything your other notifications already told you is not sent again, and anything that cannot be ' +
+        'placed exactly is withheld and counted in /status rather than guessed.'
       : 'Notification monitoring is off. A read already in progress finishes; nothing starts after it. ' +
         'No target, cursor or pending notification was changed.',
     ephemeral: true,

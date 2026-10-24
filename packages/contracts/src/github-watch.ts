@@ -206,6 +206,11 @@ export const WatchReviewsSchema = z.array(
     state: z.string().max(40),
     submitted_at: Iso.nullable().optional(),
     body: z.string().nullable().optional(),
+    // The review's global node id: the same id GraphQL (and so `gh pr list --json latestReviews`)
+    // calls `id`. Bounded and optional, and an unusable value becomes "absent" rather than failing
+    // the page: it is only ever compared by exact equality, and an absent one means no match. It
+    // is hashed before it is stored; the raw value is never kept.
+    node_id: z.string().min(1).max(255).optional().catch(undefined),
   }),
 ).max(WATCH_API_PAGE_SIZE);
 export type WatchReviewsResponse = z.infer<typeof WatchReviewsSchema>;
@@ -235,6 +240,9 @@ export const WatchRunsSchema = z.object({
       conclusion: z.string().max(40).nullable().optional(),
       created_at: Iso,
       updated_at: Iso.nullable().optional(),
+      // The rerun attempt, which with the run id identifies a native failure card exactly. Bounded
+      // and optional; an unusable value is "absent" and then no run failure is matched by it.
+      run_attempt: z.number().int().min(1).max(9999).optional().catch(undefined),
     }),
   ).max(WATCH_API_PAGE_SIZE),
 });

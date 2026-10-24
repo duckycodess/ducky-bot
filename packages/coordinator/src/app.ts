@@ -37,7 +37,7 @@ import { OwnerPreferencesService } from './domain/owner-preferences.service.js';
 import { WeatherBriefing } from './domain/weather-briefing.js';
 import { takeCoordinatorLock } from './runtime-lock.js';
 import {
-  AssistantWatchService, IMPORT_COVERS_NATIVE, IMPORT_COVER_DELIVERY, type AssistantWatchConfig,
+  AssistantWatchService, type AssistantWatchConfig,
 } from './domain/assistant-watch.service.js';
 import {
   UnavailableAssistantWatchReader, type AssistantWatchReader,
@@ -526,23 +526,6 @@ export function createApp(
   // DM only. Its targets are not engineering watches: nothing reads `repos`.
   const watchConfig = resolveWatchConfig(env);
   const assistantWatch = new AssistantWatchService({
-    // What the native paths retain. Ordinary watches are only COUNTED: their slug is mapped to a
-    // repository by the allowlist, which is overwritten at every boot, so no current mapping can
-    // say what a retained row watched when it ran. The feed's rows are keyed by the repository
-    // itself (a durable identity), so those are matched against the targets' keys directly.
-    nativeWatchedEver: () => ({
-      keys: new Set(store.githubFeed.repoKeysEver().map((k) => k.toLowerCase())),
-      unprovenOrdinary: store.githubWatches.retainedSlugCount(authz.ownerId),
-    }),
-    digestDeliverable: () => {
-      const schedule = resolveBriefingSchedule(env);
-      return schedule.enabled && schedule.delivery !== 'channel' &&
-        (() => {
-          const prefs = ownerPreferences.effective();
-          // A digest rides a briefing slot: with both imported slots off nothing carries it.
-          return prefs?.includeGithub === true && (prefs.morningEnabled || prefs.eveningEnabled);
-        })();
-    },
     store, authz, transport, ownerId: authz.ownerId, clock,
     reader: overrides.assistantWatchReader ??
       (watchConfig.readerEnabled
@@ -569,11 +552,6 @@ export function createApp(
   });
   const githubWatches = new GitHubWatchService({
     store, authz, allowlist, reader: githubReader, transport, ownerId: authz.ownerId, clock,
-    // An imported target that observes a repository tells its pull request and issue
-    // events itself (alert or digest), so the ordinary snapshot DM leaves those out.
-    // Only where the imported side will really deliver it (watching on, inside the poll
-    // cycle, and a briefing that can carry a digest for digest-only kinds).
-    importedCovers: (repoKey, surface, delivery) => assistantWatch.covers(repoKey, surface, delivery),
   });
   /**
    * The GitHub feed rides the SAME coordinator interval and holds no model
@@ -584,16 +562,18 @@ export function createApp(
   const githubFeed = new GitHubFeedService({
     store, reader: githubReader, transport, ownerId: authz.ownerId, clock, allowlist,
     config: resolveGitHubFeed(env),
-    // An imported target's typed observation takes precedence for the events it
-    // covers, so the owner hears about each once. Job reads and authorization
-    // are untouched.
-    coveredByImport: (repoKey, kind) => {
-      const surface = IMPORT_COVERS_NATIVE[kind];
-      const delivery = IMPORT_COVER_DELIVERY[kind];
-      return surface !== undefined && delivery !== undefined && assistantWatch.covers(repoKey, surface, delivery);
-    },
   });
   githubFeed.reconcileSelection();
+  // Start-up, with the runtime lock already held (so no earlier holder is alive): the ledger's legacy
+  // rows are read back for this owner before anything can prune them, a target send that was in
+  // progress when a process died is released back to pending (never a receipt), and a feed that
+  // frozen configuration disabled releases what it reserved while keeping every row.
+  assistantWatch.recoverAfterStart({ holdsRuntimeLock: runtimeLock !== undefined });
+  if (!githubFeed.enabled) {
+    store.nativeTransitions.releaseNativeVia('feed_event');
+    store.nativeTransitions.releaseNativeVia('feed_commit');
+  }
+  store.nativeTransitions.sweepOrphans();
 
   /**
    * The repository workflow bridge.

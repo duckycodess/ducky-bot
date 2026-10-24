@@ -14,6 +14,9 @@ import type { AssistantWatchService } from './assistant-watch.service.js';
 import type { OwnerPreferencesService } from './owner-preferences.service.js';
 import type { ActorContext } from '../security/authz.js';
 
+/** How many times a briefing is rebuilt when an event its digest held drops out before the send. */
+const DIGEST_RESERVE_ATTEMPTS = 3;
+
 export interface BriefingScheduleConfig {
   /** OFF unless an operator says otherwise. A briefing is pushed, not pulled. */
   readonly enabled: boolean;
@@ -208,6 +211,8 @@ export class BriefingNotifier {
 
     for (const row of pending) {
       const nowIso = this.clock.nowIso();
+      // The repository digest reserved for THIS send, so a failure can release exactly it.
+      let reservedDigest: readonly string[] = [];
 
       // A row addressed to a DIFFERENT account than the configured owner is
       // never re-addressed to the new one: that would hand one person's day to
@@ -230,9 +235,27 @@ export class BriefingNotifier {
         // A copy bound for a channel never carries them: the channel's readers are
         // not something Ducky can check, and leaving the sections out is the
         // direction that cannot widen who sees them.
-        const body = await this.briefing.assemble(actor, row.kind, {
+        let body = await this.briefing.assemble(actor, row.kind, {
           includePrivate: row.target === 'owner_dm',
         });
+        // Only what can be told now goes into the briefing. The digest's items are reserved for this
+        // one send (a native path that delivered one in the meantime settles it instead, one it
+        // holds waits); if any item drops out the briefing is rebuilt around the rest, and what did
+        // not go is carried forward to the next briefing rather than lost or sent twice.
+        if (this.watch && body.github && body.github.eventIds.length > 0) {
+          for (let attempt = 0; attempt < DIGEST_RESERVE_ATTEMPTS; attempt += 1) {
+            const ids = body.github?.eventIds ?? [];
+            const kept = this.watch.reserveDigest(ids);
+            if (kept.length === ids.length) {
+              reservedDigest = kept;
+              break;
+            }
+            this.watch.releaseDigest(kept);
+            body = await this.briefing.assemble(actor, row.kind, { includePrivate: row.target === 'owner_dm' });
+            if (!body.github || body.github.eventIds.length === 0) break;
+            if (attempt === DIGEST_RESERVE_ATTEMPTS - 1) body = { ...body, github: undefined };
+          }
+        }
         const to = this.targetFor(row.target);
         if (!to) {
           // The channel was configured when this row was claimed and is not
@@ -246,6 +269,7 @@ export class BriefingNotifier {
         await this.transport.send(to, briefingMessage(body));
         this.store.briefings.markDelivered(row.id, nowIso);
         delivered += 1;
+        reservedDigest = [];
         // The digest is settled only now, after it was SENT. Only the DM copy ever
         // carries it, so it is that copy's delivery that settles it; a channel copy
         // has no digest to settle and cannot hold the events open.
@@ -253,6 +277,8 @@ export class BriefingNotifier {
           this.watch?.markDigested(body.github.eventIds);
         }
       } catch {
+        // Nothing was sent (or the send failed): the reservation goes and the events stay pending.
+        if (reservedDigest.length > 0) this.watch?.releaseDigest(reservedDigest);
         this.store.briefings.recordFailure(row.id, nowIso, BRIEFING_MAX_DELIVERY_ATTEMPTS);
         if (row.attempts + 1 >= BRIEFING_MAX_DELIVERY_ATTEMPTS) abandoned += 1;
         else failed += 1;

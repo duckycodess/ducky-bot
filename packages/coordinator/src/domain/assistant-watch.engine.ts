@@ -1,4 +1,4 @@
-import type { WatchEventKind, WatchEventPayload } from '@ducky/contracts';
+import { hashProviderRef, type WatchEventKind, type WatchEventPayload } from '@ducky/contracts';
 import type {
   CommitRecord, IssueRecord, PullRecord, ReleaseRecord, ReviewRecord, RunRecord,
 } from './assistant-watch.reader.js';
@@ -22,6 +22,10 @@ export interface DerivedEvent {
   readonly identity: string;
   readonly occurredAt: string;
   readonly payload: WatchEventPayload;
+  /** Hash of the provider review id (requested changes only): a comparison identity, never the id. */
+  readonly providerHash?: string | null;
+  /** The rerun attempt (failed runs only). */
+  readonly attempt?: string | null;
 }
 
 export interface SurfaceRead {
@@ -270,6 +274,7 @@ export function deriveReviews(
       identity: `${target.n}:review:${r.id}`,
       occurredAt: r.submittedAt ?? target.u,
       payload: { ...base, ...(r.body ? { summary: scrubText(r.body, 600) } : {}) },
+      ...(kind === 'review_requested_changes' ? { providerHash: hashProviderRef(r.nodeId) } : {}),
     });
   }
   return { events, changesRequested };
@@ -460,6 +465,7 @@ export function deriveRuns(
       events.push({
         kind, identity: `${r.id}:${kind}`, occurredAt: stamp,
         payload: { workflow: scrubText(r.name, 60), branch: scrubText(r.branch, 80) },
+        ...(kind === 'ci_failed' ? { attempt: r.attempt === undefined || r.attempt === null ? null : String(r.attempt) } : {}),
       });
     }
   }

@@ -119,13 +119,6 @@ export class GitHubFeedRepo {
     return rows.map((r) => mapRepo(r as Record<string, unknown>));
   }
 
-  /** Every repository the feed's list still has a row for, active or cancelled (a tombstone is kept). */
-  repoKeysEver(): string[] {
-    return (
-      this.db.prepare('SELECT repo_key AS k FROM github_feed_repos').all() as { k: string }[]
-    ).map((r) => String(r.k));
-  }
-
   repoByKey(repoKey: string): GitHubFeedRepoRow | undefined {
     const r = this.db.prepare('SELECT * FROM github_feed_repos WHERE repo_key = ?').get(repoKey);
     return r ? mapRepo(r as Record<string, unknown>) : undefined;
@@ -462,15 +455,39 @@ export class GitHubFeedRepo {
     ).map((r) => r.repo_key);
   }
 
-  /** Marks exactly these commits consumed. Already-consumed ones are left alone. */
-  consumeCommits(repoKey: string, shas: readonly string[], atIso: string, target: GitHubFeedTarget): number {
+  /**
+   * Marks exactly these commits consumed. Already-consumed ones are left alone. `named` says whether
+   * the digest message wrote the commit's own line (a receipt) or only counted it under "and N more".
+   */
+  consumeCommits(
+    repoKey: string, shas: readonly string[], atIso: string, target: GitHubFeedTarget,
+    named: ReadonlySet<string> = new Set(),
+  ): number {
     const stmt = this.db.prepare(
-      `UPDATE github_feed_commits SET consumed_at = ?, consumed_target = ?
+      `UPDATE github_feed_commits SET consumed_at = ?, consumed_target = ?, told_as = ?
         WHERE repo_key = ? AND sha = ? AND consumed_at IS NULL`,
     );
     let n = 0;
-    for (const sha of shas) n += Number(stmt.run(atIso, target, repoKey, sha).changes);
+    for (const sha of shas) n += Number(stmt.run(atIso, target, named.has(sha) ? 'named' : 'counted', repoKey, sha).changes);
     return n;
+  }
+
+  /** Retires a buffered commit that an imported target already delivered: consumed, no target, never told here. */
+  skipCommit(repoKey: string, sha: string, atIso: string): boolean {
+    return Number(
+      this.db
+        .prepare(
+          `UPDATE github_feed_commits SET consumed_at = ? WHERE repo_key = ? AND sha = ? AND consumed_at IS NULL`,
+        )
+        .run(atIso, repoKey, sha).changes,
+    ) === 1;
+  }
+
+  /** Whether a buffered commit is new this very read (recorded now and still open). */
+  isOpenCommit(repoKey: string, sha: string): boolean {
+    return this.db
+      .prepare('SELECT 1 FROM github_feed_commits WHERE repo_key = ? AND sha = ? AND consumed_at IS NULL')
+      .get(repoKey, sha) !== undefined;
   }
 
   // ---- digest slots ---------------------------------------------------------------------

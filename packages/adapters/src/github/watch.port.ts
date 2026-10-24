@@ -64,6 +64,8 @@ export interface ReviewRecord {
   readonly state: string;
   readonly submittedAt: string | null;
   readonly body: string;
+  /** The provider's global node id of the review, for exact comparison with a native card. */
+  readonly nodeId?: string | null;
 }
 
 export interface IssueRecord {
@@ -82,6 +84,8 @@ export interface RunRecord {
   readonly conclusion: string | null;
   readonly createdAt: string;
   readonly updatedAt: string | null;
+  /** The rerun attempt, when the provider said one. */
+  readonly attempt?: number | null;
 }
 
 export interface ReleaseRecord {

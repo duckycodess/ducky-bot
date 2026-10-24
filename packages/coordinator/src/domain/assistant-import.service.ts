@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  ASSISTANT_WATCH_MAX_TARGETS, MAX_OPEN_TASKS_PER_OWNER, MAX_SCHEDULED_REMINDERS_PER_OWNER,
+  ASSISTANT_WATCH_MAX_TARGETS, NATIVE_LEGACY_SKEW_MS, MAX_OPEN_TASKS_PER_OWNER, MAX_SCHEDULED_REMINDERS_PER_OWNER,
   REMINDER_TEXT_MAX, REQUIRED_WATCH_KINDS, SCHEDULE_EXCEPTIONS_MAX, SCHEDULE_RULES_MAX,
   TIME_CURSOR_SURFACES, WATCH_SURFACES, canonicalJson, instantOfZonedWallClock, newPublicReminderId, newPublicTaskId,
   newPublicWatchId, validateAssistantImport, watchTargetKey,
@@ -355,6 +355,10 @@ export class AssistantImportService {
     const tz = this.deps.env.timeZone;
     const ns = doc.namespace;
     const imp = this.store.assistantImport;
+    // What the feed's own rows said at the ledger's cutoff becomes this owner's receipts BEFORE any
+    // imported event is decided, inside this same transaction (the importer builds no application, so
+    // nothing else would have read them back). An unreadable boundary refuses the whole import.
+    this.store.nativeTransitions.ensureSeeded(owner, at);
 
     const tally = (cat: ImportCountCategory, d: Disposition): boolean => {
       if (d === 'create') {
@@ -514,7 +518,8 @@ export class AssistantImportService {
     // native choice nor re-pause what the owner resumed. `verify` reports the difference
     // as drift rather than this pass silently erasing it.
     if (doc.watch && this.store.assistantWatch.monitoringSetting(owner) === undefined) {
-      this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at);
+      // An imported pause has no real start: only the import time is known.
+      this.store.assistantWatch.setMonitoring(owner, doc.watch.monitoringEnabled, at, 'import');
     }
   }
 
@@ -669,7 +674,7 @@ export class AssistantImportService {
   verify(raw: unknown): VerifyReport {
     const validated = validateAssistantImport(raw);
     if (!validated.ok) {
-      return { ok: false, parity: false, issues: validated.issues, categories: {} };
+      return { ok: false, parity: false, issues: validated.issues, categories: {}, nativeLedger: null };
     }
     const doc = validated.doc;
     const owner = this.deps.env.ownerId;
@@ -765,10 +770,26 @@ export class AssistantImportService {
       if (this.store.assistantWatch.monitoringEnabled(owner) !== doc.watch.monitoringEnabled) bump('watchSwitch', 'drifted');
     }
 
+    // The native ledger (ADR 0034), counts only. On a database that is not new, an active target whose
+    // cursor sits at or before the cutoff (plus the skew margin) will read transitions the ledger cannot
+    // place, and any withheld event is a notification that was never sent: neither is parity.
+    const boundary = this.store.nativeTransitions.boundary();
+    const held = this.store.assistantWatch.withheldCounts(owner);
+    const cursorsBelow = boundary && !boundary.fresh
+      ? this.store.assistantWatch.cursorsAtOrBefore(owner, Date.parse(boundary.cutoffAt) + NATIVE_LEGACY_SKEW_MS)
+      : 0;
+    const nativeLedger: NativeLedgerReport = {
+      readable: boundary !== undefined,
+      fresh: boundary?.fresh ?? false,
+      withheldLegacy: held.legacyUnproven,
+      withheldAmbiguous: held.ambiguousEvidence,
+      cursorsAtOrBeforeCutoff: cursorsBelow,
+      clear: boundary !== undefined && held.legacyUnproven + held.ambiguousEvidence + cursorsBelow === 0,
+    };
     const totals = Object.values(cats);
     const ok = totals.every((c) => c.missing === 0 && c.changedAtSource === 0);
-    const parity = ok && totals.every((c) => c.drifted === 0);
-    return { ok, parity, issues: [], categories: cats };
+    const parity = ok && totals.every((c) => c.drifted === 0) && nativeLedger.clear;
+    return { ok, parity, issues: [], categories: cats, nativeLedger };
   }
 }
 
@@ -781,6 +802,17 @@ export interface VerifyCounts {
   drifted: number;
 }
 
+/** Counts only; never a repository or an event. */
+export interface NativeLedgerReport {
+  readonly readable: boolean;
+  readonly fresh: boolean;
+  readonly withheldLegacy: number;
+  readonly withheldAmbiguous: number;
+  readonly cursorsAtOrBeforeCutoff: number;
+  /** Nothing withheld, no cursor below the cutoff, and the boundary readable. */
+  readonly clear: boolean;
+}
+
 export interface VerifyReport {
   /** Nothing is missing and nothing changed at the source. */
   readonly ok: boolean;
@@ -788,6 +820,7 @@ export interface VerifyReport {
   readonly parity: boolean;
   readonly issues: readonly ImportIssue[];
   readonly categories: Readonly<Record<string, VerifyCounts>>;
+  readonly nativeLedger: NativeLedgerReport | null;
 }
 
 interface Plan {

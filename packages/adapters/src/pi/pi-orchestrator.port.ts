@@ -1,4 +1,6 @@
-import type { JobResultFile, JobWorkPhase } from '@ducky/contracts';
+import type {
+  JobPauseCause, JobPauseQuietStatus, JobResultFile, JobWorkPhase,
+} from '@ducky/contracts';
 
 export interface OrchestrationSpec {
   readonly jobId: string;
@@ -81,6 +83,21 @@ export type OrchestrationOutcome =
       reason: 'orphan_agent_still_working' | 'orphan_agent_blocked';
       workspaceId: string;
       agentName: string;
+    }
+  /**
+   * The agent is PROVEN quiet and left no valid result (or the prompt was
+   * withheld before it was sent). Produced only after a fresh `agent get`
+   * positively matched the recorded name and workspace and reported `idle` or
+   * `done`. It is what lets the runner pause the job for the owner instead of
+   * failing it -- and it never says WHY, because nothing observed can.
+   */
+  | {
+      kind: 'quiet_pause';
+      cause: JobPauseCause;
+      observed: JobPauseQuietStatus;
+      workspaceId: string;
+      agentName: string;
+      workspacePath: string;
     }
   | { kind: 'conflict'; reason: 'foreign_agent_conflict'; agentName: string }
   | { kind: 'unavailable' }

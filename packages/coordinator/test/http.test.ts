@@ -256,3 +256,60 @@ describe('readiness', () => {
     await app.close();
   });
 });
+
+describe('executor pause route', () => {
+  const REG = {
+    workspaceId: 'wX', label: 'ducky-mgd:demo', mode: 'direct', agentName: 'ducky-pi-demo',
+    workspacePath: '/tmp/ducky-demo', state: 'active',
+  };
+  const PAUSE = {
+    cause: 'agent_idle_no_result', workspaceId: 'wX', agentName: 'ducky-pi-demo',
+    agentStatus: 'idle', quiescent: true,
+  };
+
+  async function claimed(h: ReturnType<typeof makeHarness>, app: FastifyInstance) {
+    h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
+    const claim = (
+      await app.inject(
+        sign(h, '/api/v1/executor/claim', {
+          executorId: h.executorId, capabilities: [], waitMs: 0, idempotencyKey: 'abcdefgh',
+        }),
+      )
+    ).json() as { jobId: string; leaseId: string };
+    const reg = await app.inject(
+      sign(h, `/api/v1/executor/jobs/${claim.jobId}/workspace`, { leaseId: claim.leaseId, ...REG }),
+    );
+    expect(reg.statusCode).toBe(200);
+    return claim;
+  }
+
+  it('pauses a quiet job, answers a retried report identically, and refuses everything else', async () => {
+    const h = makeHarness();
+    const app = await boot(h);
+    const claim = await claimed(h, app);
+    const url = `/api/v1/executor/jobs/${claim.jobId}/pause`;
+
+    const first = await app.inject(sign(h, url, { leaseId: claim.leaseId, ...PAUSE }));
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({ state: 'needs_owner_input', paused: true });
+    expect(h.store.jobs.byId(claim.jobId)).toMatchObject({ state: 'needs_owner_input', attempts: 0 });
+
+    const again = await app.inject(sign(h, url, { leaseId: claim.leaseId, ...PAUSE }));
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual(first.json());
+
+    const stale = await app.inject(sign(h, url, { leaseId: 'not-the-lease', ...PAUSE }));
+    expect(stale.statusCode).toBe(409);
+
+    for (const bad of [{ quiescent: false }, { agentStatus: 'working' }, { cause: 'quota' }]) {
+      const res = await app.inject(sign(h, url, { leaseId: claim.leaseId, ...PAUSE, ...bad }));
+      expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+    }
+
+    const anon = await app.inject({
+      method: 'POST', url, payload: '{}', headers: { 'content-type': 'application/json' },
+    });
+    expect(anon.statusCode).toBe(401);
+    h.close();
+  });
+});

@@ -1,4 +1,7 @@
-import { ownerNextStep, ownerStateLabel, type JobState } from '@ducky/contracts';
+import {
+  SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel, parseSystemPauseReason,
+  type JobState,
+} from '@ducky/contracts';
 import type { NotificationTarget, PendingNotificationRow, Store } from '@ducky/persistence';
 import type { ComponentSigner } from '../security/component-signing.js';
 import type { DiscordTransport } from '../discord/transport.js';
@@ -258,20 +261,29 @@ export class JobNotifier {
    * is who is DMed even if a historical row's stored id were ever stale.
    */
   private buildMessage(row: PendingNotificationRow): OutboundMessage {
+    // Decided from THIS transition's own reason, never from the job's latest
+    // state: a sweep can run after the job has resumed or paused again, and the
+    // row must describe the pause it was written for.
+    const systemPause = row.toState === 'needs_owner_input' ? parseSystemPauseReason(row.reason) : undefined;
     const fields: OutboundEmbedField[] = [
       { name: 'What happens next', value: ownerNextStep(row.toState) },
-      { name: 'Reason', value: humanize(row.reason) },
+      {
+        name: 'Reason',
+        value: systemPause ? SYSTEM_PAUSE_OWNER_TEXT[systemPause.cause] : humanize(row.reason),
+      },
     ];
     const rows: OutboundRow[] = [];
 
-    const result = this.store.results.byJobId(row.jobId);
+    // A system pause asked no question, so whatever result snapshot exists
+    // belongs to an earlier round and is not shown beside it.
+    const result = systemPause ? undefined : this.store.results.byJobId(row.jobId);
     if (result) {
       fields.push({ name: 'Result', value: result.summaryRedacted });
       fields.push({ name: 'Verdict', value: humanize(result.verdict) });
     }
 
     if (row.toState === 'needs_owner_input') {
-      this.addOwnerInputComponents(row, result, fields, rows);
+      this.addOwnerInputComponents(row, result, fields, rows, systemPause !== undefined);
     } else if (row.toState === 'needs_approval') {
       this.addApprovalComponents(row, fields, rows);
     }
@@ -306,6 +318,7 @@ export class JobNotifier {
     result: ReturnType<Store['results']['byJobId']>,
     fields: OutboundEmbedField[],
     rows: OutboundRow[],
+    systemPause = false,
   ): void {
     const job = this.store.jobs.byId(row.jobId);
     if (!job || job.state !== 'needs_owner_input') return;
@@ -322,7 +335,7 @@ export class JobNotifier {
             entityId: row.publicId,
             actorUserId: this.ownerId,
           }),
-          label: 'Answer',
+          label: systemPause ? 'Resume' : 'Answer',
           style: 'primary',
         },
       ],

@@ -135,6 +135,11 @@ export function jobDetail(
    * projection has no field that could carry it.
    */
   placementHold?: string | undefined,
+  /**
+   * Set only while the job is in a SYSTEM pause. It is the generic explanation,
+   * shown in place of a result summary that belongs to an earlier round.
+   */
+  systemPauseText?: string | undefined,
 ): OutboundMessage {
   const fields: OutboundEmbedField[] = [
     { name: 'Repository', value: job.repoSlug, inline: true },
@@ -148,6 +153,7 @@ export function jobDetail(
     },
     { name: 'Task', value: short(job.task, 500) },
   ];
+  if (systemPauseText) fields.push({ name: 'Paused', value: short(systemPauseText, 600) });
   const waiting = dependencies.find((d) => d.state === 'waiting');
   if (waiting) {
     fields.push({

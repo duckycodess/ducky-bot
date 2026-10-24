@@ -1337,7 +1337,7 @@ export class DuckyRouter {
                     entityId: detail.job.publicId,
                     actorUserId: actor.discordUserId,
                   }),
-                  label: 'Answer',
+                  label: detail.systemPause ? 'Resume' : 'Answer',
                   style: 'primary',
                 },
               ],
@@ -1353,6 +1353,7 @@ export class DuckyRouter {
             rows,
             detail.dependencies,
             d.jobs.placementHold(detail.job.repoSlug),
+            detail.systemPause?.message,
           );
         }
       }

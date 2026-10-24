@@ -378,6 +378,44 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       return;
     }
 
+    case 'quiet_pause': {
+      deps.onWorkspace?.(claim.jobId, {
+        workspaceId: outcome.workspaceId,
+        agentName: outcome.agentName,
+        workspacePath: outcome.workspacePath,
+        mode: resolved.mode,
+      });
+      // The agent was proved quiet, so the writer lock was released above. The
+      // pause is idempotent for this lease and `pauseJob` retries a bounded
+      // number of times. If it still cannot be delivered the job is NOT failed
+      // and NOT downgraded to a no-result: nothing is lost, because the lease
+      // simply expires and the recovery claim meets the same quiet agent, which
+      // pauses again instead of prompting.
+      try {
+        const sent = await client.pauseJob(claim.jobId, {
+          leaseId: claim.leaseId,
+          cause: outcome.cause,
+          workspaceId: outcome.workspaceId,
+          agentName: outcome.agentName,
+          agentStatus: outcome.observed,
+          quiescent: true,
+        });
+        log(
+          `job ${claim.publicId}: ` +
+            (sent.paused
+              ? `paused for the owner (${outcome.cause}); no attempt spent`
+              : `pause overtaken, job is ${sent.state}`),
+        );
+      } catch (err) {
+        log(
+          `job ${claim.publicId}: the pause was not delivered ` +
+            `(${redact(isDuckyError(err) ? err.ownerMessage : (err as Error).message).slice(0, 160)}); ` +
+            'the job is left to lease expiry and recovery, not failed',
+        );
+      }
+      return;
+    }
+
     case 'orphan':
       // A possibly-live writer stays untouched and keeps blocking the repo
       // until the owner clears it. The writer lock was NOT released above, so

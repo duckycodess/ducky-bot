@@ -3,7 +3,7 @@ import {
   DuckyError, EXECUTOR_HEADERS, canonicalRequest,
   type CancelAckRequest, type ClaimResponse, type ExecutorFailureReason,
   type HeartbeatRequest, type JobHeartbeatRequest, type JobHeartbeatResponse,
-  type JobResultFile,
+  type JobPauseRequest, type JobPauseResponse, type JobResultFile,
 } from '@ducky/contracts';
 import { ClaimResponseSchema } from '@ducky/contracts';
 
@@ -15,6 +15,18 @@ export interface CoordinatorClientOptions {
   readonly hmacSecret: string;
   readonly fetchImpl?: typeof fetch;
   readonly timeoutMs?: number;
+  /** Bounded retry of a pause report; injected so a test does not wait. */
+  readonly pauseRetry?: { readonly attempts: number; readonly delayMs: number; readonly sleep?: (ms: number) => Promise<void> };
+}
+
+/** The pause report could not be delivered. The job is NOT failed because of it. */
+export class PauseDeliveryError extends DuckyError {
+  constructor(
+    readonly status: number | undefined,
+    message: string,
+  ) {
+    super('not_found', message);
+  }
 }
 
 /**
@@ -151,6 +163,45 @@ export class CoordinatorClient {
     return this.expectJson(
       await this.post(`/api/v1/executor/jobs/${jobId}/workspace/close`, { workspaceId }),
     );
+  }
+
+  /**
+   * Reports a confirmed-quiet pause, retrying a transport failure or a 5xx a
+   * bounded number of times -- safe, because the coordinator answers a repeat of
+   * the same pause identically.
+   *
+   * A refusal is never retried and never downgraded: 404 is a coordinator that
+   * does not know the route (version skew, a coordinated upgrade), not a
+   * provider problem, and 409 or 400 is the coordinator saying the lease or the
+   * proof is wrong. Each throws `PauseDeliveryError` and nothing else happens.
+   */
+  async pauseJob(jobId: string, body: JobPauseRequest): Promise<JobPauseResponse> {
+    const retry = this.opts.pauseRetry ?? { attempts: 4, delayMs: 2_000 };
+    const sleep = retry.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    let last: PauseDeliveryError | undefined;
+    for (let attempt = 0; attempt < retry.attempts; attempt += 1) {
+      if (attempt > 0) await sleep(retry.delayMs * attempt);
+      let res: Response;
+      try {
+        res = await this.post(`/api/v1/executor/jobs/${jobId}/pause`, body);
+      } catch {
+        last = new PauseDeliveryError(undefined, 'The coordinator could not be reached to report the pause.');
+        continue;
+      }
+      if (res.ok) return (await res.json()) as JobPauseResponse;
+      if (res.status >= 500 || res.status === 429) {
+        last = new PauseDeliveryError(res.status, `Coordinator responded ${res.status} to the pause report.`);
+        continue;
+      }
+      if (res.status === 401) throw new DuckyError('unauthorized', 'The coordinator rejected our credentials.');
+      throw new PauseDeliveryError(
+        res.status,
+        res.status === 404
+          ? 'The coordinator did not accept the pause route (version skew or unknown job).'
+          : `The coordinator refused the pause (${res.status}).`,
+      );
+    }
+    throw last ?? new PauseDeliveryError(undefined, 'The pause report was not attempted.');
   }
 
   async reportFailure(

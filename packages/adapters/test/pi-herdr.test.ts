@@ -186,10 +186,12 @@ describe('Herdr/Pi orchestration', () => {
     expect(herdr.countOf('agentPrompt')).toBe(0);
   });
 
-  it('reports no_result rather than inventing one', async () => {
+  it('a quiet agent with no result is a pause, never an invented result', async () => {
     const herdr = new MockHerdr();
     const outcome = await orchestratorWith(herdr, undefined).runJob(spec());
-    expect(outcome.kind).toBe('no_result');
+    expect(outcome).toMatchObject({
+      kind: 'quiet_pause', cause: 'agent_idle_no_result', observed: 'idle',
+    });
   });
 
   it('is experimental until a live probe has been recorded', () => {
@@ -470,7 +472,7 @@ describe('prompt settling', () => {
     });
 
     const out = await orch.runJob(spec());
-    expect(out.kind).toBe('no_result');
+    expect(out.kind).toBe('quiet_pause');
     expect(reads).toBe(2);
   });
 });
@@ -534,16 +536,15 @@ describe('prompt failure', () => {
     await expect(orch.runJob(spec())).rejects.toThrow(/the wait died/);
   });
 
-  it('a stalled prompt with a quiet agent re-raises the stall, not an outage claim', async () => {
+  it('a stalled prompt that no agent ever picked up is a quiet pause, not an outage claim', async () => {
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     herdr.agentPrompt = async () => {
       throw new DuckyError('herdr_prompt_stalled', 'no activity observed');
     };
     const orch = orchestratorWith(herdr, undefined);
 
-    const err = await orch.runJob(spec()).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DuckyError);
-    expect((err as DuckyError).code).toBe('herdr_prompt_stalled');
+    const out = await orch.runJob(spec());
+    expect(out).toMatchObject({ kind: 'quiet_pause', cause: 'agent_idle_no_result', observed: 'idle' });
   });
 });
 

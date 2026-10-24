@@ -324,7 +324,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (recovered) {
         return { kind: 'result', result: recovered, workspaceId, agentName, workspacePath, reused: true };
       }
-      return { kind: 'no_result', workspaceId, agentName, workspacePath };
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath });
     }
 
     // idle or done. If a previous turn already wrote a result and only the
@@ -334,6 +334,17 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (recovered) {
         return { kind: 'result', result: recovered, workspaceId, agentName, workspacePath, reused: true };
       }
+      // A recovery claim that meets a quiet agent with nothing written is the
+      // same wall a pause was reported for (or one whose report was lost). It
+      // must NOT send the brief again: that would spend model capacity on the
+      // very turn that just produced nothing, with no owner in the loop. The
+      // pause hands it to the owner, and resuming clears `recoveryRequired`.
+      //
+      // Whatever the fresh observation says is what is returned: a pause only
+      // on positive identity and idle/done proof, otherwise the unproven
+      // `no_result` or the working/blocked orphan. Falling through to a prompt
+      // here would send model work without the proof this branch exists for.
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath });
     }
 
     return this.promptAndSettle(spec, {
@@ -461,12 +472,70 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
           workspacePath: at.workspacePath,
           reused: at.reused,
         }
-      : {
-          kind: 'no_result',
-          workspaceId: at.workspaceId,
-          agentName: at.agentName,
-          workspacePath: at.workspacePath,
-        };
+      : this.noResultOutcome(at);
+  }
+
+  /**
+   * What a turn that settled WITHOUT a valid result means, decided from a fresh
+   * observation of the agent rather than from the settle that led here.
+   *
+   * - `idle`/`done`, with the recorded name AND workspace AND a pane id: proven
+   *   quiet, so `quiet_pause` (and only this earns the slot release it carries);
+   * - `working`/`blocked`: the agent is alive, so each keeps its orphan outcome;
+   * - absent, unknown, an unreadable answer, or an agent that is not provably
+   *   ours: not quiet proof, so the unchanged `no_result` failure, which keeps
+   *   the repository reserved for the owner.
+   *
+   * The screen is never read. Whether the agent stopped because of quota,
+   * sign-in or anything else is not something Herdr's status can say.
+   */
+  private async noResultOutcome(
+    at: { workspaceId: string; agentName: string; workspacePath: string },
+  ): Promise<OrchestrationOutcome> {
+    const base = { workspaceId: at.workspaceId, agentName: at.agentName };
+    const noResult = { kind: 'no_result' as const, ...base, workspacePath: at.workspacePath };
+    let agent: AgentInfo | undefined;
+    try {
+      agent = await this.herdr.agentGet(at.agentName);
+    } catch {
+      return noResult;
+    }
+    if (!agent || !this.isRecordedAgent(agent, at)) return noResult;
+    if (agent.agent_status === 'blocked') {
+      return { kind: 'orphan', reason: 'orphan_agent_blocked', ...base };
+    }
+    if (agent.agent_status === 'working') {
+      return { kind: 'orphan', reason: 'orphan_agent_still_working', ...base };
+    }
+    if (agent.agent_status !== 'idle' && agent.agent_status !== 'done') return noResult;
+    if (!(await this.workspaceIsOurs(at.workspaceId))) return noResult;
+    return {
+      kind: 'quiet_pause',
+      cause: 'agent_idle_no_result',
+      observed: agent.agent_status,
+      ...base,
+      workspacePath: at.workspacePath,
+    };
+  }
+
+  /** Positive identity: the recorded name, the recorded workspace id, and a pane. */
+  private isRecordedAgent(agent: AgentInfo, at: { workspaceId: string; agentName: string }): boolean {
+    return (
+      agent.name === at.agentName &&
+      agent.name.startsWith(DUCKY_AGENT_PREFIX) &&
+      typeof agent.workspace_id === 'string' &&
+      agent.workspace_id === at.workspaceId &&
+      agent.pane_id.length > 0
+    );
+  }
+
+  private async workspaceIsOurs(workspaceId: string): Promise<boolean> {
+    try {
+      const ws = (await this.herdr.workspaceList()).find((w) => w.workspace_id === workspaceId);
+      return ws !== undefined && (ws.label ?? '').startsWith(DUCKY_WORKSPACE_LABEL_PREFIX);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -519,15 +588,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
               workspacePath: at.workspacePath,
               reused: at.reused,
             }
-          : {
-              kind: 'no_result',
-              workspaceId: at.workspaceId,
-              agentName: at.agentName,
-              workspacePath: at.workspacePath,
-            };
+          : this.noResultOutcome(at);
       }
-      // 'never_started': the agent stayed quiet for the whole grace and wrote
-      // nothing. Fall through and report the stall honestly.
+      // 'never_started': no pickup was observed within the grace and nothing was
+      // written. That is a quiet agent without a result -- possibly one that
+      // could not start the turn -- and it is paused for the owner when, and
+      // only when, a fresh look proves the agent quiet. Anything else falls
+      // through and reports the stall honestly.
     }
 
     let agent: AgentInfo | undefined;
@@ -574,6 +641,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         workspacePath: at.workspacePath,
         reused: at.reused,
       };
+    }
+    // A stalled turn that nobody picked up is the one failure that is also a
+    // quiet agent without a result. Any other error stays an error: a
+    // malformed or unexpected failure must not be relabelled as a pause.
+    if (spec !== undefined && isDuckyError(err) && err.code === 'herdr_prompt_stalled') {
+      const quiet = await this.noResultOutcome(at);
+      if (quiet.kind === 'quiet_pause') return quiet;
     }
     // Nothing running and nothing written: re-raise so the caller reports the
     // real reason (a stall is not an outage) rather than inventing one here.

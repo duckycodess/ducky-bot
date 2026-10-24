@@ -275,6 +275,22 @@ export class JobsRepo {
     return this.byId(jobId)!;
   }
 
+  /**
+   * The reason of the most recent move INTO `state`, or undefined.
+   *
+   * A system pause is recorded in its transition reason rather than in a new
+   * column, so this is how a paused job says what kind of pause it is. Only
+   * meaningful while the job is still in `state`: a later move out supersedes it.
+   */
+  latestTransitionReasonInto(jobId: string, state: JobState): string | undefined {
+    const r = this.db
+      .prepare(
+        'SELECT reason FROM job_transitions WHERE job_id = ? AND to_state = ? ORDER BY id DESC LIMIT 1',
+      )
+      .get(jobId, state) as { reason: string } | undefined;
+    return r?.reason;
+  }
+
   transitions(jobId: string): { from: string; to: string; reason: string; actor: string; at: string }[] {
     return this.db
       .prepare('SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id')

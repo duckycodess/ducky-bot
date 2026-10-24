@@ -4,8 +4,10 @@ import {
   DEFAULT_MAX_ATTEMPTS, DuckyError, ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS,
   EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
+  SYSTEM_PAUSE_OWNER_TEXT, SYSTEM_RESUME_REASON, leaseDigest, systemPauseReason,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
+  type JobPauseRequest, type JobPauseResponse,
   type JobProgress, type JobState, type JobSubmitInput, type JobWorkPhase,
 } from '@ducky/contracts';
 import { DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX } from '@ducky/contracts';
@@ -23,6 +25,7 @@ import { isoPlus, nowIso, withTransaction, type JobRow, type Store } from '@duck
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { RepoAllowlist } from './allowlist.js';
 import { intakeResult, type IntakeVerdict } from './result-intake.js';
+import { activeSystemPause } from './system-pause.js';
 
 export interface JobsServiceDeps {
   readonly store: Store;
@@ -42,7 +45,15 @@ export interface JobDetail {
   readonly transitions: ReturnType<Store['jobs']['transitions']>;
   readonly events: ReturnType<Store['jobs']['events']>;
   readonly approvals: ReturnType<Store['approvals']['forJob']>;
+  /**
+   * The latest result snapshot, or undefined. Always undefined while the job is
+   * in a SYSTEM pause: whatever snapshot exists then belongs to an earlier
+   * round, and showing it beside a pause that has nothing to do with it would
+   * present a stale question or verdict as current.
+   */
   readonly result: ReturnType<Store['results']['byJobId']>;
+  /** Present only while the job is in a system pause: the generic, honest explanation. */
+  readonly systemPause?: { readonly cause: string; readonly message: string };
   /**
    * What this job has waited on, newest last. PRIVATE: the shared projection
    * has no field that could carry it, and no shared route reaches this method.
@@ -156,12 +167,16 @@ export class JobsService {
   detail(actor: ActorContext, publicId: string): JobDetail {
     this.authz.requireOwner(actor);
     const job = this.ownedJob(actor, publicId);
+    const pause = activeSystemPause(this.store, job);
     return {
       job,
       transitions: this.store.jobs.transitions(job.id),
       events: this.store.jobs.events(job.id),
       approvals: this.store.approvals.forJob(job.id),
-      result: this.store.results.byJobId(job.id),
+      result: pause ? undefined : this.store.results.byJobId(job.id),
+      ...(pause
+        ? { systemPause: { cause: pause.cause, message: SYSTEM_PAUSE_OWNER_TEXT[pause.cause] } }
+        : {}),
       dependencies: this.store.dependencies.forJob(job.id),
     };
   }
@@ -249,11 +264,31 @@ export class JobsService {
       // Idempotent: the answer already landed and the job was requeued.
       return { state: job.state, note: 'That question was already answered.' };
     }
+    if (
+      (job.state === 'queued' || job.state === 'waiting_for_executor') &&
+      this.store.jobs.transitions(job.id).at(-1)?.reason === SYSTEM_RESUME_REASON
+    ) {
+      // Idempotent for a system pause too, which has no owner-input row to find.
+      return { state: job.state, note: 'That pause was already resumed.' };
+    }
     if (job.state !== 'needs_owner_input') {
       throw new DuckyError(
         'invalid_transition',
         `Job ${publicId} is ${job.state.replace(/_/g, ' ')} and is not waiting for an answer.`,
       );
+    }
+
+    // A SYSTEM pause asked no question, so it has nothing to answer. Resuming
+    // it records no answer row (the unique (job, round) key belongs to real
+    // questions and a repeated pause would collide with it), spends none of the
+    // job's question rounds, and leaves `attempts` alone. The text is not used.
+    if (activeSystemPause(this.store, job)) {
+      withTransaction(this.store.db, () => {
+        this.store.jobs.transition(job.id, 'queued', SYSTEM_RESUME_REASON, `owner:${actor.discordUserId}`);
+        this.store.jobs.appendEvent(job.id, 'owner_resumed', 'Owner resumed after a system pause; requeued for the executor.');
+        this.store.jobs.acquireReservation(job.repoSlug, job.id, this.reservationExpiry('queued'));
+      });
+      return { state: 'queued', note: 'Resumed. The job is queued for a fresh attempt.' };
     }
 
     const question = this.store.results.byJobId(job.id)?.snapshot;
@@ -772,6 +807,132 @@ export class JobsService {
       }
     });
     return { state: 'failed', orphan };
+  }
+
+  /**
+   * A lease-checked SYSTEM pause: the executor proved its agent quiet and
+   * result-less and asks for the job to wait for the owner instead of failing.
+   *
+   * Everything is decided inside one transaction, in this order, so no late
+   * report can beat a decision the coordinator already made:
+   *
+   * 1. a repeat of a pause that already landed (same executor, same pausing
+   *    lease, same recorded workspace) answers the same thing again, because the
+   *    executor retries a lost response and the first one cleared the lease;
+   * 2. otherwise the lease must be current, and the named workspace and agent
+   *    must be exactly the ones recorded for this job. A mismatch changes
+   *    nothing, so a wrong proof can never release the engineering slot;
+   * 3. an owner cancellation wins, then an elapsed attempt deadline: the job
+   *    ends the way it would have without the pause, and the quiet proof only
+   *    lets it release;
+   * 4. only then is the job paused. `attempts` and `ownerInputRounds` are not
+   *    touched, the repository reservation and workspace are kept, and the
+   *    engineering slot is released by the transition because quiescence is
+   *    the contract of this request.
+   *
+   * `recoveryRequired` is cleared: a pause is exactly the reconciliation a
+   * recovery claim exists to perform, and leaving it set would send the
+   * resumed attempt back into recovery instead of a fresh turn.
+   */
+  pauseJob(
+    executorId: string,
+    jobId: string,
+    leaseId: string,
+    input: Pick<JobPauseRequest, 'cause' | 'workspaceId' | 'agentName' | 'agentStatus'>,
+  ): JobPauseResponse {
+    return withTransaction(this.store.db, () => {
+      const job = this.store.jobs.byId(jobId);
+      if (!job) throw new DuckyError('not_found', 'Unknown job.');
+      const reason = systemPauseReason(input.cause, leaseId);
+      const recorded = this.store.herdrWorkspaces.openForJob(job.id);
+      const proofMatches =
+        recorded !== undefined &&
+        recorded.workspaceId === input.workspaceId &&
+        recorded.agentName === input.agentName;
+
+      if (
+        job.state === 'needs_owner_input' &&
+        job.executorId === executorId &&
+        job.leaseId === null &&
+        proofMatches &&
+        this.store.jobs.latestTransitionReasonInto(job.id, 'needs_owner_input') === reason
+      ) {
+        return { state: 'needs_owner_input', paused: true };
+      }
+
+      this.leasedJob(executorId, jobId, leaseId);
+      if (!proofMatches) {
+        throw new DuckyError(
+          'invalid_input',
+          'That workspace and agent are not the ones recorded for this job.',
+        );
+      }
+
+      // The quiet release below frees the engineering slot, so the job must
+      // provably be the holder of its own repository: a reservation that is
+      // missing, someone else's, or already an orphan is not something this
+      // report may settle.
+      const held = this.store.jobs.reservation(job.repoSlug);
+      if (!held || held.jobId !== job.id || held.reason === 'orphan_agent') {
+        throw new DuckyError(
+          'invalid_input',
+          'This job does not hold its repository reservation, so it cannot be paused.',
+        );
+      }
+
+      const actor = `executor:${executorId}`;
+      const finishedAt = this.now().toISOString();
+
+      if (job.cancelRequested) {
+        this.store.jobs.transition(job.id, 'cancelled', 'cancel_acknowledged_by_pause', actor, {
+          finishedAt, leaseId: null, leaseExpiresAt: null,
+        });
+        this.store.jobs.appendEvent(job.id, 'cancelled', 'Executor confirmed the agent quiet after the cancellation request.');
+        this.store.auditLog.record({
+          event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
+          subjectKind: 'job', subjectRef: job.publicId, detail: 'quiet at pause; cancellation won',
+        });
+        this.releaseUnlessOrphan(job);
+        return { state: 'cancelled', paused: false };
+      }
+
+      if (job.attemptDeadlineAt !== null && Date.parse(job.attemptDeadlineAt) <= this.now().getTime()) {
+        this.store.jobs.transition(job.id, 'failed', 'wall_clock_exceeded', actor, {
+          finishedAt, leaseId: null, leaseExpiresAt: null,
+          retainedWorkspaceId: input.workspaceId,
+        });
+        this.store.jobs.appendEvent(
+          job.id,
+          'wall_clock_exceeded',
+          'The attempt budget ran out before the pause landed; the agent was observed quiet.',
+        );
+        this.store.auditLog.record({
+          event: 'job.failed', actorKind: 'executor', actorRef: executorId,
+          subjectKind: 'job', subjectRef: job.publicId, outcome: 'failed',
+          detail: 'wall_clock_exceeded; quiet at pause',
+        });
+        this.releaseUnlessOrphan(job);
+        return { state: 'failed', paused: false };
+      }
+
+      this.store.jobs.transition(job.id, 'needs_owner_input', reason, actor, {
+        leaseId: null,
+        leaseExpiresAt: null,
+        recoveryRequired: false,
+      });
+      this.store.jobs.appendEvent(
+        job.id,
+        'system_paused',
+        `Paused for the owner (${input.cause.replace(/_/g, ' ')}); agent ${input.agentName} observed ${input.agentStatus}. ` +
+          'No attempt was spent and the workspace was kept.',
+      );
+      this.store.auditLog.record({
+        event: 'job.system_paused', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId,
+        detail: `${input.cause}; lease ${leaseDigest(leaseId)}`,
+      });
+      return { state: 'needs_owner_input', paused: true };
+    });
   }
 
   /**

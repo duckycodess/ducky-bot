@@ -5,7 +5,7 @@ import {
   HTTP_BODY_LIMIT, HTTP_CONNECTION_TIMEOUT_MS, HTTP_KEEPALIVE_TIMEOUT_MS,
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
-  JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
+  JobFailureRequestSchema, JobHeartbeatRequestSchema, JobPauseRequestSchema, JobResultRequestSchema,
   WorkspaceCloseRequestSchema, WorkspaceRegistrationRequestSchema,
   EXECUTOR_HEADERS, EXECUTOR_ID_RE, isDuckyError,
 } from '@ducky/contracts';
@@ -311,6 +311,24 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         ...(body.workspaceId === undefined ? {} : { workspaceId: body.workspaceId }),
         ...(body.agentName === undefined ? {} : { agentName: body.agentName }),
         ...(body.quiescent === undefined ? {} : { quiescent: body.quiescent }),
+      });
+    }),
+  );
+
+  // A lease-checked SYSTEM pause: the executor proved its agent quiet and
+  // result-less. Idempotent for the pausing lease, so a lost response can be
+  // retried; cancellation and an elapsed deadline are decided in the service.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/pause',
+    { config: { rateLimit: { max: RATE_LIMITS.result.max, timeWindow: RATE_LIMITS.result.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = JobPauseRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.pauseJob(executorId, id, body.leaseId, {
+        cause: body.cause,
+        workspaceId: body.workspaceId,
+        agentName: body.agentName,
+        agentStatus: body.agentStatus,
       });
     }),
   );

@@ -193,7 +193,9 @@ export const JobFailureRequestSchema = z.strictObject({
   agentName: z.string().max(64).optional(),
   workspacePath: z.string().max(4096).optional(),
   /**
-   * The executor observed the job's agent idle, done or absent. Honoured ONLY
+   * The executor POSITIVELY proved the job's agent quiet: the recorded name,
+   * workspace and pane, a Ducky workspace, idle or done, and a settled turn.
+   * Absence is not proof. Honoured ONLY
    * with `wall_clock_exceeded`: it is what lets a timeout whose agent is
    * provably quiet release the repository and the engineering slot, while any
    * other failure after a workspace exists keeps both held for the owner.

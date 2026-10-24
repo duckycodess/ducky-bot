@@ -153,7 +153,7 @@ export class Reconciler {
               `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
             );
           } else {
-            this.releaseUnlessOrphan(job.repoSlug);
+            this.releaseUnlessOrphan(job.repoSlug, job.id);
           }
           return;
         }
@@ -181,7 +181,7 @@ export class Reconciler {
               `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
             );
           } else {
-            this.releaseUnlessOrphan(job.repoSlug);
+            this.releaseUnlessOrphan(job.repoSlug, job.id);
           }
           return;
         }
@@ -218,12 +218,12 @@ export class Reconciler {
     for (const reservation of expired) {
       const job = this.store.jobs.byId(reservation.jobId);
       if (!job) {
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
         n += 1;
         continue;
       }
       if (isTerminal(job.state)) {
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
         n += 1;
         continue;
       }
@@ -302,7 +302,7 @@ export class Reconciler {
             `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
           );
         } else {
-          this.store.jobs.releaseReservation(reservation.repoSlug);
+          this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
         }
       });
 
@@ -406,9 +406,10 @@ export class Reconciler {
       .map((w) => ({ workspaceId: w.workspaceId, repoSlug: w.repoSlug }));
   }
 
-  private releaseUnlessOrphan(repoSlug: string): void {
+  private releaseUnlessOrphan(repoSlug: string, jobId: string): void {
     const r = this.store.jobs.reservation(repoSlug);
-    if (r && r.reason === 'orphan_agent') return;
-    this.store.jobs.releaseReservation(repoSlug);
+    // Only the owning job's own, non-orphan reservation is ever released here.
+    if (!r || r.jobId !== jobId || r.reason === 'orphan_agent') return;
+    this.store.jobs.releaseReservation(repoSlug, jobId);
   }
 }

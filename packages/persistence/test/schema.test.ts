@@ -370,12 +370,36 @@ describe('migration 28: engineering admission', () => {
     store.jobs.acquireReservation('two', 'b', null);
     store.jobs.acquireAdmission('a', 'one');
 
-    store.jobs.releaseReservation('two');
+    expect(store.jobs.releaseReservation('two', 'b')).toBe(true);
     expect(store.jobs.admission()?.jobId).toBe('a');
 
     store.jobs.markReservationOrphan('one');
     expect(store.jobs.admission()?.reason).toBe('unconfirmed_stop');
-    store.jobs.releaseReservation('one');
+    expect(store.jobs.releaseReservation('one', 'a')).toBe(true);
+    expect(store.jobs.admission()).toBeUndefined();
+    db.close();
+  });
+
+  it('releases a reservation only for the job that owns it, and its slot only after that delete', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'one');
+    const store = createStore(db);
+    store.jobs.acquireReservation('one', 'a', null);
+    store.jobs.acquireAdmission('a', 'one');
+
+    // Another job's release of the SAME repository touches neither the
+    // reservation nor the slot of the job that holds them.
+    expect(store.jobs.releaseReservation('one', 'b')).toBe(false);
+    expect(store.jobs.reservation('one')?.jobId).toBe('a');
+    expect(store.jobs.admission()?.jobId).toBe('a');
+    // A release naming no job that holds anything changes nothing either.
+    expect(store.jobs.releaseReservation('one', 'nobody')).toBe(false);
+    expect(store.jobs.releaseReservation('absent-repo', 'a')).toBe(false);
+    expect(store.jobs.admission()?.jobId).toBe('a');
+
+    expect(store.jobs.releaseReservation('one', 'a')).toBe(true);
+    expect(store.jobs.reservation('one')).toBeUndefined();
     expect(store.jobs.admission()).toBeUndefined();
     db.close();
   });

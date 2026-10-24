@@ -293,15 +293,26 @@ describe('cancellation against the real adapter shape', () => {
     expect(herdr.countOf('workspaceClose')).toBe(0);
   });
 
-  it('reports an idle or absent agent as terminated', async () => {
-    for (const [status, agents] of [
-      ['idle', [owned('idle')]],
-      ['absent', []],
+  it('reports an idle agent as terminated only with a provably Ducky workspace, and an absent one as not', async () => {
+    const proven = new MockHerdr({
+      available: true,
+      agents: [owned('idle')],
+      workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
+    });
+    const outcome = await new HerdrPiOrchestrator({ herdr: proven, sleep: async () => {}, briefWriter: briefs() })
+      .cancel(spec({ recorded }));
+    expect(outcome.terminated).toBe(true);
+
+    // The same idle agent in a workspace that is not Ducky's is not quiet proof,
+    // and a recorded agent that has vanished is not proof it stopped.
+    for (const [status, agents, workspaces] of [
+      ['idle in a workspace that is not Ducky-managed', [owned('idle')], []],
+      ['absent', [], []],
     ] as const) {
-      const herdr = new MockHerdr({ available: true, agents: [...agents], workspaces: [] });
-      const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
-      const outcome = await orchestrator.cancel(spec({ recorded }));
-      expect(outcome.terminated, status).toBe(true);
+      const herdr = new MockHerdr({ available: true, agents: [...agents], workspaces: [...workspaces] });
+      const o = await new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() })
+        .cancel(spec({ recorded }));
+      expect(o.terminated, status).toBe(false);
     }
   });
 

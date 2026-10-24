@@ -243,9 +243,10 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     if (!supervisor.cancelRequested) {
       // Timeout only. The adapter has no supported way to interrupt a working
       // agent (and sending keystrokes into a live pane is deliberately not
-      // done), so "stopped" here means exactly what `cancel` observed: the
-      // agent is idle, done or gone. Otherwise it is an orphan, and the
-      // repository and the engineering slot stay held for the owner.
+      // done), so "stopped" here means exactly what `cancel` PROVED: the recorded
+      // agent is idle or done, on a turn seen to settle. Absence, a mismatched
+      // agent, an unsettled prompt or a run that may still dispatch is an orphan,
+      // and the repository and the engineering slot stay held for the owner.
       const phase = supervisor.acceptedPhase;
       const where = phase === null ? 'before a phase was reported' : `during ${phase}`;
       const detail = redact(`The attempt budget ran out ${where}. ${stopped.detail}`).slice(0, 400);

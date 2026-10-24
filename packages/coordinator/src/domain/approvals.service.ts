@@ -288,7 +288,9 @@ export class ApprovalsService {
       anyApproved ? 'Approved actions recorded; Phase 1 defers execution.' : 'No action was approved.',
     );
     const r = this.store.jobs.reservation(job.repoSlug);
-    if (!r || r.reason !== 'orphan_agent') this.store.jobs.releaseReservation(job.repoSlug);
+    if (r && r.jobId === job.id && r.reason !== 'orphan_agent') {
+      this.store.jobs.releaseReservation(job.repoSlug, job.id);
+    }
     return 'completed';
   }
 

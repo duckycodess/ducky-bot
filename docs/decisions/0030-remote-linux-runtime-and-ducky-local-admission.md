@@ -71,9 +71,19 @@ times itself out through the supervised cancellation path. The coordinator
 requests ordinary cancellation after a grace period as a backstop.
 
 **An honest timeout.** On timeout the executor asks `orchestrator.cancel`, which
-only observes the agent through Herdr `agent get`. An idle, done or absent agent
-is reported as `wall_clock_exceeded` with `quiescent`, and releases the
-repository and slot. Anything else becomes an orphan that keeps both. The
+only observes the agent through Herdr `agent get`. `terminated: true`, and with
+it `wall_clock_exceeded` with `quiescent` and the release of the repository and
+slot, needs a POSITIVE proof: a fresh look that matches the recorded agent name
+and workspace id, the pane pinned at the start (or at the owned agent's first
+observation), and a Ducky-managed workspace, with the agent `idle` or `done`.
+Absent, unknown, working, blocked or a same-name agent that is not provably the
+recorded one is an orphan that keeps both; a started agent that has vanished is
+not proof it stopped (only a job that never started an agent, with nothing
+recorded, is released on absence). Because the runner abandons `runJob` rather
+than stopping it, `cancel` also refuses to call anything quiet while `runJob` may
+still dispatch (after a bounded wait for it to wind down) and while a prompt has
+been handed over whose turn was never observed to settle: an idle reading right
+after delivery may only mean the agent has not picked the work up yet. The
 recorded adapter has no supported way to interrupt a working agent and sending
 keystrokes into a live pane is deliberately not done, so a working agent that
 outlives its budget is an orphan, never a fabricated stop.
@@ -146,6 +156,15 @@ budget remaining, the recovery claim pauses without prompting. Preserving the
 attempt budget across transport loss needs the coordinator to learn of the pause
 by another route, and is a required, unimplemented follow-up. Nothing here says
 why the agent stopped, and no quota or sign-in state is inferred from the screen.
+
+**A hold belongs to one job.** A repository reservation and the engineering slot
+that goes with it are released only by the job that holds them: the delete is
+scoped to the owning job and its slot goes only after that delete happened. Every
+release path (cancel, terminal result, expiry, dependency and approval endings,
+owner cleanup) is a no-op for a job that does not hold the repository, so
+cancelling a queued second job on a repository never removes the running job's
+reservation or slot. An orphaned or unconfirmed-stop hold is never released by
+another job.
 
 **No friend-facing model by default.** `DUCKY_ADDITIONAL_USER_AI_ENABLED`
 (default off) is frozen into the Authorizer. `Authorizer.mayConverse` is the one

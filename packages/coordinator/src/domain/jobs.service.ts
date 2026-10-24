@@ -380,7 +380,7 @@ export class JobsService {
     }
 
     withTransaction(this.store.db, () => {
-      this.store.jobs.releaseReservation(job.repoSlug);
+      this.store.jobs.releaseReservation(job.repoSlug, job.id);
       this.store.jobs.appendEvent(
         job.id,
         force ? 'forced_cleanup' : 'cleanup',
@@ -771,10 +771,11 @@ export class JobsService {
     // workspace existed can safely release.
     const hasRecordedWorkspace = this.store.herdrWorkspaces.openForJob(job.id) !== undefined;
     //
-    // The one exception is a timeout whose agent the executor observed idle,
-    // done or absent. That is the same evidence an acknowledged cancellation
-    // rests on, and it is the only way a registered workspace stops blocking
-    // the repository and the engineering slot without the owner's cleanup.
+    // The one exception is a timeout whose agent the executor positively proved
+    // quiet (recorded identity and idle or done, on a settled turn; absence is not
+    // proof). That is the same evidence an acknowledged cancellation rests on, and
+    // it is the only way a registered workspace stops blocking the repository and
+    // the engineering slot without the owner's cleanup.
     const provenQuiet = extra.quiescent === true && reason === 'wall_clock_exceeded';
     const orphan =
       ORPHAN_FAILURE_REASONS.includes(reason) || (hasRecordedWorkspace && !provenQuiet);
@@ -1152,9 +1153,13 @@ export class JobsService {
    */
   private releaseUnlessOrphan(job: JobRow): boolean {
     const r = this.store.jobs.reservation(job.repoSlug);
-    if (r && r.reason === 'orphan_agent') return false;
+    // The reservation is another job's, or there is none: there is nothing of
+    // THIS job's to release or to keep, and a different job's hold on the
+    // repository (and its slot) is never this job's to touch.
+    if (!r || r.jobId !== job.id) return true;
+    if (r.reason === 'orphan_agent') return false;
     const held = this.store.jobs.admission();
-    if (r && r.jobId === job.id && held?.jobId === job.id && held.reason === 'unconfirmed_stop') {
+    if (held?.jobId === job.id && held.reason === 'unconfirmed_stop') {
       this.store.jobs.markReservationOrphan(job.repoSlug);
       this.store.jobs.appendEvent(
         job.id,
@@ -1163,7 +1168,7 @@ export class JobsService {
       );
       return false;
     }
-    this.store.jobs.releaseReservation(job.repoSlug);
+    this.store.jobs.releaseReservation(job.repoSlug, job.id);
     return true;
   }
 

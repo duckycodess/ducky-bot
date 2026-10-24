@@ -431,16 +431,25 @@ export class JobsRepo {
   }
 
   /**
-   * Releases a repository reservation, and with it the engineering slot of the
+   * Releases a repository reservation held by `jobId`, and with it the engineering slot of the
    * SAME job: the slot never outlives its job's reservation, so every existing
    * release site (terminal result, cancellation, owner cleanup) frees both
    * without having to remember a second table. An orphaned job never reaches
    * here, because every caller already skips `orphan_agent` reservations.
    */
-  releaseReservation(repoSlug: string): void {
-    const held = this.reservation(repoSlug);
-    this.db.prepare('DELETE FROM repo_reservations WHERE repo_slug = ?').run(repoSlug);
-    if (held) this.releaseAdmission(held.jobId);
+  releaseReservation(repoSlug: string, jobId: string): boolean {
+    // Scoped to the OWNING job. Deleting by repository alone let one job's
+    // release -- cancelling a queued second job on the same repository -- remove
+    // the RUNNING job's reservation and its engineering slot, so a job on
+    // another repository could then claim beside a live writer. Only the job
+    // that holds the reservation can release it, and its slot goes with it only
+    // when that delete actually happened.
+    const res = this.db
+      .prepare('DELETE FROM repo_reservations WHERE repo_slug = ? AND job_id = ?')
+      .run(repoSlug, jobId);
+    if (Number(res.changes) === 0) return false;
+    this.releaseAdmission(jobId);
+    return true;
   }
 
   /**

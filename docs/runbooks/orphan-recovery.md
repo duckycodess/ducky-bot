@@ -28,9 +28,13 @@ is local to this coordinator database; agent-flow and the other profile have
 their own state and are not affected.
 
 A timed-out attempt (the 60 minute default) is reported with the phase it
-reached. If Herdr showed the agent idle, done or gone, the repository and slot
-are released on their own. If the agent was still working, nothing was
-interrupted and you will find it here as an orphan.
+reached. If a fresh look positively matched the recorded agent (name, workspace,
+pane, a Ducky workspace) and showed it idle or done, and its turn had been seen to
+settle, the repository and slot are released on their own. Anything else (still
+working, blocked, unknown, **gone**, a same-name agent that is not provably
+the recorded one, or a prompt whose turn was never seen to settle) interrupted
+nothing and you will find it here as an orphan: a vanished agent is not proof that
+its process stopped.
 
 ### Look first
 

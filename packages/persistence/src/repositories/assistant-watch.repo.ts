@@ -1,7 +1,7 @@
 import {
   BASELINE_MARKER_CANDIDATE_LIMIT, BASELINE_MARKER_PREFIX, TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS,
-  WATCH_EVENT_SURFACE, classifyBaselineMarker, isReservedMarkerIdentity, type MarkerCandidate,
-  type WatchEventKind, type WatchSurface,
+  WATCH_EVENT_SURFACE, classifyBaselineMarker, isImpossibleReviewChange, isReservedMarkerIdentity,
+  isReviewProviderState, type MarkerCandidate, type ReviewProviderState, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
@@ -69,14 +69,22 @@ export interface WatchEventRow {
   readonly digestedAt: string | null;
   readonly createdAt: string;
   /** Why the target will not deliver this event, or null. Never delivered, never settled. */
-  readonly withheldReason: 'legacy_unproven' | 'ambiguous_evidence' | null;
+  readonly withheldReason: WithheldReason | null;
   /** Set when a native receipt, not a delivery of its own, settled the event. */
   readonly settledBy: 'native_receipt' | null;
-  /** Hash of the provider review id, for a requested-changes review; a comparison identity only. */
+  /** Hash of the provider review id, for a review row; a comparison identity only. */
   readonly providerHash: string | null;
+  /** Which identity `providerHash` is. Always `provider` on an event row: a source-identity hash is derived. */
+  readonly hashDomain: 'provider' | 'source_identity';
+  /** The state a review row was OBSERVED in; null on a row observed before migration 38 and on an imported-document row. */
+  readonly providerState: ReviewProviderState | null;
+  /** The provider's canonical submission instant when the provider supplied one; null is UNKNOWN, never "now". */
+  readonly providerAt: string | null;
   /** The rerun attempt, for a failed run. */
   readonly attempt: string | null;
 }
+
+export type WithheldReason = 'legacy_unproven' | 'ambiguous_evidence' | 'state_conflict';
 
 /** An event with the target it belongs to, for rendering. */
 export interface WatchEventWithTarget extends WatchEventRow {
@@ -177,9 +185,12 @@ const mapEvent = (r: Record<string, unknown>): WatchEventRow => ({
   alertAbandonedAt: r['alert_abandoned_at'] == null ? null : String(r['alert_abandoned_at']),
   digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
   createdAt: String(r['created_at']),
-  withheldReason: r['withheld_reason'] == null ? null : (String(r['withheld_reason']) as 'legacy_unproven' | 'ambiguous_evidence'),
+  withheldReason: r['withheld_reason'] == null ? null : (String(r['withheld_reason']) as WithheldReason),
   settledBy: r['settled_by'] == null ? null : (String(r['settled_by']) as 'native_receipt'),
   providerHash: r['provider_hash'] == null ? null : String(r['provider_hash']),
+  hashDomain: r['hash_domain'] == null ? 'provider' : (String(r['hash_domain']) as 'provider' | 'source_identity'),
+  providerState: isReviewProviderState(r['provider_state']) ? r['provider_state'] : null,
+  providerAt: r['provider_at'] == null ? null : String(r['provider_at']),
   attempt: r['attempt'] == null ? null : String(r['attempt']),
 });
 
@@ -205,8 +216,12 @@ export interface ObservedEventWrite {
   readonly payloadJson: string;
   /** Settled at birth: an event that is already known must not be announced. */
   readonly settled: boolean;
-  /** Hash of the provider review id (requested changes only). */
+  /** Hash of the provider review id (a review row only). */
   readonly providerHash?: string | null;
+  /** The state a review row was observed in. */
+  readonly providerState?: ReviewProviderState | null;
+  /** The provider's canonical submission instant, only when the provider supplied one. */
+  readonly providerAt?: string | null;
   /** The rerun attempt (failed runs only). */
   readonly attempt?: string | null;
 }
@@ -700,17 +715,44 @@ export class AssistantWatchRepo {
         .prepare(
           `INSERT OR IGNORE INTO assistant_watch_events
              (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin,
-              alerted_at, digested_at, created_at, provider_hash, attempt)
-           VALUES (?,?,?,?,?,?,?,?, 'observed', ?, ?, ?, ?, ?)`,
+              alerted_at, digested_at, created_at, provider_hash, provider_state, provider_at, attempt)
+           VALUES (?,?,?,?,?,?,?,?, 'observed', ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           e.id, targetId, e.kind, WATCH_EVENT_SURFACE[e.kind], held ? 1 : 0, e.identity, e.occurredAt,
           e.payloadJson, e.settled ? atIso : null, e.settled ? atIso : null, atIso,
-          e.providerHash ?? null, e.attempt ?? null,
+          e.providerHash ?? null, e.providerState ?? null, e.providerAt ?? null, e.attempt ?? null,
         );
       inserted += Number(res.changes);
+      if (Number(res.changes) === 1) this.refuseImpossibleState(targetId, e.id);
     }
     return inserted;
+  }
+
+  /**
+   * A submitted review changes state only by being DISMISSED, so a second row of the same review identity whose
+   * KNOWN state is not a possible successor of the other's is an impossible lifecycle change. The row is kept
+   * (the source uniqueness is `(target, kind, identity)` and nothing is deleted) but withheld with the reason
+   * `state_conflict`: never delivered as a fact, counted, and never settled. A row with no recorded state (one
+   * observed before migration 38, an imported-document row) never conflicts.
+   */
+  private refuseImpossibleState(targetId: string, id: string): void {
+    const row = this.db.prepare('SELECT identity, provider_state FROM assistant_watch_events WHERE id = ?').get(id) as
+      { identity: string; provider_state: string | null } | undefined;
+    if (!row || !isReviewProviderState(row.provider_state)) return;
+    const others = this.db
+      .prepare(
+        `SELECT provider_state FROM assistant_watch_events
+          WHERE target_id = ? AND identity = ? AND id != ? AND provider_state IS NOT NULL`,
+      )
+      .all(targetId, row.identity, id) as { provider_state: string }[];
+    const state = row.provider_state;
+    // The new row is the later telling: it conflicts with any earlier known state it cannot follow.
+    if (others.some((o) => isReviewProviderState(o.provider_state) && isImpossibleReviewChange(o.provider_state, state))) {
+      this.db
+        .prepare(`UPDATE assistant_watch_events SET withheld_reason = 'state_conflict' WHERE id = ? AND withheld_reason IS NULL`)
+        .run(id);
+    }
   }
 
   /**
@@ -1266,6 +1308,9 @@ export class AssistantWatchRepo {
       kind: String(r['kind']) as WatchEventKind, identity: String(r['identity']), occurredAt: String(r['occurred_at']),
       providerHash: r['provider_hash'] == null ? null : String(r['provider_hash']),
       attempt: r['attempt'] == null ? null : String(r['attempt']),
+      providerState: r['provider_state'] == null ? null : String(r['provider_state']),
+      providerAt: r['provider_at'] == null ? null : String(r['provider_at']),
+      createdAt: String(r['created_at']),
     };
   }
 
@@ -1299,7 +1344,7 @@ export class AssistantWatchRepo {
   reserveSend(
     event: { readonly id: string; readonly targetRepoKey: string; readonly discordUserId: string } & Pick<
       WatchEventRow, 'kind' | 'identity' | 'occurredAt' | 'providerHash' | 'attempt'
-    >,
+    > & Partial<Pick<WatchEventRow, 'providerState' | 'providerAt' | 'createdAt'>>,
     via: 'target_alert' | 'target_digest',
     atIso: string,
   ): 'send' | 'settled' | 'wait' | 'withheld' {
@@ -1307,6 +1352,7 @@ export class AssistantWatchRepo {
       const facts = {
         kind: event.kind, identity: event.identity, occurredAt: event.occurredAt,
         providerHash: event.providerHash, attempt: event.attempt,
+        providerState: event.providerState ?? null, providerAt: event.providerAt ?? null, createdAt: event.createdAt ?? null,
       };
       const out = this.ledger.reserveTarget(event.discordUserId, event.targetRepoKey, facts, via, event.id, atIso);
       const raw = this.db.prepare('SELECT * FROM assistant_watch_events WHERE id = ?').get(event.id) as Record<string, unknown>;
@@ -1332,6 +1378,7 @@ export class AssistantWatchRepo {
   deliverableNow(ownerId: string, e: WatchEventWithTarget): boolean {
     return this.ledger.resolveTarget(ownerId, e.targetRepoKey, {
       kind: e.kind, identity: e.identity, occurredAt: e.occurredAt, providerHash: e.providerHash, attempt: e.attempt,
+      providerState: e.providerState, providerAt: e.providerAt, createdAt: e.createdAt,
     }).outcome === 'deliver';
   }
 
@@ -1362,7 +1409,9 @@ export class AssistantWatchRepo {
   }
 
   /** Counts only, by reason; waiting is the bounded number of unsettled events a native path holds. */
-  withheldCounts(ownerId: string): { legacyUnproven: number; ambiguousEvidence: number; settledByReceipt: number } {
+  withheldCounts(
+    ownerId: string,
+  ): { legacyUnproven: number; ambiguousEvidence: number; stateConflict: number; settledByReceipt: number } {
     const n = (where: string): number =>
       Number(
         (this.db
@@ -1376,6 +1425,7 @@ export class AssistantWatchRepo {
     return {
       legacyUnproven: n(`e.withheld_reason = 'legacy_unproven'`),
       ambiguousEvidence: n(`e.withheld_reason = 'ambiguous_evidence'`),
+      stateConflict: n(`e.withheld_reason = 'state_conflict'`),
       settledByReceipt: n(`e.settled_by = 'native_receipt'`),
     };
   }

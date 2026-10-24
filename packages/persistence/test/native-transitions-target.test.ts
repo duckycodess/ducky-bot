@@ -106,7 +106,7 @@ describe('a withheld event is neither delivered nor settled, and is counted by r
     expect(store.assistantWatch.pendingAlerts(OWNER, 10).map((e) => e.id)).toEqual([]);
     expect(store.assistantWatch.undigested(OWNER, 10).map((e) => e.id)).toEqual(['late']);
     expect(store.assistantWatch.counts(OWNER).undigested).toBe(1);
-    expect(store.assistantWatch.withheldCounts(OWNER)).toEqual({ legacyUnproven: 1, ambiguousEvidence: 0, settledByReceipt: 0 });
+    expect(store.assistantWatch.withheldCounts(OWNER)).toEqual({ legacyUnproven: 1, ambiguousEvidence: 0, stateConflict: 0, settledByReceipt: 0 });
     // Repeated reconciliation never settles it, and markDigested cannot either.
     store.assistantWatch.reconcileOwner(OWNER, T2);
     expect(store.assistantWatch.markDigested(['old'], T2)).toBe(0);

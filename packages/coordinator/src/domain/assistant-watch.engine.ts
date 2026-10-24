@@ -1,4 +1,6 @@
-import { hashProviderRef, type WatchEventKind, type WatchEventPayload } from '@ducky/contracts';
+import {
+  canonicalStamp, hashProviderRef, type ReviewProviderState, type WatchEventKind, type WatchEventPayload,
+} from '@ducky/contracts';
 import type {
   CommitRecord, IssueRecord, PullRecord, ReleaseRecord, ReviewRecord, RunRecord,
 } from './assistant-watch.reader.js';
@@ -22,8 +24,15 @@ export interface DerivedEvent {
   readonly identity: string;
   readonly occurredAt: string;
   readonly payload: WatchEventPayload;
-  /** Hash of the provider review id (requested changes only): a comparison identity, never the id. */
+  /** Hash of the provider review id (a review row): a comparison identity, never the id. */
   readonly providerHash?: string | null;
+  /** The state a review row was OBSERVED in. */
+  readonly providerState?: ReviewProviderState | null;
+  /**
+   * The provider's canonical submission instant, ONLY when the provider supplied `submitted_at`. `occurredAt` may
+   * fall back to the pull request's update time; that is never a submission instant, so it is not recorded here.
+   */
+  readonly providerAt?: string | null;
   /** The rerun attempt (failed runs only). */
   readonly attempt?: string | null;
 }
@@ -135,6 +144,17 @@ export function deriveCommits(
 }
 
 // ---- pull requests and their reviews -----------------------------------------
+
+/** The state word a review row records, for the verdicts this build knows. */
+const reviewState = (state: string): ReviewProviderState | undefined => {
+  switch (state.toUpperCase()) {
+    case 'CHANGES_REQUESTED': return 'CHANGES_REQUESTED';
+    case 'APPROVED': return 'APPROVED';
+    case 'COMMENTED': return 'COMMENTED';
+    case 'DISMISSED': return 'DISMISSED';
+    default: return undefined;
+  }
+};
 
 const reviewKind = (state: string): WatchEventKind | undefined => {
   switch (state.toUpperCase()) {
@@ -274,7 +294,12 @@ export function deriveReviews(
       identity: `${target.n}:review:${r.id}`,
       occurredAt: r.submittedAt ?? target.u,
       payload: { ...base, ...(r.body ? { summary: scrubText(r.body, 600) } : {}) },
-      ...(kind === 'review_requested_changes' ? { providerHash: hashProviderRef(r.nodeId) } : {}),
+      // Every review kind carries what is needed to compare it exactly: the hash of the provider's id, the state it
+      // was observed in (COMMENTED and DISMISSED share one kind, as in the source, and only this tells them
+      // apart) and the provider's own submission instant when there is one.
+      providerHash: hashProviderRef(r.nodeId),
+      providerState: reviewState(r.state) ?? null,
+      providerAt: canonicalStamp(r.submittedAt),
     });
   }
   return { events, changesRequested };

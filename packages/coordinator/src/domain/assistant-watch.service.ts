@@ -796,6 +796,8 @@ export class AssistantWatchService {
       payloadJson: JSON.stringify(e.payload),
       settled: false,
       ...(e.providerHash ? { providerHash: e.providerHash } : {}),
+      ...(e.providerState ? { providerState: e.providerState } : {}),
+      ...(e.providerAt ? { providerAt: e.providerAt } : {}),
       ...(e.attempt ? { attempt: e.attempt } : {}),
     };
   }

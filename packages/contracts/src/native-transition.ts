@@ -397,3 +397,14 @@ export type GapReason = (typeof GAP_REASONS)[number];
 /** `shown`: the whole segment lies inside the clamp and redaction left the summary unchanged. */
 export const GAP_SHOWN = ['shown', 'delivered_not_provably_shown'] as const;
 export type GapShown = (typeof GAP_SHOWN)[number];
+
+// ---- review lifecycle ----------------------------------------------------------------------------------------
+
+/**
+ * Whether a change of one review's KNOWN state is impossible under the provider lifecycle this build assumes: a
+ * submitted review changes state only by being dismissed, so a change to anything but DISMISSED, and any change
+ * out of DISMISSED, is refused. The assumption is explicit and enforced, and it is NOT proven live. An unknown
+ * (absent) state never conflicts, so callers compare only two known states.
+ */
+export const isImpossibleReviewChange = (from: ReviewProviderState, to: ReviewProviderState): boolean =>
+  from !== to && to !== 'DISMISSED';

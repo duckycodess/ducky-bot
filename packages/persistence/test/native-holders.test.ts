@@ -157,7 +157,7 @@ describe('migration 37 rebuilds the ledger from a populated migration 36 without
       );
       seed.run(T0, 'owner_dm', T1);
     });
-    runMigrations(db, { upTo: 37, now: () => T3 });
+    runMigrations(db, { now: () => T3 });
     // After migration 37 a second staged holder of the same transition is no longer ignored.
     db.prepare(
       `INSERT INTO native_legacy_seed (repo_key, transition_key, kind, item, via, ref, observed_at)

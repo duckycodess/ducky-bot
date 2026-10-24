@@ -1,7 +1,7 @@
 import {
   NATIVE_LEGACY_SKEW_MS, canonicalStamp, feedEventTransition, isObservedReviewKind, isWellFormedTransition, targetTransition,
   transitionKey, transitionRepoKey,
-  type TargetEventFacts, type Transition, type TransitionKind,
+  type HashDomain, type ReviewObservedState, type TargetEventFacts, type Transition, type TransitionKind,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
 import { atomically } from '../db.js';
@@ -58,6 +58,29 @@ export interface LedgerBoundary {
  */
 export type NativeProbe = 'free' | 'target_delivered' | 'target_in_flight' | 'ambiguous';
 
+export interface NativeProbeOptions {
+  /**
+   * `pb` of the previous COMPLETE review set the fact's review is absent from: the host instant fixed before the
+   * read that produced it began. Null or absent means no proof. Used only for a NEW review fact.
+   */
+  readonly boundary?: string | null;
+  /** The fact is a known review changing state (to DISMISSED). The boundary proof never applies to it. */
+  readonly stateChange?: boolean;
+}
+
+/**
+ * The SQL predicate (over `kind` and `provider_state`) that selects the claims whose observed state is COMPATIBLE
+ * with `state`: the same state, or a candidate set that includes it. Different states never compare.
+ */
+function compatibleStates(state: ReviewObservedState): string {
+  switch (state) {
+    case 'APPROVED': return `kind = 'review_approved'`;
+    case 'COMMENTED': return `kind = 'review_commented'`;
+    case 'DISMISSED': return `kind = 'review_dismissed' OR (kind = 'review_commented' AND provider_state = 'COMMENTED|DISMISSED')`;
+    case 'COMMENTED|DISMISSED': return `kind IN ('review_commented','review_dismissed')`;
+  }
+}
+
 /** What an imported event may do. */
 export type TargetResolution =
   | { readonly outcome: 'deliver' }
@@ -86,6 +109,8 @@ const mapClaim = (r: Record<string, unknown>): ClaimRow => ({
     stamp: r['stamp'] == null ? null : String(r['stamp']),
     hash: r['provider_hash'] == null ? null : String(r['provider_hash']),
     attempt: r['attempt'] == null ? null : String(r['attempt']),
+    domain: r['hash_domain'] == null ? 'provider' : (String(r['hash_domain']) as HashDomain),
+    state: r['provider_state'] == null ? null : (String(r['provider_state']) as ReviewObservedState),
   },
   path: String(r['path']) as ClaimPath,
   state: String(r['state']) as 'reserved' | 'delivered',
@@ -137,6 +162,7 @@ export class NativeTransitionsRepo {
           stamp: r['stamp'] == null ? null : String(r['stamp']),
           hash: r['provider_hash'] == null ? null : String(r['provider_hash']),
           attempt: r['attempt'] == null ? null : String(r['attempt']),
+          domain: r['hash_domain'] == null ? 'provider' : (String(r['hash_domain']) as HashDomain),
         };
         const delivered = r['delivered_at'] != null && r['delivered_to'] != null;
         const ok = this.insertClaim({
@@ -184,12 +210,13 @@ export class NativeTransitionsRepo {
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO native_transition_claims
-           (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
-            path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt,
+            provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
-        c.ownerId, repo, transitionKey(t), t.kind, t.item, t.stamp, t.hash, t.attempt, canonicalStamp(c.providerAt ?? null),
+        c.ownerId, repo, transitionKey(t), t.kind, t.item, t.stamp, t.hash, t.domain ?? 'provider', t.state ?? null,
+        t.attempt, canonicalStamp(c.providerAt ?? null),
         c.path, c.delivered ? 'delivered' : 'reserved', c.via, c.ref, c.observedAt,
         c.delivered?.to ?? null, c.delivered?.at ?? null, c.atIso, c.atIso,
       );
@@ -248,10 +275,13 @@ export class NativeTransitionsRepo {
    * including an imported event that merely exists, is free. A requested-changes review is
    * compared with the target's claims on the same pull request (`probeReview`).
    */
-  probeNative(ownerId: string, repoKey: string, t: Transition, providerAt: string | null = null): NativeProbe {
+  probeNative(
+    ownerId: string, repoKey: string, t: Transition, providerAt: string | null = null, opts: NativeProbeOptions = {},
+  ): NativeProbe {
     const repo = transitionRepoKey(repoKey);
     if (repo === null || !isWellFormedTransition(t)) return 'free';
     if (t.kind === 'changes_requested') return this.probeReview(ownerId, repo, t, canonicalStamp(providerAt));
+    if (isObservedReviewKind(t.kind)) return this.probeObserved(ownerId, repo, t, canonicalStamp(providerAt), opts);
     // An update is covered by a target update at or after it; every other kind by its exact key.
     const state = t.kind === 'pr_updated'
       ? this.strongest(ownerId, repo, t.kind, t.item, 'target', 'AND stamp >= ?', t.stamp ?? '')
@@ -282,6 +312,40 @@ export class NativeTransitionsRepo {
       .get(providerAt, providerAt, ownerId, repo, t.item) as { reserved: number; unprovable: number };
     if (Number(r.reserved) > 0) return 'target_in_flight';
     return Number(r.unprovable) > 0 ? 'ambiguous' : 'free';
+  }
+
+  /**
+   * A native review fact in an OBSERVED state against the target's claims on the same pull request. Only claims of a
+   * COMPATIBLE state are compared (an approved and a dismissed observation are different tellings, both told, and
+   * never held against each other). The exact key (same domain, same hash, same state) decides first. Otherwise a
+   * target send in flight makes the fact wait; a delivered claim with a DIFFERENT known submission instant is a
+   * different review; an equal or unknown instant cannot be told apart, so the fact is HELD, unless the boundary
+   * proof shows the target's review existed before the read that produced the previous complete set began
+   * (`observed_at` + the skew margin is before `opts.boundary`): then it is in that set and the new fact is not it.
+   * That proof never applies to a known review changing state (`opts.stateChange`): that review is in the set.
+   */
+  private probeObserved(
+    ownerId: string, repo: string, t: Transition, providerAt: string | null, opts: NativeProbeOptions,
+  ): NativeProbe {
+    const key = transitionKey(t);
+    const exact = this.byKeyState(ownerId, repo, key, 'target');
+    if (exact === 'delivered') return 'target_delivered';
+    if (exact === 'reserved') return 'target_in_flight';
+    const rows = this.db
+      .prepare(
+        `SELECT state, provider_at, observed_at FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND item = ? AND path = 'target' AND transition_key != ?
+            AND (${compatibleStates(t.state ?? 'COMMENTED|DISMISSED')})`,
+      )
+      .all(ownerId, repo, t.item, key) as { state: string; provider_at: string | null; observed_at: string }[];
+    if (rows.some((r) => r.state === 'reserved')) return 'target_in_flight';
+    const boundaryMs = opts.stateChange === true || opts.boundary == null ? Number.NaN : Date.parse(opts.boundary);
+    for (const r of rows) {
+      if (providerAt !== null && r.provider_at !== null && r.provider_at !== providerAt) continue;
+      if (Number.isFinite(boundaryMs) && Date.parse(r.observed_at) + NATIVE_LEGACY_SKEW_MS < boundaryMs) continue;
+      return 'ambiguous';
+    }
+    return 'free';
   }
 
   /** Reserves a transition for a native outbox row. False when something already owns it. */
@@ -416,6 +480,10 @@ export class NativeTransitionsRepo {
       const near = this.nativeSameItem(ownerId, repo, x.kind, x.item, occurredMs);
       if (near) return near;
     }
+    if (isObservedReviewKind(x.kind)) {
+      const near = this.nativeObservedHolders(ownerId, repo, x, canonicalStamp(e.providerAt ?? null));
+      if (near) return near;
+    }
     // The observed-state review families are exempt from the migration-36 cutoff: they were deliverable before
     // they had a counterpart, and migration 38 only records provenance. Withholding them by time would make
     // history that was never a receipt look like one.
@@ -470,6 +538,34 @@ export class NativeTransitionsRepo {
     return this.hasNative(ownerId, repo, kind, item, 'reserved') ? { outcome: 'wait' } : null;
   }
 
+  /**
+   * The native holders of the same pull request whose observed state is compatible with an imported review row's,
+   * beside the exact key that was already decided. ANY reserved holder makes the row wait (a send that has not
+   * happened may be the one that tells it). A delivered holder holds the row back unless its own submission instant
+   * is KNOWN and later than that holder's observation plus the skew margin (a different, later review); a row with
+   * no known instant (an imported-document row, one observed before migration 38, a provider that gave none) can
+   * never prove it, so it is withheld, counted, never delivered and never settled.
+   */
+  private nativeObservedHolders(
+    ownerId: string, repo: string, x: Transition, providerAt: string | null,
+  ): TargetResolution | null {
+    const key = transitionKey(x);
+    const rows = this.db
+      .prepare(
+        `SELECT state, observed_at FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND item = ? AND path = 'native' AND transition_key != ?
+            AND (${compatibleStates(x.state ?? 'COMMENTED|DISMISSED')})`,
+      )
+      .all(ownerId, repo, x.item, key) as { state: string; observed_at: string }[];
+    if (rows.length === 0) return null;
+    const providerMs = providerAt === null ? Number.NaN : Date.parse(providerAt);
+    const contained = rows.some(
+      (r) => r.state === 'delivered' && (!Number.isFinite(providerMs) || Date.parse(r.observed_at) >= providerMs - NATIVE_LEGACY_SKEW_MS),
+    );
+    if (contained) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
+    return rows.some((r) => r.state === 'reserved') ? { outcome: 'wait' } : null;
+  }
+
   /** Whether ANY native holder of the item is in the given state (and satisfies `extra`). */
   private hasNative(
     ownerId: string, repoKey: string, kind: TransitionKind, item: string, state: 'reserved' | 'delivered',
@@ -513,9 +609,14 @@ export class NativeTransitionsRepo {
         ? { reserved: false, resolution }
         : { reserved: false, resolution: { outcome: 'covered' }, selfCovered: true };
     }
+    // A review row's claim records the instant the event row was COMMITTED (an upper bound on when the review
+    // existed, never `occurredAt`) and, for the observed-state families, the provider's own submission instant
+    // only when it supplied one: an unknown instant stays unknown, never "now".
+    const observed = isObservedReviewKind(t.transition.kind);
     const ok = this.insertClaim({
-      ownerId, repoKey: repo, transition: t.transition, path: 'target', via, ref, observedAt: atIso, atIso,
-      providerAt: e.occurredAt,
+      ownerId, repoKey: repo, transition: t.transition, path: 'target', via, ref,
+      observedAt: t.transition.kind === 'changes_requested' || observed ? (e.createdAt ?? atIso) : atIso, atIso,
+      providerAt: observed ? (e.providerAt ?? null) : e.occurredAt,
     });
     return ok ? { reserved: true, resolution } : { reserved: false, resolution: { outcome: 'wait' } };
   }

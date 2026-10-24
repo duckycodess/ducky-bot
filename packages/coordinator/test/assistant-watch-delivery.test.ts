@@ -33,7 +33,8 @@ const ev = (
   payloadJson: JSON.stringify(over.payload ?? { number: n, title: `Title ${n}` }), origin: 'observed',
   alertedAt: null, alertAttempts: 0, alertAbandonedAt: null, digestedAt: null, createdAt: T0,
   display: over.display ?? 'acme/widgets', discordUserId: OWNER, targetRepoKey: 'acme/widgets',
-  withheldReason: null, settledBy: null, providerHash: null, attempt: null,
+  withheldReason: null, settledBy: null, providerHash: null, hashDomain: 'provider', providerState: null, providerAt: null,
+  attempt: null,
 });
 
 describe('the digest', () => {

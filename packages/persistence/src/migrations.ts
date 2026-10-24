@@ -2285,7 +2285,7 @@ CREATE TABLE github_watch_gap_markers (
   repo_key      TEXT,
   pr_number     INTEGER NOT NULL CHECK (pr_number > 0),
   review_class  TEXT NOT NULL CHECK (review_class IN ('approval','changes_requested')),
-  reason        TEXT NOT NULL CHECK (reason IN ('no_comparison','unavailable','truncated')),
+  reason        TEXT NOT NULL CHECK (reason IN ('no_comparison','unavailable','truncated','not_conveyed')),
   shown         TEXT NOT NULL CHECK (shown IN ('shown','delivered_not_provably_shown')),
   outbox_ref    TEXT NOT NULL,
   delivered_at  TEXT NOT NULL,

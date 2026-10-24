@@ -468,6 +468,7 @@ export class GitHubWatchService {
             const key = transitionKey(c.t);
             const probe = ledger.probeNative(this.ownerId, repoKey, c.t, c.providerAt, {
               boundary: c.boundary ?? null, stateChange: c.stateChange === true,
+              ...(c.priorState === undefined ? {} : { priorState: c.priorState }),
             });
             if (probe === 'target_in_flight') return 'deferred' as const;
             if (excluded.has(key)) continue;
@@ -912,6 +913,8 @@ interface NamedClaim {
   readonly boundary?: string | null;
   /** The fact is a known review changing state (to DISMISSED). */
   readonly stateChange?: boolean;
+  /** For a state change: the KNOWN not-dismissed state the previous complete set recorded (never an unknown one). */
+  readonly priorState?: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED';
 }
 
 /** A per-author line segment rendered without exact review identity, checked against the final text. */
@@ -963,8 +966,13 @@ interface ReviewFactChange {
   readonly at: string;
   readonly code: 'A' | 'R' | 'C' | 'D';
   readonly stateChange: boolean;
-  /** `pb` of the previous complete set a NEW review is absent from. Never set for a state change. */
+  /**
+   * `pb` of the previous complete set. For a NEW review: the set it is absent from. For a state change: the set that
+   * recorded the review in `priorState`; null when that prior state is not a known not-dismissed one.
+   */
   readonly boundary: string | null;
+  /** For a state change: the known not-dismissed prior state. Absent for an unknown prior state. */
+  readonly priorState?: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED';
 }
 
 /**
@@ -993,7 +1001,14 @@ function reviewFactChanges(previous: NormalizedSnapshot, current: NormalizedSnap
         if (identityOnly.has(f.h.slice(0, 32)) || f.c === 'U') continue;
         out.push({ n: pr.number, h: f.h, at: f.at, code: f.c, stateChange: false, boundary: old.rf.pb });
       } else if (p.c !== f.c && f.c === 'D') {
-        out.push({ n: pr.number, h: f.h, at: f.at, code: 'D', stateChange: true, boundary: null });
+        // The previous set recorded this review in a state; only a KNOWN not-dismissed one lets the lifecycle prove
+        // a compatible target claim committed before that read began is a different review. An unknown state
+        // word (U) is not proven not-dismissed, so it gets no boundary.
+        const prior = p.c === 'A' ? 'APPROVED' : p.c === 'R' ? 'CHANGES_REQUESTED' : p.c === 'C' ? 'COMMENTED' : undefined;
+        out.push({
+          n: pr.number, h: f.h, at: f.at, code: 'D', stateChange: true,
+          boundary: prior === undefined ? null : old.rf.pb, ...(prior === undefined ? {} : { priorState: prior }),
+        });
       }
     }
   }
@@ -1215,7 +1230,10 @@ function summarizeChange(
     if (cls !== null) exactFacts.get(`${cls}:${c.n}`)!.push(key);
     const b = bucketOf(c);
     const byPr = buckets.get(b) ?? new Map<number, NamedClaim[]>();
-    byPr.set(c.n, [...(byPr.get(c.n) ?? []), { t, providerAt: c.at, boundary: c.boundary, stateChange: c.stateChange }]);
+    byPr.set(c.n, [...(byPr.get(c.n) ?? []), {
+      t, providerAt: c.at, boundary: c.boundary, stateChange: c.stateChange,
+      ...(c.priorState === undefined ? {} : { priorState: c.priorState }),
+    }]);
     buckets.set(b, byPr);
   }
   const lines: [Bucket, string][] = [
@@ -1262,7 +1280,9 @@ function summarizeChange(
         suppressed.push({ key, renderedKeys: facts });
         continue;
       }
-      const reason = gapReason(pr, old);
+      // A line that comes back because its exact segment was not conveyed has its own reason: the exact facts exist but
+      // have no receipt, so this unidentified line is what the owner reads and it is the same evidence as any other.
+      const reason = gapReason(pr, old) ?? (facts !== undefined && demoted.has(key) ? 'not_conveyed' : null);
       entries.push({
         claims: [],
         segment: reason === null ? `#${pr.number}` : `#${pr.number} (reviewer summary only)`,

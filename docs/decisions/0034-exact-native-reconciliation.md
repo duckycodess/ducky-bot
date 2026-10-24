@@ -297,11 +297,20 @@ identity discriminator, null is unknown) and it is never presented as a dismissa
 - **Ledger decisions compare only compatible states on the same pull request.** An exact key (same domain, hash and
   state) decides first. Otherwise a reserved holder makes the other side wait; for an imported row a delivered native
   holder withholds it unless its own KNOWN submission instant is later than that holder's observation plus the
-  margin (a row with no known instant can never prove it); for a native fact a delivered target claim with an equal
-  or unknown instant is HELD (the existing held row), unless the target's event row was committed before the
-  previous complete read of that pull request began (`pb`, the boundary proof). A target claim's `observed_at` is the
-  instant the event row was committed, never the provider time. The boundary proof never applies to a known review
-  changing state. An approved and a dismissed observation are different tellings: both are told and nothing is held
+  margin (a row with no known instant can never prove it); two KNOWN submission instants that differ prove two
+  different reviews in either direction, so a holder (delivered or reserved) whose known instant differs from the
+  row's is not compared at all. For a native fact a delivered target claim with an equal or unknown instant is HELD
+  (the existing held row), unless the target's event row was committed before the previous complete read of that
+  pull request began (`pb`, the boundary proof). An observed-state target claim's `observed_at` is the instant the
+  event row was committed, never the provider time (every other target claim keeps its send time). A known review
+  changing state to DISMISSED has a proof of its own that rests on the enforced lifecycle (DISMISSED is terminal,
+  and an approved or requested-changes review is never merely commented): when the previous complete set recorded
+  that review in a KNOWN not-dismissed state, a compatible target claim committed before that read began cannot be
+  the same review (it was already dismissed while the review was still recorded undismissed); a candidate-set row
+  (COMMENTED or DISMISSED) is refuted only by a prior approval or request, not by a prior comment. **An unknown
+  state word, an identity-only (version 2) review, a version 2 snapshot (no boundary) and a missing boundary give
+  no proof**, and the fact stays held. This supersedes the earlier wording that the boundary proof never applies to
+  a state change. An approved and a dismissed observation are different tellings: both are told and nothing is held
   against the other. These counterparts are **exempt from the migration-36 cutoff**: migration 38 records provenance
   only (`review_families_at`), and earlier unidentified aggregate history stays an unresolved overlap, not a
   receipt.
@@ -335,12 +344,16 @@ identity discriminator, null is unknown) and it is never presented as a dismissa
   A requested-changes line needs a strictly later canonical instant. A change in review counts alone sends no
   generic message.
 - **Gap markers.** A per-author line told while no exact list could identify it (the list unavailable, at the bound,
-  or with no comparable baseline) is labelled `(reviewer summary only)` and written with its outbox row as a
+  with no comparable baseline, or `not_conveyed`: a comparable observation held same-class exact facts but one of
+  them was cut off or redacted, so the line came back and the exact segment has no receipt) is labelled `(reviewer summary only)` and written with its outbox row as a
   PENDING marker; only a successful send promotes it, in the transaction that settles the row, into
   `github_watch_gap_markers`: owner scoped, independent of `github_watch_events` and `github_watches` (retention
   deletes both), on `RETENTION_FORBIDDEN_TABLES`, recording whether the whole segment was provably shown or only
   delivered. It is counted in `/status`, `import:assistant --verify` (any row makes `clear` false and the exit 5)
   and the export, is never a receipt and nothing clears it, not a recovery, a cancel, a remap, a restart or retention.
+- **Owner scope.** The ordinary-watch tombstone lookup for a requested-changes review with no id is owner scoped.
+  The feed's repository list is one global table with no owner column (the feed serves the single configured
+  owner), so that lookup cannot be.
 - **Stateless and old rows are not guessed.** A review row observed before migration 38 or imported from a document
   has no state and no hash; it is exact only in its source-identity domain, with both candidate states, and is
   decided by reservation and by instant like any row without a comparable id.
@@ -424,6 +437,11 @@ identifiers per delivered native transition and is accepted.
   `native_transition_claims.provider_at`, yet records migration 36 as applied, so it will not be migrated
   again. Recreate it from a fresh backup taken before migration 36 and migrate that. No reset of live data is
   authorized or implied; a database that never ran those commits is unaffected.
+- **Migration 38 was revised in place before publication.** The first local commits of this branch (`63deaeb` to
+  `5b75ecd`) allowed three gap-marker reasons; the final migration allows a fourth, `not_conveyed`. A scratch or
+  rehearsal database migrated at those commits has `github_watch_gap_markers` with the narrower CHECK yet records
+  migration 38 as applied. Recreate it from a fresh backup taken before migration 36 and migrate that. Published
+  migrations (36 and 37) are untouched, and no live-data reset is authorized or implied.
 - **Verification is a gate with its own exit code.** `pnpm import:assistant --verify` exits 0 only at parity
   (nothing missing or changed at the source, nothing drifted, the ledger clear), 3 when a record is missing
   or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a

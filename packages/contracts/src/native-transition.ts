@@ -392,7 +392,12 @@ export function targetTransition(e: TargetEventFacts): TargetTransition {
  */
 export const GAP_CLASSES = ['approval', 'changes_requested'] as const;
 export type GapClass = (typeof GAP_CLASSES)[number];
-export const GAP_REASONS = ['no_comparison', 'unavailable', 'truncated'] as const;
+/**
+ * Why a per-author line could not stand on exact facts: no comparable baseline, the list unavailable, the list at
+ * the bound, or `not_conveyed` (a comparable observation held same-class exact facts, but at least one of them was
+ * not shown in full, so the line came back and its exact segment has no receipt).
+ */
+export const GAP_REASONS = ['no_comparison', 'unavailable', 'truncated', 'not_conveyed'] as const;
 export type GapReason = (typeof GAP_REASONS)[number];
 /** `shown`: the whole segment lies inside the clamp and redaction left the summary unchanged. */
 export const GAP_SHOWN = ['shown', 'delivered_not_provably_shown'] as const;

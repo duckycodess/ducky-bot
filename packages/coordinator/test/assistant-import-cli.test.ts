@@ -357,15 +357,18 @@ describe('--verify', () => {
     expect(JSON.parse(v.out).nativeLedger).toMatchObject({ refusedReviewPullRequests: 1, clear: false });
   });
 
-  it.each([['shown'], ['delivered_not_provably_shown']])(
-    'exits 5 while a per-author review line delivered without exact identity (%s) is on record',
-    (shown) => {
+  it.each([
+    ['shown', 'unavailable'], ['delivered_not_provably_shown', 'unavailable'],
+    ['shown', 'not_conveyed'], ['delivered_not_provably_shown', 'not_conveyed'],
+  ])(
+    'exits 5 while a per-author review line delivered without exact identity (%s, %s) is on record',
+    (shown, reason) => {
       const w = applied();
       const d = openDatabase({ location: w.dbPath });
       d.prepare(
         `INSERT INTO github_watch_gap_markers (owner_id, watch_id, repo_key, pr_number, review_class, reason, shown, outbox_ref, delivered_at)
-         VALUES ('100000000000000001', 'gone', 'acme/demo', 7, 'approval', 'unavailable', ?, 's1', '2026-10-12T00:00:00.000Z')`,
-      ).run(shown);
+         VALUES ('100000000000000001', 'gone', 'acme/demo', 7, 'approval', ?, ?, 's1', '2026-10-12T00:00:00.000Z')`,
+      ).run(reason, shown);
       d.close();
       const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
       expect(v.code).toBe(5);

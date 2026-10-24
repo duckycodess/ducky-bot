@@ -117,7 +117,8 @@ describe('a row whose hash cannot be compared is decided by reservation and by i
 
   it('withholds a row with an UNKNOWN instant: only a known, later submission proves a different review', () => {
     const { store } = fresh();
-    nativeTold(store, nativeFact('APPROVED'), 'n1', T2);
+    // The native holder does not know its review's submission instant either, so only containment can decide.
+    nativeTold(store, nativeFact('APPROVED'), 'n1', T2, REPO, OWNER, null);
     expect(resolve(store, sourceRow(null))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
     // Submitted after the native observation plus the margin: provably another review.
     expect(resolve(store, sourceRow('2026-10-01T02:00:05.000Z'))).toEqual({ outcome: 'deliver' });
@@ -128,10 +129,48 @@ describe('a row whose hash cannot be compared is decided by reservation and by i
 
   it('proves a later submission against EVERY delivered holder, not just one', () => {
     const { store } = fresh();
-    nativeTold(store, nativeFact('APPROVED', OTHER), 'n1', T2);
-    nativeTold(store, nativeFact('APPROVED', hashProviderRef('PRR_third')!), 'n2', T4);
+    nativeTold(store, nativeFact('APPROVED', OTHER), 'n1', T2, REPO, OWNER, null);
+    nativeTold(store, nativeFact('APPROVED', hashProviderRef('PRR_third')!), 'n2', T4, REPO, OWNER, null);
     expect(resolve(store, sourceRow('2026-10-01T03:00:00.000Z'))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
     expect(resolve(store, sourceRow('2026-10-01T04:30:00.000Z'))).toEqual({ outcome: 'deliver' });
+  });
+
+  describe('two KNOWN submission instants that differ are two different reviews, in either direction', () => {
+    // A native holder told review A1 (submitted 10:03, observed 10:05). The target then reads A2, submitted EARLIER
+    // (10:01), with an id that cannot be compared: the instants alone prove they differ, so A2 is not withheld.
+    const A1 = '2026-10-01T10:03:00.000Z';
+    const A2 = '2026-10-01T10:01:00.000Z';
+    const OBSERVED = '2026-10-01T10:05:00.000Z';
+    const cases: [string, ReviewObservedState, Kind, string | null][] = [
+      ['approved', 'APPROVED', 'review_approved', 'APPROVED'],
+      ['commented', 'COMMENTED', 'review_commented', 'COMMENTED'],
+      ['dismissed', 'DISMISSED', 'review_commented', 'DISMISSED'],
+    ];
+    it.each(cases)('%s: an earlier known instant delivers, an equal one withholds, an unknown one withholds', (_n, state, kind, st) => {
+      const { store } = fresh();
+      nativeTold(store, nativeFact(state), 'n1', OBSERVED, REPO, OWNER, A1);
+      const ev = (at: string | null) => row(kind, 7, { providerHash: null, providerState: st, providerAt: at });
+      expect(resolve(store, ev(A2))).toEqual({ outcome: 'deliver' });
+      expect(resolve(store, ev('2026-10-01T10:09:00.000Z'))).toEqual({ outcome: 'deliver' });
+      expect(resolve(store, ev(A1))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+      expect(resolve(store, ev(null))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    });
+
+    it('does not make the row wait for a RESERVED holder whose known instant differs, and waits for an equal or unknown one', () => {
+      const { store } = fresh();
+      nativeReserved(store, nativeFact('APPROVED'), 'n1', OBSERVED, A1);
+      const ev = (at: string | null) => row('review_approved', 7, { providerHash: null, providerState: 'APPROVED', providerAt: at });
+      expect(resolve(store, ev(A2))).toEqual({ outcome: 'deliver' });
+      expect(resolve(store, ev(A1))).toEqual({ outcome: 'wait' });
+      expect(resolve(store, ev(null))).toEqual({ outcome: 'wait' });
+    });
+
+    it('still applies the containment rule when the holder has no known instant', () => {
+      const { store } = fresh();
+      nativeTold(store, nativeFact('APPROVED'), 'n1', OBSERVED, REPO, OWNER, null);
+      expect(resolve(store, row('review_approved', 7, { providerHash: null, providerState: 'APPROVED', providerAt: A2 })))
+        .toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    });
   });
 
   it('is NOT withheld by the migration-36 cutoff, even on a database that is not new and for an old event', () => {
@@ -250,13 +289,57 @@ describe('a native fact is held, not told, when it cannot be told from a review 
       expect(probe(null)).toBe('ambiguous');
     });
 
-    it('never applies to a known review changing state: that review is in the previous set', () => {
-      const { store } = fresh();
-      targetSend(store, row('review_commented', 7, { providerHash: null, providerState: 'DISMISSED', providerAt: T1, createdAt: T1 }));
+    describe('a known review changing state to DISMISSED has a lifecycle proof of its own, never from an unknown prior state', () => {
+      const BEFORE = '2026-08-31T23:00:00.000Z'; // the target row was committed long before the previous read began
+      const PB = '2026-10-01T05:00:00.000Z';
       const dismissed = nativeFact('DISMISSED');
-      expect(store.nativeTransitions.probeNative(OWNER, REPO, dismissed, T1, { boundary: '2026-10-01T05:00:00.000Z', stateChange: true }))
-        .toBe('ambiguous');
-      expect(store.nativeTransitions.probeNative(OWNER, REPO, dismissed, T1, { boundary: '2026-10-01T05:00:00.000Z' })).toBe('free');
+      const target = (store: Store, over: Parameters<typeof row>[2], kind: Kind = 'review_commented') =>
+        targetSend(store, row(kind, 7, { providerHash: null, providerAt: T1, ...over }));
+      const probe = (store: Store, opts: Parameters<Store['nativeTransitions']['probeNative']>[4]) =>
+        store.nativeTransitions.probeNative(OWNER, REPO, dismissed, T1, opts);
+
+      it.each(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'] as const)(
+        'a target DISMISSED row committed before the previous read cannot be a review recorded %s then: free',
+        (prior) => {
+          const { store } = fresh();
+          target(store, { providerState: 'DISMISSED', createdAt: BEFORE });
+          expect(probe(store, { boundary: PB, stateChange: true, priorState: prior })).toBe('free');
+        },
+      );
+
+      it('stays held when the target row was committed AFTER, at, or within the margin of the previous read', () => {
+        const { store } = fresh();
+        target(store, { providerState: 'DISMISSED', createdAt: '2026-10-01T05:00:00.500Z' });
+        expect(probe(store, { boundary: PB, stateChange: true, priorState: 'APPROVED' })).toBe('ambiguous');
+        const { store: s2 } = fresh();
+        target(s2, { providerState: 'DISMISSED', createdAt: '2026-10-01T06:00:00.000Z' });
+        expect(probe(s2, { boundary: PB, stateChange: true, priorState: 'APPROVED' })).toBe('ambiguous');
+      });
+
+      it('has NO proof without a known not-dismissed prior state, whatever the boundary says', () => {
+        const { store } = fresh();
+        target(store, { providerState: 'DISMISSED', createdAt: BEFORE });
+        // An unknown or identity-only prior state is not a proven not-dismissed one.
+        expect(probe(store, { boundary: PB, stateChange: true })).toBe('ambiguous');
+        // No boundary at all (a legacy, version 2 or first observation).
+        expect(probe(store, { boundary: null, stateChange: true, priorState: 'APPROVED' })).toBe('ambiguous');
+        expect(probe(store, { stateChange: true, priorState: 'APPROVED' })).toBe('ambiguous');
+      });
+
+      it('a stateless target row (COMMENTED or DISMISSED) is refuted by a prior approval or request, not by a prior comment', () => {
+        const { store } = fresh();
+        target(store, { providerState: null, createdAt: BEFORE });
+        expect(probe(store, { boundary: PB, stateChange: true, priorState: 'APPROVED' })).toBe('free');
+        expect(probe(store, { boundary: PB, stateChange: true, priorState: 'CHANGES_REQUESTED' })).toBe('free');
+        // The review may itself be the one the target read COMMENTED: it cannot be told apart.
+        expect(probe(store, { boundary: PB, stateChange: true, priorState: 'COMMENTED' })).toBe('ambiguous');
+      });
+
+      it('ignores a target row of an incompatible state altogether', () => {
+        const { store } = fresh();
+        target(store, { providerState: 'COMMENTED', createdAt: BEFORE }); // not compatible with a dismissal at all
+        expect(probe(store, { boundary: PB, stateChange: true })).toBe('free');
+      });
     });
 
     it('uses the instant the event was committed, never the provider time it carries', () => {
@@ -296,5 +379,36 @@ describe('a native review claim records its state and domain', () => {
     const bad: Transition = { kind: 'review_approved', item: '7', stamp: null, hash: NATIVE, attempt: null, domain: 'provider', state: 'DISMISSED' };
     expect(store.nativeTransitions.reserveNative(OWNER, REPO, bad, 'watch_summary', 'n1', T1, T1)).toBe(false);
     expect(db.prepare('SELECT COUNT(*) n FROM native_transition_claims').get()).toEqual({ n: 0 });
+  });
+});
+
+describe('the no-id requested-changes tombstone is looked up per owner', () => {
+  const noId = { kind: 'review_requested_changes' as const, identity: '7:review:1', occurredAt: T1, providerHash: null, attempt: null };
+  const watchFor = (db: Db, owner: string, id: string): void => {
+    db.prepare(`INSERT OR IGNORE INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo','/x','acme','demo',?)`).run(T0);
+    db.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key)
+       VALUES (?, ?, ?, 'demo', 15, ?, 'active', ?, ?, 'acme/demo')`,
+    ).run(id, `w${id}abc`.slice(0, 6), owner, T0, T0, T0);
+  };
+
+  it('another owner\'s ordinary watch is no native path that could tell this owner\'s review', () => {
+    const { db, store } = fresh();
+    watchFor(db, OTHER_OWNER, 'a1');
+    expect(store.nativeTransitions.resolveTarget(OWNER, REPO, noId)).toEqual({ outcome: 'deliver' });
+    watchFor(db, OWNER, 'b2');
+    expect(store.nativeTransitions.resolveTarget(OWNER, REPO, noId)).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+  });
+});
+
+describe('only the observed-state families take their claim time from the committed event row', () => {
+  it('keeps the send time as the observed_at of a requested-changes target claim, as it always was', () => {
+    const { db, store } = fresh();
+    store.nativeTransitions.reserveTarget(
+      OWNER, REPO,
+      { kind: 'review_requested_changes', identity: '7:review:1', occurredAt: T1, providerHash: NATIVE, attempt: null, createdAt: T1 },
+      'target_alert', 'e1', T4,
+    );
+    expect(db.prepare("SELECT observed_at FROM native_transition_claims WHERE kind = 'changes_requested'").get()).toEqual({ observed_at: T4 });
   });
 });

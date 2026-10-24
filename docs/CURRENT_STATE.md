@@ -1343,8 +1343,9 @@ fail-closed form of the blocker, not a decision to drop it.
   approved, commented, first seen dismissed), a known review observed dismissed and a PROVEN opening are exact now
   (migrations 37 and 38; a dismissal is a state observation with no dismissal time, and the target, like the
   source, never reports a dismissal of a review its cursor has passed). Still open: a per-author approvals or
-  requested-changes line told while no exact list could identify it (kept as durable gap-marker evidence, counted in
-  status, verify and the export, never cleared); a PR-level decision is its own unclaimed line and no cause is
+  requested-changes line told while no exact list could identify it, or one that came back because its exact segment
+  was cut off or redacted (`not_conveyed`), kept as durable gap-marker evidence, counted in status, verify and the
+  export, never cleared; a PR-level decision is its own unclaimed line and no cause is
   inferred from it; a pull request merely "newly listed" is not provably opened; pull requests with 100 or more
   reviews are counted and told no new review exactly; an exact segment cut off by the clamp or inside a redacted
   summary claims nothing and may leave a duplicate; the no-longer-listed (not a close), issue-count and

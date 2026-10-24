@@ -698,19 +698,60 @@ describe('what the imported target delivered, holds or is sending, per observed 
     ctx.h.close();
   });
 
-  it('never applies the boundary proof to a known review changing state', async () => {
-    const ctx = await start();
-    ctx.reader.prs = [pr(1, { updatedAt: at(2) })];
-    ctx.reader.setReviews(1, [rv('PRR_x', 'APPROVED', at(1))]);
-    await ctx.step();
-    ctx.h.transport.clear();
-    targetTold(ctx.h, targetFacts('review_commented', { providerState: 'DISMISSED', createdAt: '2026-08-31T23:00:00.000Z', providerAt: at(1) }), 'e2');
-    ctx.reader.prs = [pr(1, { updatedAt: at(3) })];
-    ctx.reader.setReviews(1, [rv('PRR_x', 'DISMISSED', at(1))]);
-    await ctx.step();
-    expect(said(ctx.h)).not.toContain('dismissed');
-    expect(ctx.h.store.githubWatches.heldReviews(10)).toMatchObject([{ heldKey: keyOf('DISMISSED', 'PRR_x') }]);
-    ctx.h.close();
+  describe('the dismissal of a known review: the lifecycle proof holds only from a KNOWN not-dismissed prior state', () => {
+    const BEFORE = '2026-08-31T23:00:00.000Z';
+    const dismissedByTarget = (ctx: Awaited<ReturnType<typeof start>>, createdAt: string) =>
+      targetTold(ctx.h, targetFacts('review_commented', { providerState: 'DISMISSED', createdAt, providerAt: at(1) }), 'e2');
+    const dismiss = async (ctx: Awaited<ReturnType<typeof start>>) => {
+      ctx.reader.prs = [pr(1, { updatedAt: at(3) })];
+      ctx.reader.setReviews(1, [rv('PRR_x', 'DISMISSED', at(1))]);
+      await ctx.step();
+    };
+    const known = async (first: string) => {
+      const ctx = await start();
+      ctx.reader.prs = [pr(1, { updatedAt: at(2) })];
+      ctx.reader.setReviews(1, [rv('PRR_x', first, at(1))]);
+      await ctx.step();
+      ctx.h.transport.clear();
+      return ctx;
+    };
+
+    it('tells the dismissal when a target DISMISSED row was committed before the read that recorded the review approved', async () => {
+      const ctx = await known('APPROVED');
+      dismissedByTarget(ctx, BEFORE);
+      await dismiss(ctx);
+      expect(said(ctx.h)).toContain('review dismissed (observed) on #1');
+      expect(ctx.h.store.githubWatches.heldCount(OWNER)).toBe(0);
+      ctx.h.close();
+    });
+
+    it('stays HELD when that target row was committed after the read that recorded the review undismissed', async () => {
+      const ctx = await known('APPROVED');
+      dismissedByTarget(ctx, '2026-09-01T09:00:00.000Z');
+      await dismiss(ctx);
+      expect(said(ctx.h)).not.toContain('dismissed');
+      expect(ctx.h.store.githubWatches.heldReviews(10)).toMatchObject([{ heldKey: keyOf('DISMISSED', 'PRR_x') }]);
+      ctx.h.close();
+    });
+
+    it('has NO proof from an UNKNOWN prior state: a review first read with a state word this build does not know stays held', async () => {
+      const ctx = await known('SOMETHING_NEW');
+      dismissedByTarget(ctx, BEFORE);
+      await dismiss(ctx);
+      expect(said(ctx.h)).not.toContain('dismissed');
+      expect(ctx.h.store.githubWatches.heldReviews(10)).toMatchObject([{ heldKey: keyOf('DISMISSED', 'PRR_x') }]);
+      ctx.h.close();
+    });
+
+    it('has NO proof from a version 2 snapshot, which recorded no boundary, even for a requested change it proves', async () => {
+      const ctx = await known('CHANGES_REQUESTED');
+      asVersion2(ctx.h);
+      dismissedByTarget(ctx, BEFORE);
+      await dismiss(ctx);
+      expect(said(ctx.h)).not.toContain('dismissed');
+      expect(ctx.h.store.githubWatches.heldReviews(10)).toHaveLength(1);
+      ctx.h.close();
+    });
   });
 
   it('tells an approved review even when the target delivered the same review DISMISSED: another state, another telling', async () => {
@@ -765,7 +806,7 @@ describe('a per-author line is shown after all when the exact fact that stood fo
   it('claims exactly the exact segments shown, and shows the per-author line for every pull request whose exact segment was cut off', async () => {
     let exercised = 0;
     for (const [len, pad] of Array.from({ length: 20 }, (_, i) => [171, 14 + i] as const)) {
-      const { text, shownExact, claimed, perAuthorShown } = await scenario(len, pad);
+      const { text, shownExact, claimed, perAuthorShown, markers } = await scenario(len, pad);
       expect(text.length, `len ${len} pad ${pad}`).toBeLessThanOrEqual(1200);
       // A receipt exists for exactly the segments the owner can read.
       expect(claimed, `len ${len} pad ${pad}`).toEqual(shownExact);
@@ -778,6 +819,13 @@ describe('a per-author line is shown after all when the exact fact that stood fo
       }
       // And one whose exact segment IS shown has no per-author line repeating it.
       for (const n of shownExact) expect(perAuthorShown, `len ${len} pad ${pad} #${n}`).not.toContain(n);
+      // Every line that came back is durable evidence with its own reason; a `shown` marker means its segment is in
+      // the text, and a pull request whose exact segment was shown has none.
+      expect(markers.map((m) => m.pr).sort(), `len ${len} pad ${pad}`).toEqual(cut);
+      for (const m of markers) {
+        expect(m.reason, `len ${len} pad ${pad} #${m.pr}`).toBe('not_conveyed');
+        if (m.shown === 'shown') expect(perAuthorShown, `len ${len} pad ${pad} #${m.pr}`).toContain(m.pr);
+      }
       if (cut.length > 0) exercised += 1;
     }
     // The clamp really cut an exact segment off in at least one of those cases, so the rule was exercised.
@@ -805,7 +853,16 @@ describe('redaction that changes the summary claims nothing and brings the per-a
     clock.advance(15 * MIN);
     await h.app.githubWatches.tick();
     expect(claimsOf(h, 'review_approved').filter((c) => c.path === 'native')).toEqual([]);
-    expect(said(h)).toMatch(/approvals recorded on #1, #2|approvals recorded on #1/);
+    // The line is told, labelled, and because it replaces exact facts nobody could read it is durable evidence: the
+    // redaction changed the whole summary, so NO segment is provably shown.
+    expect(said(h)).toContain('approvals recorded on #1 (reviewer summary only), #2 (reviewer summary only)');
+    expect(h.store.githubWatches.gapMarkers(OWNER, 10).map((m) => [m.pr, m.reviewClass, m.reason, m.shown])).toEqual([
+      [1, 'approval', 'not_conveyed', 'delivered_not_provably_shown'],
+      [2, 'approval', 'not_conveyed', 'delivered_not_provably_shown'],
+    ]);
+    expect(h.app.githubWatches.statusNotes()).toMatch(
+      /2 per-author review line\(s\) were delivered without exact review identity \(0 shown, 2 not provably shown/,
+    );
     h.close();
   });
 });

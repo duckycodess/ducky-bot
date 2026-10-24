@@ -518,17 +518,19 @@ describe('the v5 export says what the observed-state review families recorded', 
     h.store.db.prepare(
       `INSERT INTO github_watch_gap_markers (owner_id, watch_id, repo_key, pr_number, review_class, reason, shown, outbox_ref, delivered_at)
        VALUES (?, 'w1', 'acme/demo', 7, 'approval', 'unavailable', 'shown', 's1', ?),
-              (?, 'w1', 'acme/demo', 8, 'changes_requested', 'truncated', 'delivered_not_provably_shown', 's2', ?)`,
-    ).run(OWNER, NOW, OWNER, NOW);
+              (?, 'w1', 'acme/demo', 8, 'changes_requested', 'truncated', 'delivered_not_provably_shown', 's2', ?),
+              (?, 'w1', 'acme/demo', 9, 'approval', 'not_conveyed', 'shown', 's3', ?)`,
+    ).run(OWNER, NOW, OWNER, NOW, OWNER, NOW);
     h.store.db.prepare('DELETE FROM github_watches').run();
     const d = exportDelta(h);
     expect(d.complete).toBe(true);
     expect(d.state.nativeLedger.gapMarkers.map((m) => [m['prNumber'], m['reviewClass'], m['reason'], m['shown']])).toEqual([
       [7, 'approval', 'unavailable', 'shown'],
       [8, 'changes_requested', 'truncated', 'delivered_not_provably_shown'],
+      [9, 'approval', 'not_conveyed', 'shown'],
     ]);
     expect(d.state.nativeLedger.gapMarkers[0]).toMatchObject({ watchHandle: null, repoKey: 'acme/demo', outboxRef: 's1' });
-    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ gapMarkers: 2, gapMarkersNotProvablyShown: 1 });
+    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ gapMarkers: 3, gapMarkersNotProvablyShown: 1 });
     // Identifiers and reasons only.
     expect(JSON.stringify(d.state.nativeLedger.gapMarkers)).not.toMatch(/summary|title|body/i);
     h.close();

@@ -229,7 +229,7 @@ export interface GitHubGapMarkerRow {
   repoKey: string | null;
   pr: number;
   reviewClass: 'approval' | 'changes_requested';
-  reason: 'no_comparison' | 'unavailable' | 'truncated';
+  reason: 'no_comparison' | 'unavailable' | 'truncated' | 'not_conveyed';
   shown: 'shown' | 'delivered_not_provably_shown';
   outboxRef: string;
   deliveredAt: string;

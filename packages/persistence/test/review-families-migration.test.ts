@@ -150,13 +150,15 @@ describe('migration 38 rebuilds from a populated migration 37 without losing a r
        VALUES (?, 'w1', 'acme/demo', ?, ?, ?, ?, 's1', ?)`,
     );
     marker.run(OWNER, 7, 'approval', 'unavailable', 'shown', T3);
+    marker.run(OWNER, 8, 'approval', 'not_conveyed', 'delivered_not_provably_shown', T3);
+    expect(() => marker.run(OWNER, 9, 'approval', 'whatever', 'shown', T3)).toThrow(/CHECK/);
     expect(() => marker.run(OWNER, 7, 'approval', 'unavailable', 'shown', T3)).toThrow(/UNIQUE/);
     expect(() => marker.run(OWNER, 7, 'approval', 'truncated', 'maybe', T3)).toThrow(/CHECK/);
     expect(() => marker.run(OWNER, 7, 'decision', 'truncated', 'shown', T3)).toThrow(/CHECK/);
     // Independent of the watch and its outbox: nothing here cascades from either.
     db.prepare('DELETE FROM github_watch_events').run();
     db.prepare('DELETE FROM github_watches').run();
-    expect(db.prepare('SELECT COUNT(*) n FROM github_watch_gap_markers').get()).toEqual({ n: 1 });
+    expect(db.prepare('SELECT COUNT(*) n FROM github_watch_gap_markers').get()).toEqual({ n: 2 });
   });
 
   it('keeps the gap markers on the retention-forbidden list', () => {

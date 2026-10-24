@@ -252,9 +252,20 @@ describe('a native receipt settles an imported review only for the exact fact it
     const { h, reader, tick } = boot();
     nativeTold(h, 'APPROVED', hashProviderRef('PRR_other')!, at(12, 2));
     reader.pullsBy.set('acme/demo', [pr(2, at(12))]);
-    reader.reviewsBy.set('acme/demo#2', [rv('11', 'APPROVED', at(12, 1))]);
+    // The same known submission instant the native fact carries (at(12)): they cannot be told apart.
+    reader.reviewsBy.set('acme/demo#2', [rv('11', 'APPROVED', at(12))]);
     await tick();
     expect(reviewsOf(h)[0]).toMatchObject({ withheld_reason: 'ambiguous_evidence', settled_by: null, digested_at: null });
+    h.close();
+  });
+
+  it('delivers a review whose KNOWN submission instant differs from the native one, even when it is EARLIER than the observation', async () => {
+    const { h, reader, tick } = boot();
+    nativeTold(h, 'APPROVED', hashProviderRef('PRR_other')!, at(12, 2));
+    reader.pullsBy.set('acme/demo', [pr(2, at(12, 1))]);
+    reader.reviewsBy.set('acme/demo#2', [rv('11', 'APPROVED', at(11, 5))]);
+    await tick();
+    expect(reviewsOf(h)[0]).toMatchObject({ withheld_reason: null, settled_by: null });
     h.close();
   });
 

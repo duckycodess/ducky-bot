@@ -64,8 +64,14 @@ export interface NativeProbeOptions {
    * read that produced it began. Null or absent means no proof. Used only for a NEW review fact.
    */
   readonly boundary?: string | null;
-  /** The fact is a known review changing state (to DISMISSED). The boundary proof never applies to it. */
+  /** The fact is a known review changing state (to DISMISSED). */
   readonly stateChange?: boolean;
+  /**
+   * For a state change only: the state the previous COMPLETE set recorded for that review, and ONLY when it was a
+   * known, not-dismissed state. Without it a state change has no boundary proof (an unknown or identity-only prior
+   * state proves nothing).
+   */
+  readonly priorState?: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED';
 }
 
 /**
@@ -322,7 +328,13 @@ export class NativeTransitionsRepo {
    * different review; an equal or unknown instant cannot be told apart, so the fact is HELD, unless the boundary
    * proof shows the target's review existed before the read that produced the previous complete set began
    * (`observed_at` + the skew margin is before `opts.boundary`): then it is in that set and the new fact is not it.
-   * That proof never applies to a known review changing state (`opts.stateChange`): that review is in the set.
+   * A known review changing state to DISMISSED has a proof of its own, resting on the enforced lifecycle (DISMISSED
+   * is terminal, and an approved or requested-changes review is never merely commented): when the previous set
+   * recorded that review in a KNOWN not-dismissed state (`opts.priorState`), a compatible target claim committed
+   * before that set's read began cannot be the same review, because it was already dismissed (or, for a candidate set,
+   * dismissed or commented) while the review was still recorded undismissed. A prior COMMENTED state cannot refute a
+   * candidate set that includes COMMENTED. With no known prior state (unknown, identity-only, no boundary) there is
+   * no proof and the fact stays held.
    */
   private probeObserved(
     ownerId: string, repo: string, t: Transition, providerAt: string | null, opts: NativeProbeOptions,
@@ -333,16 +345,22 @@ export class NativeTransitionsRepo {
     if (exact === 'reserved') return 'target_in_flight';
     const rows = this.db
       .prepare(
-        `SELECT state, provider_at, observed_at FROM native_transition_claims
+        `SELECT kind, state, provider_at, observed_at FROM native_transition_claims
           WHERE owner_id = ? AND repo_key = ? AND item = ? AND path = 'target' AND transition_key != ?
             AND (${compatibleStates(t.state ?? 'COMMENTED|DISMISSED')})`,
       )
-      .all(ownerId, repo, t.item, key) as { state: string; provider_at: string | null; observed_at: string }[];
+      .all(ownerId, repo, t.item, key) as { kind: string; state: string; provider_at: string | null; observed_at: string }[];
     if (rows.some((r) => r.state === 'reserved')) return 'target_in_flight';
-    const boundaryMs = opts.stateChange === true || opts.boundary == null ? Number.NaN : Date.parse(opts.boundary);
+    const boundaryMs = opts.boundary == null ? Number.NaN : Date.parse(opts.boundary);
+    // A state change is proven only against a known not-dismissed prior state.
+    const usable = Number.isFinite(boundaryMs) && (opts.stateChange !== true || opts.priorState !== undefined);
     for (const r of rows) {
       if (providerAt !== null && r.provider_at !== null && r.provider_at !== providerAt) continue;
-      if (Number.isFinite(boundaryMs) && Date.parse(r.observed_at) + NATIVE_LEGACY_SKEW_MS < boundaryMs) continue;
+      if (usable && Date.parse(r.observed_at) + NATIVE_LEGACY_SKEW_MS < boundaryMs) {
+        if (opts.stateChange !== true) continue;
+        // Terminal DISMISSED refutes any known not-dismissed prior; a candidate set also needs the prior not to be COMMENTED.
+        if (r.kind === 'review_dismissed' || opts.priorState !== 'COMMENTED') continue;
+      }
       return 'ambiguous';
     }
     return 'free';
@@ -528,10 +546,15 @@ export class NativeTransitionsRepo {
     const near = this.nativeSameItem(ownerId, repo, family, item, family === 'ci_failed' ? null : occurredMs);
     if (near) return near;
     if (this.legacyHeld(occurredMs)) return { outcome: 'withhold', reason: 'legacy_unproven' };
+    // The feed's repository list is one global table with no owner column (the feed serves the single configured
+    // owner), so this lookup cannot be owner-scoped; it is a durable tombstone of "a feed ever watched it".
     const feed = this.db.prepare('SELECT 1 FROM github_feed_repos WHERE repo_key = ?').get(repo);
     if (feed !== undefined) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
     if (family === 'changes_requested') {
-      const ordinary = this.db.prepare('SELECT 1 FROM github_watches WHERE repo_key = ? LIMIT 1').get(repo);
+      // An ordinary watch is the OWNER's: another owner's watch is no native path that could tell this owner's review.
+      const ordinary = this.db
+        .prepare('SELECT 1 FROM github_watches WHERE repo_key = ? AND discord_user_id = ? LIMIT 1')
+        .get(repo, ownerId);
       if (ordinary !== undefined) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
     }
     return { outcome: 'deliver' };
@@ -562,19 +585,23 @@ export class NativeTransitionsRepo {
    * happened may be the one that tells it). A delivered holder holds the row back unless its own submission instant
    * is KNOWN and later than that holder's observation plus the skew margin (a different, later review); a row with
    * no known instant (an imported-document row, one observed before migration 38, a provider that gave none) can
-   * never prove it, so it is withheld, counted, never delivered and never settled.
+   * never prove it, so it is withheld, counted, never delivered and never settled. Two KNOWN submission instants
+   * that differ prove two different reviews (one review has one submission instant), so a holder whose known
+   * instant differs from the row's known instant is not compared at all, in either direction and whether it
+   * delivered or only reserved; equal or unknown instants fall through to the containment rule.
    */
   private nativeObservedHolders(
     ownerId: string, repo: string, x: Transition, providerAt: string | null,
   ): TargetResolution | null {
     const key = transitionKey(x);
-    const rows = this.db
+    const all = this.db
       .prepare(
-        `SELECT state, observed_at FROM native_transition_claims
+        `SELECT state, observed_at, provider_at FROM native_transition_claims
           WHERE owner_id = ? AND repo_key = ? AND item = ? AND path = 'native' AND transition_key != ?
             AND (${compatibleStates(x.state ?? 'COMMENTED|DISMISSED')})`,
       )
-      .all(ownerId, repo, x.item, key) as { state: string; observed_at: string }[];
+      .all(ownerId, repo, x.item, key) as { state: string; observed_at: string; provider_at: string | null }[];
+    const rows = all.filter((r) => providerAt === null || r.provider_at === null || r.provider_at === providerAt);
     if (rows.length === 0) return null;
     const providerMs = providerAt === null ? Number.NaN : Date.parse(providerAt);
     const contained = rows.some(
@@ -627,13 +654,14 @@ export class NativeTransitionsRepo {
         ? { reserved: false, resolution }
         : { reserved: false, resolution: { outcome: 'covered' }, selfCovered: true };
     }
-    // A review row's claim records the instant the event row was COMMITTED (an upper bound on when the review
-    // existed, never `occurredAt`) and, for the observed-state families, the provider's own submission instant
-    // only when it supplied one: an unknown instant stays unknown, never "now".
+    // An observed-state review claim records the instant the event row was COMMITTED (an upper bound on when the
+    // review existed, never `occurredAt`) and the provider's own submission instant only when it supplied one: an
+    // unknown instant stays unknown, never "now". Every other target claim (a requested change included) keeps the
+    // meaning it always had, the moment of the send.
     const observed = isObservedReviewKind(t.transition.kind);
     const ok = this.insertClaim({
       ownerId, repoKey: repo, transition: t.transition, path: 'target', via, ref,
-      observedAt: t.transition.kind === 'changes_requested' || observed ? (e.createdAt ?? atIso) : atIso, atIso,
+      observedAt: observed ? (e.createdAt ?? atIso) : atIso, atIso,
       providerAt: observed ? (e.providerAt ?? null) : e.occurredAt,
     });
     return ok ? { reserved: true, resolution } : { reserved: false, resolution: { outcome: 'wait' } };

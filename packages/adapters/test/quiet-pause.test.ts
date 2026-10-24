@@ -141,25 +141,43 @@ describe('a stalled prompt', () => {
     return herdr;
   };
 
-  it('is a pause when no pickup was observed and a fresh look proves the agent quiet', async () => {
-    expect(await orch(stalled(new MockHerdr())).runJob(spec())).toMatchObject({
-      kind: 'quiet_pause', observed: 'idle',
-    });
+  it('is NOT a pause when no pickup was observed: submitted work may still start', async () => {
+    const out = await orch(stalled(new MockHerdr())).runJob(spec());
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
+    expect(out.kind).not.toBe('quiet_pause');
   });
 
-  it('still re-raises the stall when the agent cannot be proven quiet', async () => {
+  it('stays an orphan even when the agent later picks the work up AFTER the grace has ended', async () => {
+    // Idle for the whole (short) grace, then it starts working.
+    const herdr = stalled(new MockHerdr());
+    const o = orch(herdr);
+    const out = await o.runJob(spec());
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
+    herdr.setAgentStatus(AGENT, 'working'); // the late pickup
+    expect(await o.cancel(spec())).toMatchObject({ terminated: false });
+    herdr.setAgentStatus(AGENT, 'idle'); // and even once it is idle again
+    expect((await o.cancel(spec())).terminated).toBe(false);
+  });
+
+  it('says only that submitted work was not observed to settle', async () => {
+    const out = await orch(stalled(new MockHerdr())).runJob(spec());
+    const detail = out.kind === 'orphan' ? (out.detail ?? '') : '';
+    expect(detail).toMatch(/not observed to pick it up or to finish a turn/);
+    expect(detail).not.toMatch(/working|quota|sign-in|credit|limit/i);
+  });
+
+  it('is still a pause once the turn WAS observed to settle: working, then idle, no result', async () => {
     const herdr = stalled(new MockHerdr());
     const get = herdr.agentGet.bind(herdr);
-    let looks = 0;
+    let calls = 0;
     herdr.agentGet = async (t) => {
-      looks += 1;
+      calls += 1;
       const a = await get(t);
-      // The final look after the stall is the one that matters here.
-      return a && looks > 3 ? { ...a, agent_status: 'unknown' } : a;
+      // After the prompt stalls: first look is working, afterwards it is idle.
+      return a && calls >= 3 && calls < 5 ? { ...a, agent_status: 'working' } : a;
     };
-    const err = await orch(herdr).runJob(spec()).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DuckyError);
-    expect((err as DuckyError).code).toBe('herdr_prompt_stalled');
+    const out = await orch(herdr).runJob(spec());
+    expect(out).toMatchObject({ kind: 'quiet_pause', cause: 'agent_idle_no_result' });
   });
 
   it('never relabels any other failure as a pause', async () => {
@@ -168,6 +186,29 @@ describe('a stalled prompt', () => {
       throw new Error('socket exploded');
     };
     await expect(orch(herdr).runJob(spec())).rejects.toThrow(/socket exploded/);
+  });
+});
+
+describe('a prompt handed over whose turn was not seen to settle', () => {
+  it('does not pause on an idle reading when the prompt returned something that is not settled', async () => {
+    const herdr = new MockHerdr();
+    // The prompt call returned while the agent still read as working; Herdr
+    // then says idle. Quiet now is not a settled turn.
+    const get = herdr.agentGet.bind(herdr);
+    herdr.agentPrompt = async (t) => {
+      const a = (await get(t))!;
+      return { ...a, agent_status: 'working' };
+    };
+    const out = await orch(herdr).runJob(spec());
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
+  });
+
+  it('still pauses a normal settled idle or done turn with no result', async () => {
+    for (const status of ['idle', 'done'] as const) {
+      const herdr = new MockHerdr();
+      herdr.promptSettlesAs = status;
+      expect(await orch(herdr).runJob(spec())).toMatchObject({ kind: 'quiet_pause', observed: status });
+    }
   });
 });
 

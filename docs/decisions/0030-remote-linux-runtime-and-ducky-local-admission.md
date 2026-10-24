@@ -129,14 +129,26 @@ withholds the prompt and pauses the job (below) once the agent is freshly
 proved quiet. This is a check at one instant, not an atomic reservation shared
 with another program and not continuous enforcement.
 
-**A quiet agent with no result pauses; it does not fail.** An agent that
-settles `idle` or `done` without a valid result, a stalled prompt nothing picked
-up, and a prompt withheld by the guard above all end the attempt with a
+**A quiet agent with no result pauses; it does not fail.** An agent whose turn
+was observed to settle `idle` or `done` without a valid result, and a prompt
+withheld by the guard above before anything was sent, end the attempt with a
 lease-checked pause on the existing `needs_owner_input` state, but only after a
 fresh look positively matches the recorded agent name, workspace id and pane and
 a Ducky-managed workspace, and reports `idle` or `done`. Working and blocked keep
 their orphan outcomes; absent, unknown, unreadable or mismatched keep the
-unchanged `no_result` failure, which keeps the repository reserved. The
+unchanged `no_result` failure, which keeps the repository reserved.
+
+**A submitted prompt that was never seen to settle does NOT pause.** If a prompt
+was handed to the agent and no settled turn was observed -- a stalled prompt whose
+pickup was not seen inside the grace, or an idle reading with no settle behind
+it -- the agent may simply start later, so releasing the slot or the writer lock
+would let a second job begin beside it. That ends as the orphan
+`orphan_prompt_unsettled`: the repository, the slot and the host writer lock are
+retained for the owner, and the wording says only that submitted work was not
+observed to settle. It claims neither that the agent is working nor any cause,
+and nothing about quota or sign-in is inferred. A late pickup after the grace
+therefore finds everything still held. A turn that WAS observed to settle (work
+seen, then idle or done, with no result) still pauses as above. The
 coordinator decides in one transaction: a repeated report for the same lease is
 answered identically, the workspace, agent and repository reservation must be the
 recorded ones, and an owner cancellation then an elapsed deadline win. A pause

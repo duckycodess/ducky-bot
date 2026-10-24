@@ -548,3 +548,49 @@ describe('a lost response to a pause that lost the race', () => {
     h.close();
   });
 });
+
+
+/**
+ * A prompt that was submitted and never seen to settle (a stalled no-pickup) is
+ * not a pause. Late pickup after the executor gave up looking must still find
+ * the repository and the slot held, so no other job can start beside it.
+ */
+describe('an unsettled submitted prompt', () => {
+  it('orphans the repository and the slot, so another repository cannot claim', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'orphan_prompt_unsettled', {
+      detail: 'A prompt was submitted but the agent was not observed to pick it up or to finish a turn.',
+    });
+
+    expect(h.store.jobs.byId(job.id)).toMatchObject({ state: 'failed', attempts: 0 });
+    expect(h.store.jobs.reservation('demo')).toMatchObject({ jobId: job.id, reason: 'orphan_agent' });
+    expect(h.store.jobs.admission()).toMatchObject({ jobId: job.id, reason: 'unconfirmed_stop' });
+
+    // The agent picks the work up late. Nothing about that frees anything.
+    const other = submit(h, 'other');
+    expect(h.app.jobs.claim(h.executorId, 'k2')).toBeUndefined();
+    expect(h.store.jobs.byId(other.id)?.state).toBe('queued');
+    const sameRepo = submit(h, 'demo');
+    expect(h.app.jobs.claim(h.executorId, 'k3')).toBeUndefined();
+    expect(h.store.jobs.byId(sameRepo.id)?.state).toBe('queued');
+    h.close();
+  });
+
+  it('is never a pause: the pause route will not take over the orphaned hold', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'orphan_prompt_unsettled');
+    expect(() => h.app.jobs.pauseJob(h.executorId, c.jobId, c.leaseId, PAUSE)).toThrow();
+    expect(h.store.jobs.admission()).toMatchObject({ jobId: job.id, reason: 'unconfirmed_stop' });
+    h.close();
+  });
+
+  it('is accepted by the executor failure schema as an orphan reason', async () => {
+    const { EXECUTOR_FAILURE_REASONS, ORPHAN_FAILURE_REASONS } = await import('@ducky/contracts');
+    expect(EXECUTOR_FAILURE_REASONS).toContain('orphan_prompt_unsettled');
+    expect(ORPHAN_FAILURE_REASONS).toContain('orphan_prompt_unsettled');
+  });
+});

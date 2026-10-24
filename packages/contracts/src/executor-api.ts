@@ -170,6 +170,13 @@ export type CancelAckRequest = z.infer<typeof CancelAckRequestSchema>;
 export const EXECUTOR_FAILURE_REASONS = [
   'orphan_agent_still_working',
   'orphan_agent_blocked',
+  /**
+   * A prompt was handed to the agent and the turn was never OBSERVED to settle
+   * (a stalled prompt nothing was seen to pick up, or an idle reading with no
+   * settle behind it). It claims neither that the agent is working nor why it is
+   * quiet: only that submitted work may still start, so nothing is released.
+   */
+  'orphan_prompt_unsettled',
   'foreign_agent_conflict',
   'herdr_unavailable',
   'workspace_rejected',
@@ -183,6 +190,7 @@ export type ExecutorFailureReason = (typeof EXECUTOR_FAILURE_REASONS)[number];
 export const ORPHAN_FAILURE_REASONS: readonly ExecutorFailureReason[] = [
   'orphan_agent_still_working',
   'orphan_agent_blocked',
+  'orphan_prompt_unsettled',
 ];
 
 export const JobFailureRequestSchema = z.strictObject({

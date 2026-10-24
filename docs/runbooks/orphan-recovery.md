@@ -13,8 +13,10 @@ a workspace that may still have uncommitted changes.
 
 ## When a repository stays blocked
 
-`/jobs` shows a job as `failed` with `orphan_agent_still_working` or
-`orphan_agent_blocked`, and new jobs for that repository stay `queued`.
+`/jobs` shows a job as `failed` with `orphan_agent_still_working`,
+`orphan_agent_blocked` or `orphan_prompt_unsettled` (a prompt was submitted and
+the turn was never seen to settle, so the agent may still start), and new jobs for
+that repository stay `queued`.
 
 That is deliberate. A Pi agent may still be running, so the reservation is
 converted to `orphan_agent` — which **never expires** — instead of being

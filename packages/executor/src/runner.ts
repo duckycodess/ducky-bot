@@ -298,9 +298,10 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   if (failure !== undefined) {
     const err = failure;
     const detail = isDuckyError(err) ? err.ownerMessage : 'The orchestrator failed.';
-    // A stalled prompt is NOT an outage: the orchestrator has already proved,
-    // via `agentGet`, that no agent of ours is running and no result was
-    // written. It is reported as an absent result so the reason stays honest.
+    // A thrown failure that is not an outage is reported as an absent result so
+    // the reason stays honest. A stalled prompt no longer arrives here: it is an
+    // `orphan_prompt_unsettled` outcome, because a submitted prompt that was not
+    // seen to settle proves nothing about the agent.
     const reason: ExecutorFailureReason =
       isDuckyError(err) && err.code === 'herdr_unavailable' ? 'herdr_unavailable' : 'no_result';
     await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
@@ -435,7 +436,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       await client.reportFailure(claim.jobId, claim.leaseId, outcome.reason, {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,
-        detail: `Agent ${outcome.agentName} could not be resolved safely.`,
+        detail: outcome.detail ?? `Agent ${outcome.agentName} could not be resolved safely.`,
       });
       return;
 

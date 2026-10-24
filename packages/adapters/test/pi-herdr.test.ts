@@ -547,7 +547,7 @@ describe('prompt failure', () => {
     await expect(orch.runJob(spec())).rejects.toThrow(/the wait died/);
   });
 
-  it('a stalled prompt that no agent ever picked up is a quiet pause, not an outage claim', async () => {
+  it('a stalled prompt that no agent was seen to pick up retains ownership, and is not an outage claim', async () => {
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     herdr.agentPrompt = async () => {
       throw new DuckyError('herdr_prompt_stalled', 'no activity observed');
@@ -555,7 +555,7 @@ describe('prompt failure', () => {
     const orch = orchestratorWith(herdr, undefined);
 
     const out = await orch.runJob(spec());
-    expect(out).toMatchObject({ kind: 'quiet_pause', cause: 'agent_idle_no_result', observed: 'idle' });
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
   });
 });
 
@@ -764,11 +764,15 @@ describe('a stalled prompt', () => {
     expect(out.kind).toBe('result');
   });
 
-  it('reports the stall honestly when the agent never starts and writes nothing', async () => {
+  it('retains ownership, and does not pause, when the agent never starts and writes nothing', async () => {
     const herdr = stalling(['idle']);
-    const err = await orch(herdr, undefined).runJob(spec()).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DuckyError);
-    expect((err as DuckyError).code).toBe('herdr_prompt_stalled');
+    const out = await orch(herdr, undefined).runJob(spec());
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
+    // Honest: submitted work was not observed to settle. It does not claim the
+    // agent is working, and it does not name a cause.
+    const detail = out.kind === 'orphan' ? (out.detail ?? '') : '';
+    expect(detail).toMatch(/not observed to pick it up or to finish a turn/);
+    expect(detail).not.toMatch(/working|quota|sign-in|credit/i);
   });
 });
 

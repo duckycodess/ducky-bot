@@ -125,6 +125,26 @@ describe('runner on a quiet_pause outcome', () => {
   });
 });
 
+describe('runner on an unsettled orphan outcome', () => {
+  const UNSETTLED: OrchestrationOutcome = {
+    kind: 'orphan', reason: 'orphan_prompt_unsettled', workspaceId: 'wZ', agentName: 'ducky-pi-demo',
+    detail: 'A prompt was submitted but the agent was not observed to pick it up or to finish a turn.',
+  };
+
+  it('reports it as an orphan with the honest detail, keeps the writer lock, and never pauses', async () => {
+    const c = makeClient(async () => ({ state: 'needs_owner_input', paused: true }));
+    await runClaimedJob({ client: c as never, orchestrator: returning(UNSETTLED), heartbeatMs: 50_000 }, claim());
+
+    expect(c.reportFailure).toHaveBeenCalledWith(
+      'job-1', 'lease-1', 'orphan_prompt_unsettled',
+      expect.objectContaining({ detail: expect.stringMatching(/not observed to pick it up/) }),
+    );
+    expect(c.pauseJob).not.toHaveBeenCalled();
+    // A possibly-live writer keeps the host lock, so a retry here cannot start a second one.
+    expect(heldLocks()).toEqual(['demo.lock']);
+  });
+});
+
 describe('the client pause report', () => {
   const clientWith = (responses: (Response | Error)[]) => {
     const fetchImpl = vi.fn(async () => {

@@ -42,6 +42,14 @@ interface TurnState {
 
 const MAX_TRACKED_TURNS = 64;
 
+/**
+ * Said when a prompt went to the agent and no settled turn was observed. It
+ * claims neither that the agent is working nor any cause for its quiet.
+ */
+const UNSETTLED_DETAIL =
+  'A prompt was submitted but the agent was not observed to pick it up or to finish a turn. ' +
+  'It may still start, so nothing was released and the repository stays reserved until you clear it.';
+
 /** Raised inside this module when the pre-prompt guard declines; never leaves it. */
 class PromptWithheld extends Error {
   constructor(readonly reason: string) {
@@ -599,7 +607,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     try {
       settled = await this.submitWhenReady(at, briefPointerPrompt(briefPath), spec);
     } catch (err) {
-      if (err instanceof PromptWithheld) return this.withheldOutcome(err, at);
+      if (err instanceof PromptWithheld) return this.withheldOutcome(err, at, spec);
       return this.afterPromptFailure(err, at, spec);
     }
 
@@ -622,7 +630,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
           workspacePath: at.workspacePath,
           reused: at.reused,
         }
-      : this.noResultOutcome(at);
+      : this.noResultOutcome(at, undefined, undefined, this.promptUnsettled(spec));
+  }
+
+  /** A prompt was handed over in THIS turn and the turn was never observed to settle. */
+  private promptUnsettled(spec: OrchestrationSpec | undefined): boolean {
+    const turn = spec ? this.turns.get(spec.jobId) : undefined;
+    return turn !== undefined && turn.promptSent && !turn.settled;
   }
 
   /**
@@ -643,6 +657,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
     cause: JobPauseCause = 'agent_idle_no_result',
     detail?: string,
+    unsettled = false,
   ): Promise<OrchestrationOutcome> {
     const base = { workspaceId: at.workspaceId, agentName: at.agentName };
     const noResult = {
@@ -666,6 +681,12 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     }
     if (agent.agent_status !== 'idle' && agent.agent_status !== 'done') return noResult;
     if (!(await this.workspaceIsOurs(at.workspaceId))) return noResult;
+    // Quiet is not enough when a prompt WAS handed over and its turn was never
+    // observed to settle: an idle reading may only mean the agent has not picked
+    // the work up yet, and a pause would release the slot under it.
+    if (unsettled) {
+      return { kind: 'orphan', reason: 'orphan_prompt_unsettled', ...base, detail: UNSETTLED_DETAIL };
+    }
     return {
       kind: 'quiet_pause',
       cause,
@@ -757,7 +778,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
               workspacePath: at.workspacePath,
               reused: at.reused,
             }
-          : this.noResultOutcome(at);
+          : this.noResultOutcome(at, undefined, undefined, this.promptUnsettled(spec));
       }
       // 'never_started': no pickup was observed within the grace and nothing was
       // written. That is a quiet agent without a result -- possibly one that
@@ -811,12 +832,22 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         reused: at.reused,
       };
     }
-    // A stalled turn that nobody picked up is the one failure that is also a
-    // quiet agent without a result. Any other error stays an error: a
-    // malformed or unexpected failure must not be relabelled as a pause.
+    // A stalled prompt that nobody was seen to pick up is NOT a quiet agent. The
+    // text was delivered, and Herdr saw no lifecycle change inside its window or
+    // ours; the agent may simply start later. So nothing is released and no pause
+    // is made: the outcome is an orphan that keeps the writer lock, the repository
+    // and the slot, saying only that submitted work was not observed to settle.
+    // It claims neither that the agent is working nor any cause for the silence.
+    // Any OTHER error stays an error: a malformed or unexpected failure must not
+    // be relabelled as anything.
     if (spec !== undefined && isDuckyError(err) && err.code === 'herdr_prompt_stalled') {
-      const quiet = await this.noResultOutcome(at);
-      if (quiet.kind === 'quiet_pause') return quiet;
+      return {
+        kind: 'orphan',
+        reason: 'orphan_prompt_unsettled',
+        workspaceId: at.workspaceId,
+        agentName: at.agentName,
+        detail: UNSETTLED_DETAIL,
+      };
     }
     // Nothing running and nothing written: re-raise so the caller reports the
     // real reason (a stall is not an outage) rather than inventing one here.
@@ -832,11 +863,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   private withheldOutcome(
     err: PromptWithheld,
     at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
+    spec: OrchestrationSpec,
   ): Promise<OrchestrationOutcome> {
     return this.noResultOutcome(
       at,
       'memory_headroom_unproven',
       'The prompt was withheld before any model work was sent: ' + err.reason,
+      this.promptUnsettled(spec),
     );
   }
 

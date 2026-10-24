@@ -80,9 +80,11 @@ export type OrchestrationOutcome =
     }
   | {
       kind: 'orphan';
-      reason: 'orphan_agent_still_working' | 'orphan_agent_blocked';
+      reason: 'orphan_agent_still_working' | 'orphan_agent_blocked' | 'orphan_prompt_unsettled';
       workspaceId: string;
       agentName: string;
+      /** Owner-safe wording for this outcome, when the default is not accurate enough. */
+      detail?: string;
     }
   /**
    * The agent is PROVEN quiet and left no valid result (or the prompt was

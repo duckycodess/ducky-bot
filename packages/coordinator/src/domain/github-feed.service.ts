@@ -6,7 +6,7 @@ import {
   GITHUB_FEED_MAX_PR_CHECKS, GITHUB_FEED_MAX_REVIEW_REQUESTS, GITHUB_FEED_MAX_SELECTED,
   GITHUB_FEED_UNIT_BATCH, GITHUB_DIGEST_STALE_AFTER_MS,
   GITHUB_DIGEST_SWEEP_GRACE_MS, GitHubFeedCardSchema,
-  canonicalRepoKey, commitTransition, feedEventTransition, githubFeedTarget, parseRepoKey,
+  canonicalRepoKey, canonicalStamp, commitTransition, feedEventTransition, githubFeedTarget, parseRepoKey,
   zonedDateKey,
   type CommitsPage, type GitHubCommitDigestSection, type PrList, type GitHubFeedCard, type GitHubFeedKind,
   type GitHubFeedTarget,
@@ -240,6 +240,12 @@ export class GitHubFeedService {
       return n + parseCheckState(this.store.githubFeed.cursor(r.repoKey, 'checks')?.meta ?? null).unread;
     }, 0);
     if (unread > 0) notes.push(`${unread} pull request check read${unread === 1 ? '' : 's'} skipped last pass`);
+    const held = this.store.githubFeed.heldEventCount();
+    if (held > 0) {
+      notes.push(
+        `${held} requested-changes card${held === 1 ? '' : 's'} HELD, neither sent nor skipped: it cannot be told from a review the notification target already delivered`,
+      );
+    }
     if (this.config.reviewRequests &&
         parseRequestState(this.store.githubFeed.cursor('@me', 'review_requests')?.meta ?? null).saturated) {
       notes.push(`review request window full, so only the ${GITHUB_FEED_MAX_REVIEW_REQUESTS} most recently updated are watched`);
@@ -352,10 +358,11 @@ export class GitHubFeedService {
       if (!parsed) continue;
       // Only the row this very read inserted (a deduplicated key keeps its first row).
       if (feed.eventByKey(e.eventKey)?.id !== e.id) continue;
-      const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition);
+      const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition, e.providerAt ?? null);
       if (probe === 'target_delivered') feed.markEventSkipped(e.id, atIso);
+      else if (probe === 'ambiguous') feed.holdEvent(e.id, 'ambiguous_review');
       else if (probe === 'free') {
-        ledger.reserveNative(this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', e.id, atIso, atIso);
+        ledger.reserveNative(this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', e.id, atIso, atIso, e.providerAt ?? null);
       }
     }
     if (read.commits) {
@@ -809,6 +816,9 @@ export class GitHubFeedService {
         id: randomUUID(), eventKey: c.key, kind: c.kind, repoKey: c.repoKey ?? unit.scope, origin,
         cardJson: announce ? JSON.stringify(c.card()) : null,
         status: announce ? 'pending' : 'baseline',
+        // A review's submission instant, canonical: what tells it APART from the target's review of
+        // the same pull request when their ids cannot be compared.
+        providerAt: c.kind === 'changes_requested' ? canonicalStamp(c.stamp) : null,
       });
     }
     return { events, cursor: newest ?? unit.cursor };
@@ -835,20 +845,29 @@ export class GitHubFeedService {
       if (parsed) {
         const decision = withTransaction(this.store.db, () => {
           const ledger = this.store.nativeTransitions;
-          const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition);
+          const probe = ledger.probeNative(this.ownerId, parsed.repoKey, parsed.transition, event.providerAt);
           if (probe === 'target_delivered') {
             feed.markEventSkipped(event.id, at);
             return 'skipped' as const;
           }
           if (probe === 'target_in_flight') return 'wait' as const;
-          ledger.reserveNative(this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', event.id, event.createdAt, at);
+          if (probe === 'ambiguous') {
+            // Cannot be told from the review the target delivered: neither sent nor skipped. The hold
+            // is durable, releases any reservation it had, charges no attempt and is counted.
+            feed.holdEvent(event.id, 'ambiguous_review');
+            ledger.releaseNative('feed_event', event.id);
+            return 'held' as const;
+          }
+          ledger.reserveNative(
+            this.ownerId, parsed.repoKey, parsed.transition, 'feed_event', event.id, event.createdAt, at, event.providerAt,
+          );
           return 'send' as const;
         });
         if (decision === 'skipped') {
           r.skipped += 1;
           continue;
         }
-        if (decision === 'wait') continue;
+        if (decision === 'wait' || decision === 'held') continue;
       }
       const card = parseCard(event);
       if (!card) {

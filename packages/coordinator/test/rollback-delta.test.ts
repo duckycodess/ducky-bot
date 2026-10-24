@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createStore, openDatabase, runMigrations } from '@ducky/persistence';
 import { AssistantImportService } from '../src/domain/assistant-import.service.js';
 import {
   ROLLBACK_DELTA_SCHEMA, buildRollbackDelta, deltaCounts, type CategoryDelta, type RollbackDelta,
@@ -386,5 +387,33 @@ describe('the v3 export says what exact native reconciliation recorded', () => {
     expect(d.incomplete).toContainEqual({ category: 'native_ledger', rule: 'native_ledger_unreadable', count: 1 });
     expect(d.state.nativeLedger.boundary).toBeNull();
     h.close();
+  });
+
+  it('carries what the migration staged and no reader has seeded yet, and the count of held native cards', () => {
+    const raw = openDatabase({ location: ':memory:' });
+    runMigrations(raw, { upTo: 35 });
+    raw.prepare(
+      `INSERT INTO github_feed_events (id, event_key, kind, repo_key, origin, card_json, status, delivered_at, delivered_to, created_at)
+       VALUES ('f1','pr_opened:acme/demo#7','pr_opened','acme/demo','selected',NULL,'delivered',?, 'owner_dm', ?)`,
+    ).run(NOW, NOW);
+    runMigrations(raw);
+    const store = createStore(raw);
+    raw.prepare(
+      `INSERT INTO github_feed_events (id, event_key, kind, repo_key, origin, card_json, status, created_at, held_reason)
+       VALUES ('h1','changes_requested:acme/demo#7:X','changes_requested','acme/demo','selected',NULL,'pending',?, 'ambiguous_review')`,
+    ).run(NOW);
+    expect(store.nativeTransitions.boundary()?.seededAt).toBeNull(); // nobody knew the owner yet
+    const d = buildRollbackDelta({ store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:00.000Z' });
+    expect(d.state.nativeLedger.claims).toEqual([]);
+    expect(d.state.nativeLedger.staged).toEqual([
+      expect.objectContaining({ repoKey: 'acme/demo', kind: 'pr_opened', item: '7', deliveredTo: 'owner_dm' }),
+    ]);
+    expect(d.state.nativeLedger.heldNativeCards).toBe(1);
+    expect(d.replay.join(' ')).toMatch(/staged.*same kind of fact/s);
+    // Once seeded the same facts are claims, and the stage is empty: the export never says less than the database holds.
+    store.nativeTransitions.ensureSeeded(OWNER, '2026-10-14T00:00:01.000Z');
+    const after = buildRollbackDelta({ store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:02.000Z' });
+    expect(after.state.nativeLedger.staged).toEqual([]);
+    expect(after.state.nativeLedger.claims).toHaveLength(1);
   });
 });

@@ -597,6 +597,10 @@ export interface GitHubFeedEventRow {
   deliveredAt: string | null;
   deliveredTo: GitHubFeedTarget | null;
   createdAt: string;
+  /** The provider's canonical instant for the fact the card tells (a review's submission), or null. */
+  providerAt: string | null;
+  /** Set when the card cannot be told from one the target delivered: never sent, skipped or receipted. */
+  heldReason: 'ambiguous_review' | null;
 }
 
 export interface GitHubFeedCommitRow {

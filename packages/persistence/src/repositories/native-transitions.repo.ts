@@ -1,5 +1,5 @@
 import {
-  NATIVE_LEGACY_SKEW_MS, feedEventTransition, isWellFormedTransition, targetTransition,
+  NATIVE_LEGACY_SKEW_MS, canonicalStamp, feedEventTransition, isWellFormedTransition, targetTransition,
   transitionKey, transitionRepoKey,
   type TargetEventFacts, type Transition, type TransitionKind,
 } from '@ducky/contracts';
@@ -45,8 +45,13 @@ export interface LedgerBoundary {
   readonly seededAt: string | null;
 }
 
-/** What a native path may do with one item it is about to tell. */
-export type NativeProbe = 'free' | 'target_delivered' | 'target_in_flight';
+/**
+ * What a native path may do with one item it is about to tell. `ambiguous`: the target delivered a
+ * requested-changes review on the SAME pull request whose id differs, and nothing proves the two are
+ * different reviews (the provider instants are equal or one is unknown): the card is neither sent nor
+ * skipped, it is HELD and counted.
+ */
+export type NativeProbe = 'free' | 'target_delivered' | 'target_in_flight' | 'ambiguous';
 
 /** What an imported event may do. */
 export type TargetResolution =
@@ -162,6 +167,7 @@ export class NativeTransitionsRepo {
     observedAt: string;
     atIso: string;
     delivered?: { at: string; to: DeliveredTo };
+    providerAt?: string | null;
   }): boolean {
     if (!isWellFormedTransition(c.transition)) return false;
     const repo = transitionRepoKey(c.repoKey);
@@ -170,12 +176,12 @@ export class NativeTransitionsRepo {
     const res = this.db
       .prepare(
         `INSERT OR IGNORE INTO native_transition_claims
-           (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt,
+           (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
             path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
-        c.ownerId, repo, transitionKey(t), t.kind, t.item, t.stamp, t.hash, t.attempt,
+        c.ownerId, repo, transitionKey(t), t.kind, t.item, t.stamp, t.hash, t.attempt, canonicalStamp(c.providerAt ?? null),
         c.path, c.delivered ? 'delivered' : 'reserved', c.via, c.ref, c.observedAt,
         c.delivered?.to ?? null, c.delivered?.at ?? null, c.atIso, c.atIso,
       );
@@ -217,11 +223,13 @@ export class NativeTransitionsRepo {
   /**
    * Whether a native path may tell this item. Only an ACTUALLY DELIVERED target transition
    * lets it skip; a target send in flight makes it wait (the caller defers); anything else,
-   * including an imported event that merely exists, is free.
+   * including an imported event that merely exists, is free. A requested-changes review is
+   * compared with the target's claims on the same pull request (`probeReview`).
    */
-  probeNative(ownerId: string, repoKey: string, t: Transition): NativeProbe {
+  probeNative(ownerId: string, repoKey: string, t: Transition, providerAt: string | null = null): NativeProbe {
     const repo = transitionRepoKey(repoKey);
     if (repo === null || !isWellFormedTransition(t)) return 'free';
+    if (t.kind === 'changes_requested') return this.probeReview(ownerId, repo, t, canonicalStamp(providerAt));
     // An update is covered by a target update at or after it; every other kind by its exact key.
     const state = t.kind === 'pr_updated'
       ? this.strongest(ownerId, repo, t.kind, t.item, 'target', 'AND stamp >= ?', t.stamp ?? '')
@@ -229,11 +237,37 @@ export class NativeTransitionsRepo {
     return state === 'delivered' ? 'target_delivered' : state === 'reserved' ? 'target_in_flight' : 'free';
   }
 
+  /**
+   * A requested-changes card against the target's claims on the same pull request. The exact key (the
+   * hash of the review id) decides when the ids match. A DIFFERENT hash is not proof of a different
+   * review (the native and REST ids may simply not be comparable on a live provider), so: a target send
+   * in flight makes the card wait; a delivered one proves a DIFFERENT review only when both provider
+   * instants are known and differ (then the card is sent); an equal or unknown instant cannot be told
+   * apart, so the card is HELD, never sent, skipped or receipted.
+   */
+  private probeReview(ownerId: string, repo: string, t: Transition, providerAt: string | null): NativeProbe {
+    const exact = this.byKeyState(ownerId, repo, transitionKey(t), 'target');
+    if (exact === 'delivered') return 'target_delivered';
+    if (exact === 'reserved') return 'target_in_flight';
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN state = 'reserved' THEN 1 ELSE 0 END), 0) AS reserved,
+                COALESCE(SUM(CASE WHEN state = 'delivered'
+                                   AND (provider_at IS NULL OR ? IS NULL OR provider_at = ?) THEN 1 ELSE 0 END), 0) AS unprovable
+           FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND kind = 'changes_requested' AND item = ? AND path = 'target'`,
+      )
+      .get(providerAt, providerAt, ownerId, repo, t.item) as { reserved: number; unprovable: number };
+    if (Number(r.reserved) > 0) return 'target_in_flight';
+    return Number(r.unprovable) > 0 ? 'ambiguous' : 'free';
+  }
+
   /** Reserves a transition for a native outbox row. False when something already owns it. */
   reserveNative(
     ownerId: string, repoKey: string, t: Transition, via: ClaimVia, ref: string, observedAt: string, atIso: string,
+    providerAt: string | null = null,
   ): boolean {
-    return this.insertClaim({ ownerId, repoKey, transition: t, path: 'native', via, ref, observedAt, atIso });
+    return this.insertClaim({ ownerId, repoKey, transition: t, path: 'native', via, ref, observedAt, atIso, providerAt });
   }
 
   /** The outbox row was delivered: its reservations become receipts. Same transaction as the settlement. */
@@ -429,6 +463,7 @@ export class NativeTransitionsRepo {
     }
     const ok = this.insertClaim({
       ownerId, repoKey: repo, transition: t.transition, path: 'target', via, ref, observedAt: atIso, atIso,
+      providerAt: e.occurredAt,
     });
     return ok ? { reserved: true, resolution } : { reserved: false, resolution: { outcome: 'wait' } };
   }

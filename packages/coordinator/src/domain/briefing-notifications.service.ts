@@ -264,6 +264,9 @@ export class BriefingNotifier {
           // goes.
           this.store.briefings.markSkipped(row.id, nowIso);
           skippedStale += 1;
+          // Nothing will be sent: the reservation made for this briefing goes, so the events are not
+          // left looking like a send in flight.
+          if (reservedDigest.length > 0) this.watch?.releaseDigest(reservedDigest);
           continue;
         }
         await this.transport.send(to, briefingMessage(body));

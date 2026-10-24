@@ -68,6 +68,10 @@ export interface OwnerStateSnapshot {
   readonly nativeClaims: RawRow[];
   /** Where the native ledger starts; null when it cannot be read. */
   readonly nativeBoundary: RawRow | null;
+  /** Rows the migration staged for the first reader that knows the owner (empty once seeded). */
+  readonly nativeStaged: RawRow[];
+  /** Native requested-changes cards on hold (a count: their keys carry a native review id). */
+  readonly heldNativeCards: number;
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
   /** A deletion cause row present at read time: a process died mid-deletion. */
@@ -180,6 +184,11 @@ export class RollbackDeltaRepo {
         owner,
       ),
       nativeBoundary: (this.db.prepare('SELECT * FROM native_ledger_boundary WHERE id = 1').get() as RawRow | undefined) ?? null,
+      nativeStaged: read('native_legacy_seed', 'SELECT * FROM native_legacy_seed ORDER BY repo_key, transition_key'),
+      heldNativeCards: Number(
+        (this.db.prepare("SELECT COUNT(*) AS n FROM github_feed_events WHERE status = 'pending' AND held_reason IS NOT NULL").get() as
+          { n: number }).n,
+      ),
       truncated,
       deletionContext: (this.db.prepare('SELECT * FROM deletion_context WHERE id = 1').get() as RawRow | undefined) ?? null,
       foreignKeyViolations: this.db.prepare('PRAGMA foreign_key_check').all().length,

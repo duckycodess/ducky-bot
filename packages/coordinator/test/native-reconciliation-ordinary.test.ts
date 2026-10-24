@@ -167,6 +167,46 @@ describe('a summary reserves exactly the items its words name', () => {
   });
 });
 
+describe('a summary clipped to its length reserves only the items it shows in full', () => {
+  const LONG = (n: number) => `${'long title '.repeat(20)}${n}`.slice(0, 160) + `#${n}`.padEnd(20, '.');
+  // Three pull requests updated AND merged in one pass (the snapshot holds at most five).
+  const settle = (n: number, title: (i: number) => string) =>
+    prs(n, (i) => ({ title: title(i), ...(i < 3 ? { state: 'MERGED', mergedAt: at(2 + i), updatedAt: at(1 + i) } : {}) }));
+
+  it('keeps no claim for a third merge the clamp cut off, so a native receipt can never settle what the owner did not read', async () => {
+    const { h, reader, step } = await start(prs(5, (i) => ({ title: LONG(i + 1) })));
+    // Two previously listed pull requests are gone and a head has failing checks: lines in front of the
+    // merge line that push its third item past the clamp.
+    reader.prs = settle(3, (i) => LONG(i + 1));
+    reader.checks.set(1, [{ name: 'tests', state: 'FAILURE', bucket: 'fail' }]);
+    await step();
+    const body = JSON.parse(sent(h))[0].message.embeds[0].description as string;
+    expect(body.length).toBeLessThanOrEqual(1200);
+    expect(body.endsWith('…')).toBe(true);
+    // Merges 1 and 2 are read in full; 3 is cut off and is no receipt. All three updates are in full.
+    expect(body).toContain(LONG(2));
+    expect(body.split(LONG(3)).length - 1).toBe(1); // read once (the update line), cut off in the merge line
+    expect(claims(h).filter((c) => c.transition.kind === 'pr_merged').map((c) => c.transition.item).sort()).toEqual(['1', '2']);
+    expect(claims(h).filter((c) => c.transition.kind === 'pr_updated').map((c) => c.transition.item).sort()).toEqual(['1', '2', '3']);
+    // The imported event for the merge nobody read is NOT settled by a native receipt: it is told.
+    const merged = (n: number) => ({
+      kind: 'pr_merged' as const, identity: `${n}:merged`, occurredAt: at(2 + n - 1), providerHash: null, attempt: null,
+    });
+    expect(h.store.nativeTransitions.resolveTarget(OWNER, 'acme/demo', merged(2))).toEqual({ outcome: 'covered' });
+    expect(h.store.nativeTransitions.resolveTarget(OWNER, 'acme/demo', merged(3))).toEqual({ outcome: 'deliver' });
+    h.close();
+  });
+
+  it('claims every named item when nothing is clipped, and the claims are exactly the items in the text', async () => {
+    const { h, reader, step } = await start(prs(5));
+    reader.prs = settle(5, (i) => `PR ${i + 1}`);
+    await step();
+    expect(claims(h).map((c) => `${c.transition.kind}:${c.transition.item}`).sort())
+      .toEqual(['pr_merged:1', 'pr_merged:2', 'pr_merged:3', 'pr_updated:1', 'pr_updated:2', 'pr_updated:3']);
+    h.close();
+  });
+});
+
 describe('an item the imported target already delivered is taken out, and only that item', () => {
   const targetDelivered = (h: Harness, n: number, stamp: string) => {
     h.store.nativeTransitions.reserveTarget(OWNER, 'acme/demo', {

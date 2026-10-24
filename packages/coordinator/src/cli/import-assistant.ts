@@ -33,9 +33,13 @@ import { UnavailableAssistantWatchReader } from '../domain/assistant-watch.reade
  * What it prints is counts and rule names. It never prints a title, an id, a
  * repository, a preference or a path.
  *
- * Exit codes: 0 passed; 2 refused before reading anything of the data (usage,
- * paths, configuration, schema); 3 the document or the backup was refused; 4 a
- * live process holds the database.
+ * Exit codes: 0 passed (for `--verify`: nothing missing, nothing changed at the source, nothing
+ * drifted, and the native ledger clear); 2 refused before reading anything of the data (usage,
+ * paths, configuration, schema); 3 the document or the backup was refused (for `--verify`: a record
+ * missing or changed at the source); 4 a live process holds the database; 5 `--verify` found the
+ * data present but NOT at parity: a record drifted since the import, or the native ledger is not
+ * clear (a withheld event, a held native card, a cursor at or before the ledger cutoff, or an
+ * unreadable boundary). Counts only, never a repository.
  */
 export interface CliIo {
   readonly out: (text: string) => void;
@@ -57,7 +61,9 @@ const has = (args: readonly string[], name: string): boolean => args.includes(`-
 
 const USAGE =
   'usage: pnpm import:assistant --db <db> --file <document.json> [--backup <backup.db>] [--verify | --apply]\n' +
-  '  default: validate only (a dry run). --apply needs --backup and a stopped coordinator.\n';
+  '  default: validate only (a dry run). --apply needs --backup and a stopped coordinator.\n' +
+  '  --verify exits 0 only at parity; 3 when a record is missing or changed at the source; 5 when it is\n' +
+  '  present but NOT at parity (drift, or the native ledger is not clear).\n';
 
 /** The path as the filesystem sees it, with every symlink followed. */
 function real(p: string): string {
@@ -169,7 +175,9 @@ export function runImportCli(
       // Read only, and reads nothing the coordinator cannot be writing safely.
       const report = svc.verify(doc);
       print(report);
-      return report.ok ? 0 : 3;
+      // Present but not at parity is its own code: a gate that exits 0 on a withheld event or a
+      // drifted record would be read as a pass (ADR 0034).
+      return !report.ok ? 3 : report.parity ? 0 : 5;
     }
 
     // A dry run and an apply both take the shared lock first. A dry run against a

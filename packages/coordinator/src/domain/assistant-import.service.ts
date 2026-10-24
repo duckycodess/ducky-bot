@@ -778,13 +778,17 @@ export class AssistantImportService {
     const cursorsBelow = boundary && !boundary.fresh
       ? this.store.assistantWatch.cursorsAtOrBefore(owner, Date.parse(boundary.cutoffAt) + NATIVE_LEGACY_SKEW_MS)
       : 0;
+    // A native requested-changes card held because it cannot be told from a review the target delivered
+    // is a notification that was not sent either.
+    const heldCards = this.store.githubFeed.heldEventCount();
     const nativeLedger: NativeLedgerReport = {
       readable: boundary !== undefined,
       fresh: boundary?.fresh ?? false,
       withheldLegacy: held.legacyUnproven,
       withheldAmbiguous: held.ambiguousEvidence,
       cursorsAtOrBeforeCutoff: cursorsBelow,
-      clear: boundary !== undefined && held.legacyUnproven + held.ambiguousEvidence + cursorsBelow === 0,
+      heldNativeCards: heldCards,
+      clear: boundary !== undefined && held.legacyUnproven + held.ambiguousEvidence + cursorsBelow + heldCards === 0,
     };
     const totals = Object.values(cats);
     const ok = totals.every((c) => c.missing === 0 && c.changedAtSource === 0);
@@ -809,7 +813,9 @@ export interface NativeLedgerReport {
   readonly withheldLegacy: number;
   readonly withheldAmbiguous: number;
   readonly cursorsAtOrBeforeCutoff: number;
-  /** Nothing withheld, no cursor below the cutoff, and the boundary readable. */
+  /** Native requested-changes cards held, neither sent nor skipped (ADR 0034). */
+  readonly heldNativeCards: number;
+  /** Nothing withheld or held, no cursor below the cutoff, and the boundary readable. */
   readonly clear: boolean;
 }
 

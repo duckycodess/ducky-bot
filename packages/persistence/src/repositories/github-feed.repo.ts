@@ -47,6 +47,8 @@ const mapEvent = (r: Record<string, unknown>): GitHubFeedEventRow => ({
   deliveredAt: str(r['delivered_at']),
   deliveredTo: str(r['delivered_to']) as GitHubFeedTarget | null,
   createdAt: String(r['created_at']),
+  providerAt: str(r['provider_at']),
+  heldReason: str(r['held_reason']) as 'ambiguous_review' | null,
 });
 
 const mapCommit = (r: Record<string, unknown>): GitHubFeedCommitRow => ({
@@ -84,6 +86,8 @@ export interface NewFeedEvent {
   readonly origin: GitHubFeedEventOrigin;
   readonly cardJson: string | null;
   readonly status: 'baseline' | 'pending';
+  /** The provider's instant for the fact (a review's submission time), when one is known. */
+  readonly providerAt?: string | null;
 }
 
 export interface NewFeedCommit {
@@ -287,11 +291,11 @@ export class GitHubFeedRepo {
 
     const insertEvent = this.db.prepare(
       `INSERT OR IGNORE INTO github_feed_events
-         (id, event_key, kind, repo_key, origin, card_json, status, created_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
+         (id, event_key, kind, repo_key, origin, card_json, status, created_at, provider_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
     );
     for (const e of input.events ?? []) {
-      insertEvent.run(e.id, e.eventKey, e.kind, e.repoKey, e.origin, e.cardJson, e.status, input.atIso);
+      insertEvent.run(e.id, e.eventKey, e.kind, e.repoKey, e.origin, e.cardJson, e.status, input.atIso, e.providerAt ?? null);
     }
     if (input.commits) {
       const insertCommit = this.db.prepare(
@@ -355,9 +359,15 @@ export class GitHubFeedRepo {
     return known;
   }
 
+  /**
+   * Cards still to be sent. A HELD card is not pending work (nothing will send it), so a pile of them
+   * can never fill the batch and starve the cards behind them.
+   */
   pendingEvents(limit: number): GitHubFeedEventRow[] {
     return this.db
-      .prepare("SELECT * FROM github_feed_events WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?")
+      .prepare(
+        "SELECT * FROM github_feed_events WHERE status = 'pending' AND held_reason IS NULL ORDER BY created_at ASC LIMIT ?",
+      )
       .all(limit)
       .map((r) => mapEvent(r as Record<string, unknown>));
   }
@@ -389,6 +399,26 @@ export class GitHubFeedRepo {
           WHERE id = ? AND status = 'pending'`,
       )
       .run(atIso, maxAttempts, id);
+  }
+
+  /**
+   * Puts a pending card on a durable hold: it cannot be told from a review the target delivered, so it
+   * is neither sent nor skipped, charges no attempt and writes no receipt, and stays counted.
+   */
+  holdEvent(id: string, reason: 'ambiguous_review'): boolean {
+    return Number(
+      this.db
+        .prepare("UPDATE github_feed_events SET held_reason = ? WHERE id = ? AND status = 'pending' AND held_reason IS NULL")
+        .run(reason, id).changes,
+    ) === 1;
+  }
+
+  /** How many pending cards are on hold (counts only). */
+  heldEventCount(): number {
+    return Number(
+      (this.db.prepare("SELECT COUNT(*) AS n FROM github_feed_events WHERE status = 'pending' AND held_reason IS NOT NULL").get() as
+        { n: number }).n,
+    );
   }
 
   markEventSkipped(id: string, atIso: string): void {

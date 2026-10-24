@@ -217,6 +217,35 @@ describe('what is sent and what is carried forward', () => {
   });
 });
 
+describe('a long run of waiting events cannot hide a deliverable one', () => {
+  it('finds a fresh deliverable event behind more than a thousand that a native path holds, and counts them all', async () => {
+    const { h, clock } = boot();
+    const WAITING = 1_150;
+    const ins = h.store.db.prepare(
+      `INSERT INTO assistant_watch_events (id, target_id, kind, surface, identity, occurred_at, payload_json, origin, created_at)
+       VALUES (?, 't1', ?, 'pulls', ?, ?, ?, 'observed', ?)`,
+    );
+    const reserve = h.store.nativeTransitions;
+    for (let n = 1; n <= WAITING; n += 1) {
+      ins.run(`w${n}`, 'pr_opened', `${n}:opened`, '2026-10-12T00:00:00.000Z', JSON.stringify({ number: n, title: `Waiting ${n}` }), NOW);
+      reserve.reserveNative(OWNER, 'acme/demo', { kind: 'pr_opened', item: String(n), stamp: null, hash: null, attempt: null }, 'feed_event', `f${n}`, NOW, NOW);
+    }
+    // Fresh, later in the digest's order, and nothing native holds it.
+    ins.run('fresh', 'pr_merged', '9999:merged', '2026-10-12T10:00:00.000Z', JSON.stringify({ number: 9999, title: 'Fresh work' }), NOW);
+
+    const digest = h.app.assistantWatch.digest();
+    expect(digest.repos.flatMap((r) => r.lines)).toEqual(['PR #9999 merged: Fresh work']);
+    expect(h.app.assistantWatch.statusLine()).toMatch(new RegExp(`${WAITING} event\\(s\\) waiting on a native notification`));
+    // And a pushed briefing carries it, while every waiting event stays unread and unreserved.
+    clock.set('2026-10-13T08:00:00.000Z');
+    expect((await h.app.briefingNotifier.tick()).delivered).toBe(1);
+    expect(sentJson(h)).toContain('Fresh work');
+    expect(h.store.db.prepare("SELECT COUNT(*) n FROM assistant_watch_events WHERE digested_at IS NULL").get()).toEqual({ n: WAITING });
+    expect(h.store.nativeTransitions.counts().reservedTarget).toBe(0);
+    h.close();
+  });
+});
+
 describe('an import decides what it writes against the same ledger', () => {
   const apply = (h: Harness, clock: TestClock, doc: unknown = importDoc()) => {
     const lock = takeLock(h.store);
@@ -241,7 +270,7 @@ describe('an import decides what it writes against the same ledger', () => {
     expect(unsettled(h)).toEqual({ withheld_reason: null, settled_by: null });
     const report = new AssistantImportService({ store: h.store, env: importEnv(), nowMs: () => clock.nowMs() }).verify(importDoc());
     expect(report.nativeLedger).toEqual({
-      readable: true, fresh: true, withheldLegacy: 0, withheldAmbiguous: 0, cursorsAtOrBeforeCutoff: 0, clear: true,
+      readable: true, fresh: true, withheldLegacy: 0, withheldAmbiguous: 0, cursorsAtOrBeforeCutoff: 0, heldNativeCards: 0, clear: true,
     });
     expect(report.parity).toBe(true);
     h.close();

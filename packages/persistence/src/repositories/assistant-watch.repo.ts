@@ -1380,20 +1380,30 @@ export class AssistantWatchRepo {
     };
   }
 
-  /** Unsettled events of active targets that a native path currently holds (bounded by `limit`). */
-  waitingOnNative(ownerId: string, limit = 400): number {
-    const rows = this.db
-      .prepare(
-        `SELECT e.*, t.repo_key AS target_repo_key FROM assistant_watch_events e
-           JOIN assistant_watch_targets t ON t.id = e.target_id
-          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.digested_at IS NULL AND e.held = 0
-            AND e.withheld_reason IS NULL AND e.kind != 'review_pending'
-          ORDER BY e.created_at ASC LIMIT ?`,
-      )
-      .all(ownerId, limit) as Record<string, unknown>[];
-    return rows.filter(
-      (r) => this.ledger.resolveTarget(ownerId, String(r['target_repo_key']), this.factsOf(r)).outcome === 'wait',
-    ).length;
+  /**
+   * Unsettled events of active targets that a native path currently holds. Paged, and bounded by
+   * `maxScan` events looked at in total, so a long run of waiting events at the head of the order
+   * cannot hide what is behind it and the work stays bounded.
+   */
+  waitingOnNative(ownerId: string, maxScan = 10_000): number {
+    const page = 400;
+    let waiting = 0;
+    for (let offset = 0; offset < maxScan; offset += page) {
+      const rows = this.db
+        .prepare(
+          `SELECT e.*, t.repo_key AS target_repo_key FROM assistant_watch_events e
+             JOIN assistant_watch_targets t ON t.id = e.target_id
+            WHERE t.discord_user_id = ? AND t.state = 'active' AND e.digested_at IS NULL AND e.held = 0
+              AND e.withheld_reason IS NULL AND e.kind != 'review_pending'
+            ORDER BY e.created_at ASC, e.id ASC LIMIT ? OFFSET ?`,
+        )
+        .all(ownerId, page, offset) as Record<string, unknown>[];
+      for (const r of rows) {
+        if (this.ledger.resolveTarget(ownerId, String(r['target_repo_key']), this.factsOf(r)).outcome === 'wait') waiting += 1;
+      }
+      if (rows.length < page) break;
+    }
+    return waiting;
   }
 
   eventsFor(targetId: string): WatchEventRow[] {
@@ -1465,7 +1475,7 @@ export class AssistantWatchRepo {
    * as an alert and must not appear twice). An alert that was sent, or whose
    * alert was abandoned, is digest-eligible: the digest is the safety net.
    */
-  undigested(ownerId: string, limit: number): WatchEventWithTarget[] {
+  undigested(ownerId: string, limit: number, offset = 0): WatchEventWithTarget[] {
     return this.db
       .prepare(
         `SELECT e.*, t.display, t.discord_user_id, t.repo_key AS target_repo_key
@@ -1474,9 +1484,9 @@ export class AssistantWatchRepo {
           WHERE t.discord_user_id = ? AND t.state = 'active' AND e.held = 0 AND e.withheld_reason IS NULL
             AND e.digested_at IS NULL AND e.kind != 'review_pending'
             AND NOT (e.kind IN (${ALERT_LIST}) AND e.alerted_at IS NULL AND e.alert_abandoned_at IS NULL)
-          ORDER BY t.display ASC, e.occurred_at ASC, e.id ASC LIMIT ?`,
+          ORDER BY t.display ASC, e.occurred_at ASC, e.id ASC LIMIT ? OFFSET ?`,
       )
-      .all(ownerId, limit)
+      .all(ownerId, limit, offset)
       .map((raw) => {
         const r = raw as Record<string, unknown>;
         return {
@@ -1484,6 +1494,27 @@ export class AssistantWatchRepo {
           targetRepoKey: String(r['target_repo_key']),
         };
       });
+  }
+
+  /** The named undigested events of one owner, by id (a lookup that does not depend on a scan window). */
+  undigestedByIds(ownerId: string, ids: readonly string[]): WatchEventWithTarget[] {
+    const stmt = this.db.prepare(
+      `SELECT e.*, t.display, t.discord_user_id, t.repo_key AS target_repo_key
+         FROM assistant_watch_events e
+         JOIN assistant_watch_targets t ON t.id = e.target_id
+        WHERE t.discord_user_id = ? AND t.state = 'active' AND e.id = ? AND e.held = 0 AND e.withheld_reason IS NULL
+          AND e.digested_at IS NULL AND e.kind != 'review_pending'`,
+    );
+    const out: WatchEventWithTarget[] = [];
+    for (const id of ids) {
+      const raw = stmt.get(ownerId, id) as Record<string, unknown> | undefined;
+      if (!raw) continue;
+      out.push({
+        ...mapEvent(raw), display: String(raw['display']), discordUserId: String(raw['discord_user_id']),
+        targetRepoKey: String(raw['target_repo_key']),
+      });
+    }
+    return out;
   }
 
   /** Silent markers settle themselves: they exist to dedupe, never to be read. */

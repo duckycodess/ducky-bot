@@ -206,8 +206,11 @@ export const WatchReviewsSchema = z.array(
     state: z.string().max(40),
     submitted_at: Iso.nullable().optional(),
     body: z.string().nullable().optional(),
-    // The review's global node id: the same id GraphQL (and so `gh pr list --json latestReviews`)
-    // calls `id`. Bounded and optional, and an unusable value becomes "absent" rather than failing
+    // The review's global node id: GitHub documents it as the same id GraphQL (and so
+    // `gh pr list --json latestReviews`) calls `id`. THAT EQUALITY IS UNPROVEN: no live response
+    // carrying a review has ever been read (the probe's reviews answer was empty), and the two id
+    // formats can differ, so a match is never assumed and a mismatch is withheld, never suppressed
+    // (ADR 0034). Bounded and optional, and an unusable value becomes "absent" rather than failing
     // the page: it is only ever compared by exact equality, and an absent one means no match. It
     // is hashed before it is stored; the raw value is never kept.
     node_id: z.string().min(1).max(255).optional().catch(undefined),

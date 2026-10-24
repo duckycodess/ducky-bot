@@ -112,6 +112,14 @@ export interface RollbackDelta {
     readonly nativeLedger: {
       readonly boundary: Record<string, unknown> | null;
       readonly claims: readonly Record<string, unknown>[];
+      /**
+       * What the migration staged and no reader has turned into receipts yet (an unseeded database).
+       * These are native receipts and reservations too: leaving them out would make the export say less
+       * than the database holds.
+       */
+      readonly staged: readonly Record<string, unknown>[];
+      /** Native requested-changes cards held (neither sent nor skipped nor receipted): a count only. */
+      readonly heldNativeCards: number;
     };
   };
 }
@@ -126,7 +134,7 @@ export const REPLAY_RULES: readonly string[] = [
   '`deleted` with cause unknown: STOP. The export is incomplete; history already lost is not reconstructible.',
   '`state`: one latest value per key, applied idempotently; applying it twice changes nothing.',
   '`state.watchEvents[].withheldReason` set: the target never delivered it and never settled it (nothing could place it exactly). Do NOT treat it as told, and do not announce it from here: it is a counted, required cutover blocker. An event whose `settledBy` is `native_receipt` was told by a native path, not by the target: settle it, tell nothing. A v1 or v2 document has neither field: unknown, never inferred.',
-  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
+  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened; `staged` rows are the same kind of fact read from legacy feed rows before any reader knew the owner. `heldNativeCards` counts requested-changes cards neither sent nor skipped because they cannot be told from a review the target delivered: never treat one as told. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
   '`state.watchEvents[].baselineMarker` true: a first-observation suppression marker. It means this start is KNOWN, never that anything was delivered; announce nothing and settle nothing from it. A document whose schema is v1 has no such flag: its marker status is unknown and must not be inferred.',
   'This export is not a bridge and authorizes no restore of stale data.',
 ];
@@ -332,6 +340,8 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
       nativeLedger: {
         boundary: snap.nativeBoundary === null ? null : rec(snap.nativeBoundary, ['id']),
         claims: snap.nativeClaims.map((r) => rec(r, ['owner_id'])),
+        staged: snap.nativeStaged.map((r) => rec(r)),
+        heldNativeCards: snap.heldNativeCards,
       },
     },
   };
@@ -359,6 +369,8 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
       briefingSlots: d.state.briefingSlots.length, discoveryTombstones: d.state.discoveryTombstones.length,
       pausePeriods: d.state.pausePeriods.length,
       nativeClaims: d.state.nativeLedger.claims.length,
+      nativeStaged: d.state.nativeLedger.staged.length,
+      heldNativeCards: d.state.nativeLedger.heldNativeCards,
       watchEventsWithheld: d.state.watchEvents.filter((e) => e['withheldReason'] != null).length,
       watchEventsSettledByNativeReceipt: d.state.watchEvents.filter((e) => e['settledBy'] != null).length,
       // A presence count, never the value: the setting is a preference and the terminal

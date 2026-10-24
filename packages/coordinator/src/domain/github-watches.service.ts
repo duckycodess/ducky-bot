@@ -520,7 +520,21 @@ function summarizeChange(
       named: [],
     };
   }
-  const named: Transition[] = [];
+  /** One line of the summary and the items it names, with where each item's text ENDS inside the line. */
+  interface Part { text: string; items: { t: Transition; end: number }[] }
+  const parts: Part[] = [];
+  /** Joins named segments after a prefix and remembers where each one ends. */
+  const named = (prefix: string, entries: { t: Transition | null; segment: string }[]): Part => {
+    let text = prefix;
+    const items: Part['items'] = [];
+    entries.forEach((e, i) => {
+      if (i > 0) text += '; ';
+      text += e.segment;
+      if (e.t !== null) items.push({ t: e.t, end: text.length });
+    });
+    return { text, items };
+  };
+  const plain = (text: string): Part => ({ text, items: [] });
   let removed = false;
   const before = new Map(previous.prs.map((pr) => [pr.number, pr]));
   const updateOf = (pr: NormalizedPr): Transition | null => {
@@ -548,18 +562,15 @@ function summarizeChange(
   const currentNumbers = new Set(current.prs.map((pr) => pr.number));
   const closed = previous.prs.filter((pr) => !currentNumbers.has(pr.number));
   const failedChecks = current.prs.filter((pr) => pr.checks.some((check) => /fail|error|cancel/i.test(check)));
-  const parts: string[] = [];
   if (newOrUpdated.length > 0) {
     const shown = newOrUpdated.slice(0, NATIVE_SUMMARY_NAMED_MAX);
-    for (const pr of shown) {
-      const t = updateOf(pr);
-      if (t !== null) named.push(t);
-    }
-    const names = shown.map((pr) => `#${pr.number} ${pr.title}`).join('; ');
-    parts.push(`${newOrUpdated.length} pull request update(s): ${names}`);
+    parts.push(named(
+      `${newOrUpdated.length} pull request update(s): `,
+      shown.map((pr) => ({ t: updateOf(pr), segment: `#${pr.number} ${pr.title}` })),
+    ));
   }
-  if (closed.length > 0) parts.push(`${closed.length} previously listed pull request(s) are no longer open`);
-  if (failedChecks.length > 0) parts.push(`${failedChecks.length} pull request(s) have failing checks`);
+  if (closed.length > 0) parts.push(plain(`${closed.length} previously listed pull request(s) are no longer open`));
+  if (failedChecks.length > 0) parts.push(plain(`${failedChecks.length} pull request(s) have failing checks`));
 
   // ---- what the wider surface added -------------------------------------
   //
@@ -578,42 +589,57 @@ function summarizeChange(
   });
   if (merged.length > 0) {
     const shown = merged.slice(0, NATIVE_SUMMARY_NAMED_MAX);
-    for (const pr of shown) {
-      const t = mergedTransition(pr.number, pr.mergedAt);
-      if (t !== null) named.push(t);
-    }
-    parts.push(`merged: ${shown.map((pr) => `#${pr.number} ${pr.title}`).join('; ')}`);
+    parts.push(named(
+      'merged: ',
+      shown.map((pr) => ({ t: mergedTransition(pr.number, pr.mergedAt), segment: `#${pr.number} ${pr.title}` })),
+    ));
   }
 
   const newlyApproved = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return /APPROVED/i.test(pr.reviewDecision ?? '') && !/APPROVED/i.test(old?.reviewDecision ?? '');
   });
-  if (newlyApproved.length > 0) parts.push(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`);
+  if (newlyApproved.length > 0) parts.push(plain(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`));
 
   const newlyBlocked = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return isChangesRequested(pr) &&
       (!old || old.latestChangeRequestAt !== pr.latestChangeRequestAt);
   });
-  if (newlyBlocked.length > 0) parts.push(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`);
+  if (newlyBlocked.length > 0) parts.push(plain(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`));
 
   const moreComments = current.prs.filter((pr) => {
     const old = before.get(pr.number);
     return (pr.reviewComments ?? 0) > (old?.reviewComments ?? 0);
   });
-  if (moreComments.length > 0) parts.push(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`);
+  if (moreComments.length > 0) parts.push(plain(`new review comment(s) on ${moreComments.map((pr) => `#${pr.number}`).join(', ')}`));
 
   const runSummary = summarizeRuns(previous.runs ?? [], current.runs ?? []);
-  if (runSummary) parts.push(runSummary);
+  if (runSummary) parts.push(plain(runSummary));
 
   const issueSummary = summarizeIssues(previous.openIssues ?? [], current.openIssues ?? []);
-  if (issueSummary) parts.push(issueSummary);
+  if (issueSummary) parts.push(plain(issueSummary));
 
   // Only items an imported target DELIVERED were taken out, and nothing remains to say.
   if (parts.length === 0 && removed) return { text: null, named: [] };
-  if (parts.length === 0) parts.push('The repository snapshot changed.');
-  return { text: clampSummary(`Update for \`${slug}\`: ${parts.join('. ')}.`), named };
+  if (parts.length === 0) parts.push(plain('The repository snapshot changed.'));
+
+  // The text is clamped to a fixed length, and an item cut off by the clamp was NOT shown in full, so it
+  // is no receipt. A claim is kept only for an item whose whole text lies inside what the owner reads.
+  const head = `Update for \`${slug}\`: `;
+  const full = `${head}${parts.map((p) => p.text).join('. ')}.`;
+  const cleaned = redact(full);
+  const shownLimit = cleaned.length <= GITHUB_WATCH_SUMMARY_MAX
+    ? Number.POSITIVE_INFINITY
+    // A redaction that changed the text moved every later offset: nothing is guaranteed.
+    : cleaned === full ? GITHUB_WATCH_SUMMARY_MAX - 1 : -1;
+  const claims: Transition[] = [];
+  let start = head.length;
+  for (const p of parts) {
+    for (const it of p.items) if (start + it.end <= shownLimit) claims.push(it.t);
+    start += p.text.length + 2;
+  }
+  return { text: clampSummary(full), named: claims };
 }
 
 const isSet = (v: string | undefined): boolean => typeof v === 'string' && v !== '';

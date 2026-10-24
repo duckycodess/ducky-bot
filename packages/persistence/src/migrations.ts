@@ -1959,6 +1959,14 @@ ALTER TABLE github_watch_events ADD COLUMN repo_key TEXT;
 -- "and N more". NULL on a legacy row: unknown, and never read as named.
 ALTER TABLE github_feed_commits ADD COLUMN told_as TEXT CHECK (told_as IS NULL OR told_as IN ('named','counted'));
 
+-- The provider's own instant for a card's fact (a review's submission time), canonical, so a native card
+-- and an imported event of the same pull request can be told APART by time when their ids cannot be
+-- compared. And a durable HOLD: a pending card that cannot be told from one the target delivered. A held
+-- card holds no reservation, charges no attempt, is never sent, skipped or receipted, and is not read as
+-- pending work (so held cards cannot starve the batch); it is counted.
+ALTER TABLE github_feed_events ADD COLUMN provider_at TEXT;
+ALTER TABLE github_feed_events ADD COLUMN held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('ambiguous_review'));
+
 -- An imported event the target will not deliver, with the reason; and the receipt that settled
 -- one without a delivery of its own. provider_hash and attempt are comparison identities only.
 ALTER TABLE assistant_watch_events ADD COLUMN withheld_reason TEXT
@@ -1982,6 +1990,8 @@ CREATE TABLE native_transition_claims (
   stamp          TEXT,
   provider_hash  TEXT,
   attempt        TEXT,
+  -- The provider's canonical instant of the fact (a review's submission time) when one is known.
+  provider_at    TEXT,
   path           TEXT NOT NULL CHECK (path IN ('native','target')),
   state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
   via            TEXT NOT NULL CHECK (via IN

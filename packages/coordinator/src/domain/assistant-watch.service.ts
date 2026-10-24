@@ -98,8 +98,9 @@ export interface WatchDigest {
 
 const MINUTE = 60_000;
 
-/** Undigested events scanned to build one digest, before the 400 the briefing may carry. */
-const ASSISTANT_WATCH_DIGEST_SCAN = 1_000;
+/** Unread events read per page while a digest is built, and the most looked at in total (a bound, not a cap on waiting). */
+const ASSISTANT_WATCH_DIGEST_PAGE = 400;
+const ASSISTANT_WATCH_DIGEST_SCAN_MAX = 10_000;
 
 /** Every surface a target is read through; `ci_state` moves with `runs` and has no read of its own. */
 const WATCH_SURFACES_OBSERVED: readonly WatchSurface[] = [
@@ -1043,10 +1044,19 @@ export class AssistantWatchService {
    */
   digest(): WatchDigest {
     // Only what can be told right now: an event a native path holds, delivered, or cannot be placed
-    // for is left out, and the briefing that does not carry it carries it forward.
+    // for is left out, and the briefing that does not carry it carries it forward. The unread events
+    // are read in pages until a briefing's worth of DELIVERABLE ones is found (or a bound is reached),
+    // so a long run of waiting events at the head cannot hide a fresh deliverable one behind it.
     const repo = this.store.assistantWatch;
-    const events = repo.undigested(this.ownerId, ASSISTANT_WATCH_DIGEST_SCAN).filter((e) => repo.deliverableNow(this.ownerId, e));
-    return buildWatchDigest(events.slice(0, 400));
+    const picked: WatchEventWithTarget[] = [];
+    for (let offset = 0; offset < ASSISTANT_WATCH_DIGEST_SCAN_MAX && picked.length < 400; offset += ASSISTANT_WATCH_DIGEST_PAGE) {
+      const page = repo.undigested(this.ownerId, ASSISTANT_WATCH_DIGEST_PAGE, offset);
+      for (const e of page) {
+        if (picked.length < 400 && repo.deliverableNow(this.ownerId, e)) picked.push(e);
+      }
+      if (page.length < ASSISTANT_WATCH_DIGEST_PAGE) break;
+    }
+    return buildWatchDigest(picked);
   }
 
   /**
@@ -1059,7 +1069,7 @@ export class AssistantWatchService {
   reserveDigest(eventIds: readonly string[]): string[] {
     const repo = this.store.assistantWatch;
     const at = this.clock.nowIso();
-    const events = new Map(repo.undigested(this.ownerId, ASSISTANT_WATCH_DIGEST_SCAN).map((e) => [e.id, e]));
+    const events = new Map(repo.undigestedByIds(this.ownerId, eventIds).map((e) => [e.id, e]));
     const kept: string[] = [];
     for (const id of eventIds) {
       const e = events.get(id);

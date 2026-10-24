@@ -430,3 +430,89 @@ describe('sweeping releases a native reservation only when its outbox row can no
     expect(store.nativeTransitions.counts().reservedNative).toBe(0);
   });
 });
+
+/**
+ * B1 regression (persisted from the reproduction that found it): a requested-changes review compared
+ * by the hash of its id when the native id and the REST id may not be comparable on a live provider.
+ * Whatever the order, a review is never told twice by a deterministic id mismatch, and a distinct
+ * review is never dropped.
+ */
+describe('a requested-changes review is never told twice by an id mismatch, whichever path is first', () => {
+  const NATIVE = hashProviderRef('native-graphql-id')!;
+  const REST = hashProviderRef('rest-node-id')!;
+  const review = (hash: string | null, at: string) => facts('review_requested_changes', '7:review:1', at, { providerHash: hash });
+  const cr = (hash: string) => t('changes_requested', '7', { hash });
+  const OBSERVED = '2026-10-01T01:00:00.000Z';
+  const SUBMITTED = '2026-10-01T00:30:00.000Z';
+
+  describe('native first', () => {
+    it('waits while the native card is reserved, is withheld once it is delivered, and a missing id is the same', () => {
+      const { store } = fresh();
+      store.nativeTransitions.reserveNative(OWNER, REPO, cr(NATIVE), 'feed_event', 'n', OBSERVED, OBSERVED, SUBMITTED);
+      expect(resolve(store, review(REST, SUBMITTED))).toEqual({ outcome: 'wait' });
+      store.nativeTransitions.markNativeDelivered('feed_event', 'n', 'owner_dm', OBSERVED);
+      expect(resolve(store, review(REST, SUBMITTED))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+      expect(resolve(store, review(null, SUBMITTED))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    });
+
+    it('delivers a review submitted after the native observation: it could not have been in that card', () => {
+      const { store } = fresh();
+      nativeTold(store, cr(NATIVE), 'n', REPO, OBSERVED);
+      expect(resolve(store, review(REST, '2026-10-01T03:00:00.000Z'))).toEqual({ outcome: 'deliver' });
+    });
+
+    it('is covered when the ids are equal', () => {
+      const { store } = fresh();
+      nativeTold(store, cr(NATIVE), 'n', REPO, OBSERVED);
+      expect(resolve(store, review(NATIVE, SUBMITTED))).toEqual({ outcome: 'covered' });
+    });
+  });
+
+  describe('target first', () => {
+    const targetDelivered = (store: Store, hash: string, at: string) => {
+      store.nativeTransitions.reserveTarget(OWNER, REPO, review(hash, at), 'target_digest', 'e1', '2026-10-01T02:00:00.000Z');
+      store.nativeTransitions.markTargetDelivered('target_digest', 'e1', '2026-10-01T02:00:00.000Z');
+    };
+
+    it('HOLDS a native card whose provider instant equals the target review\'s, when the hashes differ', () => {
+      const { store } = fresh();
+      targetDelivered(store, REST, SUBMITTED);
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(NATIVE), SUBMITTED)).toBe('ambiguous');
+    });
+
+    it('HOLDS a native card whose provider instant is unknown, or whose target review instant is unknown', () => {
+      const { store, db } = fresh();
+      targetDelivered(store, REST, SUBMITTED);
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(NATIVE), null)).toBe('ambiguous');
+      db.prepare('UPDATE native_transition_claims SET provider_at = NULL').run();
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(NATIVE), '2026-10-01T05:00:00.000Z')).toBe('ambiguous');
+    });
+
+    it('SENDS a native card whose provider instant provably differs from the delivered target review\'s', () => {
+      const { store } = fresh();
+      targetDelivered(store, REST, SUBMITTED);
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(NATIVE), '2026-10-01T05:00:00.000Z')).toBe('free');
+    });
+
+    it('makes the native card WAIT while a target send of a review of that pull request is in flight', () => {
+      const { store } = fresh();
+      store.nativeTransitions.reserveTarget(OWNER, REPO, review(REST, SUBMITTED), 'target_alert', 'e1', OBSERVED);
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(NATIVE), '2026-10-01T05:00:00.000Z')).toBe('target_in_flight');
+    });
+
+    it('skips only for the SAME id, and another pull request is unaffected', () => {
+      const { store } = fresh();
+      targetDelivered(store, REST, SUBMITTED);
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, cr(REST), SUBMITTED)).toBe('target_delivered');
+      expect(store.nativeTransitions.probeNative(OWNER, REPO, t('changes_requested', '8', { hash: NATIVE }), SUBMITTED)).toBe('free');
+      expect(store.nativeTransitions.probeNative(OWNER, 'acme/other', cr(NATIVE), SUBMITTED)).toBe('free');
+    });
+
+    it('records the canonical provider instant of the target review on its claim, and none on a kind that needs none', () => {
+      const { store } = fresh();
+      targetDelivered(store, REST, '2026-10-01T08:30:00+08:00');
+      const row = store.db.prepare("SELECT provider_at FROM native_transition_claims WHERE kind = 'changes_requested'").get() as { provider_at: string };
+      expect(row.provider_at).toBe(SUBMITTED);
+    });
+  });
+});

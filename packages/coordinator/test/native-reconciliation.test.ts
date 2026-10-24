@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GITHUB_FEED_MAX_DELIVERY_ATTEMPTS, hashProviderRef, type ImportedPreferences, type WatchEventKind } from '@ducky/contracts';
+import { GITHUB_FEED_EVENT_BATCH, GITHUB_FEED_MAX_DELIVERY_ATTEMPTS, hashProviderRef, type ImportedPreferences, type WatchEventKind } from '@ducky/contracts';
 import { FakeWatchReader } from './assistant-watch-helpers.js';
 import { FeedReader, commit, issue, pr, review, sentTo } from './github-feed-helpers.js';
 import { OWNER, TestClock, makeHarness, type Harness } from './helpers.js';
@@ -256,6 +256,137 @@ describe('a commit digest records which commits it NAMED', () => {
     await h.app.githubFeed.tick();
     expect(h.store.githubFeed.openCommits(DEMO)).toEqual([]);
     expect(h.store.nativeTransitions.counts().reservedNative).toBe(0);
+    h.close();
+  });
+});
+
+describe('a native requested-changes card that cannot be told from the target\'s review is HELD', () => {
+  const REVIEW_AT = '2026-10-01T00:11:00Z';
+  const targetDelivered = (h: Harness, hash: string, occurredAt: string) => {
+    h.store.nativeTransitions.reserveTarget(OWNER, DEMO, {
+      kind: 'review_requested_changes', identity: '2:review:777', occurredAt, providerHash: hash, attempt: null,
+    }, 'target_digest', 'tgt', T0);
+    h.store.nativeTransitions.markTargetDelivered('target_digest', 'tgt', T0);
+  };
+  const withReview = (reader: FeedReader) =>
+    reader.prs.set(DEMO, [pr(1), pr(2, { latestReviews: [review('R9', 'CHANGES_REQUESTED', REVIEW_AT, 'dave')] })]);
+  const cards = (h: Harness) => h.store.githubFeed.listEvents('pending').filter((e) => e.kind === 'changes_requested');
+  const nativeReviewClaims = (h: Harness) =>
+    h.store.nativeTransitions.all().filter((c) => c.path === 'native' && c.transition.kind === 'changes_requested');
+
+  it('neither sends, skips nor receipts it, charges no attempt and holds no reservation; and says so in /status', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    // The target already delivered a review of #2 under an id that does not equal the native id.
+    targetDelivered(h, hashProviderRef('rest-node-id')!, '2026-10-01T00:11:00.000Z');
+    withReview(reader);
+    await feedTick();
+    expect(texts(h)).not.toContain('Changes requested');
+    expect(cards(h)).toHaveLength(1);
+    expect(cards(h)[0]).toMatchObject({ attempts: 0, heldReason: 'ambiguous_review', providerAt: '2026-10-01T00:11:00.000Z' });
+    expect(h.store.githubFeed.listEvents('skipped').filter((e) => e.kind === 'changes_requested')).toEqual([]);
+    // (The unrelated pull request #2 card is a different transition and is delivered as usual.)
+    expect(nativeReviewClaims(h)).toEqual([]);
+    expect(h.store.githubFeed.heldEventCount()).toBe(1);
+    expect(h.app.githubFeed.statusLine()).toMatch(/1 requested-changes card HELD, neither sent nor skipped/);
+    // More ticks change nothing: it is not retried, charged or sent.
+    await feedTick();
+    await feedTick();
+    expect(texts(h)).not.toContain('Changes requested');
+    expect(cards(h)[0]).toMatchObject({ attempts: 0, heldReason: 'ambiguous_review' });
+    h.close();
+  });
+
+  it('keeps the hold across a restart and the orphan sweep', async () => {
+    const { h, reader, feedTick, clock } = boot();
+    await baseline(reader, feedTick);
+    targetDelivered(h, hashProviderRef('rest-node-id')!, '2026-10-01T00:11:00.000Z');
+    withReview(reader);
+    await feedTick();
+    expect(h.store.githubFeed.heldEventCount()).toBe(1);
+    const again = makeHarness({ clock, store: h.store, github: reader, assistantWatchReader: new FakeWatchReader(), env: { DUCKY_GITHUB_FEED_ENABLED: 'true' } });
+    again.store.nativeTransitions.sweepOrphans();
+    clock.advance(16 * MIN);
+    await again.app.githubFeed.tick();
+    expect(again.store.githubFeed.heldEventCount()).toBe(1);
+    expect(JSON.stringify(again.transport.sent)).not.toContain('Changes requested');
+    again.close();
+  });
+
+  it('SENDS the card when its provider instant provably differs from the target\'s review', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    targetDelivered(h, hashProviderRef('rest-node-id')!, '2026-10-01T00:05:00.000Z');
+    withReview(reader);
+    await feedTick();
+    expect(texts(h)).toContain('Changes requested');
+    expect(h.store.githubFeed.heldEventCount()).toBe(0);
+    h.close();
+  });
+
+  it('skips it only when the ids are equal', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    targetDelivered(h, hashProviderRef('R9')!, '2026-10-01T00:11:00.000Z');
+    withReview(reader);
+    await feedTick();
+    expect(texts(h)).not.toContain('Changes requested');
+    expect(h.store.githubFeed.listEvents('skipped').map((e) => e.kind)).toContain('changes_requested');
+    expect(h.store.githubFeed.heldEventCount()).toBe(0);
+    h.close();
+  });
+
+  it('waits while the target\'s send is in flight, then holds the queued card when that send is delivered', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    // The target is mid-send of a review of #2 under a different id: the card is queued, unreserved.
+    h.store.nativeTransitions.reserveTarget(OWNER, DEMO, {
+      kind: 'review_requested_changes', identity: '2:review:777', occurredAt: '2026-10-01T00:11:00.000Z',
+      providerHash: hashProviderRef('rest-node-id'), attempt: null,
+    }, 'target_digest', 'tgt', T0);
+    withReview(reader);
+    await feedTick();
+    expect(cards(h)).toHaveLength(1);
+    expect(cards(h)[0]).toMatchObject({ attempts: 0, heldReason: null });
+    expect(nativeReviewClaims(h)).toEqual([]);
+    expect(texts(h)).not.toContain('Changes requested');
+    // The send succeeded: the card is now ambiguous, so it is held (not sent, not skipped), still unreserved.
+    h.store.nativeTransitions.markTargetDelivered('target_digest', 'tgt', T0);
+    await feedTick();
+    expect(texts(h)).not.toContain('Changes requested');
+    expect(cards(h)[0]).toMatchObject({ attempts: 0, heldReason: 'ambiguous_review' });
+    expect(nativeReviewClaims(h)).toEqual([]);
+    h.close();
+  });
+
+  it('never lets the target deliver a review while a native card for that pull request is still reserved', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    h.transport.failSends = true; // the card is queued and reserved, but not sent
+    withReview(reader);
+    await feedTick();
+    expect(nativeReviewClaims(h).map((c) => c.state)).toEqual(['reserved']);
+    // The target's own attempt must WAIT, so it cannot deliver first and leave the card ambiguous.
+    const out = h.store.nativeTransitions.reserveTarget(OWNER, DEMO, {
+      kind: 'review_requested_changes', identity: '2:review:777', occurredAt: '2026-10-01T00:11:00.000Z',
+      providerHash: hashProviderRef('rest-node-id'), attempt: null,
+    }, 'target_digest', 'tgt', T0);
+    expect(out).toMatchObject({ reserved: false, resolution: { outcome: 'wait' } });
+    h.close();
+  });
+
+  it('cannot starve the cards behind it: held cards are not pending work', async () => {
+    const { h, reader, feedTick } = boot();
+    await baseline(reader, feedTick);
+    const ins = h.store.db.prepare(
+      `INSERT INTO github_feed_events (id, event_key, kind, repo_key, origin, card_json, status, created_at, held_reason)
+       VALUES (?, ?, 'changes_requested', ?, 'selected', NULL, 'pending', ?, 'ambiguous_review')`,
+    );
+    for (let i = 0; i < GITHUB_FEED_EVENT_BATCH + 5; i += 1) ins.run(`held${i}`, `changes_requested:${DEMO}#9:H${i}`, DEMO, '2026-09-01T00:00:00.000Z');
+    reader.prs.set(DEMO, [pr(3, { createdAt: '2026-10-01T00:10:00Z', title: 'Add the feed' }), pr(1)]);
+    await feedTick();
+    expect(texts(h)).toContain('Pull request opened');
+    expect(h.store.githubFeed.heldEventCount()).toBe(GITHUB_FEED_EVENT_BATCH + 5);
     h.close();
   });
 });

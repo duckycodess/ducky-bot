@@ -243,6 +243,55 @@ describe('--verify', () => {
     expect(JSON.parse(v.out)).toMatchObject({ ok: true, parity: true });
     expect(existsSync(w.file)).toBe(true);
   });
+
+  it('exits 5, not 0, when the data is present but a record has drifted since the import', () => {
+    const w = world();
+    w.makeBackup();
+    run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    const d = openDatabase({ location: w.dbPath });
+    d.prepare("UPDATE tasks SET title = 'edited since the import'").run();
+    d.close();
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    const report = JSON.parse(v.out);
+    expect(report).toMatchObject({ ok: true, parity: false });
+    expect(report.nativeLedger).toMatchObject({ clear: true });
+    expect(v.out).not.toContain('edited since the import');
+  });
+
+  it('exits 5 when the native ledger is not clear: a withheld event and a cursor at or before the cutoff', () => {
+    const w = world(importDoc(), { migrate: false });
+    const d = openDatabase({ location: w.dbPath });
+    runMigrations(d, { upTo: 35 });
+    runMigrations(d, { now: () => '2026-10-12T12:00:00.000Z' }); // a database that predates the ledger
+    d.close();
+    chmodSync(w.dbPath, 0o600);
+    w.makeBackup();
+    expect(run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees }).code).toBe(0);
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    const report = JSON.parse(v.out);
+    expect(report).toMatchObject({ ok: true, parity: false });
+    expect(report.nativeLedger).toMatchObject({ fresh: false, clear: false, withheldLegacy: 1 });
+    expect(report.nativeLedger.cursorsAtOrBeforeCutoff).toBeGreaterThan(0);
+    // Counts only: no repository, event or identity.
+    expect(v.out).not.toMatch(/widgets|acme|review:9/i);
+  });
+
+  it('exits 5 when a native card is held because it cannot be told from a review the target delivered', () => {
+    const w = world();
+    w.makeBackup();
+    run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    const d = openDatabase({ location: w.dbPath });
+    d.prepare(
+      `INSERT INTO github_feed_events (id, event_key, kind, repo_key, origin, card_json, status, created_at, held_reason)
+       VALUES ('h1', 'changes_requested:acme/widgets#12:X', 'changes_requested', 'acme/widgets', 'selected', NULL, 'pending', '2026-10-12T00:00:00.000Z', 'ambiguous_review')`,
+    ).run();
+    d.close();
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    expect(JSON.parse(v.out).nativeLedger).toMatchObject({ heldNativeCards: 1, clear: false });
+  });
 });
 
 

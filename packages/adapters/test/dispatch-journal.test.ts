@@ -296,3 +296,48 @@ describe('proveQuiet', () => {
     expect((await prove(existing(agent('idle')), bad)).quiet).toBe(false);
   });
 });
+
+describe('absence is never recorded as a settle', () => {
+  it('an agent that vanishes while a recovery watches it leaves the dispatch unsettled, and a same-name agent that reappears is not trusted', async () => {
+    const herdr = existing(agent('working'));
+    const journal = journalWith(entry('dispatching'));
+    const get = herdr.agentGet.bind(herdr);
+    let n = 0;
+    herdr.agentGet = async (name: string) => {
+      n += 1;
+      if (n > 2) herdr.state.agents = [];
+      return get(name);
+    };
+    const first = await orch(herdr, journal).runJob(spec({ recorded, recoveryRequired: true }));
+    // It vanished: not a pause, and nothing was recorded as settled.
+    expect(first.kind).not.toBe('quiet_pause');
+    expect(journal.entries.get('job-1')?.state).toBe('dispatching');
+    expect(journal.writes.filter((w) => w.state === 'settled')).toEqual([]);
+
+    // Later a fresh agent with the same name and workspace reads idle. It must not be
+    // mistaken for the one that was handed the work.
+    const later = existing(agent('idle'));
+    const out = await orch(later, journal).runJob(spec({ leaseId: 'lease-2', recorded, recoveryRequired: true }));
+    expect(out).toMatchObject({ kind: 'orphan', reason: 'orphan_prompt_unsettled' });
+    expect(later.countOf('agentPrompt')).toBe(0);
+    expect((await orch(later, journal).proveQuiet({ jobId: 'job-1', workspaceId: WS, agentName: AGENT })).quiet).toBe(false);
+  });
+
+  it('a stalled prompt whose agent then vanishes stays dispatching', async () => {
+    const herdr = new MockHerdr();
+    herdr.agentPrompt = async () => {
+      throw new DuckyError('herdr_prompt_stalled', 'no change');
+    };
+    const journal = new MemoryDispatchJournal();
+    const get = herdr.agentGet.bind(herdr);
+    let calls = 0;
+    herdr.agentGet = async (name: string) => {
+      calls += 1;
+      // Present for the ownership look and the readiness wait, gone once the stall is watched.
+      if (calls > 3) herdr.state.agents = [];
+      return get(name);
+    };
+    await orch(herdr, journal).runJob(spec()).catch(() => undefined);
+    expect(journal.entries.get('job-1')?.state).toBe('dispatching');
+  });
+});

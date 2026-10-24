@@ -609,8 +609,9 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         return { kind: 'orphan', reason: 'orphan_agent_still_working', workspaceId, agentName };
       }
       // Work was seen, and then seen to stop: that IS an observed settle, whichever
-      // process dispatched it. Recorded so a later quiet reading can rest on it.
-      await this.markSettled(spec, { workspaceId, agentName });
+      // process dispatched it. Recorded so a later quiet reading can rest on it. An
+      // agent that VANISHED is not a settle and is never recorded as one.
+      if (settled === 'settled') await this.markSettled(spec, { workspaceId, agentName });
       if (settled === 'blocked') {
         return { kind: 'orphan', reason: 'orphan_agent_blocked', workspaceId, agentName };
       }
@@ -934,7 +935,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
           agentName: at.agentName,
         };
       }
-      if (resumed === 'settled') {
+      if (resumed === 'settled' || resumed === 'vanished') {
         const result = await this.readResultSettling(at.workspacePath);
         return result
           ? {
@@ -1263,7 +1264,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     agentName: string,
     spec: OrchestrationSpec,
     workspacePath: string,
-  ): Promise<'settled' | 'blocked' | 'still_working' | 'never_started' | undefined> {
+  ): Promise<'settled' | 'vanished' | 'blocked' | 'still_working' | 'never_started' | undefined> {
     const pickupDeadline = Date.now() + this.stallPickupMs;
     let observedWorking = false;
 
@@ -1276,7 +1277,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         // Cannot observe: assume the worst rather than release anything.
         return 'still_working';
       }
-      if (!now) return 'settled';
+      if (!now) return 'vanished';
       if (now.agent_status === 'blocked') return 'blocked';
       if (now.agent_status === 'working') {
         observedWorking = true;
@@ -1291,6 +1292,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
 
     const settled = await this.pollUntilSettled(agentName, spec.promptTimeoutMs, spec.signal);
     if (settled === 'blocked') return 'blocked';
+    if (settled === 'vanished') return 'vanished';
     return settled === 'settled' ? 'settled' : 'still_working';
   }
 
@@ -1299,13 +1301,16 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     agentName: string,
     waitMs: number,
     signal?: AbortSignal | undefined,
-  ): Promise<'settled' | 'blocked' | undefined> {
+  ): Promise<'settled' | 'vanished' | 'blocked' | undefined> {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) return undefined;
       await this.sleep(this.pollIntervalMs);
       const now = await this.herdr.agentGet(agentName);
-      if (!now) return 'settled';
+      // Absence is NOT a settle: a vanished pane says nothing about whether the
+      // work finished, and a fresh agent of the same name could later appear. It
+      // is reported on its own so nothing records it as `settled`.
+      if (!now) return 'vanished';
       if (now.agent_status === 'blocked') return 'blocked';
       if (now.agent_status === 'idle' || now.agent_status === 'done') return 'settled';
     }

@@ -1165,8 +1165,15 @@ exceptions integrated with the briefing, `/forget` and retention; a per-task
 reminder policy that survives Done, Edit and Snooze; scoped, non-authoritative
 preferences with lookahead, captures, GitHub-digest and weather briefing sections;
 notification-only watch targets with typed checkpoints, held partial reads,
-separate alert and digest settlement and a fixed call budget; and the
-`/watch list targets` / `/watch remove` owner controls.
+separate alert and digest settlement and a fixed call budget; the
+`/watch list targets` / `/watch remove` owner controls; and exact, delivered-only
+reconciliation between the native paths and the imported targets (ADR 0034, migration 36):
+a ledger of native receipts and reservations by exact transition, a shared codec, ordinary
+watches that record the repository they queried, pause provenance, withheld-event accounting
+and a v3 rollback export. **Operator sequencing it needs:** stop the coordinator, back up,
+migrate, and only then take the final source export, so imported cursors lie after the ledger
+cutoff; then require `pnpm import:assistant --verify` to report zero withheld events and zero
+cursors at or before the cutoff. Never run an older build against a migrated database.
 
 **Upgrade notes.** Migration 29 introduces the runtime lock, which a coordinator from an
 older build does not know; stop the coordinator before migrations, and never start an
@@ -1215,19 +1222,20 @@ fail-closed form of the blocker, not a decision to drop it.
   high in lists and the lookahead and is shown as urgent, and the category is shown
   with the task; no native command sets either, and the task command definitions are
   unchanged. Unit-tested only. The paused
-  global watch switch is carried over and gates reads, and the owner now sets it with
+  global watch switch is carried over and gates reads, and the owner sets it with
   `/watch monitoring state:on|off` (explicit, never a toggle; the same state changes no
-  row, timestamp, audit row or delta). **The switch is GLOBAL, and resuming is refused
-  wherever a feed repository (active or cancelled) overlaps an active target, or ANY ordinary
-  watch row is retained at all** (ADR 0032): one such overlap or unprovable history blocks
-  resuming ALL targets, up to 1,000. An ordinary watch is stored by an allowlist slug whose
-  mapping is overwritten every boot, so no current mapping can say what it watched; nothing
-  stored proves when a pause began or what a native path delivered; exact cross-path
-  reconciliation is not built; a checkpoint is never reset to get past it; removing native rows
-  is not a way round it; and a repeated import preserves the stored switch, so there is no
-  operator-import workaround. **A REQUIRED full-parity and cutover blocker, not an accepted
-  omission**, with a real cost: with any ordinary-watch history no target can be resumed.
-  Unit-tested only; command registration with Discord is not performed here.
+  row, timestamp, audit row, pause period or delta). **Resuming is no longer refused because history
+  exists** (ADR 0034, which replaced the earlier blanket guard): pause provenance (owner, import or
+  unknown, a real start only for an owner's pause), the repository an ordinary watch actually queried and the
+  exact transitions native paths delivered are recorded, and every imported event is decided against
+  that ledger. It refuses only when the ledger boundary cannot be read. **Still required, not
+  waived:** what predates the ledger cannot be placed, so on a database that is not verifiably new every
+  imported event with a native counterpart at or before the migration-36 cutoff (plus one second)
+  and no exact receipt is **withheld**, never delivered or settled, counted in `/status`, `--verify`
+  and the export, with no clearing control; counts and unnamed aggregates are never receipts (aggregate/
+  detail overlap remains); a requested-changes review is told twice until REST `node_id` equality with
+  the native id is proven on a live provider. Unit and synthetic tests only; command registration with
+  Discord is not performed here.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned". The review BODY is now read (and is the only approved source: file and
   review-comment endpoints are not approved), but the private audit does not define
@@ -1324,13 +1332,19 @@ fail-closed form of the blocker, not a decision to drop it.
   insertion); a pull request with over 100 reviews; release ordering and the runs/releases
   schemas are unprobed on real data (the live answers were empty). Unit-tested and probed
   for shape on a public repository only.
+- **Native reconciliation limits (ADR 0034), required until closed:** events that predate the
+  ledger are withheld and counted with no clearing control; counts and unnamed aggregates prove
+  no item, so aggregate/detail overlap remains; a requested-changes review is told twice until REST
+  `node_id` equals the native id on a live provider (a live-probe gate nobody has run); a start-up
+  crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
+  ledger grows by a few identifiers per delivered native transition for the life of the database.
 - **A real typed reader, the rollback-delta export and every operational gate**
   (above).
 
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2343 tests in 148 files**.
+The unmodified `pnpm test` command passes all **2606 tests in 158 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

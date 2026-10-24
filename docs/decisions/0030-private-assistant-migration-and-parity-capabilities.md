@@ -129,11 +129,13 @@ commit together under a compare-and-set with unique event keys. Only the review
 verdict "changes requested" interrupts; everything else is delivered in the next
 briefing digest and marked digested only after that briefing was sent.
 
-Where an imported target and the native feed observe the same repository, the
-imported typed observation takes precedence for the events it covers, and the
-corresponding native proactive event is suppressed; nothing about a job read or
-an authorization changes. Imported alerts and digests are private to the owner's
-destinations and are never routed to the shared GitHub feed channel.
+Where an imported target and the native paths observe the same repository, the owner is told each
+exact transition once, by whichever path DELIVERS it first: a native path skips an item only for a
+transition the target actually delivered, and an imported event a native path already delivered is
+settled silently. **This replaces the earlier prospective rule** (an imported surface that merely
+observes a repository retired the native card), which lost a notification whenever the promise failed
+(ADR 0034); nothing about a job read or an authorization changes. Imported alerts and digests are
+private to the owner's destinations and are never routed to the shared GitHub feed channel.
 
 ### Preferences are scoped and never authoritative
 
@@ -171,8 +173,8 @@ active weather preference with no configured location is a refusal.
   only into the owner's DM copy, and the importer refuses preferences that want
   them with a channel delivery. A briefing the owner ASKS for follows the same
   rule: they are included only when the reply is a DM or guaranteed ephemeral, never
-  in a role channel, where replies persist (ADR 0023). Native feed suppression covers only kinds an
-  imported surface sees in full.
+  in a role channel, where replies persist (ADR 0023). No native notification is suppressed in
+  advance; only an exact transition the target has delivered is skipped (ADR 0034).
 
 ## What this ADR deliberately does not do
 

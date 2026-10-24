@@ -299,9 +299,11 @@ one by its id. A baseline or a source cursor stays strict.
   selection is unproven.
 - **The global monitoring switch** is carried over from the import and gates reads
   only (no target or cursor changes). The owner flips it with `/watch monitoring`
-  (explicit on or off), and resuming is refused while a native path overlapped a target
-  during the pause (ADR 0032): the control exists, the cross-path reconciliation does
-  not, and that stays a named blocker.
+  (explicit on or off). Resuming is no longer refused for history: what native paths told the owner is
+  reconciled per exact transition, and what predates the ledger is withheld and counted (ADR 0034,
+  which supersedes the earlier guard). The reviews response now also carries the bounded optional
+  `node_id` and the runs response the bounded optional `run_attempt` (no new endpoint, argument or
+  policy), used only for exact comparison with a native card; their live equality is unproven.
 - It adds no engineering permission, no owner command and no write.
 
 ## Alternatives considered

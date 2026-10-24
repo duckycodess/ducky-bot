@@ -35,23 +35,17 @@ survives into a later day. It applies when the profile selects imported preferen
 (`DUCKY_IMPORTED_PREFERENCES`), because those are the preferences that carry the source's
 slot times. Without them the native six-hour rule is unchanged.
 
-### The ordinary watch's snapshot DM leaves out what an imported target already tells
+### The ordinary watch's snapshot DM no longer leaves anything out on a promise
 
-When an imported target will REALLY tell the owner about the same repository's pulls or
-issues surface, the ordinary snapshot DM (and the feed's duplicate card) omits the parts
-that surface reports, so one event is told once. A healthy checkpoint on an active target
-is not delivery. Watching must be on (the global switch), the target must be inside the
-poll cycle's coverage where one applies, and what it tells must have somewhere to go: a
-requested change is an imported ALERT, sent as soon as it is found, and needs nothing
-more; every other kind waits for a briefing digest, so it needs briefings on, imported
-preferences in force with the GitHub section and at least one briefing slot enabled, and a DM
-copy. Paused, outside the cycle, preferences off, no GitHub section, both slots off, briefings off or channel-only, or a discovered target
-with no preferences all keep the native DM and card. A part the imported side cannot see is kept: a
-check changing on a pull request head (it touches none of a pull request's state, title or
-update time), and a workflow run on any branch (the imported runs surface follows the
-default branch only). The follow-up job proposal for a requested change is not a
-notification and is kept. A snapshot whose every change was covered sends nothing, and the
-snapshot still advances.
+**Superseded by [ADR 0034](0034-exact-native-reconciliation.md).** This ADR first made the ordinary
+snapshot DM (and the feed's duplicate card) omit whatever an imported surface was healthy enough to
+"really tell". That is a promise, not a delivery, and it lost a notification whenever the promise
+failed. The ordinary summary and the feed now tell everything they tell, and skip an item only for an
+exact transition the imported target has actually delivered; an imported event a native path already
+delivered is settled silently. The summary is rebuilt around exactly that item and keeps every other
+part: counts, aggregates, other updates, merges, issues, runs, review lines and the follow-up job
+proposal (which is advice, not a receipt). A snapshot whose every change was an item the target
+delivered sends nothing, and the snapshot still advances.
 
 ### Schedule rollback is an owner control with a stale-safe confirmation
 
@@ -84,48 +78,25 @@ this ADR previously said the audit event set was closed and that widening it nee
 rebuild. That was wrong. `audit_log.event` is unconstrained text; only `subject_kind` is
 constrained, and an existing kind serves. Adding a typed event needs no migration.
 
-### The monitoring switch is an explicit owner choice, and resuming is guarded
+### The monitoring switch is an explicit owner choice
 
 `/watch monitoring state:on|off` sets the global switch. It is a choice, never a toggle,
-and the same state is a no-op: no settings row, no timestamp, no audit row and no export
-delta. A change writes the switch and the audit event `watch.monitoring_changed` (state
-only) in one transaction at the injected time. Neither direction touches a target, a
-checkpoint, a pending event, a failure count or the call budget. Pausing applies at the
-next tick (the tick in flight read the switch once, at its start and finishes); resuming
+and the same state is a no-op: no settings row, no timestamp, no audit row, no pause period and no
+export delta. A change writes the switch, its pause provenance (ADR 0034) and the audit event
+`watch.monitoring_changed` (state only) in one transaction at the injected time. Neither direction
+touches a target, a checkpoint, a pending event, a failure count or the call budget. Pausing applies at
+the next tick (the tick in flight read the switch once, at its start and finishes); resuming
 makes every cursor due again exactly where it stood.
 
-**The switch is GLOBAL.** Resuming (off to on) turns on every target at once (up to the
-1,000-target cap), so one overlap, or any ordinary-watch history whose repository cannot be
-proven, blocks resuming ALL of them, not only the overlapping one.
+**The switch is GLOBAL.** Resuming turns on every target at once (up to the 1,000-target cap).
 
-Resuming is **refused** wherever a native path could have told the owner the same things.
-While monitoring is off an ordinary snapshot DM or feed card is not trimmed for what a target
-covers, so it may already have told the owner what the target's untouched checkpoint would tell
-a second time. Nothing stored proves when a pause really began (an imported pause carries only
-the import time, so a native watch cancelled before the import can have spoken after the
-source's pause began), what a native path delivered, whether a pending native notification was
-settled, or what an ordinary watch's allowlist slug named when it ran: `repos` is a mirror of
-frozen configuration overwritten at every boot, so the same slug can name different
-repositories now. Exact cross-path reconciliation has no evidence, and resetting a checkpoint
-would silently baseline away events nobody was told. So, inside the transaction, the guard
-counts (a) every selected-feed repository, active or cancelled, that an active target also
-watches (a feed row is keyed by the repository itself, a durable identity) and (b) every
-distinct retained ordinary watch, cancelled or not, **whatever it maps to today**, and refuses
-if there is any. Cancelled targets are not counted (they are not read). No mapping-history
-migration was added.
-
-The cost is deliberate and owned: with any ordinary-watch history at all, no target can be
-resumed until reconciliation exists. Removing a native row is **not** a way round it (that
-would delete the history the guard honours), and a repeated import preserves the stored switch,
-so there is no operator-import workaround either; the reply gives a count and no remedy. Pause
-provenance and fuller native dedup history are not recorded; recording them, and reconciling,
-is a **required full-parity and cutover blocker**, not an accepted omission and not a completed
-acceptance criterion.
-
-An import that adds a NEW active target on a repository an ordinary watch already covers is
-older than this work and is unchanged: events between the source's last observation and the
-import are not reconciled across the two paths. That named blocker, and the duplicate-free
-observation gate, stand.
+**Correction.** This ADR first **refused** to resume wherever any native history existed (a selected
+feed repository, active or cancelled, or any retained ordinary watch), because pause provenance, the
+repository an ordinary watch queried and what a native path delivered were not recorded. That blanket
+refusal was a missing implementation, not a policy, and is **removed**: ADR 0034 records all three and
+reconciles per exact transition as the targets observe, withholding and counting only what predates the
+ledger and cannot be placed. Resuming now refuses only when the ledger boundary cannot be read. It
+never resets a checkpoint, and a repeated import still never overrides the owner's choice.
 
 A repeated import of an unchanged document states the switch only when nothing has ever
 been stored, so it can neither undo a native choice nor re-pause what the owner resumed;
@@ -156,10 +127,10 @@ rollback as drift. Both changes appear in the rollback-delta export.
   preferences, history and repeat-cooldown mechanics alone would be a shell that looks like
   parity and is not. It needs an owner-supplied catalog and a contract for it; until then
   the importer refuses an active meal preference.
-- **Cross-path reconciliation and pause provenance on resume.** Resuming is an owner control now
-  (above), but only while no ordinary watch row is retained at all and no feed row overlaps an active target;
-  reconciling what the ordinary watch and the feed told the owner against a target's checkpoint,
-  and recording where a pause began, have no evidence in the stored data and are not built.
-  Refusal is the safe form, and it stays a required parity blocker.
+- **Cross-path reconciliation and pause provenance.** Built by ADR 0034, with limits that stay
+  required blockers: what predates the ledger is withheld and counted, a count or an unnamed
+  aggregate is never a receipt (aggregate/detail overlap remains), a requested-changes review is told
+  twice until REST `node_id` equality with the native id is proven live, and nothing here is live
+  evidence.
 - **The private source's repeated-rollback semantics.** The audit available to this repository
   does not say what the source does on a second rollback; none was invented.

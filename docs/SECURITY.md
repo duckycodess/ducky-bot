@@ -410,7 +410,7 @@ was turned away. It now records:
 | `config.rejected` | credential-file reload | the variable NAME, never a path or a value |
 | `workflow.requested` | a `$grill-me` / `$ticket` / `$agentize` run reaching a terminal status | the command TOKEN and the status word, never the repository, the issue or anything the owner typed |
 | `schedule.batch_rolled_back` | `/schedule rollback:<code>` | restored and replaced rule COUNTS only; subject kind `config`; written by the strict audit method in the flipping transaction, so a failed write undoes the flip |
-| `watch.monitoring_changed` | `/watch monitoring state:on\|off`, when the state really changes | `on to off` or `off to on` only; a no-op writes nothing; strict and in the same transaction as the change |
+| `watch.monitoring_changed` | `/watch monitoring state:on\|off`, when the state really changes | `on to off` or `off to on` only; a no-op writes nothing; strict and in the same transaction as the switch and its pause-period row |
 
 **Local commit / push / PR outcomes** are covered by the existing
 `approval.execution_started` / `_succeeded` / `_failed` events, whose `detail`

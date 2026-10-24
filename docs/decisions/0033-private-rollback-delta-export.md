@@ -1,6 +1,6 @@
 # ADR 0033 — A private, read-only rollback-delta export
 
-**Status:** accepted
+**Status:** accepted (schema now `ducky-rollback-delta/v3`, see [ADR 0034](0034-exact-native-reconciliation.md))
 **Extends** [ADR 0030](0030-private-assistant-migration-and-parity-capabilities.md)
 and [ADR 0020](0020-conservative-retention-and-per-entity-deletion.md); supersedes
 nothing.
@@ -100,6 +100,15 @@ its marker status is UNKNOWN**: it must not be inferred from a payload, a timest
 identity, and an unflagged v1 row must not be read as "not a marker". No consumer of v1 exists in
 this repository, no v1 file is rewritten, no stored row is migrated or contracted, and the
 private source reverse bridge remains unproven.
+
+**v3 (ADR 0034).** The schema is bumped again because the meaning of a watch event changed. v3 adds
+`state.pausePeriods` (a null `startedAt` means the real start is unknown), `state.nativeLedger` (the
+boundary and every native receipt and reservation, identifiers only) and, on each event,
+`withheldReason`, `settledBy`, `providerHash` (a hash, never a review id) and `attempt`. A v1 or v2
+document carries none of them: whether an event was withheld, settled by a native receipt, or
+paused-over is UNKNOWN there and must not be inferred, no older file is rewritten, and an unreadable
+boundary makes the export incomplete. A withheld event is neither delivered nor baseline, and a reverse
+bridge must not announce it from here.
 
 ### Replay semantics
 

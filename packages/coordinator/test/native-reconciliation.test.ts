@@ -260,6 +260,42 @@ describe('a commit digest records which commits it NAMED', () => {
   });
 });
 
+describe('a buffered commit waits out an imported send of it, and nothing else', () => {
+  it('keeps the commit open and unreserved while the imported send is in flight, then tells it once that send is released', async () => {
+    const clock = new TestClock('2026-10-01T00:00:00Z', 'UTC');
+    const reader = new FeedReader();
+    reader.setView(DEMO);
+    const h = makeHarness({
+      clock, github: reader, assistantWatchReader: new FakeWatchReader(),
+      env: { DUCKY_GITHUB_FEED_ENABLED: 'true', DUCKY_DEV_GITHUB_CHANNEL_ID: CHANNEL },
+    });
+    reader.commitList.set(DEMO, [commit(1, '2026-09-30T00:00:00Z')]);
+    await h.app.githubFeed.tick();
+    const sha = (n: number) => n.toString(16).padStart(40, '0');
+    h.store.nativeTransitions.reserveTarget(OWNER, DEMO, {
+      kind: 'commit', identity: sha(2), occurredAt: T0, providerHash: null, attempt: null,
+    }, 'target_digest', 'tgt', T0);
+    reader.commitList.set(DEMO, [commit(2, '2026-10-01T00:10:00Z', 'In flight'), commit(3, '2026-10-01T00:11:00Z', 'Free'), commit(1, '2026-09-30T00:00:00Z')]);
+    clock.set('2026-10-01T00:30:00Z');
+    await h.app.githubFeed.tick();
+    // Only the commit nothing imported is sending is reserved.
+    expect(h.store.nativeTransitions.all().filter((c) => c.path === 'native').map((c) => c.transition.item)).toEqual([sha(3)]);
+    clock.set('2026-10-01T09:05:00Z');
+    await h.app.githubFeed.tick();
+    const digest = sentTo(h.transport.sent).filter((m) => m.text.includes('Commit digest')).map((m) => m.text).join('\n');
+    expect(digest).toContain('Free');
+    expect(digest).not.toContain('In flight');
+    expect(h.store.githubFeed.openCommits(DEMO).map((c) => c.sha)).toEqual([sha(2)]);
+    // The imported send failed and was released: the next digest tells it.
+    h.store.nativeTransitions.releaseTarget('target_digest', 'tgt');
+    h.transport.clear();
+    clock.set('2026-10-02T09:05:00Z');
+    await h.app.githubFeed.tick();
+    expect(sentTo(h.transport.sent).map((m) => m.text).join('\n')).toContain('In flight');
+    h.close();
+  });
+});
+
 describe('pausing, native delivery and resuming', () => {
   it('does not repeat what the feed told while monitoring was off, and still tells the rest', async () => {
     const { h, reader, feedTick, clock } = boot();

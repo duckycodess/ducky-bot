@@ -14,6 +14,7 @@ import { acquireWriterLock } from './single-writer.js';
 import { JobSupervisor } from './supervisor.js';
 import { attemptDeadlineMs } from './attempt-deadline.js';
 import { deliverFresh } from './pause-delivery.js';
+import { isExecutorDone } from '@ducky/contracts';
 import { PauseIntentSchema, type PauseIntentStore } from './pause-intents.js';
 
 export interface RunnerDeps {
@@ -25,8 +26,14 @@ export interface RunnerDeps {
    * released or sent, and a pending record withholds every prompt.
    */
   readonly intents: PauseIntentStore;
-  /** Drops the dispatch journal of a job that finished cleanly and was cleaned up. */
+  /** Drops the dispatch journal of a job the coordinator reports nothing will ever run again. */
   readonly forgetJournal?: (jobId: string) => void;
+  /**
+   * Whether this job's dispatch can still be journaled. Checked before the turn
+   * starts, because finding out after an agent has been started leaves a started
+   * agent and a job that can only fail. Omitting it means no check.
+   */
+  readonly journalHasRoomFor?: (jobId: string) => boolean;
   /** Recorded workspace for this job, when the executor has one from a prior turn. */
   readonly recordedWorkspace?: (jobId: string) => {
     workspaceId: string;
@@ -55,6 +62,28 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   const { client, orchestrator } = deps;
   const log = deps.log ?? (() => {});
 
+  /**
+   * Every terminal answer from the coordinator is also the moment this job's dispatch
+   * journal stops mattering: it is only ever read to prove an agent quiet before a
+   * recovery, a resume, a pause or a stop, and a job the coordinator says is
+   * completed, failed, cancelled or awaiting approval has none of those left. The
+   * coordinator's own answer is the confirmation; nothing is pruned on a guess.
+   */
+  const pruneIfDone = (answer: unknown): void => {
+    const state = (answer as { state?: unknown } | undefined)?.state;
+    if (typeof state === 'string' && isExecutorDone(state)) deps.forgetJournal?.(claim.jobId);
+  };
+  const reportFailure = async (
+    jobId: string,
+    leaseId: string,
+    reason: ExecutorFailureReason,
+    extra: { detail?: string; workspaceId?: string; agentName?: string; quiescent?: boolean } = {},
+  ): Promise<unknown> => {
+    const answer = await client.reportFailure(jobId, leaseId, reason, extra);
+    pruneIfDone(answer);
+    return answer;
+  };
+
   // The attempt's own clock, taken from the persisted claim deadline so a
   // restarted executor or a reclaim resumes the SAME budget instead of getting
   // a fresh one. Bounded locally even when the claim carries nothing.
@@ -65,7 +94,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     resolved = await resolveWorkspace(claim.payload, claim.publicId);
   } catch (err) {
     const detail = isDuckyError(err) ? err.ownerMessage : 'Workspace could not be prepared.';
-    await client.reportFailure(claim.jobId, claim.leaseId, 'workspace_rejected', { detail });
+    await reportFailure(claim.jobId, claim.leaseId, 'workspace_rejected', { detail });
     return;
   }
 
@@ -203,6 +232,14 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     return;
   }
 
+  // Likewise when this job's dispatch could not be journaled: find out BEFORE an
+  // agent is started, not after, when the only outcome left is a failed job around
+  // an idle agent. The loop checks first; this is the same refusal for any caller.
+  if (deps.journalHasRoomFor && !deps.journalHasRoomFor(claim.jobId)) {
+    log(`job ${claim.publicId}: not started, the dispatch journal has no room for it`);
+    return;
+  }
+
   const lock = acquireWriterLock(claim.payload.repoSlug);
   let outcome: OrchestrationOutcome | undefined;
   let failure: unknown;
@@ -271,7 +308,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       const phase = supervisor.acceptedPhase;
       const where = phase === null ? 'before a phase was reported' : `during ${phase}`;
       const detail = redact(`The attempt budget ran out ${where}. ${stopped.detail}`).slice(0, 400);
-      await client.reportFailure(
+      await reportFailure(
         claim.jobId,
         claim.leaseId,
         stopped.terminated ? 'wall_clock_exceeded' : 'orphan_agent_still_working',
@@ -288,13 +325,15 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       return;
     }
 
-    await client.cancelAck(claim.jobId, {
-      leaseId: claim.leaseId,
-      terminated: stopped.terminated,
-      note: redact(stopped.detail).slice(0, 400),
-    });
+    pruneIfDone(
+      await client.cancelAck(claim.jobId, {
+        leaseId: claim.leaseId,
+        terminated: stopped.terminated,
+        note: redact(stopped.detail).slice(0, 400),
+      }),
+    );
     if (!stopped.terminated) {
-      await client.reportFailure(claim.jobId, claim.leaseId, 'orphan_agent_still_working', {
+      await reportFailure(claim.jobId, claim.leaseId, 'orphan_agent_still_working', {
         detail: redact(stopped.detail).slice(0, 400),
         ...(stopped.workspaceId === undefined ? {} : { workspaceId: stopped.workspaceId }),
         ...(stopped.agentName === undefined ? {} : { agentName: stopped.agentName }),
@@ -325,13 +364,21 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     // the reason stays honest. A stalled prompt no longer arrives here: it is an
     // `orphan_prompt_unsettled` outcome, because a submitted prompt that was not
     // seen to settle proves nothing about the agent.
+    // A refusal by the executor's own durable state (the dispatch journal could not
+    // be written, or a pause is owed) is NOT "the agent left no result": the agent
+    // was never asked. It is reported as its own reason, so the owner looks at the
+    // executor and not at the agent.
     const reason: ExecutorFailureReason =
-      isDuckyError(err) && err.code === 'herdr_unavailable' ? 'herdr_unavailable' : 'no_result';
-    await client.reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
+      isDuckyError(err) && err.code === 'herdr_unavailable'
+        ? 'herdr_unavailable'
+        : isDuckyError(err) && err.code === 'dispatch_journal_unavailable'
+          ? 'executor_state_unavailable'
+          : 'no_result';
+    await reportFailure(claim.jobId, claim.leaseId, reason, { detail: redact(detail) });
     return;
   }
   if (outcome === undefined) {
-    await client.reportFailure(claim.jobId, claim.leaseId, 'no_result', {
+    await reportFailure(claim.jobId, claim.leaseId, 'no_result', {
       detail: 'The orchestrator returned nothing.',
     });
     return;
@@ -341,7 +388,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
     // A durable pause never got as far as its intent; it ends as the ordinary
     // timeout report, so the lock it was holding back is released as before.
     if (durablePause) lock.release();
-    await client.reportFailure(claim.jobId, claim.leaseId, 'wall_clock_exceeded', {
+    await reportFailure(claim.jobId, claim.leaseId, 'wall_clock_exceeded', {
       detail: 'The job exceeded its attempt budget.',
     });
     return;
@@ -358,6 +405,8 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       const accepted = (await client.submitResult(claim.jobId, claim.leaseId, outcome.result)) as
         | { state?: string }
         | undefined;
+
+      pruneIfDone(accepted);
 
       // Clean up ONLY after a genuinely terminal success. A job that paused for
       // an owner answer, is awaiting approval, or failed keeps its workspace so
@@ -389,7 +438,6 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         }
         log(`job ${claim.publicId} cleanup: ${cleaned.detail}`);
         if (cleaned.closed) {
-          deps.forgetJournal?.(claim.jobId);
           // Recorded only after the exact recorded workspace was proved closed,
           // through a lease-free route -- submitting the result already cleared
           // the lease, so the old registration call could never have succeeded
@@ -458,7 +506,10 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         try {
           // An unresolved delivery is handed to the executor loop's reconcile, never
           // to a new claim or a new prompt.
-          await deliverFresh({ client, intents: deps.intents, log }, intent);
+          await deliverFresh(
+            { client, intents: deps.intents, log, ...(deps.forgetJournal ? { forgetJournal: deps.forgetJournal } : {}) },
+            intent,
+          );
         } finally {
           keepalive.stop();
         }
@@ -502,7 +553,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         `job ${claim.publicId}: ${outcome.reason}; writer lock for ` +
           `\`${claim.payload.repoSlug}\` retained for the owner`,
       );
-      await client.reportFailure(claim.jobId, claim.leaseId, outcome.reason, {
+      await reportFailure(claim.jobId, claim.leaseId, outcome.reason, {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,
         detail: outcome.detail ?? `Agent ${outcome.agentName} could not be resolved safely.`,
@@ -510,14 +561,14 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       return;
 
     case 'conflict':
-      await client.reportFailure(claim.jobId, claim.leaseId, 'foreign_agent_conflict', {
+      await reportFailure(claim.jobId, claim.leaseId, 'foreign_agent_conflict', {
         agentName: outcome.agentName,
         detail: 'An agent with that name exists but is not provably ours; nothing was touched.',
       });
       return;
 
     case 'unavailable':
-      await client.reportFailure(claim.jobId, claim.leaseId, 'herdr_unavailable', {
+      await reportFailure(claim.jobId, claim.leaseId, 'herdr_unavailable', {
         detail: 'Herdr is not reachable on this host.',
       });
       return;
@@ -529,7 +580,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         workspacePath: outcome.workspacePath,
         mode: resolved.mode,
       });
-      await client.reportFailure(claim.jobId, claim.leaseId, 'no_result', {
+      await reportFailure(claim.jobId, claim.leaseId, 'no_result', {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,
         detail: outcome.detail ?? 'The agent finished without writing a valid result file.',

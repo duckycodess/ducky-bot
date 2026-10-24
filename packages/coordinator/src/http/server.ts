@@ -6,7 +6,7 @@ import {
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
   JobFailureRequestSchema, JobHeartbeatRequestSchema, JobPauseRequestSchema, JobResultRequestSchema,
-  PauseDispositionRequestSchema, PauseReportRequestSchema,
+  JobStatusRequestSchema, PauseDispositionRequestSchema, PauseReportRequestSchema,
   WorkspaceCloseRequestSchema, WorkspaceRegistrationRequestSchema,
   EXECUTOR_HEADERS, EXECUTOR_ID_RE, isDuckyError,
 } from '@ducky/contracts';
@@ -357,6 +357,18 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
       const body = PauseDispositionRequestSchema.parse(req.body);
       const { id } = req.params as { id: string };
       return deps.jobs.pauseDisposition(executorId, id, body);
+    }),
+  );
+
+  // Read-only job status for the executor that ran the job: lets it drop durable
+  // local records once the job is one nothing will run again.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/status',
+    { config: { rateLimit: { max: RATE_LIMITS.jobHeartbeat.max, timeWindow: RATE_LIMITS.jobHeartbeat.windowMs } } },
+    authed(async (req, executorId) => {
+      JobStatusRequestSchema.parse(req.body ?? {});
+      const { id } = req.params as { id: string };
+      return deps.jobs.executorJobStatus(executorId, id);
     }),
   );
 

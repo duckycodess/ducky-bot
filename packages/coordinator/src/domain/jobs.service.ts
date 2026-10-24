@@ -6,12 +6,12 @@ import {
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
   SYSTEM_PAUSE_OWNER_TEXT, SYSTEM_RESUME_REASON, leaseDigest, parsePauseOvertakenReason,
   pauseOvertakenReason, systemPauseReason,
-  PAUSE_DELIVERY_CAPABILITY, PAUSE_DELIVERY_PROTOCOL,
+  PAUSE_DELIVERY_CAPABILITY, PAUSE_DELIVERY_PROTOCOL, isExecutorDone,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
   type JobPauseRequest, type JobPauseResponse,
   type PauseDeliveryResponse, type PauseDisposition, type PauseDispositionRequest,
-  type PauseReportRequest,
+  type PauseReportRequest, type JobStatusResponse,
   type JobProgress, type JobState, type JobSubmitInput, type JobWorkPhase,
 } from '@ducky/contracts';
 import { DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX } from '@ducky/contracts';
@@ -1137,6 +1137,25 @@ export class JobsService {
       );
     }
     throw new DuckyError('lease_mismatch', 'That report does not match any attempt of this job.');
+  }
+
+  /**
+   * Read-only: where a job stands, for the executor that ran it, so that executor
+   * can drop the durable local records of a job nothing will ever run again.
+   *
+   * Bound to the executor: the one the job is (or was last) leased to, or one with
+   * an expired lease recorded on it. Anyone else is a mismatch and learns nothing.
+   * An unknown job is `not_found`, which an executor reads as "this job cannot be
+   * live". It carries no task text, path, result or hold.
+   */
+  executorJobStatus(executorId: string, jobId: string): JobStatusResponse {
+    const job = this.store.jobs.byId(jobId);
+    if (!job) throw new DuckyError('not_found', 'Unknown job.');
+    const related =
+      job.executorId === executorId ||
+      this.store.jobs.expiriesFor(job.id).some((e) => e.executorId === executorId);
+    if (!related) throw new DuckyError('lease_mismatch', 'That job was not run by this executor.');
+    return { jobId: job.id, state: job.state, executorDone: isExecutorDone(job.state) };
   }
 
   private assertReceiptIdentity(

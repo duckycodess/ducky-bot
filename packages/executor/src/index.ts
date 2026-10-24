@@ -9,3 +9,4 @@ export * from './pause-intents.js';
 export * from './pause-delivery.js';
 export * from './dispatch-journal-file.js';
 export * from './executor-state.js';
+export * from './journal-sweep.js';

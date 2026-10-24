@@ -1,5 +1,5 @@
 import {
-  AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, ENGINEERING_ATTEMPT_GRACE_MS,
+  LEASE_EXPIRED_DEFERRED_REASON, AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, ENGINEERING_ATTEMPT_GRACE_MS,
   EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS, leaseDigest,
   TASK_PREVIEW_SETTLED_TTL_MS, TASK_PREVIEW_SWEEP_BATCH,
   isTerminal,
@@ -183,7 +183,7 @@ export class Reconciler {
 
         if (deferrable) {
           this.recordExpiry(expiry, 'deferred', 'pending');
-          this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired_deferred', 'system:reconciler', {
+          this.store.jobs.transition(job.id, 'waiting_for_executor', LEASE_EXPIRED_DEFERRED_REASON, 'system:reconciler', {
             recoveryRequired: true,
             leaseId: null,
             leaseExpiresAt: null,

@@ -89,3 +89,30 @@ export const PauseDeliveryResponseSchema = z.strictObject({
   state: z.string().min(1).max(64),
 });
 export type PauseDeliveryResponse = z.infer<typeof PauseDeliveryResponseSchema>;
+
+/**
+ * Whether anything on an executor can ever need this job's durable local records
+ * again. Terminal jobs never run again, and a job waiting for approval only ever
+ * ends through the coordinator (its actions are the coordinator's, not a turn):
+ * for these, and only these, an executor may drop its dispatch journal entry.
+ * Everything else -- running, queued, waiting for an executor, paused for the
+ * owner or on a dependency -- can still be recovered, resumed or reconciled, so
+ * its journal is exactly what a later quiet proof rests on.
+ */
+export const EXECUTOR_DONE_STATES = ['completed', 'failed', 'cancelled', 'needs_approval'] as const;
+export const isExecutorDone = (state: string): boolean =>
+  (EXECUTOR_DONE_STATES as readonly string[]).includes(state);
+
+export const JOB_STATUS_PATH = (jobId: string): string => `/api/v1/executor/jobs/${jobId}/status`;
+
+export const JobStatusRequestSchema = z.strictObject({});
+export const JobStatusResponseSchema = z.strictObject({
+  jobId: z.string().min(1).max(128),
+  state: z.string().min(1).max(64),
+  /** `isExecutorDone(state)`, decided by the coordinator. */
+  executorDone: z.boolean(),
+});
+export type JobStatusResponse = z.infer<typeof JobStatusResponseSchema>;
+
+/** The transition reason of a lease expiry whose charge was deferred (protocol 1). */
+export const LEASE_EXPIRED_DEFERRED_REASON = 'lease_expired_deferred';

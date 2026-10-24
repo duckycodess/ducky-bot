@@ -218,6 +218,19 @@ export class StateDir {
     return { records, untrusted };
   }
 
+  get capacity(): number {
+    return this.maxRecords;
+  }
+
+  /** The record names present, unparsed. Throws `StateStoreError` if the directory cannot be listed. */
+  names(): string[] {
+    try {
+      return this.fs.readdirSync(this.dir).filter((n) => NAME_RE.test(n));
+    } catch {
+      throw new StateStoreError('The directory could not be listed.');
+    }
+  }
+
   private count(): number {
     try {
       return this.fs.readdirSync(this.dir).filter((n) => NAME_RE.test(n)).length;

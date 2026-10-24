@@ -5,6 +5,8 @@ import type { CoordinatorClient } from './client.js';
 import { runClaimedJob } from './runner.js';
 import type { HeadroomVerdict } from './memory-headroom.js';
 import { reconcileIntent } from './pause-delivery.js';
+import { sweepJournal } from './journal-sweep.js';
+import type { FileDispatchJournal } from './dispatch-journal-file.js';
 import type { PauseIntentStore } from './pause-intents.js';
 
 export interface LoopDeps {
@@ -16,8 +18,18 @@ export interface LoopDeps {
    * claim that IS made attests that none is pending.
    */
   readonly intents: PauseIntentStore;
-  /** Drops the dispatch journal of a job that finished cleanly. */
+  /** Drops the dispatch journal of a job the coordinator reports nothing will ever run again. */
   readonly forgetJournal?: (jobId: string) => void;
+  /**
+   * The durable dispatch journal. When present, the loop prunes entries of jobs
+   * the coordinator confirms are finished (at startup, periodically, and whenever
+   * it is full) and makes NO claim while it has no room, so a started agent is
+   * never left around a job that cannot be journaled.
+   */
+  readonly journal?: FileDispatchJournal;
+  readonly journalHasRoomFor?: (jobId: string) => boolean;
+  /** How often to prune the journal when it is not full. */
+  readonly journalSweepMs?: number;
   /**
    * Whether the agent runtime is reachable. When it is not, no claim is made: a
    * job claimed into an unreachable Herdr can only fail, and a pause owed to the
@@ -59,6 +71,8 @@ export class ExecutorLoop {
   #heldFor: string | undefined;
   /** Why claims are withheld for a pause, so a long hold logs once. */
   #pauseHeldFor: string | undefined;
+  #lastJournalSweep = 0;
+  #journalFull = false;
   /** Jobs this executor is running right now, reported on every heartbeat. */
   readonly #active = new Set<string>();
   private readonly workspaces = new Map<
@@ -138,6 +152,7 @@ export class ExecutorLoop {
           client: this.deps.client,
           orchestrator: this.deps.orchestrator,
           intents: this.deps.intents,
+          ...(this.deps.forgetJournal ? { forgetJournal: this.deps.forgetJournal } : {}),
           log,
         },
         intent,
@@ -156,6 +171,40 @@ export class ExecutorLoop {
     return 'clear';
   }
 
+  /**
+   * Prunes finished jobs' journal entries on a schedule and whenever the journal is
+   * full, then reports whether there is room for a new job. A full journal means no
+   * claim (and one log line): the alternative is claiming a job, starting its agent,
+   * and only then failing to record the dispatch.
+   */
+  private async maintainJournal(): Promise<boolean> {
+    const journal = this.deps.journal!;
+    const now = Date.now();
+    const due = now - this.#lastJournalSweep >= (this.deps.journalSweepMs ?? 600_000);
+    if (due || !journal.hasRoom()) {
+      this.#lastJournalSweep = now;
+      await sweepJournal(
+        {
+          client: this.deps.client, journal, intents: this.deps.intents,
+          log: this.deps.log ?? (() => {}),
+        },
+      ).catch(() => undefined);
+    }
+    if (journal.hasRoom()) {
+      if (this.#journalFull) this.deps.log?.('the dispatch journal has room again; claiming resumes');
+      this.#journalFull = false;
+      return true;
+    }
+    if (!this.#journalFull) {
+      this.#journalFull = true;
+      this.deps.log?.(
+        'claims withheld: the dispatch journal is full and no finished job could be pruned; ' +
+          'nothing was deleted that could back a proof',
+      );
+    }
+    return false;
+  }
+
   async runOnce(): Promise<'claimed' | 'idle' | 'held' | 'pause_held'> {
     if ((await this.reconcilePauses()) === 'held') return 'pause_held';
     if (this.deps.herdrAvailable && !(await this.deps.herdrAvailable().catch(() => false))) {
@@ -169,6 +218,8 @@ export class ExecutorLoop {
       this.#heldFor = undefined;
       this.deps.log?.('Herdr is reachable again; claiming resumes');
     }
+    if (this.deps.journal && !(await this.maintainJournal())) return 'held';
+
     // Checked BEFORE the claim, because a claim is what starts a job. A refused
     // check leaves the job queued and the executor heartbeating, which is the
     // honest state: work is waiting, and nothing has been started that the
@@ -197,6 +248,7 @@ export class ExecutorLoop {
           client: this.deps.client,
           orchestrator: this.deps.orchestrator,
           intents: this.deps.intents,
+          ...(this.deps.journalHasRoomFor ? { journalHasRoomFor: this.deps.journalHasRoomFor } : {}),
           ...(this.deps.forgetJournal ? { forgetJournal: this.deps.forgetJournal } : {}),
           recordedWorkspace: (jobId) => this.workspaces.get(jobId),
           onWorkspace: (jobId, info) =>

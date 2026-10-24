@@ -130,6 +130,8 @@ function bootExecutor(c: Coordinator, orchestrator: PiOrchestrator, wire: Wire, 
   });
   const loop = new ExecutorLoop({
     client, orchestrator, intents: state.intents, pollWaitMs: 0, version: 'e2e',
+    journal: state.journal, journalHasRoomFor: (id) => state.journal.hasRoomFor(id),
+    forgetJournal: (id) => state.journal.forget(id),
     log: () => undefined,
   });
   return { state, client, loop, stateDir };
@@ -348,5 +350,31 @@ describe('a pause undelivered through an outage, an executor crash, lease expiry
     const loop = new ExecutorLoop({ client: skewed, orchestrator: o2, intents: e2.state.intents, pollWaitMs: 0, version: 'e2e' });
     expect(await loop.runOnce()).toBe('pause_held');
     expect(intentFiles(e2.stateDir)).toHaveLength(1);
+  });
+});
+
+describe('the dispatch journal is pruned on the coordinator\'s word, over real HTTP', () => {
+  it('keeps a paused job that can still be resumed, drops an unknown one, and drops the job once it is cancelled', async () => {
+    const wire: Wire = { down: false, dropResponses: 0 };
+    const c = await bootCoordinator(true);
+    const job = submit(c);
+    const e = bootExecutor(c, new StubOrchestrator('quiet'), wire);
+    await e.loop.runOnce(); // runs and pauses for the owner
+    expect(c.store.jobs.byId(job.id)?.state).toBe('needs_owner_input');
+
+    const entry = (jobId: string) => ({ jobId, leaseId: 'l', workspaceId: 'w', agentName: 'ducky-pi-demo', state: 'settled' as const });
+    await e.state.journal.record(entry(job.id));
+    await e.state.journal.record(entry('ghost-job'));
+
+    // Paused for the owner: it can be resumed, so its journal is what a later proof rests on.
+    const first = bootExecutor(c, new StubOrchestrator('quiet'), wire);
+    expect(await first.loop.runOnce()).toBe('idle');
+    expect([...(first.state.journal.jobIds() ?? [])]).toEqual([job.id]);
+
+    // Cancelled by the owner: nothing will ever run it again.
+    c.h.app.jobs.requestCancel(c.h.owner, job.publicId);
+    const second = bootExecutor(c, new StubOrchestrator('quiet'), wire);
+    await second.loop.runOnce();
+    expect(second.state.journal.jobIds()).toEqual([]);
   });
 });

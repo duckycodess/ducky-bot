@@ -1,11 +1,12 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import {
   DuckyError, EXECUTOR_HEADERS, PAUSE_DELIVERY_CAPABILITY, PAUSE_DISPOSITION_PATH,
-  PAUSE_REPORT_PATH, PauseDeliveryResponseSchema, canonicalRequest,
+  JOB_STATUS_PATH, JobStatusResponseSchema, PAUSE_REPORT_PATH, PauseDeliveryResponseSchema, canonicalRequest,
   type CancelAckRequest, type ClaimResponse, type ExecutorFailureReason,
   type HeartbeatRequest, type JobHeartbeatRequest, type JobHeartbeatResponse,
   type JobPauseRequest, type JobPauseResponse, type JobResultFile,
-  type PauseDeliveryResponse, type PauseDispositionRequest, type PauseReportRequest,
+  type JobStatusResponse, type PauseDeliveryResponse, type PauseDispositionRequest,
+  type PauseReportRequest,
 } from '@ducky/contracts';
 import { ClaimResponseSchema } from '@ducky/contracts';
 
@@ -256,6 +257,41 @@ export class CoordinatorClient {
       }
     }
     throw last ?? new PauseDeliveryError(undefined, 'The pause report was not attempted.');
+  }
+
+  /**
+   * Where a job stands, for pruning durable local records. `gone` is the
+   * coordinator saying it does not know the job at all (so it cannot be live);
+   * anything else that is not a valid answer throws, and the caller keeps its
+   * records.
+   */
+  async jobStatus(jobId: string): Promise<{ kind: 'known'; status: JobStatusResponse } | { kind: 'gone' }> {
+    let res: Response;
+    try {
+      res = await this.post(JOB_STATUS_PATH(jobId), {});
+    } catch {
+      throw new PauseDeliveryError(undefined, 'The coordinator could not be reached.', 'transport');
+    }
+    if (res.ok) {
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        throw new PauseDeliveryError(res.status, 'Unreadable job status.', 'malformed');
+      }
+      const parsed = JobStatusResponseSchema.safeParse(json);
+      if (!parsed.success) throw new PauseDeliveryError(res.status, 'Unexpected job status.', 'malformed');
+      return { kind: 'known', status: parsed.data };
+    }
+    if (res.status === 404) {
+      if ((await errorCode(res)) === 'not_found') return { kind: 'gone' };
+      throw new PauseDeliveryError(404, 'The coordinator has no job status route (version skew).', 'version_skew');
+    }
+    throw new PauseDeliveryError(
+      res.status,
+      res.status === 409 ? 'The coordinator knows no such job of this executor.' : `Job status refused (${res.status}).`,
+      res.status >= 500 || res.status === 429 ? 'server' : res.status === 409 ? 'mismatch' : 'refused',
+    );
   }
 
   /** What became of a report. One attempt: the caller's loop is the retry. */

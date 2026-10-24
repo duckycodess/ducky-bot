@@ -188,6 +188,13 @@ export const EXECUTOR_FAILURE_REASONS = [
   'foreign_agent_conflict',
   'herdr_unavailable',
   'workspace_rejected',
+  /**
+   * The executor could not write (or was refusing to use) its own durable state,
+   * so it sent nothing to the agent. Its own reason rather than `no_result`: the
+   * agent produced no result because it was never asked, and an owner reading
+   * "no result" would look at the agent instead of at the executor.
+   */
+  'executor_state_unavailable',
   'no_result',
   'wall_clock_exceeded',
   'cancelled_by_owner',

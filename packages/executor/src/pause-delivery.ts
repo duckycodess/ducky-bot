@@ -1,5 +1,5 @@
 import {
-  isTerminalPauseDisposition, leaseDigest, type PauseDeliveryResponse,
+  isExecutorDone, isTerminalPauseDisposition, leaseDigest, type PauseDeliveryResponse,
 } from '@ducky/contracts';
 import { redact, type PiOrchestrator } from '@ducky/adapters';
 import { PauseDeliveryError, type CoordinatorClient } from './client.js';
@@ -27,6 +27,8 @@ export interface SettleDeps {
   readonly client: CoordinatorClient;
   readonly intents: PauseIntentStore;
   readonly log: (line: string) => void;
+  /** Drops the dispatch journal of a job the answer shows nothing will run again. */
+  readonly forgetJournal?: (jobId: string) => void;
 }
 
 export type Settlement = 'resolved' | 'held';
@@ -62,7 +64,18 @@ export function applyAnswer(deps: SettleDeps, i: PauseIntent, r: PauseDeliveryRe
     deps.log(`job ${i.publicId}: the pause was answered (${r.disposition}) but its record could not be removed; holding`);
     return 'held';
   }
-  deps.log(`job ${i.publicId}: pause ${r.disposition}; no attempt was charged for it`);
+  // Worded per answer. Only `paused` and the overtaken outcomes were decided on
+  // THIS report; `superseded` says the coordinator had already moved past that
+  // attempt (which may have been charged, resumed or ended) and this report
+  // changed nothing.
+  deps.log(
+    r.disposition === 'superseded'
+      ? `job ${i.publicId}: the coordinator had already moved past that attempt (job is ${r.state}); this report changed nothing`
+      : r.disposition === 'paused'
+        ? `job ${i.publicId}: paused for the owner on this report; no attempt was charged for it`
+        : `job ${i.publicId}: ${r.disposition.replace(/_/g, ' ')} (job is ${r.state}); decided on this report`,
+  );
+  if (isExecutorDone(r.state)) deps.forgetJournal?.(i.jobId);
   return 'resolved';
 }
 

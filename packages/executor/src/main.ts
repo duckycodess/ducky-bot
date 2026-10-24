@@ -108,6 +108,8 @@ async function main(): Promise<void> {
     herdrAvailable: () => herdr.available(),
     intents: state.intents,
     forgetJournal: (jobId) => state.journal.forget(jobId),
+    journal: state.journal,
+    journalHasRoomFor: (jobId) => state.journal.hasRoomFor(jobId),
     ...(env.DUCKY_MEMORY_GUARD === 'cgroup'
       ? { headroom: () => checkMemoryHeadroom(headroomConfig) }
       : {}),

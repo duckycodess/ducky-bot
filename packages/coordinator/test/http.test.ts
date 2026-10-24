@@ -396,3 +396,30 @@ describe('executor durable pause-delivery routes', () => {
     h.close();
   });
 });
+
+describe('executor job status route', () => {
+  it('answers the executor that ran the job, and refuses with distinguishable errors', async () => {
+    const h = makeHarness();
+    const app = await boot(h);
+    const job = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
+    const claim = (
+      await app.inject(sign(h, '/api/v1/executor/claim', { executorId: h.executorId, capabilities: [], waitMs: 0, idempotencyKey: 'abcdefgh' }))
+    ).json() as { jobId: string };
+
+    const ok = await app.inject(sign(h, `/api/v1/executor/jobs/${claim.jobId}/status`, {}));
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ jobId: job.id, state: 'running', executorDone: false });
+
+    const unknown = await app.inject(sign(h, '/api/v1/executor/jobs/no-such-job/status', {}));
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: 'not_found' });
+
+    expect((await app.inject(sign(h, `/api/v1/executor/jobs/${claim.jobId}/status`, { extra: 1 }))).statusCode).toBe(400);
+    const anon = await app.inject({
+      method: 'POST', url: `/api/v1/executor/jobs/${claim.jobId}/status`, payload: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(anon.statusCode).toBe(401);
+    h.close();
+  });
+});

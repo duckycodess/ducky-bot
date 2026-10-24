@@ -727,3 +727,63 @@ describe('retention and forget', () => {
     h.close();
   });
 });
+
+describe('job status for pruning an executor\'s durable records', () => {
+  it('tells the executor that ran a job where it stands, and whether anything will run it again', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId)).toEqual({ jobId: job.id, state: 'running', executorDone: false });
+
+    at(h, EXPIRED).expireLeases();
+    expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId)).toMatchObject({ state: 'waiting_for_executor', executorDone: false });
+
+    h.app.jobs.requestCancel(h.owner, job.publicId);
+    expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId)).toMatchObject({ state: 'cancelled', executorDone: true });
+    h.close();
+  });
+
+  it('marks completed, failed, cancelled and awaiting-approval as done, and a paused or queued job as not', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    h.app.jobs.deliverPause(h.executorId, c.jobId, report(c.leaseId));
+    expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId)).toMatchObject({ state: 'needs_owner_input', executorDone: false });
+    for (const [state, done] of [['needs_approval', true], ['completed', true], ['failed', true], ['waiting_on_dependency', false], ['queued', false]] as const) {
+      h.store.db.prepare('UPDATE jobs SET state = ? WHERE id = ?').run(state, job.id);
+      expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId).executorDone, state).toBe(done);
+    }
+    h.close();
+  });
+
+  it('is bound to the executor: another one learns nothing, an unknown job is not_found, an expired lease still counts', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    expect(() => h.app.jobs.executorJobStatus('exec-b', c.jobId)).toThrow(/not run by this executor/);
+    expect(() => h.app.jobs.executorJobStatus(h.executorId, 'no-such-job')).toThrow(/Unknown job/);
+
+    // The job moves to another executor; the one with an expired lease on it may still ask.
+    at(h, EXPIRED).expireLeases();
+    h.store.db.prepare('UPDATE jobs SET executor_id = ? WHERE id = ?').run('exec-b', job.id);
+    expect(h.app.jobs.executorJobStatus(h.executorId, c.jobId).state).toBe('waiting_for_executor');
+    expect(h.app.jobs.executorJobStatus('exec-b', c.jobId).state).toBe('waiting_for_executor');
+    expect(() => h.app.jobs.executorJobStatus('exec-c', c.jobId)).toThrow();
+    h.close();
+  });
+});
+
+describe('an executor-state failure', () => {
+  it('ends the job under its own reason, never as no_result, keeping the holds of a started agent', () => {
+    const h = makeHarness();
+    const job = submit(h);
+    const c = claimRegistered(h, 'k1');
+    const out = h.app.jobs.reportFailure(h.executorId, c.jobId, c.leaseId, 'executor_state_unavailable', {
+      detail: 'The record of what was submitted to the agent could not be written.',
+    });
+    expect(out).toEqual({ state: 'failed', orphan: true });
+    expect(h.store.jobs.transitions(job.id).at(-1)?.reason).toBe('executor_state_unavailable');
+    expect(h.store.jobs.reservation('demo')).toMatchObject({ reason: 'orphan_agent' });
+    h.close();
+  });
+});

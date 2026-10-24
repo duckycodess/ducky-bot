@@ -71,8 +71,8 @@ unequal or missing id on the same pull request is treated as "possibly the same 
   reservation and charging no attempt, excluded from the pending batch (so held cards cannot starve the
   cards behind them), counted in `/status`, `import:assistant --verify` (`heldNativeCards`, which also
   clears `clear`) and the v3 export. A restart and the orphan sweep keep it. Two distinct reviews in the same
-  second are therefore held, not told. A held card is a notification not sent, by design, and has no
-  clearing control.
+  second are therefore held, not told. A held card is durable UNDELIVERED work: it is kept, counted and
+  unresolved, never deleted, and has no clearing control until exact evidence exists.
 
 That live equality check remains a required evidence gate; it would let both directions stop holding.
 
@@ -195,8 +195,8 @@ identifiers per delivered native transition and is accepted.
 - **Duplicates that remain, honestly.** A count line or an unnamed aggregate never proves an item, so
   an aggregate ("3 new issues", "and 7 more commits") and the detailed imported event can both reach
   the owner. A transition no codec can name has no counterpart and is told by both. A requested-changes
-  review is **not** told twice by an id mismatch: it is withheld or held (above), which is loss, not
-  duplication. A review alone is never settled for a follow-up DM.
+  review is **not** told twice by an id mismatch: it is withheld or held (above), which is durable
+  undelivered work, not a duplicate and not a deletion. A review alone is never settled for a follow-up DM.
 - **Required merge blockers (named, not accepted residuals, no claim of parity).** The ordinary
   watch's summary lines are PR-level and carry no review id or per-item identity, so no safe settlement
   exists for the following, and each is a **required merge blocker** that must be closed (by a source of
@@ -207,12 +207,22 @@ identifiers per delivered native transition and is accepted.
   against an imported `pr_opened`. Also open on the same terms: the closed-pull-request line, issue count
   lines and workflow-run lines against their imported events, and the follow-up proposal. None is settled
   by a count, a coarse suppression or a timestamp.
-- **Loss that remains, honestly.** A withheld event is a notification that was never sent, by design,
-  and is counted. On a not-new database with the cutoff after the source's own times, a large
+- **Undelivered work that remains, honestly.** A withheld event, and a held native card, is a notification
+  that has NOT been sent. It is durable (kept, counted in `/status`, `--verify` and the export), not
+  deleted, and not an acceptable omission: it stays a required cutover blocker until exact evidence or a
+  separately authorized remediation delivers or settles it. On a not-new database with the cutoff after the source's own times, a large
   backlog of counterpart events is withheld until the sequencing above is followed.
 - **Bounded scans, stated.** A briefing reads unread events in pages of 400 until it has 400 deliverable
   ones or has looked at 10,000, so a long run of waiting events cannot hide a deliverable one behind it;
-  beyond 10,000 unread events the scan stops and the rest wait for a later briefing.
+  beyond 10,000 unread events the scan stops and the rest wait for a later briefing. **That bound is a
+  throughput limit, not a fairness certification:** a backlog of more than 10,000 unread events can still
+  starve work behind it, and that is a **required throughput blocker** until a fair scheme is proven.
+- **Migration 36 was revised in place before it was ever deployed.** A scratch or rehearsal database
+  migrated at an intermediate, never-deployed commit of this branch (`819a420`, `55266b9` or `09f9463`)
+  lacks `github_feed_events.provider_at`, `github_feed_events.held_reason` and
+  `native_transition_claims.provider_at`, yet records migration 36 as applied, so it will not be migrated
+  again. Recreate it from a fresh backup taken before migration 36 and migrate that. No reset of live data is
+  authorized or implied; a database that never ran those commits is unaffected.
 - **Verification is a gate with its own exit code.** `pnpm import:assistant --verify` exits 0 only at parity
   (nothing missing or changed at the source, nothing drifted, the ledger clear), 3 when a record is missing
   or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a

@@ -1345,6 +1345,14 @@ fail-closed form of the blocker, not a decision to drop it.
   same terms; a start-up
   crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
   ledger grows by a few identifiers per delivered native transition for the life of the database.
+- **Digest throughput is bounded, not certified fair:** a briefing looks at no more than 10,000 unread
+  events, so a backlog beyond that can still starve later work. A **required throughput blocker** until a
+  fair scheme is proven.
+- **Withheld events and held native cards are durable UNDELIVERED work**, kept and counted, never deleted
+  and not an acceptable omission; each stays a required cutover blocker with no clearing control.
+- **Scratch databases migrated at `819a420`, `55266b9` or `09f9463` must be recreated** from a backup taken
+  before migration 36 (it was revised in place before ever being deployed, so they lack `provider_at` and
+  `held_reason`). No live-data reset is authorized.
 - **A real typed reader, the rollback-delta export and every operational gate**
   (above).
 

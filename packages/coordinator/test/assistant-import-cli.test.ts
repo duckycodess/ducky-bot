@@ -314,6 +314,67 @@ describe('--verify', () => {
     // Counts only: no handle, hash or repository.
     expect(v.out).not.toMatch(/wabcde|bbbbbbbb|acme\/demo/);
   });
+
+  const applied = () => {
+    const w = world();
+    w.makeBackup();
+    run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    return w;
+  };
+  const watchRow = (d: ReturnType<typeof openDatabase>, snapshot: string | null = null): void => {
+    d.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo','/x','acme','demo','2026-10-12T00:00:00.000Z')`).run();
+    d.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key, cancelled_at, snapshot_json)
+       VALUES ('w1','wabcde','100000000000000001','demo', 15, NULL, 'cancelled', '2026-10-12T00:00:00.000Z', '2026-10-12T00:00:00.000Z', 'acme/demo', '2026-10-12T00:00:00.000Z', ?)`,
+    ).run(snapshot);
+  };
+
+  it('exits 5 while an imported review row reports an impossible state change, and prints only a count', () => {
+    const w = applied();
+    const d = openDatabase({ location: w.dbPath });
+    const target = d.prepare('SELECT id FROM assistant_watch_targets LIMIT 1').get() as { id: string };
+    d.prepare(
+      `INSERT INTO assistant_watch_events (id, target_id, kind, surface, identity, occurred_at, payload_json, origin, created_at, withheld_reason, provider_state)
+       VALUES ('c1', ?, 'review_approved', 'pulls', '7:review:1', '2026-10-12T00:00:00.000Z', '{}', 'observed', '2026-10-12T00:00:00.000Z', 'state_conflict', 'APPROVED')`,
+    ).run(target.id);
+    d.close();
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    expect(JSON.parse(v.out).nativeLedger).toMatchObject({ withheldStateConflict: 1, clear: false });
+    expect(v.out).not.toMatch(/7:review|acme\/widgets/);
+  });
+
+  it('exits 5 while a pull request has exact review facts refused, even after its watch was cancelled', () => {
+    const w = applied();
+    const d = openDatabase({ location: w.dbPath });
+    watchRow(d, JSON.stringify({
+      v: 3, repoName: 'demo', defaultBranch: 'main', openPrCount: 1,
+      prs: [{ number: 7, title: 't', state: 'OPEN', isDraft: false, headRefName: 'f', updatedAt: '2026-10-12T00:00:00.000Z', checks: [], rf: { s: 'unavailable', known: true, pb: null, x: 'left', rv: [] } }],
+    }));
+    d.close();
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    expect(JSON.parse(v.out).nativeLedger).toMatchObject({ refusedReviewPullRequests: 1, clear: false });
+  });
+
+  it.each([['shown'], ['delivered_not_provably_shown']])(
+    'exits 5 while a per-author review line delivered without exact identity (%s) is on record',
+    (shown) => {
+      const w = applied();
+      const d = openDatabase({ location: w.dbPath });
+      d.prepare(
+        `INSERT INTO github_watch_gap_markers (owner_id, watch_id, repo_key, pr_number, review_class, reason, shown, outbox_ref, delivered_at)
+         VALUES ('100000000000000001', 'gone', 'acme/demo', 7, 'approval', 'unavailable', ?, 's1', '2026-10-12T00:00:00.000Z')`,
+      ).run(shown);
+      d.close();
+      const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+      expect(v.code).toBe(5);
+      expect(JSON.parse(v.out).nativeLedger).toMatchObject({
+        clear: false, gapMarkersShown: shown === 'shown' ? 1 : 0, gapMarkersNotProvablyShown: shown === 'shown' ? 0 : 1,
+      });
+      expect(v.out).not.toMatch(/acme\/demo|s1/);
+    },
+  );
 });
 
 

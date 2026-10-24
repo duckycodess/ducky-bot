@@ -77,6 +77,12 @@ export interface OwnerStateSnapshot {
    * own watch handle and the provider instant), including those of a cancelled or identity-stopped watch.
    */
   readonly heldOrdinaryReviews: RawRow[];
+  /**
+   * Per-author review lines delivered while no exact review list could identify them (migration 38): owner,
+   * watch, bound repository, pull request, class, reason, how provably shown, outbox reference, delivery time.
+   * Never a title, a body or a review id.
+   */
+  readonly gapMarkers: RawRow[];
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
   /** A deletion cause row present at read time: a process died mid-deletion. */
@@ -197,9 +203,17 @@ export class RollbackDeltaRepo {
       heldOrdinaryReviews: read(
         'github_watch_events_held',
         `SELECT w.public_id AS watch_handle, w.state AS watch_state, e.repo_key, e.held_reason, e.held_key,
-                e.provider_at, e.created_at
+                e.hash_domain, e.provider_at, e.created_at
            FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
           WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL ORDER BY e.created_at, e.id`,
+        owner,
+      ),
+      gapMarkers: read(
+        'github_watch_gap_markers',
+        `SELECT m.id, m.watch_id, w.public_id AS watch_handle, m.repo_key, m.pr_number, m.review_class, m.reason, m.shown,
+                m.outbox_ref, m.delivered_at
+           FROM github_watch_gap_markers m LEFT JOIN github_watches w ON w.id = m.watch_id
+          WHERE m.owner_id = ? ORDER BY m.id`,
         owner,
       ),
       truncated,

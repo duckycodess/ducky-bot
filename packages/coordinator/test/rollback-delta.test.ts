@@ -344,7 +344,7 @@ describe('the v4 export says what exact native reconciliation recorded', () => {
     claim(h);
     const d = exportDelta(h);
     expect(d.schema).toBe(ROLLBACK_DELTA_SCHEMA);
-    expect(d.schema).toBe('ducky-rollback-delta/v4');
+    expect(d.schema).toBe('ducky-rollback-delta/v5');
     expect(d.complete).toBe(true);
     expect(d.state.pausePeriods).toEqual([
       expect.objectContaining({ startedAt: null, startedOrigin: 'import', startBoundAt: NOW, endedAt: null }),
@@ -460,6 +460,112 @@ describe('the v4 export lists every native holder and every held ordinary fact',
     expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ heldOrdinaryReviews: 1 });
     // Identifiers only: the held row's summary text and any raw review id never leave.
     expect(JSON.stringify(d.state.nativeLedger.heldOrdinary)).not.toContain('held, not sent');
+    h.close();
+  });
+});
+
+describe('the v5 export says what the observed-state review families recorded', () => {
+  const H = 'c'.repeat(64);
+
+  const watchRow = (h: ReturnType<typeof boot>['h'], snapshot: string | null = null): void => {
+    h.store.db.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key, snapshot_json)
+       VALUES ('w1','wabcde',?, 'demo', 15, ?, 'active', ?, ?, 'acme/demo', ?)`,
+    ).run(OWNER, NOW, NOW, NOW, snapshot);
+  };
+
+  it('is a new schema: older documents are never inferred, and the replay rules say what a dismissal and a domain mean', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    const d = exportDelta(h);
+    expect(d.schema).toBe('ducky-rollback-delta/v5');
+    const rules = d.replay.join(' ');
+    expect(rules).toMatch(/OBSERVED STATE/);
+    expect(rules).toMatch(/never a dismissal time/);
+    expect(rules).toMatch(/hashDomain/);
+    expect(rules).toMatch(/state_conflict/);
+    h.close();
+  });
+
+  it('exports every review claim with its state, its hash domain and the review\'s ORIGINAL submission instant', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    const provider = { kind: 'review_dismissed' as const, item: '7', stamp: null, hash: H, attempt: null, domain: 'provider' as const, state: 'DISMISSED' as const };
+    h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', provider, 'watch_summary', 's1', NOW, NOW, '2026-10-01T01:00:00.000Z');
+    h.store.nativeTransitions.markNativeDelivered('watch_summary', 's1', 'owner_dm', NOW);
+    h.store.nativeTransitions.reserveTarget(
+      OWNER, 'acme/demo',
+      {
+        kind: 'review_commented', identity: '8:review:9', occurredAt: NOW, providerHash: null, attempt: null,
+        providerState: null, providerAt: null, createdAt: NOW,
+      },
+      'target_alert', 'e1', NOW,
+    );
+    const rows = exportDelta(h).state.nativeLedger.claims.filter((c) => String(c['kind']).startsWith('review_'));
+    expect(rows.map((c) => [c['kind'], c['hashDomain'], c['providerState'], c['providerAt'], c['path']])).toEqual(expect.arrayContaining([
+      ['review_dismissed', 'provider', 'DISMISSED', '2026-10-01T01:00:00.000Z', 'native'],
+      ['review_commented', 'source_identity', 'COMMENTED|DISMISSED', null, 'target'],
+    ]));
+    // No dismissal time anywhere in the export of a dismissal.
+    expect(JSON.stringify(rows)).not.toMatch(/dismissedAt/);
+    h.close();
+  });
+
+  it('lists the per-author review lines that were delivered without exact identity, after the watch itself is gone', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    watchRow(h);
+    h.store.db.prepare(
+      `INSERT INTO github_watch_gap_markers (owner_id, watch_id, repo_key, pr_number, review_class, reason, shown, outbox_ref, delivered_at)
+       VALUES (?, 'w1', 'acme/demo', 7, 'approval', 'unavailable', 'shown', 's1', ?),
+              (?, 'w1', 'acme/demo', 8, 'changes_requested', 'truncated', 'delivered_not_provably_shown', 's2', ?)`,
+    ).run(OWNER, NOW, OWNER, NOW);
+    h.store.db.prepare('DELETE FROM github_watches').run();
+    const d = exportDelta(h);
+    expect(d.complete).toBe(true);
+    expect(d.state.nativeLedger.gapMarkers.map((m) => [m['prNumber'], m['reviewClass'], m['reason'], m['shown']])).toEqual([
+      [7, 'approval', 'unavailable', 'shown'],
+      [8, 'changes_requested', 'truncated', 'delivered_not_provably_shown'],
+    ]);
+    expect(d.state.nativeLedger.gapMarkers[0]).toMatchObject({ watchHandle: null, repoKey: 'acme/demo', outboxRef: 's1' });
+    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ gapMarkers: 2, gapMarkersNotProvablyShown: 1 });
+    // Identifiers and reasons only.
+    expect(JSON.stringify(d.state.nativeLedger.gapMarkers)).not.toMatch(/summary|title|body/i);
+    h.close();
+  });
+
+  it('carries the state, hash domain and instant of an imported review row, and a withheld state conflict', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    const target = h.store.db.prepare('SELECT id FROM assistant_watch_targets').get() as { id: string };
+    h.store.db.prepare(
+      `INSERT INTO assistant_watch_events
+         (id, target_id, kind, surface, identity, occurred_at, payload_json, origin, created_at, withheld_reason, provider_hash, provider_state, provider_at)
+       VALUES ('x1', ?, 'review_approved', 'pulls', '7:review:1', ?, '{}', 'observed', ?, 'state_conflict', ?, 'APPROVED', ?)`,
+    ).run(target.id, NOW, NOW, H, NOW);
+    const d = exportDelta(h);
+    const ev = d.state.watchEvents.find((e) => e['identity'] === '7:review:1')!;
+    expect(ev).toMatchObject({
+      kind: 'review_approved', withheldReason: 'state_conflict', providerState: 'APPROVED', hashDomain: 'provider', providerAt: NOW,
+    });
+    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ watchEventsStateConflict: 1, watchEventsWithheld: 1 });
+    h.close();
+  });
+
+  it('counts the pull requests whose exact review facts are refused, and the ones at the list bound, never naming one', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    const snapshot = JSON.stringify({
+      v: 3, repoName: 'demo', defaultBranch: 'main', openPrCount: 2,
+      prs: [
+        { number: 7, title: 't', state: 'OPEN', isDraft: false, headRefName: 'f', updatedAt: NOW, checks: [], rf: { s: 'unavailable', known: true, pb: null, x: 'lifecycle', rv: [] } },
+        { number: 8, title: 't', state: 'OPEN', isDraft: false, headRefName: 'f', updatedAt: NOW, checks: [], rf: { s: 'truncated', known: true, pb: null, rv: [] } },
+      ],
+    });
+    watchRow(h, snapshot);
+    const d = exportDelta(h);
+    expect(d.state.nativeLedger.reviewEvidence).toEqual({ refusedPullRequests: 1, truncatedPullRequests: 1 });
+    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ refusedReviewPullRequests: 1 });
     h.close();
   });
 });

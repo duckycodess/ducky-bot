@@ -1,6 +1,7 @@
 import type { IdentityCategory, IdentityRow, OwnerStateSnapshot, RawRow, Store } from '@ducky/persistence';
 import { classifyBaselineMarker } from '@ducky/contracts';
 import { baselineHash, markerCandidateOf } from '@ducky/persistence';
+import { reviewEvidenceCounts } from './github-watches.service.js';
 
 /**
  * The rollback-delta export (ADR 0033): everything that changed in Ducky since an
@@ -27,7 +28,7 @@ import { baselineHash, markerCandidateOf } from '@ducky/persistence';
  * test proves the export is complete and idempotent; it does not prove a source
  * bridge exists, and it never authorizes restoring stale data.
  */
-export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v4';
+export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v5';
 /*
  * v2 adds `state.watchEvents[].baselineMarker`, decided by the one shared classifier
  * (`classifyBaselineMarker`). A v1 document has no such field, so its marker status is
@@ -48,6 +49,18 @@ export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v4';
  * facts on hold (hashed identity, the owner's watch handle and the provider instant, never a review id).
  * A v1, v2 or v3 document has one row per transition and no held facts: that is UNKNOWN there, never
  * inferred, and no older file is rewritten.
+ *
+ * v5 adds the observed-state review families (migration 38). A review fact is a review IN AN OBSERVED STATE
+ * (approved, commented, requested changes, dismissed): `claims` rows of kind `review_approved`,
+ * `review_commented` and `review_dismissed` carry `hashDomain` (which identity `providerHash` is: the provider's
+ * review id, or, for a row that carried none, the imported event's own identity) and `providerState`; a
+ * `review_dismissed` claim means only "observed DISMISSED", with no dismissal time. `providerAt` is always the
+ * review's ORIGINAL submission instant, an identity discriminator, never a dismissal time, and null is unknown.
+ * Every watch event carries `providerState`, `providerAt` and `hashDomain`; `withheldReason` may be
+ * `state_conflict`. `state.nativeLedger.gapMarkers` lists the per-author review lines that were delivered
+ * without exact review identity, and `reviewEvidence` counts the pull requests for which exact review facts are
+ * refused. A v1 to v4 document has none of these: that is UNKNOWN there, never inferred, and no older file is
+ * rewritten.
  */
 /** The most rows of any one table an export reads before it calls itself incomplete. */
 export const ROLLBACK_DELTA_ROW_CAP = 20_000;
@@ -132,6 +145,17 @@ export interface RollbackDelta {
        * cancelled or identity-stopped watch is still listed: it is undelivered work, not a settled one.
        */
       readonly heldOrdinary: readonly Record<string, unknown>[];
+      /**
+       * Per-author review lines DELIVERED while no exact review list could identify them: blocking evidence that
+       * can overlap a review the target tells and that no receipt settles. Identifiers and reasons only.
+       */
+      readonly gapMarkers: readonly Record<string, unknown>[];
+      /**
+       * Counts over the ordinary watches' snapshots: pull requests whose exact review facts are refused (a review
+       * left the list, or its state changed in a way the provider lifecycle does not allow) and pull requests at
+       * the review-list bound. Counts only, never a pull request number.
+       */
+      readonly reviewEvidence: { readonly refusedPullRequests: number; readonly truncatedPullRequests: number };
     };
   };
 }
@@ -145,8 +169,8 @@ export const REPLAY_RULES: readonly string[] = [
   '`deleted` with cause import_suppressed: the import chose not to write it (deleted at the source, or superseded by what the owner did since); nothing to undo.',
   '`deleted` with cause unknown: STOP. The export is incomplete; history already lost is not reconstructible.',
   '`state`: one latest value per key, applied idempotently; applying it twice changes nothing.',
-  '`state.watchEvents[].withheldReason` set: the target never delivered it and never settled it (nothing could place it exactly). Do NOT treat it as told, and do not announce it from here: it is a counted, required cutover blocker. An event whose `settledBy` is `native_receipt` was told by a native path, not by the target: settle it, tell nothing. A v1 or v2 document has neither field: unknown, never inferred.',
-  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened; `staged` rows are the same kind of fact read from legacy feed rows before any reader knew the owner. `heldNativeCards` counts requested-changes cards, and `heldOrdinary` lists ordinary-summary requested-changes facts (by hash, watch handle and provider instant), neither sent nor skipped because they cannot be told from a review the target delivered: never treat one as told. In a v4 document one transition may have several `claims` rows, one per native holder (a feed card and a summary); any delivered native holder is a receipt. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
+  '`state.watchEvents[].withheldReason` set (`legacy_unproven`, `ambiguous_evidence`, or `state_conflict`, a review reporting a state change the provider lifecycle does not allow): the target never delivered it and never settled it (nothing could place it exactly). Do NOT treat it as told, and do not announce it from here: it is a counted, required cutover blocker. An event whose `settledBy` is `native_receipt` was told by a native path, not by the target: settle it, tell nothing. A v1 or v2 document has neither field: unknown, never inferred.',
+  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened; `staged` rows are the same kind of fact read from legacy feed rows before any reader knew the owner. `heldNativeCards` counts requested-changes cards, and `heldOrdinary` lists ordinary-summary review facts (by hash, hash domain, watch handle and provider instant), neither sent nor skipped because they cannot be told from a review the target delivered: never treat one as told. In a v4 or v5 document one transition may have several `claims` rows, one per native holder (a feed card and a summary); any delivered native holder is a receipt. In a v5 document a review fact is a review in an OBSERVED STATE: `review_approved`, `review_commented` and `review_dismissed` claims are different tellings of a review, each with its `providerState` and the `hashDomain` of its `providerHash` (a hash of one domain is never equal to, and never proof of a different review than, a hash of the other); `review_dismissed` means only that the review was observed DISMISSED, `providerAt` is the review\'s ORIGINAL submission instant (an identity discriminator, never a dismissal time; null is unknown). `gapMarkers` are per-author review lines that WERE delivered without exact review identity: blocking evidence, never a receipt and never cleared; `reviewEvidence` counts pull requests whose exact review facts are refused. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
   '`state.watchEvents[].baselineMarker` true: a first-observation suppression marker. It means this start is KNOWN, never that anything was delivered; announce nothing and settle nothing from it. A document whose schema is v1 has no such flag: its marker status is unknown and must not be inferred.',
   'This export is not a bridge and authorizes no restore of stale data.',
 ];
@@ -327,6 +351,7 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
       baselineMarker: classifyBaselineMarker(markerCandidateOf(e)) !== null,
     }));
 
+  const evidence = reviewEvidenceCounts(input.store, input.ownerId);
   const out: RollbackDelta = {
     schema: ROLLBACK_DELTA_SCHEMA,
     profile: input.profile,
@@ -355,6 +380,8 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
         staged: snap.nativeStaged.map((r) => rec(r)),
         heldNativeCards: snap.heldNativeCards,
         heldOrdinary: snap.heldOrdinaryReviews.map((r) => rec(r)),
+        gapMarkers: snap.gapMarkers.map((r) => rec(r)),
+        reviewEvidence: { refusedPullRequests: evidence.refused, truncatedPullRequests: evidence.truncated },
       },
     },
   };
@@ -385,6 +412,10 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
       nativeStaged: d.state.nativeLedger.staged.length,
       heldNativeCards: d.state.nativeLedger.heldNativeCards,
       heldOrdinaryReviews: d.state.nativeLedger.heldOrdinary.length,
+      gapMarkers: d.state.nativeLedger.gapMarkers.length,
+      gapMarkersNotProvablyShown: d.state.nativeLedger.gapMarkers.filter((m) => m['shown'] === 'delivered_not_provably_shown').length,
+      refusedReviewPullRequests: d.state.nativeLedger.reviewEvidence.refusedPullRequests,
+      watchEventsStateConflict: d.state.watchEvents.filter((e) => e['withheldReason'] === 'state_conflict').length,
       watchEventsWithheld: d.state.watchEvents.filter((e) => e['withheldReason'] != null).length,
       watchEventsSettledByNativeReceipt: d.state.watchEvents.filter((e) => e['settledBy'] != null).length,
       // A presence count, never the value: the setting is a preference and the terminal

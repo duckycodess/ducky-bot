@@ -1,7 +1,9 @@
 # ADR 0034 — Exact, delivered-only reconciliation between native and imported notifications
 
 **Status:** accepted; extended by migration 37 (several native holders, exact ordinary
-requested-changes reviews, held ordinary facts, proven openings, export v4), see the sections below.
+requested-changes reviews, held ordinary facts, proven openings, export v4) and by migration 38 (the
+observed-state review families: approved, commented and dismissed, hash domains, gap markers, export v5),
+see the sections below.
 **Supersedes** the coarse "imported typed observation takes precedence" rule of
 [ADR 0030](0030-private-assistant-migration-and-parity-capabilities.md) and the
 resume guard of [ADR 0032](0032-remaining-private-assistant-parity-behaviors.md).
@@ -212,8 +214,8 @@ and reviews without a submission instant are neither. No raw id, login or body i
   `commits`), and each follows its own rule: it is taken from a read only when that read carried that
   list, and otherwise the last proven value stays, so a failed or partial read erases no requested change
   and turns no old comment into a new one. A `reviews` list at the bound cuts off ONLY the exact facts: the
-  aggregate "changes requested" line and the conversation-comment line keep updating from their own lists,
-  as they did before this change. A complete read after a gap is compared with the carried-forward set, so a review that arrived during the gap is told. Only when no
+  per-author lines and the conversation-comment line keep updating from their own lists (migration 38 relabels
+  the old aggregate "changes requested" line as a per-author line and splits the decision from it). A complete read after a gap is compared with the carried-forward set, so a review that arrived during the gap is told. Only when no
   complete set ever existed (a legacy or first observation, a pull request newly entering the list) is the
   set established silently, with no claim. Pull requests currently truncated are counted in `/status`;
   the more-than-100-reviews limit is a required blocker.
@@ -228,12 +230,11 @@ and reviews without a submission instant are neither. No raw id, login or body i
   redaction can span segments (a private-key block opened in one title and closed in another swallows what
   lies between), so when redacting the whole summary changes anything, NOTHING in it is claimed; the
   duplicate that can leave is the named blocker, never a false receipt. A segment the clamp cut off claims
-  nothing, and the pull request of a clipped exact segment is still left out of the aggregate line, so the
-  owner may read nothing about that requested change in that summary (the same class of clamp loss the
-  aggregate line already had; with no receipt written the target may tell it as well, a possible duplicate
-  that stays a named required blocker). The PR-level
-  decisions stay distinct lines with no per-review claim; a pull request whose new review is handled
-  exactly is not repeated in the aggregate line, whether the review was told, delivered by the target or held.
+  nothing. (Migration 38 supersedes the earlier rule that left the pull request of a clipped exact segment out of
+  the aggregate line: the per-author line now comes back when its exact segment was not shown, see below; if
+  the clamp cuts that line off too, nothing about the review is read and, with no receipt written, the target may
+  tell it as well, a possible duplicate that stays a named required blocker.) The PR-level decision stays a
+  distinct line with no per-review claim and is never suppressed by a review.
 - **The loop.** Each pass probes every named item. A target-delivered item is removed. A target send in
   flight defers the WHOLE observation with nothing persisted. A review the ledger cannot tell from one the
   target delivered (a different id at an equal or unknown provider instant) is neither told, dropped nor
@@ -266,8 +267,97 @@ and reviews without a submission instant are neither. No raw id, login or body i
   imported counterparts before; summaries sent before migration 37 told the PR-level lines with no identity,
   and no historical window is called safe: those pre-37 facts stay UNRECONCILED required blockers and the
   migration-36 cutoff and its withholding still apply. Submitted approved, commented and dismissed reviews
-  are NOT given a counterpart family here; that needs a separately coherent immutable review-state protocol,
-  a fresh per-family cutoff and private proof of the source's state semantics.
+  were NOT given a counterpart family by migration 37; migration 38 gives them one (below), as observed-state facts
+  with hash domains and provenance, not as a retroactive cutoff.
+
+### Observed-state review families (migration 38)
+
+A review is a fact **in an observed state**. The source records a review per kind and identity, not per
+submission, so one review can legitimately be told approved and, while its submission is still after the pulls
+cursor, once more as dismissed (in the commented vocabulary): both tellings are accepted source behaviour, so no
+key and no index is shared across states. The new transition kinds are `review_approved`, `review_commented`
+and `review_dismissed`, keyed by pull request, identity domain and state (`kind:n:h`, `kind:n:src:h`, and the
+target-only `review_commented:n:src:h:unknown_state`); the existing `changes_requested` key and every receipt
+under it are untouched. **A dismissed key means only "observed DISMISSED".** No allowed DTO carries a dismissal
+time, actor or cause, so none is invented, `provider_at` is always the review's ORIGINAL submission instant (an
+identity discriminator, null is unknown) and it is never presented as a dismissal time.
+
+- **Hash domains.** `hash_domain` says which identity a stored hash is. `provider` is `hashProviderRef` of the
+  provider's review id (both the gh GraphQL `reviews[].id` and the REST `node_id` are hashed in it; whether they
+  are EQUAL is the unproven live gate). `source_identity` is a separately domain-separated hash of the imported
+  event's own identity string and state scope, used only for a row that carries no provider hash. Hashes of
+  different domains are never equal and never proof of a different review; the domain is part of the key, so the
+  two can never collide.
+- **The imported side keeps the source.** Uniqueness stays `(target, kind, identity)`, no row is deleted and the
+  legacy wording stays. From migration 38 every review row stores the hash of the REST `node_id`, the state it was
+  observed in and the provider's own submission instant **only when the provider supplied one** (the source falls
+  back to "now", which is never a submission instant; imported-document rows and rows observed earlier keep a null
+  state and a null instant, never a guess). The counterpart key comes from the stored state; a commented row with
+  no state has the candidate states {COMMENTED, DISMISSED} and is compatible with both, never exact.
+- **Ledger decisions compare only compatible states on the same pull request.** An exact key (same domain, hash and
+  state) decides first. Otherwise a reserved holder makes the other side wait; for an imported row a delivered native
+  holder withholds it unless its own KNOWN submission instant is later than that holder's observation plus the
+  margin (a row with no known instant can never prove it); for a native fact a delivered target claim with an equal
+  or unknown instant is HELD (the existing held row), unless the target's event row was committed before the
+  previous complete read of that pull request began (`pb`, the boundary proof). A target claim's `observed_at` is the
+  instant the event row was committed, never the provider time. The boundary proof never applies to a known review
+  changing state. An approved and a dismissed observation are different tellings: both are told and nothing is held
+  against the other. These counterparts are **exempt from the migration-36 cutoff**: migration 38 records provenance
+  only (`review_families_at`), and earlier unidentified aggregate history stays an unresolved overlap, not a
+  receipt.
+- **Lifecycle, assumed and enforced, not claimed live.** A submitted review never leaves the list and changes state
+  only by being dismissed. On the ordinary side a complete read that contradicts either is treated like an
+  unavailable one: the last proven facts are carried, nothing is told and the pull request is counted. On the target
+  side the row is recorded (the source uniqueness is kept) but withheld with the reason `state_conflict`, never
+  delivered as a fact, counted. An unknown state never conflicts, and COMMENTED against DISMISSED share a source
+  kind, so the second is never recorded at all (source parity).
+- **The importer never reports a dismissal of a review its cursor has passed**, exactly like the source, so a native
+  dismissal observation has no target counterpart and no target-side detection was added. The target tells a
+  dismissal only for a review it first reads as DISMISSED or one at the cursor second.
+- **Snapshot v3.** Per submitted review it keeps the identity hash, the submission instant, the state it was first
+  observed in (never rewritten) and its state now, and per pull request the boundary of the read that proved the set
+  (written only beside a complete set, carried unchanged through a gap, null for a legacy, first, unbound or
+  remapped observation). A new review is told in its own state (`approval submitted on #n`, `commented review
+  submitted on #n`, `requested changes submitted on #n`, `review submitted and now dismissed on #n`) and a known
+  review observed DISMISSED as `review dismissed (observed) on #n`; each claims only its own state's key, and only for
+  a whole segment actually shown. A review that left the list, or changed state impossibly, is refused and counted.
+  A purported submitted review without an id or an instant makes the read unavailable. **Upgrade from version 2** is
+  compared through its own projection AND by the facts it already proves: a genuinely new review (approved or
+  commented included) is told, a requested change it recorded is claimed when dismissed, and a review known only
+  by identity (no state) is established silently with no claim.
+- **A decision is not a submission.** A changed `reviewDecision` is its own line (`review decision now approved: #n`),
+  fires only between two values from reads that carried one (a missing or empty field carries the last proven
+  value), never for a pull request new to the list, is never claimed, never suppressed because a review sits beside
+  it, and never tied to a cause. A **per-author** line (`approvals recorded on #n`, `changes requested on #n`,
+  from `latestReviews`) names no review and claims none. It is left out only for a pull request whose complete,
+  comparable observation holds same-class exact facts that are actually shown; if one of them is cut off by the
+  clamp or inside a redacted summary the line comes back (a bounded fixpoint: the set of returned lines only grows).
+  A requested-changes line needs a strictly later canonical instant. A change in review counts alone sends no
+  generic message.
+- **Gap markers.** A per-author line told while no exact list could identify it (the list unavailable, at the bound,
+  or with no comparable baseline) is labelled `(reviewer summary only)` and written with its outbox row as a
+  PENDING marker; only a successful send promotes it, in the transaction that settles the row, into
+  `github_watch_gap_markers`: owner scoped, independent of `github_watch_events` and `github_watches` (retention
+  deletes both), on `RETENTION_FORBIDDEN_TABLES`, recording whether the whole segment was provably shown or only
+  delivered. It is counted in `/status`, `import:assistant --verify` (any row makes `clear` false and the exit 5)
+  and the export, is never a receipt and nothing clears it, not a recovery, a cancel, a remap, a restart or retention.
+- **Stateless and old rows are not guessed.** A review row observed before migration 38 or imported from a document
+  has no state and no hash; it is exact only in its source-identity domain, with both candidate states, and is
+  decided by reservation and by instant like any row without a comparable id.
+- **What this does not close.** REST `node_id` equality with the native id (every shared review is withheld or held
+  until it is proven); the provider lifecycle assumptions (nothing was probed live); reviews beyond 100 (counted, no
+  new review told exactly); a per-author line delivered during a gap (its overlap is a counted blocker, a gap marker
+  is the evidence); the clipping and redaction loss of an exact segment; summaries sent before migration 38.
+
+### Rollback export v5 (v4 described below)
+
+Migration 38 changes what the ledger and the event rows carry, so the export is `ducky-rollback-delta/v5`: claims
+and watch events carry `hashDomain` and `providerState` (`providerAt` is the original submission instant, never a
+dismissal time), a watch event may be withheld as `state_conflict`, and `state.nativeLedger` adds `gapMarkers` (the
+per-author lines that were delivered without exact review identity) and `reviewEvidence` (counts of pull requests
+whose exact review facts are refused or at the list bound). A v1 to v4 document is never inferred or rewritten.
+Operators migrate through 38 before the final export; an older build cannot honour the domains, the states or the
+markers.
 
 ### Rollback export v4 (v3 described below)
 
@@ -297,22 +387,27 @@ identifiers per delivered native transition and is accepted.
   an aggregate ("3 new issues", "and 7 more commits") and the detailed imported event can both reach
   the owner. A transition no codec can name has no counterpart and is told by both. A requested-changes
   review is **not** told twice by an id mismatch: it is withheld or held (above), which is durable
-  undelivered work, not a duplicate and not a deletion. A new submitted requested-changes review the ordinary
-  summary tells exactly is claimed, so the imported event settles silently. A review alone is never settled for a follow-up DM.
-- **Required merge blockers (named, not accepted residuals, no claim of parity).** What is now exact is a
-  NEW submitted requested-changes review and a PROVEN opening. Each of the following still carries no
-  per-item identity or no proof, so no safe settlement exists, and each is a **required merge blocker**
-  that must be closed (by a source of exact identity, or an owner-approved suppression rule) before this
-  work is called parity: (1) the PR-level "changes requested on #n" aggregate decision, which claims no
-  review; (2) "approved: #n" against an imported `review_approved` (a PR-level decision is not a review,
-  and approved reviews have no family or cutoff yet); (3) submitted COMMENTED and DISMISSED reviews against
-  an imported `review_commented` (the ordinary conversation-comment count is a different fact, relabelled,
-  not a receipt); (4) a pull request that is only "(newly listed)", not provably opened (created before the
-  boundary, at it, within the skew margin, without a creation time, after a failed read or on a legacy
-  observation); (5) pull requests with 100 or more reviews, which are counted and told no new review
-  exactly. Also open on the same terms: the no-longer-listed line, issue count lines and workflow-run lines
-  against their imported events, and the follow-up proposal. None is settled by a count, a coarse
-  suppression or a timestamp, and pre-migration-37 summary lines stay unreconciled.
+  undelivered work, not a duplicate and not a deletion. A new submitted review the ordinary
+  summary tells exactly, in the state it was observed in (requested changes, approved, commented, dismissed), is
+  claimed, so the imported event of that same state settles silently; a per-author line, a decision and a count
+  claim nothing. A review alone is never settled for a follow-up DM.
+- **Required merge blockers (named, not accepted residuals, no claim of parity).** What is now exact is a NEW
+  submitted review in each observed state (requested changes, approved, commented, first seen dismissed), a
+  known review observed dismissed, and a PROVEN opening. Each of the following still carries no per-item
+  identity or no proof, so no safe settlement exists, and each is a **required merge blocker** that must be closed
+  (by a source of exact identity, or an owner-approved suppression rule) before this work is called parity:
+  (1) a per-author approvals or requested-changes line delivered while no exact review list could identify what it
+  summarises (the list unavailable, at the bound or without a comparable baseline), which claims no review and is
+  kept as durable gap-marker evidence; (2) a PR-level decision, which is a distinct unclaimed fact and no cause is
+  inferred from it; (3) the REST `node_id` equals native id live check, without which every review shared by both
+  paths is withheld or held (the provider lifecycle assumptions are likewise unproven live); (4) a pull request
+  that is only "(newly listed)", not provably opened (created before the boundary, at it, within the skew margin,
+  without a creation time, after a failed read or on a legacy observation); (5) pull requests with 100 or more
+  reviews, which are counted and told no new review exactly; (6) an exact review segment cut off by the clamp or
+  inside a redacted summary, which claims nothing and may leave a duplicate; (7) summaries sent before migration 37
+  or 38 and imported-document review rows (no state, no hash), which stay unreconciled. Also open on the same terms:
+  the no-longer-listed line, issue count lines and workflow-run lines against their imported events, and the
+  follow-up proposal. None is settled by a count, a coarse suppression or a timestamp.
 - **Undelivered work that remains, honestly.** A withheld event, and a held native card, is a notification
   that has NOT been sent. It is durable (kept, counted in `/status`, `--verify` and the export), not
   deleted, and not an acceptable omission: it stays a required cutover blocker until exact evidence or a
@@ -332,9 +427,10 @@ identifiers per delivered native transition and is accepted.
 - **Verification is a gate with its own exit code.** `pnpm import:assistant --verify` exits 0 only at parity
   (nothing missing or changed at the source, nothing drifted, the ledger clear), 3 when a record is missing
   or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a
-  withheld event, a held native card, a held ordinary requested-changes fact, a cursor at or before the
-  cutoff, an unreadable boundary). The report is counts only.
-- **Older code is incompatible.** Stop coordinators before migrating, migrate through 37 before the final
+  withheld event including one withheld as `state_conflict`, a held native card, a held ordinary review fact, a
+  pull request with exact review facts refused, a per-author review line delivered without exact identity, a
+  cursor at or before the cutoff, an unreadable boundary). The report is counts only.
+- **Older code is incompatible.** Stop coordinators before migrating, migrate through 38 before the final
   export, and never run an older build against a migrated database: it would not know the reservations or
   the holders, so it could not honour them.
 - A repeated import, a restart and a retry can neither lose nor duplicate a deterministic transition,

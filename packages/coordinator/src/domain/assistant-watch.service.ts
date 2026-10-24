@@ -1201,10 +1201,13 @@ export class AssistantWatchService {
     const held = repo.withheldCounts(this.ownerId);
     const waiting = repo.waitingOnNative(this.ownerId);
     if (waiting > 0) parts.push(`${waiting} event(s) waiting on a native notification still to be sent`);
-    if (held.legacyUnproven + held.ambiguousEvidence > 0) {
+    if (held.legacyUnproven + held.ambiguousEvidence + held.stateConflict > 0) {
       parts.push(
         `WITHHELD and never sent: ${held.legacyUnproven} predating the native ledger, ` +
-          `${held.ambiguousEvidence} without the exact id needed to tell them from one already sent`,
+          `${held.ambiguousEvidence} without the exact id needed to tell them from one already sent` +
+          (held.stateConflict > 0
+            ? `, ${held.stateConflict} reporting a review state change the provider lifecycle does not allow`
+            : ''),
       );
     }
     if (held.settledByReceipt > 0) parts.push(`${held.settledByReceipt} settled by an exact native receipt`);

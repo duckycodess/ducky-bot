@@ -11,6 +11,7 @@ import {
 import type { RuntimeLockHandle, Store } from '@ducky/persistence';
 import type { IdentityCategory } from '@ducky/persistence';
 import type { BriefingDelivery } from './briefing-notifications.service.js';
+import { reviewEvidenceCounts } from './github-watches.service.js';
 
 /**
  * What the importer compares a document against: FROZEN configuration, never
@@ -784,16 +785,27 @@ export class AssistantImportService {
     // An ordinary-summary requested-changes fact held for the same reason, including one of a cancelled or
     // identity-stopped watch: it stays undelivered work, so it keeps the ledger from being clear.
     const heldOrdinary = this.store.githubWatches.heldCount(owner);
+    // A review state change the provider lifecycle does not allow, seen by the target (withheld, never delivered as
+    // a fact) or by an ordinary watch (exact facts refused for that pull request), is evidence nobody has resolved.
+    // So is a per-author review line that was ACTUALLY delivered while no exact list could identify it: it can
+    // overlap a review the target tells, no receipt can settle it, and nothing clears it.
+    const refused = reviewEvidenceCounts(this.store, owner).refused;
+    const gaps = this.store.githubWatches.gapMarkerCounts(owner);
     const nativeLedger: NativeLedgerReport = {
       readable: boundary !== undefined,
       fresh: boundary?.fresh ?? false,
       withheldLegacy: held.legacyUnproven,
       withheldAmbiguous: held.ambiguousEvidence,
+      withheldStateConflict: held.stateConflict,
       cursorsAtOrBeforeCutoff: cursorsBelow,
       heldNativeCards: heldCards,
       heldOrdinaryReviews: heldOrdinary,
+      refusedReviewPullRequests: refused,
+      gapMarkersShown: gaps.shown,
+      gapMarkersNotProvablyShown: gaps.notProvablyShown,
       clear: boundary !== undefined &&
-        held.legacyUnproven + held.ambiguousEvidence + cursorsBelow + heldCards + heldOrdinary === 0,
+        held.legacyUnproven + held.ambiguousEvidence + held.stateConflict + cursorsBelow + heldCards + heldOrdinary +
+          refused + gaps.shown + gaps.notProvablyShown === 0,
     };
     const totals = Object.values(cats);
     const ok = totals.every((c) => c.missing === 0 && c.changedAtSource === 0);
@@ -817,12 +829,19 @@ export interface NativeLedgerReport {
   readonly fresh: boolean;
   readonly withheldLegacy: number;
   readonly withheldAmbiguous: number;
+  /** Imported review rows that report a state change the provider lifecycle does not allow (never delivered). */
+  readonly withheldStateConflict: number;
   readonly cursorsAtOrBeforeCutoff: number;
   /** Native requested-changes cards held, neither sent nor skipped (ADR 0034). */
   readonly heldNativeCards: number;
-  /** Ordinary-summary requested-changes facts held (never sent, never receipted). */
+  /** Ordinary-summary review facts held (never sent, never receipted). */
   readonly heldOrdinaryReviews: number;
-  /** Nothing withheld or held, no cursor below the cutoff, and the boundary readable. */
+  /** Pull requests for which exact review facts are REFUSED (a review left the list, or an impossible state change). */
+  readonly refusedReviewPullRequests: number;
+  /** Per-author review lines delivered without exact review identity, and how provably each was shown. */
+  readonly gapMarkersShown: number;
+  readonly gapMarkersNotProvablyShown: number;
+  /** Nothing withheld, held, refused or delivered without identity, no cursor below the cutoff, and the boundary readable. */
   readonly clear: boolean;
 }
 

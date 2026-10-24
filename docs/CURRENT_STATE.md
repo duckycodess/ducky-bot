@@ -1234,10 +1234,10 @@ fail-closed form of the blocker, not a decision to drop it.
   waived:** what predates the ledger cannot be placed, so on a database that is not verifiably new every
   imported event with a native counterpart at or before the migration-36 cutoff (plus one second)
   and no exact receipt is **withheld**, never delivered or settled, counted in `/status`, `--verify`
-  and the export, with no clearing control; counts and unnamed aggregates are never receipts (aggregate/
-  detail overlap remains); a requested-changes review is withheld or held, never told twice by an id
-  mismatch, until REST `node_id` equality with the native id is proven on a live provider. Unit and
-  synthetic tests only; command registration with
+  and the export, with no clearing control; counts and unnamed aggregates are never receipts (a per-author
+  review line told without exact review identity is durable, counted evidence and a required blocker, ADR
+  0034); a review is withheld or held, never told twice by an id mismatch, until REST `node_id` equality with
+  the native id is proven on a live provider. Unit and synthetic tests only; command registration with
   Discord is not performed here.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned". The review BODY is now read (and is the only approved source: file and
@@ -1335,25 +1335,33 @@ fail-closed form of the blocker, not a decision to drop it.
   for shape on a public repository only.
 - **Native reconciliation limits (ADR 0034), required until closed:** events that predate the
   ledger are withheld and counted with no clearing control; counts and unnamed aggregates prove
-  no item, so aggregate/detail overlap remains; a requested-changes review is withheld (imported side)
-  or its native card HELD (feed side) when its id cannot be compared, until REST `node_id` equals the
-  native id on a live provider (a live-probe gate nobody has run); **REQUIRED MERGE BLOCKERS, each
-  named, none an accepted residual and none a parity claim:** a NEW submitted requested-changes review and
-  a PROVEN opening are exact now (migration 37), and every other overlap is open: the PR-level approval and
-  requested-changes decisions carry no per-review identity, submitted approved, commented and dismissed
-  reviews have no family or cutoff yet (the ordinary conversation-comment count is a different fact,
-  relabelled and claiming nothing), a pull request merely "newly listed" is not provably opened, pull
-  requests with 100 or more reviews are counted and told no new review exactly, the no-longer-listed (not
-  a close), issue-count and workflow-run lines and the follow-up are open on the same terms, and summaries
-  sent before migration 37 stay unreconciled (no new cutoff is claimed); a start-up
+  no item; a review is withheld (imported side) or its native fact HELD (feed or ordinary side) when its id
+  cannot be compared, until REST `node_id` equals the native id on a live provider (a live-probe gate
+  nobody has run, and the provider lifecycle assumed here, that a submitted review never leaves the list and
+  changes state only by being dismissed, was never probed live); **REQUIRED MERGE BLOCKERS, each named, none an
+  accepted residual and none a parity claim:** a NEW submitted review in each observed state (requested changes,
+  approved, commented, first seen dismissed), a known review observed dismissed and a PROVEN opening are exact now
+  (migrations 37 and 38; a dismissal is a state observation with no dismissal time, and the target, like the
+  source, never reports a dismissal of a review its cursor has passed). Still open: a per-author approvals or
+  requested-changes line told while no exact list could identify it (kept as durable gap-marker evidence, counted in
+  status, verify and the export, never cleared); a PR-level decision is its own unclaimed line and no cause is
+  inferred from it; a pull request merely "newly listed" is not provably opened; pull requests with 100 or more
+  reviews are counted and told no new review exactly; an exact segment cut off by the clamp or inside a redacted
+  summary claims nothing and may leave a duplicate; the no-longer-listed (not a close), issue-count and
+  workflow-run lines and the follow-up are open on the same terms; summaries sent before migration 37 or 38 and
+  review rows with no recorded state or hash stay unreconciled (the new families are exempt from the migration-36
+  cutoff and migration 38 records provenance only); a start-up
   crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
   ledger grows by a few identifiers per delivered native transition for the life of the database.
 - **Digest throughput is bounded, not certified fair:** a briefing looks at no more than 10,000 unread
   events, so a backlog beyond that can still starve later work. A **required throughput blocker** until a
   fair scheme is proven.
-- **Withheld events, held native cards and held ordinary requested-changes facts are durable UNDELIVERED
+- **Withheld events (including one withheld as `state_conflict`, a review reporting a state change the provider
+  lifecycle does not allow), held native cards and held ordinary review facts are durable UNDELIVERED
   work**, kept and counted (a held fact survives a cancel, an identity stop, a restart and retention), never
-  deleted and not an acceptable omission; each stays a required cutover blocker with no clearing control.
+  deleted and not an acceptable omission; each stays a required cutover blocker with no clearing control. So are
+  the pull requests whose exact review facts are refused and the per-author lines delivered without exact
+  identity (gap markers): counted in `/status`, `--verify` (exit 5) and the v5 export.
 - **Scratch databases migrated at `819a420`, `55266b9` or `09f9463` must be recreated** from a backup taken
   before migration 36 (it was revised in place before ever being deployed, so they lack `provider_at` and
   `held_reason`). No live-data reset is authorized.

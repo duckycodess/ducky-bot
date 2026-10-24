@@ -743,7 +743,8 @@ export class AssistantWatchRepo {
     const others = this.db
       .prepare(
         `SELECT provider_state FROM assistant_watch_events
-          WHERE target_id = ? AND identity = ? AND id != ? AND provider_state IS NOT NULL`,
+          WHERE target_id = ? AND identity = ? AND id != ? AND provider_state IS NOT NULL
+            AND (withheld_reason IS NULL OR withheld_reason != 'state_conflict')`,
       )
       .all(targetId, row.identity, id) as { provider_state: string }[];
     const state = row.provider_state;

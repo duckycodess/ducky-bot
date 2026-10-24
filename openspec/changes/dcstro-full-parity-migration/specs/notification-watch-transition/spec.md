@@ -76,6 +76,41 @@ The ordinary watch SHALL name a requested-changes review exactly only when it is
 - **WHEN** a pull request enters the capped list but was created before the boundary, at it, within the skew margin, with no creation time, after a failed read or on a legacy observation
 - **THEN** it is labelled newly listed and carries no opening claim
 
+### Requirement: Observed-state review families, decisions and per-author lines
+A submitted review SHALL be a fact in an OBSERVED STATE (requested changes, approved, commented, dismissed), keyed by pull request, identity domain and state, and no key or index SHALL be shared across states: the same review can be told approved and later dismissed, and both tellings are accepted source behaviour. A dismissal SHALL mean only that the review was observed DISMISSED: no dismissal time, actor or cause SHALL be recorded or invented, and the provider's submission instant SHALL be only an identity discriminator. A stored hash SHALL carry its domain (the provider's review id, or the imported event's own identity when it carried none), hashes of different domains SHALL never be equal and never proof of a different review, and an imported row SHALL record the hash of the REST node id, the state it was observed in and the provider's own submission instant only when the provider supplied one (an unknown instant or state SHALL stay unknown, never guessed or replaced by "now" or the update time). The target SHALL keep one row per kind and identity with its legacy wording, SHALL NOT report a dismissal of a review its cursor has passed, and SHALL withhold, count and never deliver as a fact a row whose known state is an impossible successor of another row of the same review. The ordinary summary SHALL tell a new review in its own state and a known review observed dismissed, claiming only that state's key and only for a whole shown segment, SHALL refuse (as an unavailable read, carrying the last proven facts and counting it) a read in which a review left the list or changed state other than to DISMISSED, and SHALL upgrade a version 2 snapshot without swallowing a review the old facts already prove new. A changed review decision SHALL be a distinct, unclaimed line between two values from reads that carried one. A per-author line SHALL name no review and claim none; it SHALL be left out only where a complete comparable observation holds same-class exact facts that are actually shown, SHALL return when such a fact was cut off or redacted, SHALL be labelled when no exact list could identify it, and SHALL then be recorded as durable, counted, never-cleared evidence only by the send that delivered it. These counterparts SHALL be exempt from the migration-36 cutoff, with migration 38 recording provenance only.
+
+#### Scenario: One review, two states
+- **WHEN** the ordinary watch tells a review approved and a later complete read observes the same review dismissed
+- **THEN** each telling claims only its own state's key, the dismissal names no time, and neither suppresses nor holds the other
+
+#### Scenario: Dismissal the target cannot see
+- **WHEN** a review's submission is already at or before the target's pulls cursor and it is then dismissed
+- **THEN** the target emits no event for it and a native dismissal observation has no target counterpart
+
+#### Scenario: Impossible state change
+- **WHEN** a known review is read approved then requested changes, or leaves the list, or a dismissed review is read approved
+- **THEN** the ordinary read is refused with the last proven facts kept and counted, and a target row for it is recorded but withheld as a state conflict and never delivered
+
+#### Scenario: Version 2 upgrade
+- **WHEN** a version 2 snapshot is upgraded and a genuinely new approved review is present while the old projection is unchanged
+- **THEN** the review is told and claimed, a requested change the old snapshot recorded is claimed when dismissed, and a review the old snapshot knew only by identity is established silently
+
+#### Scenario: Decision beside a review
+- **WHEN** a review decision changes in the same pass as a new approved review
+- **THEN** both are told, the decision claims nothing and is not suppressed, and no cause is asserted
+
+#### Scenario: Per-author line during a gap
+- **WHEN** a per-author approvals line is delivered while the exact review list is unavailable
+- **THEN** the line is labelled, a durable gap marker is written only after the send succeeds, and recovery, cancellation and retention never clear it
+
+#### Scenario: Exact segment cut off
+- **WHEN** the clamp or a redaction prevents an exact review segment from being shown in full
+- **THEN** no receipt is written for it and the per-author line it would have replaced is shown
+
+#### Scenario: Unknown instant
+- **WHEN** an imported review row has no known submission instant and a compatible native fact on the same pull request was delivered
+- **THEN** the row is withheld, counted and never delivered, and only a known later submission instant proves a different review
+
 ### Requirement: Owner monitoring control with exact pause provenance
 The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp, open no pause period and write no audit row. A change SHALL write the switch, its pause period and its audit row in one transaction at the injected time. An owner pause SHALL record its real start; an imported pause, or one recorded before provenance existed, SHALL record no real start, only the latest instant it is known to have begun. A pause period is provenance only and SHALL NOT suppress or authorize any delivery. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget, and pausing applies at the next tick. Resuming SHALL NOT be refused because native history exists: what native paths delivered SHALL be reconciled per exact transition as targets observe, and only an unreadable ledger boundary SHALL refuse. A resume SHALL NOT reset a checkpoint, and a repeated import SHALL NOT override the owner's choice (verification reports the difference).
 

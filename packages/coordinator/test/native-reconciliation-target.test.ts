@@ -270,7 +270,8 @@ describe('an import decides what it writes against the same ledger', () => {
     expect(unsettled(h)).toEqual({ withheld_reason: null, settled_by: null });
     const report = new AssistantImportService({ store: h.store, env: importEnv(), nowMs: () => clock.nowMs() }).verify(importDoc());
     expect(report.nativeLedger).toEqual({
-      readable: true, fresh: true, withheldLegacy: 0, withheldAmbiguous: 0, cursorsAtOrBeforeCutoff: 0, heldNativeCards: 0, heldOrdinaryReviews: 0, clear: true,
+      readable: true, fresh: true, withheldLegacy: 0, withheldAmbiguous: 0, withheldStateConflict: 0, cursorsAtOrBeforeCutoff: 0,
+      heldNativeCards: 0, heldOrdinaryReviews: 0, refusedReviewPullRequests: 0, gapMarkersShown: 0, gapMarkersNotProvablyShown: 0, clear: true,
     });
     expect(report.parity).toBe(true);
     h.close();

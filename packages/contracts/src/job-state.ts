@@ -45,7 +45,12 @@ export const PAUSED_STATES: readonly JobState[] = [
 
 export const ALLOWED_TRANSITIONS: Record<JobState, readonly JobState[]> = {
   queued: ['waiting_for_executor', 'running', 'cancelled', 'failed'],
-  waiting_for_executor: ['running', 'cancelled', 'failed'],
+  /**
+   * `needs_owner_input` is reachable from here ONLY by the lease-free reconcile
+   * of an exact, durable pause report (`JobsService.settlePauseReport`): a lease
+   * expired on an executor that had already proved its agent quiet.
+   */
+  waiting_for_executor: ['running', 'needs_owner_input', 'cancelled', 'failed'],
   running: [
     'needs_approval',
     'needs_owner_input',

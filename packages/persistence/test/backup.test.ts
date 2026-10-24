@@ -67,6 +67,49 @@ describe('backup and verify', () => {
     expect(verified.code, verified.out).toBe(0);
     expect(verified.out).toMatch(/integrity: ok/);
     expect(verified.out).toMatch(/captures=1/);
+    // The engineering slot is part of what a current-schema backup must carry.
+    expect(verified.out).toMatch(/engineering_admission=0/);
+    // ...and so is the durable pause delivery ledger (schema 29).
+    expect(verified.out).toMatch(/job_lease_expiries=0/);
+    expect(verified.out).toMatch(/job_pause_receipts=0/);
+  });
+
+  for (const table of ['job_lease_expiries', 'job_pause_receipts']) {
+    it(`refuses a current-schema copy that lost ${table}`, () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-backup-'));
+      const dbPath = seededDb(dir);
+      const db = openDatabase({ location: dbPath });
+      db.exec(`DROP TABLE ${table}`);
+      db.close();
+
+      const verified = run('verify-backup.ts', ['--file', dbPath]);
+      expect(verified.code).toBe(3);
+      expect(verified.out).toMatch(new RegExp(`table ${table} is missing`));
+    });
+  }
+
+  it('refuses a current-schema copy whose jobs lost the negotiated-protocol column', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-backup-'));
+    const dbPath = seededDb(dir);
+    const db = openDatabase({ location: dbPath });
+    db.exec('ALTER TABLE jobs RENAME COLUMN delivery_protocol TO delivery_protocol_lost');
+    db.close();
+
+    const verified = run('verify-backup.ts', ['--file', dbPath]);
+    expect(verified.code).toBe(3);
+    expect(verified.out).toMatch(/column jobs\.delivery_protocol is missing/);
+  });
+
+  it('refuses a current-schema copy that lost the engineering slot', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ducky-backup-'));
+    const dbPath = seededDb(dir);
+    const db = openDatabase({ location: dbPath });
+    db.exec('DROP TABLE engineering_admission');
+    db.close();
+
+    const verified = run('verify-backup.ts', ['--file', dbPath]);
+    expect(verified.code).toBe(3);
+    expect(verified.out).toMatch(/table engineering_admission is missing/);
   });
 
   it('refuses a file that is not a Ducky database, rather than passing everything', () => {

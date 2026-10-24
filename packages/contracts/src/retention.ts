@@ -26,6 +26,8 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'executor_credentials',
   /** A reservation is by definition live; retention aborts rather than clears. */
   'repo_reservations',
+  /** The engineering slot. A held slot means an attempt, or an unconfirmed stop of one, is live. */
+  'engineering_admission',
   /** Migration bookkeeping. */
   'schema_migrations',
   /**

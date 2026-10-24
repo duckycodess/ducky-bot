@@ -37,6 +37,10 @@ WorkingDirectory=/opt/ducky
 # Credentials belong in a 0600 environment file owned by this user, never in
 # the unit: unit files are world-readable.
 EnvironmentFile=/etc/ducky/executor-%i.env
+# REQUIRED since durable pause delivery: this profile's executor state directory
+# (pause outbox and dispatch journal). Preserved template: the unit was written for
+# the earlier hosts, so set DUCKY_EXECUTOR_STATE_DIR in the environment file to a
+# private directory that is not under a temp or runtime path.
 
 ExecStart=/usr/bin/env node /opt/ducky/packages/executor/dist/main.js
 Restart=always

@@ -12,9 +12,9 @@ import {
   AgentInfoSchema, AgentListResultSchema, AgentPromptResultSchema, AgentStartResultSchema,
   EnvelopeSchema, HERDR_DIRTY_WORKTREE_CODES, HERDR_NOT_FOUND_CODES, HERDR_NOT_READY_CODES,
   HERDR_STALLED_CODES, HerdrErrorEnvelopeSchema,
-  PaneSplitResultSchema, WorkspaceCreateResultSchema, WorkspaceListResultSchema,
+  PaneProcessInfoResultSchema, PaneSplitResultSchema, WorkspaceCreateResultSchema, WorkspaceListResultSchema,
   WorktreeCreateResultSchema,
-  type AgentInfo, type AgentReadSource, type WorkspaceSummary,
+  type AgentInfo, type AgentReadSource, type PaneProcessInfo, type WorkspaceSummary,
 } from './herdr.types.js';
 
 export interface HerdrCliOptions {
@@ -256,6 +256,31 @@ export class HerdrCli implements HerdrClient {
       throw new DuckyError('herdr_unavailable', 'Herdr returned an unreadable agent record.');
     }
     return parsed.data;
+  }
+
+  /**
+   * `undefined` means Herdr answered and there is NO such pane. Anything else
+   * that goes wrong -- a dead socket, an unparseable or unexpected body -- throws,
+   * because "I could not look" must never read as "no processes".
+   */
+  async paneProcessInfo(paneId: string): Promise<PaneProcessInfo | undefined> {
+    // The id becomes an argv element; a value shaped like a flag would be read
+    // as one, so only an id of Herdr's own shape is ever passed.
+    if (!/^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$/.test(paneId)) {
+      throw new DuckyError('herdr_unavailable', 'That pane id is not shaped like one of Herdr\'s.');
+    }
+    let raw: unknown;
+    try {
+      raw = await this.call(['pane', 'process-info', '--pane', paneId]);
+    } catch (err) {
+      if (isNotFound(err)) return undefined;
+      throw err;
+    }
+    const parsed = PaneProcessInfoResultSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new DuckyError('herdr_unavailable', 'Herdr returned an unreadable pane process record.');
+    }
+    return parsed.data.process_info;
   }
 
   /**

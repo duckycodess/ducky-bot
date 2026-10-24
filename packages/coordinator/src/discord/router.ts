@@ -1036,7 +1036,7 @@ export class DuckyRouter {
     }
     if (
       reference.authorId !== undefined &&
-      this.deps.authz.roleOf(reference.authorId) !== 'none'
+      this.deps.authz.mayConverse(reference.authorId)
     ) {
       return { turn: { role: 'user', text: clipped } };
     }
@@ -1337,7 +1337,7 @@ export class DuckyRouter {
                     entityId: detail.job.publicId,
                     actorUserId: actor.discordUserId,
                   }),
-                  label: 'Answer',
+                  label: detail.systemPause ? 'Resume' : 'Answer',
                   style: 'primary',
                 },
               ],
@@ -1353,6 +1353,7 @@ export class DuckyRouter {
             rows,
             detail.dependencies,
             d.jobs.placementHold(detail.job.repoSlug),
+            detail.systemPause?.message,
           );
         }
       }

@@ -196,6 +196,13 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
     bin: 'herdr', verb: ['agent', 'wait'], cls: 'read_only',
     note: 'Blocks until an agent reports one of the requested states. Observation only.',
   },
+  {
+    bin: 'herdr', verb: ['pane', 'process-info'], cls: 'read_only',
+    note:
+      "One pane's live foreground processes. Read-only. Used to find the owned agent's actual " +
+      'pids before its cgroup headroom is checked; its argv, cmdline and cwd are dropped at the ' +
+      'schema boundary and never used or logged.',
+  },
   { bin: 'herdr', verb: ['workspace', 'list'], cls: 'read_only', note: 'Workspace inventory.' },
   {
     bin: 'herdr', verb: ['workspace', 'create'], cls: 'local_mutation',

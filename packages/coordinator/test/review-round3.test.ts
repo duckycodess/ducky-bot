@@ -149,6 +149,8 @@ describe('workspace registration conflicts are decided in the transaction', () =
     h.app.jobs.registerWorkspace(h.executorId, first.jobId, first.leaseId, REGISTRATION);
 
     const other = h.app.jobs.submit(h.owner, { repoSlug: 'other', task: 'b', bootstrap: false });
+    // The engineering slot is not under test; the first attempt ended quietly.
+    h.store.jobs.releaseAdmission(first.jobId);
     const second = h.app.jobs.claim(h.executorId, 'k2')!;
     expect(second.jobId).toBe(other.id);
 

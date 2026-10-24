@@ -1467,4 +1467,101 @@ CREATE INDEX ix_github_feed_digests_settled
   ON github_feed_digests(created_at) WHERE status <> 'pending';
 `,
   },
+  {
+    version: 28,
+    name: 'engineering_admission',
+    sql: `
+-- Ducky-wide engineering admission: at most ONE job may hold an executor
+-- attempt (or an unconfirmed stop of one) at a time, across every repository.
+--
+-- SCOPE, stated exactly: this row lives in ONE coordinator database, so it is
+-- global across the repositories and executors that coordinator serves and
+-- nowhere else. A second profile (development against production), another
+-- coordinator, or the separate agent-flow dispatcher each have their own state
+-- and cannot see it. Cross-program admission is NOT provided by this table.
+--
+-- The single row is structural, not a convention: the primary key is pinned to
+-- 1, so a second concurrent holder is a constraint violation and not a bug a
+-- predicate has to catch. It is released only on proof the attempt is
+-- quiescent; an uncertain stop (lease expiry, orphaned agent) converts it to
+-- \`unconfirmed_stop\` and it then outlives the attempt until the same job
+-- reclaims it or the owner clears the orphan.
+CREATE TABLE engineering_admission (
+  slot        INTEGER PRIMARY KEY CHECK (slot = 1),
+  job_id      TEXT NOT NULL UNIQUE REFERENCES jobs(id),
+  repo_slug   TEXT NOT NULL,
+  acquired_at TEXT NOT NULL,
+  reason      TEXT NOT NULL CHECK (reason IN ('active_attempt','unconfirmed_stop'))
+);
+
+-- The instant a claimed attempt must stop. Set at claim and KEPT across a
+-- lease-expiry reclaim, so a restart cannot grant a fresh budget; cleared when
+-- the attempt ends in a pause or a terminal state.
+ALTER TABLE jobs ADD COLUMN attempt_deadline_at TEXT;
+`,
+  },
+  {
+    version: 29,
+    name: 'pause_delivery',
+    sql: `
+-- Durable pause delivery (protocol 1). See ADR 0030.
+--
+-- Whether the claim that is running NOW negotiated the protocol. It is set at
+-- claim and read at lease expiry: only a negotiated lease has its expiry charge
+-- deferred. 0 is the ordinary path and every row that existed before this
+-- migration.
+ALTER TABLE jobs ADD COLUMN delivery_protocol INTEGER NOT NULL DEFAULT 0
+  CHECK (delivery_protocol IN (0, 1));
+
+-- One structured row per EXPIRED lease, written in the expiry transaction. It
+-- holds the original attempt's identity (lease digest, executor, workspace and
+-- agent snapshot) and its accounting, so a later bound report can find exactly
+-- the attempt it describes without parsing a reason string.
+--
+--   charge_state 'deferred'    the expiry charged nothing yet; it is charged when
+--                              the job is claimed again, or never if a bound
+--                              report reconciles it first;
+--   charge_state 'charged'     attempts + 1 was applied (ordinary path);
+--   charge_state 'not_charged' a bound report reconciled it with no charge.
+--
+-- A row is only ever 'pending' while the job is still in waiting_for_executor
+-- holding its repository, its slot (as an unconfirmed stop) and its workspace.
+CREATE TABLE job_lease_expiries (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id            TEXT NOT NULL REFERENCES jobs(id),
+  lease_digest      TEXT NOT NULL,
+  executor_id       TEXT NOT NULL,
+  workspace_id      TEXT,
+  agent_name        TEXT,
+  attempts_before   INTEGER NOT NULL,
+  delivery_protocol INTEGER NOT NULL CHECK (delivery_protocol IN (0, 1)),
+  charge_state      TEXT NOT NULL CHECK (charge_state IN ('deferred','charged','not_charged')),
+  disposition       TEXT NOT NULL CHECK (disposition IN (
+    'pending','charged','exhausted','cancelled','failed','paused',
+    'overtaken_cancelled','overtaken_timed_out'
+  )),
+  created_at        TEXT NOT NULL,
+  settled_at        TEXT,
+  UNIQUE (job_id, lease_digest)
+);
+CREATE INDEX idx_job_lease_expiries_pending ON job_lease_expiries(job_id) WHERE disposition = 'pending';
+
+-- One row per COMMITTED pause report, keyed by the executor's report id. It is
+-- what makes delivery idempotent: a repeat of the same report answers the same
+-- way after the lease is gone, after an owner resume, after a coordinator
+-- restart, and mutates nothing.
+CREATE TABLE job_pause_receipts (
+  report_id    TEXT PRIMARY KEY,
+  job_id       TEXT NOT NULL REFERENCES jobs(id),
+  executor_id  TEXT NOT NULL,
+  lease_digest TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  agent_name   TEXT NOT NULL,
+  cause        TEXT NOT NULL,
+  disposition  TEXT NOT NULL CHECK (disposition IN ('paused','overtaken_cancelled','overtaken_timed_out')),
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX idx_job_pause_receipts_job ON job_pause_receipts(job_id);
+`,
+  },
 ];

@@ -69,6 +69,7 @@ export const AUDIT_EVENTS = [
   'job.claimed',
   'job.transitioned',
   'job.phase_changed',
+  'job.system_paused',
   'job.cancel_requested',
   'job.cancelled',
   'job.failed',

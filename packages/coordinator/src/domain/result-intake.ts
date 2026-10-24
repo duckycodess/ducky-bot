@@ -261,7 +261,7 @@ export function intakeResult(deps: IntakeDeps, input: IntakeInput): IntakeVerdic
         'unverified_implementation',
         'Reported as implemented without an independent passing review and passing verification.',
       );
-      store.jobs.releaseReservation(input.job.repoSlug);
+      store.jobs.releaseReservation(input.job.repoSlug, input.job.id);
     });
     return { kind: 'downgraded', state: 'failed', reason: 'unverified_implementation', duplicate: false };
   }
@@ -355,7 +355,7 @@ export function intakeResult(deps: IntakeDeps, input: IntakeInput): IntakeVerdic
     });
     store.jobs.appendEvent(input.job.id, 'result_recorded', sanitized.summary.slice(0, 400));
 
-    if (terminal) store.jobs.releaseReservation(input.job.repoSlug);
+    if (terminal) store.jobs.releaseReservation(input.job.repoSlug, input.job.id);
   });
 
   return { kind: 'accepted', state: target, duplicate: false };

@@ -98,6 +98,25 @@ export const ClaimResponseSchema = z.strictObject({
   payload: JobPayloadSchema,
   ownerInputs: z.array(OwnerInputSchema).max(16),
   recordedWorkspace: RecordedWorkspaceSchema.nullable(),
+  /**
+   * When this claimed attempt must stop, as an absolute instant.
+   *
+   * Persisted by the coordinator so a restart or a reclaim after lease expiry
+   * cannot reset a live attempt's budget. Optional so a NEW executor that sees
+   * a claim from a coordinator without it applies its own bounded local ceiling
+   * instead of running unbounded. This is not rolling-upgrade compatibility:
+   * this schema is strict, so an OLDER executor rejects a claim that carries the
+   * field. Upgrade the coordinator and executor together.
+   */
+  attemptDeadlineAt: z.string().optional(),
+  /**
+   * Present (as 1) only when this executor advertised `pause-delivery-v1` AND
+   * this coordinator speaks it. It is what tells the executor that a quiet-pause
+   * report it cannot deliver can be reconciled later without charging the
+   * attempt, and it is what makes the coordinator defer this lease's expiry
+   * accounting. Absent means the ordinary path, unchanged.
+   */
+  pauseProtocol: z.literal(1).optional(),
 });
 export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
 
@@ -159,9 +178,23 @@ export type CancelAckRequest = z.infer<typeof CancelAckRequestSchema>;
 export const EXECUTOR_FAILURE_REASONS = [
   'orphan_agent_still_working',
   'orphan_agent_blocked',
+  /**
+   * A prompt was handed to the agent and the turn was never OBSERVED to settle
+   * (a stalled prompt nothing was seen to pick up, or an idle reading with no
+   * settle behind it). It claims neither that the agent is working nor why it is
+   * quiet: only that submitted work may still start, so nothing is released.
+   */
+  'orphan_prompt_unsettled',
   'foreign_agent_conflict',
   'herdr_unavailable',
   'workspace_rejected',
+  /**
+   * The executor could not write (or was refusing to use) its own durable state,
+   * so it sent nothing to the agent. Its own reason rather than `no_result`: the
+   * agent produced no result because it was never asked, and an owner reading
+   * "no result" would look at the agent instead of at the executor.
+   */
+  'executor_state_unavailable',
   'no_result',
   'wall_clock_exceeded',
   'cancelled_by_owner',
@@ -172,6 +205,7 @@ export type ExecutorFailureReason = (typeof EXECUTOR_FAILURE_REASONS)[number];
 export const ORPHAN_FAILURE_REASONS: readonly ExecutorFailureReason[] = [
   'orphan_agent_still_working',
   'orphan_agent_blocked',
+  'orphan_prompt_unsettled',
 ];
 
 export const JobFailureRequestSchema = z.strictObject({
@@ -181,6 +215,15 @@ export const JobFailureRequestSchema = z.strictObject({
   workspaceId: z.string().max(128).optional(),
   agentName: z.string().max(64).optional(),
   workspacePath: z.string().max(4096).optional(),
+  /**
+   * The executor POSITIVELY proved the job's agent quiet: the recorded name,
+   * workspace and pane, a Ducky workspace, idle or done, and a settled turn.
+   * Absence is not proof. Honoured ONLY
+   * with `wall_clock_exceeded`: it is what lets a timeout whose agent is
+   * provably quiet release the repository and the engineering slot, while any
+   * other failure after a workspace exists keeps both held for the owner.
+   */
+  quiescent: z.boolean().optional(),
 });
 export type JobFailureRequest = z.infer<typeof JobFailureRequestSchema>;
 

@@ -1,0 +1,52 @@
+# TEMPLATE for the EXISTING remote Linux account. Not installed, not enabled,
+# not started by anything in this repository. Outbound only: this process has no
+# listener and dials the coordinator on loopback.
+#
+# Herdr owns the agent processes. They are children of the Herdr server, outside
+# this unit's cgroup, so nothing set here bounds an agent's memory or tasks (the
+# runbook records what is and is not verified about the Herdr server's own
+# cgroup). The bound that matters is the user slice, and the memory guard below
+# reads THAT before every claim rather than pretending this unit is the limit.
+# Before every prompt it also checks the cgroup the agent's own processes are in,
+# and each ancestor, found through Herdr rather than assumed from this unit.
+#
+# Use a Herdr session that belongs to Ducky. The repository has not recorded how
+# to pin one (no Herdr session setting is documented in docs/integrations/herdr.md),
+# so this template does not invent a variable: pin it in the Herdr server's own
+# configuration and read it back, and never borrow the session the agent-flow
+# dispatcher uses.
+[Unit]
+Description=Ducky executor (%i profile, outbound only)
+Documentation=file:///home/%u/projects/ducky/docs/runbooks/remote-linux-runtime.md
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/ducky
+
+# Per profile, mode 0600. Each profile has its own executor identity and
+# credential, so a development executor can never claim a production job, and
+# the owner's passcode and Discord tokens are never in this file.
+EnvironmentFile=%h/.config/ducky/executor-%i.env
+
+# Fail closed on memory: refuse to claim unless the slice provably has room for
+# an engineering reserve plus a notification reserve. The reserves are operator
+# estimates (see executor.env.example), not measurements.
+Environment=DUCKY_MEMORY_GUARD=cgroup
+
+Environment=TMPDIR=%h/.local/state/ducky/%i/tmp
+# This profile's durable executor state (pause outbox and dispatch journal). A
+# SIBLING of TMPDIR, never inside it: nothing that sweeps temp may reach it, and it
+# is per instance so two profiles can never share one. The executor refuses to
+# start if it cannot open it with the right ownership and mode.
+Environment=DUCKY_EXECUTOR_STATE_DIR=%h/.local/state/ducky/%i/executor-state
+ExecStartPre=/usr/bin/install -d -m 0700 %h/.local/state/ducky/%i %h/.local/state/ducky/%i/tmp %h/.local/state/ducky/%i/executor-state
+
+ExecStart=/usr/bin/env node %h/projects/ducky/packages/executor/dist/main.js
+Restart=always
+RestartSec=10s
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

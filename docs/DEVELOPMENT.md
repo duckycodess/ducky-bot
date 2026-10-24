@@ -180,6 +180,9 @@ DUCKY_EXECUTOR_ID=wsl-laptop
 DUCKY_EXECUTOR_KEY_ID=k1
 DUCKY_EXECUTOR_TOKEN=...
 DUCKY_EXECUTOR_HMAC_SECRET=...
+# Required: where this profile keeps its pause outbox and dispatch journal. Absolute,
+# private, and NOT under /tmp, TMPDIR or the runtime directory.
+DUCKY_EXECUTOR_STATE_DIR=/home/you/.local/state/ducky/development/executor-state
 ```
 
 ## The phone capture page
@@ -260,6 +263,15 @@ cp data/ducky-dev.db /tmp/rehearsal.db
 DUCKY_DB_PATH=/tmp/rehearsal.db pnpm migrate --dry
 DUCKY_DB_PATH=/tmp/rehearsal.db pnpm migrate
 ```
+
+## Engineering and additional-user AI are off by default
+
+`DUCKY_ENGINEERING_ENABLED` and `DUCKY_ADDITIONAL_USER_AI_ENABLED` both default to
+off (see `.env.example`). A development setup that submits jobs or lets the
+whitelist chat sets them to 1. The coordinator and executor also refuse to start
+when any `*_API_KEY` environment variable is set, which can bite a developer
+shell that exports one; unset it for these processes. For the remote Linux
+runtime see [runbooks/remote-linux-runtime.md](runbooks/remote-linux-runtime.md).
 
 ## Layout
 

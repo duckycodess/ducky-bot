@@ -46,6 +46,24 @@ export const LEASE_TTL_MS = 5 * 60_000;
 export const LEASE_HEARTBEAT_MS = 30_000;
 export const APPROVAL_TTL_MS = 7 * 24 * 60 * 60_000;
 export const JOB_MAX_WALL_CLOCK_MS = 2 * 60 * 60_000;
+/**
+ * The budget for one CLAIMED executor attempt: claim until the attempt reaches
+ * a terminal state or a pause. Owner, approval and dependency waits are not
+ * part of it and keep their own durations.
+ *
+ * The default is one hour. The maximum is a ceiling on the configured value
+ * AND the bound an executor applies locally when a claim carries no deadline
+ * (a coordinator from before this field existed), so a rolling restart can
+ * never produce an unbounded attempt.
+ */
+export const ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS = 60 * 60_000;
+export const ENGINEERING_ATTEMPT_BUDGET_MAX_MS = JOB_MAX_WALL_CLOCK_MS;
+/**
+ * How long past its deadline a running attempt may keep heartbeating before the
+ * coordinator itself requests cancellation. The executor enforces the deadline
+ * locally first; this is the backstop for an executor that does not.
+ */
+export const ENGINEERING_ATTEMPT_GRACE_MS = 2 * 60_000;
 export const RECOVERY_WAIT_MS = 15 * 60_000;
 export const EXECUTOR_OFFLINE_AFTER_MS = 3 * 60_000;
 

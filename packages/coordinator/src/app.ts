@@ -19,7 +19,7 @@ import {
 } from './domain/conversation-threads.js';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveGitHubFeed, resolveConversationProvider, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveEngineering, resolveGitHubFeed, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -200,7 +200,11 @@ export function createApp(
   const secrets = resolveProfileSecrets(env);
 
   const store = overrides.store ?? createStoreFromEnv(env, paths);
-  const authz = new Authorizer(loadAuthzConfig(env));
+  const authz = new Authorizer(loadAuthzConfig({
+    OWNER_DISCORD_USER_ID: env.OWNER_DISCORD_USER_ID,
+    CHAT_WHITELIST_USER_IDS: env.CHAT_WHITELIST_USER_IDS,
+    DUCKY_ADDITIONAL_USER_AI_ENABLED: env.DUCKY_ADDITIONAL_USER_AI_ENABLED,
+  }));
   const signer = new ComponentSigner(secrets.componentSigningKey);
 
   const allowlist = RepoAllowlist.fromJson(
@@ -309,7 +313,7 @@ export function createApp(
   const pending = new PendingScheduleStore();
   const captures = new CapturesService(store, authz);
   const schedules = new SchedulesService({ store, authz, pending, extractor });
-  const jobs = new JobsService({ store, authz, allowlist });
+  const jobs = new JobsService({ store, authz, allowlist, engineering: resolveEngineering(env) });
   const actionPerformer = overrides.actionPerformer ?? new GitActionPerformer({
     allowlist,
     enabled: resolveApprovedActionsEnabled(env),
@@ -405,7 +409,7 @@ export function createApp(
       // One question only: may this person converse? It decides whether a
       // reply anchor that missed the message cache may cost a REST call, and
       // it grants nothing.
-      (userId) => authz.roleOf(userId) !== 'none',
+      (userId) => authz.mayConverse(userId),
     );
 
   /**

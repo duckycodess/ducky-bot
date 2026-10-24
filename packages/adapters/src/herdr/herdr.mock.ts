@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DuckyError } from '@ducky/contracts';
 import type { HerdrClient } from './herdr.port.js';
-import type { AgentInfo, AgentStatus, WorkspaceSummary } from './herdr.types.js';
+import type { AgentInfo, AgentStatus, PaneProcessInfo, WorkspaceSummary } from './herdr.types.js';
 
 export interface MockHerdrState {
   available: boolean;
@@ -66,6 +66,20 @@ export class MockHerdr implements HerdrClient {
     this.record('agentRead', { target, source: opts.source ?? 'detection' });
     if (!this.state.available) throw new DuckyError('herdr_unavailable', 'Herdr is not running.');
     return this.readSnapshots.shift() ?? this.readSnapshotDefault;
+  }
+
+  /**
+   * Scripted process info, keyed by pane id. A pane with no entry is ABSENT, not
+   * an empty process list: a test that has not said what runs in a pane gets
+   * "no such pane", which the guard must refuse.
+   */
+  processInfo = new Map<string, PaneProcessInfo | (() => PaneProcessInfo | undefined)>();
+
+  async paneProcessInfo(paneId: string): Promise<PaneProcessInfo | undefined> {
+    this.record('paneProcessInfo', { paneId });
+    if (!this.state.available) throw new DuckyError('herdr_unavailable', 'Herdr is not running.');
+    const entry = this.processInfo.get(paneId);
+    return typeof entry === 'function' ? entry() : entry;
   }
 
   async agentStart(

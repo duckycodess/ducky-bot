@@ -1,4 +1,6 @@
-import type { AgentInfo, AgentReadSource, WorkspaceSummary } from './herdr.types.js';
+import type {
+  AgentInfo, AgentReadSource, PaneProcessInfo, WorkspaceSummary,
+} from './herdr.types.js';
 
 export interface HerdrClient {
   available(): Promise<boolean>;
@@ -24,6 +26,12 @@ export interface HerdrClient {
     target: string,
     opts?: { source?: AgentReadSource; lines?: number },
   ): Promise<string>;
+  /**
+   * The live foreground processes of a pane, or `undefined` when Herdr answers
+   * that there is no such pane. Read-only; argv, cmdline and cwd are stripped by
+   * the schema. A failure to ask throws, and is never read as "no processes".
+   */
+  paneProcessInfo(paneId: string): Promise<PaneProcessInfo | undefined>;
   agentStart(name: string, kind: string, paneId: string, agentArgs: readonly string[]): Promise<AgentInfo>;
   /**
    * Submits a prompt and waits for the turn to settle. Resolves with the

@@ -153,6 +153,10 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       DUCKY_PROFILE: 'development',
       OWNER_DISCORD_USER_ID: OWNER,
       CHAT_WHITELIST_USER_IDS: CHAT,
+      // Both are OFF by default in production configuration; the suite exercises
+      // the enabled behaviour and the dedicated tests exercise the defaults.
+      DUCKY_ENGINEERING_ENABLED: '1',
+      DUCKY_ADDITIONAL_USER_AI_ENABLED: '1',
       DUCKY_DEV_COMPONENT_SIGNING_KEY: secret(),
       DUCKY_EXECUTOR_CREDENTIALS: credentialsJson,
       DUCKY_DB_PATH: ':memory:',

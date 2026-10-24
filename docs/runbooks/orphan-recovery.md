@@ -11,14 +11,51 @@ submits a result that was already written.
 Nothing is re-run behind your back, and no second writer is ever started beside
 a workspace that may still have uncommitted changes.
 
+An executor that negotiated durable pause delivery may hold a quiet-pause report
+the coordinator never received. For such a lease the expiry is **not charged**:
+the job waits as `waiting_for_executor` with its repository, engineering slot and
+workspace kept, and only the original executor can finish it (by delivering its
+report, which pauses the job for you with the attempt budget intact, or by its
+ordinary recovery claim). No timer fails it, so **you are told**: when the lease
+expires this way you get a DM saying the repository and the engineering slot are
+held for that executor, that nothing was charged or released, and the two commands
+that end it. If that executor is gone for good, `/job cancel id:<id>` ends the job
+and converts its holds to an orphan, and `/job cleanup id:<id>` clears them after
+you have looked.
+
+Two things can keep the original executor from finishing it, and then cancel is the
+only way out: the executor's host is gone, or the repository names a **preferred**
+executor that is online and is not the original, which hides the repository from
+the original (placement preference hides it from every other executor while the
+preferred one is live). Do not wait for either to resolve on its own.
+
 ## When a repository stays blocked
 
-`/jobs` shows a job as `failed` with `orphan_agent_still_working` or
-`orphan_agent_blocked`, and new jobs for that repository stay `queued`.
+`/jobs` shows a job as `failed` with `orphan_agent_still_working`,
+`orphan_agent_blocked` or `orphan_prompt_unsettled` (a prompt was submitted and
+the turn was never seen to settle -- or nothing durable records that it did, which
+is the same to Ducky -- so the agent may still start), and new jobs for
+that repository stay `queued`.
 
 That is deliberate. A Pi agent may still be running, so the reservation is
 converted to `orphan_agent` — which **never expires** — instead of being
 released.
+
+A held orphan also holds the **engineering slot** (decision 0030): while it is
+held, no other engineering job is claimed, in any repository. `/job cleanup`
+releases the slot together with the reservation. A lease that expired while a
+workspace was open is treated the same way after its attempts run out. The slot
+is local to this coordinator database; agent-flow and the other profile have
+their own state and are not affected.
+
+A timed-out attempt (the 60 minute default) is reported with the phase it
+reached. If a fresh look positively matched the recorded agent (name, workspace,
+pane, a Ducky workspace) and showed it idle or done, and its turn had been seen to
+settle, the repository and slot are released on their own. Anything else (still
+working, blocked, unknown, **gone**, a same-name agent that is not provably
+the recorded one, or a prompt whose turn was never seen to settle) interrupted
+nothing and you will find it here as an orphan: a vanished agent is not proof that
+its process stopped.
 
 ### Look first
 

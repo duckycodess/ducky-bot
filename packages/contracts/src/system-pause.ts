@@ -94,3 +94,34 @@ export const SYSTEM_PAUSE_OWNER_TEXT: Record<JobPauseCause, string> = {
     'Nothing was sent to the model. The workspace and repository are kept. Resume once ' +
     'memory is available.',
 };
+
+/**
+ * A pause report that arrived AFTER the coordinator had already decided the
+ * job's fate: an owner cancellation or an elapsed attempt deadline won inside
+ * the transaction. The reason carries the digest of the reporting lease so a
+ * retried report (the response was lost) replays the same terminal state
+ * instead of being refused as a stale lease and logged as undelivered.
+ */
+export const PAUSE_OVERTAKEN_OUTCOMES = ['cancelled', 'timed_out'] as const;
+export type PauseOvertakenOutcome = (typeof PAUSE_OVERTAKEN_OUTCOMES)[number];
+
+const OVERTAKEN_PREFIX = 'pause_overtaken:';
+
+export const pauseOvertakenReason = (outcome: PauseOvertakenOutcome, leaseId: string): string =>
+  `${OVERTAKEN_PREFIX}${outcome}:${leaseDigest(leaseId)}`;
+
+export function parsePauseOvertakenReason(
+  reason: string,
+): { outcome: PauseOvertakenOutcome; leaseDigest: string } | undefined {
+  if (!reason.startsWith(OVERTAKEN_PREFIX)) return undefined;
+  const [outcome, digest, ...rest] = reason.slice(OVERTAKEN_PREFIX.length).split(':');
+  if (rest.length > 0 || !digest || !/^[0-9a-f]{16}$/.test(digest)) return undefined;
+  return (PAUSE_OVERTAKEN_OUTCOMES as readonly string[]).includes(outcome ?? '')
+    ? { outcome: outcome as PauseOvertakenOutcome, leaseDigest: digest }
+    : undefined;
+}
+
+export const PAUSE_OVERTAKEN_OWNER_TEXT: Record<PauseOvertakenOutcome, string> = {
+  cancelled: 'Cancelled. The agent was already quiet when the executor reported, so nothing was left running.',
+  timed_out: 'The attempt budget ran out before the executor could pause the job. The agent was observed quiet.',
+};

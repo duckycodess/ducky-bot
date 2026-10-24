@@ -1,5 +1,6 @@
 import {
-  SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel, parseSystemPauseReason,
+  PAUSE_OVERTAKEN_OWNER_TEXT, SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel,
+  parsePauseOvertakenReason, parseSystemPauseReason,
   type JobState,
 } from '@ducky/contracts';
 import type { NotificationTarget, PendingNotificationRow, Store } from '@ducky/persistence';
@@ -204,7 +205,18 @@ export class JobNotifier {
    */
   private shouldNotifyOwner(row: PendingNotificationRow): boolean {
     if (row.actor.startsWith('owner:')) return false;
-    return NOTIFIABLE_STATES.has(row.toState);
+    if (!NOTIFIABLE_STATES.has(row.toState)) return false;
+    // A delayed pause or question row that a LATER pause or question has
+    // superseded is dropped entirely. Its text and its button describe a wait
+    // that is over, and the button would act on whatever wait is current now:
+    // an Answer meant for an old question resuming a system pause, a Resume
+    // resolving a real question, or the older of two identical pauses offering
+    // an action for the newer one. Only the latest move into the state speaks.
+    if (row.toState === 'needs_owner_input') {
+      const latest = this.store.jobs.latestTransitionInto(row.jobId, 'needs_owner_input');
+      if (latest !== undefined && latest.id !== row.transitionId) return false;
+    }
+    return true;
   }
 
   /**
@@ -265,11 +277,16 @@ export class JobNotifier {
     // state: a sweep can run after the job has resumed or paused again, and the
     // row must describe the pause it was written for.
     const systemPause = row.toState === 'needs_owner_input' ? parseSystemPauseReason(row.reason) : undefined;
+    const overtaken = parsePauseOvertakenReason(row.reason);
     const fields: OutboundEmbedField[] = [
       { name: 'What happens next', value: ownerNextStep(row.toState) },
       {
         name: 'Reason',
-        value: systemPause ? SYSTEM_PAUSE_OWNER_TEXT[systemPause.cause] : humanize(row.reason),
+        value: systemPause
+          ? SYSTEM_PAUSE_OWNER_TEXT[systemPause.cause]
+          : overtaken
+            ? PAUSE_OVERTAKEN_OWNER_TEXT[overtaken.outcome]
+            : humanize(row.reason),
       },
     ];
     const rows: OutboundRow[] = [];

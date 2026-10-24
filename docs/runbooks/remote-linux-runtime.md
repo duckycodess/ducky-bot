@@ -269,7 +269,15 @@ open. All fourteen are required, and the list matches
    is NOT a quota feature. Ducky infers no cause, there is no provider quota
    state, counter or sign-in-versus-quota distinction until a real response is
    recorded (item 5), and no real pause has been observed, so the issue's
-   quota-pause criterion is not met.
+   quota-pause criterion is not met. **Not retry-preserving when delivery
+   fails:** if the pause report cannot reach the coordinator (an outage, or a
+   coordinator that lacks the route during an upgrade), the executor neither
+   fails the job nor prompts again, but the coordinator applies ordinary lease
+   expiry, which spends an attempt, keeps the slot as an unconfirmed stop, and
+   with the default one-attempt budget fails and orphans the job on a second
+   expiry. Deploy coordinator and executor together, and treat a logged
+   "pause was not delivered" as needing the owner's attention. Preserving the
+   budget across transport loss remains required and unimplemented.
 5. **Supported subscription route, sign-in and quota on this host.** No
    `openclaw` binary or provider profile exists in this account at the time of
    writing. Route, eligibility and quota are unverified, and the binary's absence

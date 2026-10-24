@@ -387,10 +387,17 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       });
       // The agent was proved quiet, so the writer lock was released above. The
       // pause is idempotent for this lease and `pauseJob` retries a bounded
-      // number of times. If it still cannot be delivered the job is NOT failed
-      // and NOT downgraded to a no-result: nothing is lost, because the lease
-      // simply expires and the recovery claim meets the same quiet agent, which
-      // pauses again instead of prompting.
+      // number of times. If it still cannot be delivered it is NOT reported as
+      // a failure or a no-result, and the brief is NOT sent again. That is all
+      // this branch can promise. What follows is the coordinator's ordinary lease
+      // expiry, which KNOWS NOTHING of this pause: it spends an attempt
+      // (`attempts + 1`), keeps the slot as an unconfirmed stop, and can exhaust
+      // the attempt budget (terminal, with the repository and slot orphaned for
+      // the owner) or, after a cancellation, end the job cancelled with the same
+      // orphaned reservation. If budget remains, the recovery claim meets the
+      // quiet agent and pauses without prompting. So an OUTAGE or version skew on
+      // this one call is not retry-preserving; that is a required follow-up, not
+      // something this code achieves.
       try {
         const sent = await client.pauseJob(claim.jobId, {
           leaseId: claim.leaseId,
@@ -410,7 +417,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         log(
           `job ${claim.publicId}: the pause was not delivered ` +
             `(${redact(isDuckyError(err) ? err.ownerMessage : (err as Error).message).slice(0, 160)}); ` +
-            'the job is left to lease expiry and recovery, not failed',
+            'not reported as a failure and not re-prompted, but lease expiry will now spend an attempt',
         );
       }
       return;

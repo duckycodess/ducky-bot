@@ -158,10 +158,16 @@ export function createAgentPromptGuard(deps: AgentGuardDeps): PromptGuard {
   const fs = deps.fs ?? realProcFs;
   const procRoot = deps.procRoot ?? '/proc';
   const mount = deps.cgroupMount ?? '/sys/fs/cgroup';
-  const required =
-    BigInt(deps.reserves.engineeringBytes) +
-    BigInt(deps.reserves.providerBytes) +
-    BigInt(deps.reserves.notificationBytes);
+  // Validated BEFORE any BigInt is made: `BigInt(1.5)` throws and `BigInt(-1)`
+  // would quietly lower the bar. An invalid reserve is a refusal on every call,
+  // not a throw at construction and never a smaller requirement.
+  const reserveList = [
+    deps.reserves.engineeringBytes, deps.reserves.providerBytes, deps.reserves.notificationBytes,
+  ];
+  const reservesValid =
+    reserveList.every((r) => Number.isSafeInteger(r) && r >= 0) &&
+    Number.isSafeInteger(reserveList.reduce((a, b) => a + b, 0));
+  const required = reservesValid ? reserveList.reduce((a, b) => a + BigInt(b), 0n) : 0n;
 
   /** The cgroup-v2 mount must be where we think, rooted at the real hierarchy root. */
   async function verifyMount(): Promise<void> {
@@ -234,6 +240,7 @@ export function createAgentPromptGuard(deps: AgentGuardDeps): PromptGuard {
   }
 
   async function evaluate(target: PromptGuardTarget, ctx: PromptGuardContext): Promise<PromptGuardVerdict> {
+    if (!reservesValid) return fail('the configured memory reserves are not exact non-negative integers');
     await verifyMount();
 
     // 1. Who is in the pane, right now.

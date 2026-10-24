@@ -387,6 +387,33 @@ describe('the identity sandwich', () => {
   });
 });
 
+describe('the reserves the guard is given', () => {
+  it('refuses on every call, without throwing, when a reserve is not a safe non-negative integer', async () => {
+    const big = Number.MAX_SAFE_INTEGER;
+    for (const bad of [
+      { engineeringBytes: -1 }, { engineeringBytes: 1.5 }, { providerBytes: Number.NaN },
+      { notificationBytes: Number.POSITIVE_INFINITY }, { engineeringBytes: big + 1 },
+      { engineeringBytes: big, providerBytes: 1 },
+    ]) {
+      let guard: ReturnType<typeof createAgentPromptGuard> | undefined;
+      expect(() => {
+        guard = createAgentPromptGuard({
+          herdr: { paneProcessInfo: async () => info() }, uid: UID, fs: standard(),
+          reserves: { ...RESERVES, ...bad },
+        });
+      }, JSON.stringify(bad)).not.toThrow();
+      const v = await guard!(TARGET, { proveAgent: async () => TARGET });
+      expect(v.ok, JSON.stringify(bad)).toBe(false);
+      expect(!v.ok && v.reason).toMatch(/reserves are not exact/);
+    }
+  });
+
+  it('accepts zero reserves as a legitimate configuration', async () => {
+    const g = guardFor(standard(), info(), { engineeringBytes: 0, providerBytes: 0, notificationBytes: 0 });
+    expect((await g.run()).ok).toBe(true);
+  });
+});
+
 describe('parseUnifiedCgroup', () => {
   it('accepts a plain unified entry and rejects everything else', () => {
     expect(parseUnifiedCgroup('0::/user.slice/user-1003.slice/a\\x2db.scope\n')).toBe('/user.slice/user-1003.slice/a\\x2db.scope');

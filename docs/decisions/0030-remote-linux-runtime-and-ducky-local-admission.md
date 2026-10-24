@@ -133,9 +133,19 @@ recorded ones, and an owner cancellation then an elapsed deadline win. A pause
 spends no attempt and no owner-input round, keeps the workspace and reservation,
 clears the lease, phase and deadline, and releases the Ducky-local slot only on
 that proof; resuming reacquires it and starts a fresh bounded attempt. A pause
-the executor cannot deliver is never downgraded to a failure: the lease expires
-and the recovery claim pauses again rather than prompting. Nothing here says why
-the agent stopped, and no quota or sign-in state is inferred from the screen.
+whose report is lost is retried within bounds, and a repeat for the same lease
+(including one that had lost to a cancellation or the deadline) is answered
+identically. **A pause that cannot be delivered at all (an outage, or a coordinator
+that does not know the route) is NOT retry-preserving.** The executor does not
+report a failure and does not prompt again, but the coordinator then sees only a
+silent lease and applies ordinary lease expiry: that spends an attempt, keeps
+the slot as an unconfirmed stop, and with the default budget of one attempt a
+second expiry fails the job and orphans the repository and the slot for the
+owner (after a cancellation it ends cancelled, orphaned the same way). With
+budget remaining, the recovery claim pauses without prompting. Preserving the
+attempt budget across transport loss needs the coordinator to learn of the pause
+by another route, and is a required, unimplemented follow-up. Nothing here says
+why the agent stopped, and no quota or sign-in state is inferred from the screen.
 
 **No friend-facing model by default.** `DUCKY_ADDITIONAL_USER_AI_ENABLED`
 (default off) is frozen into the Authorizer. `Authorizer.mayConverse` is the one
@@ -197,8 +207,10 @@ is kept in full, with the reason for each, in
 3. An authorized stop probe for a working agent, and with it confirmed
    owned-descendant cancel and timeout.
 4. The retry-preserving pause. Implemented in source and unit-tested for a
-   confirmed quiet agent without a result; never observed live, and no provider
-   quota or sign-in state exists to distinguish.
+   DELIVERED pause of a confirmed quiet agent without a result; never observed
+   live, and no provider quota or sign-in state exists to distinguish. NOT
+   retry-preserving when delivery fails (outage, version skew): that path
+   consumes an attempt through lease expiry and can exhaust the budget.
 5. A recorded, supported subscription route, sign-in and quota on this host.
 6. Herdr session pinning, separate from the dispatcher's.
 7. Safe periodic orphan, workspace and temp reclamation that preserves active

@@ -4,7 +4,8 @@ import {
   DEFAULT_MAX_ATTEMPTS, DuckyError, ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS,
   EXECUTOR_OFFLINE_AFTER_MS, INITIAL_WORK_PHASE, LEASE_TTL_MS,
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
-  SYSTEM_PAUSE_OWNER_TEXT, SYSTEM_RESUME_REASON, leaseDigest, systemPauseReason,
+  SYSTEM_PAUSE_OWNER_TEXT, SYSTEM_RESUME_REASON, leaseDigest, parsePauseOvertakenReason,
+  pauseOvertakenReason, systemPauseReason,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
   type JobPauseRequest, type JobPauseResponse,
@@ -850,14 +851,25 @@ export class JobsService {
         recorded.workspaceId === input.workspaceId &&
         recorded.agentName === input.agentName;
 
-      if (
-        job.state === 'needs_owner_input' &&
-        job.executorId === executorId &&
-        job.leaseId === null &&
-        proofMatches &&
-        this.store.jobs.latestTransitionReasonInto(job.id, 'needs_owner_input') === reason
-      ) {
-        return { state: 'needs_owner_input', paused: true };
+      if (job.executorId === executorId && job.leaseId === null && proofMatches) {
+        if (
+          job.state === 'needs_owner_input' &&
+          this.store.jobs.latestTransitionReasonInto(job.id, 'needs_owner_input') === reason
+        ) {
+          return { state: 'needs_owner_input', paused: true };
+        }
+        // A report that already lost to a cancellation or the deadline is
+        // replayed as that terminal state, for the exact lease that made it, so
+        // a lost response is not mistaken for an undelivered pause.
+        const last = this.store.jobs.transitions(job.id).at(-1);
+        const overtaken = last ? parsePauseOvertakenReason(last.reason) : undefined;
+        if (
+          overtaken &&
+          overtaken.leaseDigest === leaseDigest(leaseId) &&
+          (job.state === 'cancelled' || job.state === 'failed')
+        ) {
+          return { state: job.state, paused: false };
+        }
       }
 
       this.leasedJob(executorId, jobId, leaseId);
@@ -884,7 +896,7 @@ export class JobsService {
       const finishedAt = this.now().toISOString();
 
       if (job.cancelRequested) {
-        this.store.jobs.transition(job.id, 'cancelled', 'cancel_acknowledged_by_pause', actor, {
+        this.store.jobs.transition(job.id, 'cancelled', pauseOvertakenReason('cancelled', leaseId), actor, {
           finishedAt, leaseId: null, leaseExpiresAt: null,
         });
         this.store.jobs.appendEvent(job.id, 'cancelled', 'Executor confirmed the agent quiet after the cancellation request.');
@@ -897,7 +909,7 @@ export class JobsService {
       }
 
       if (job.attemptDeadlineAt !== null && Date.parse(job.attemptDeadlineAt) <= this.now().getTime()) {
-        this.store.jobs.transition(job.id, 'failed', 'wall_clock_exceeded', actor, {
+        this.store.jobs.transition(job.id, 'failed', pauseOvertakenReason('timed_out', leaseId), actor, {
           finishedAt, leaseId: null, leaseExpiresAt: null,
           retainedWorkspaceId: input.workspaceId,
         });

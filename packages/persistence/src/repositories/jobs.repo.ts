@@ -276,19 +276,25 @@ export class JobsRepo {
   }
 
   /**
-   * The reason of the most recent move INTO `state`, or undefined.
+   * The most recent move INTO `state` (its ledger id and reason), or undefined.
    *
    * A system pause is recorded in its transition reason rather than in a new
-   * column, so this is how a paused job says what kind of pause it is. Only
-   * meaningful while the job is still in `state`: a later move out supersedes it.
+   * column, so this is how a paused job says what kind of pause it is. The id is
+   * what tells a delayed notification whether it still describes the CURRENT
+   * pause or one a later pause has superseded. Only meaningful for the current
+   * state while the job is still in it: a later move out supersedes it.
    */
-  latestTransitionReasonInto(jobId: string, state: JobState): string | undefined {
+  latestTransitionInto(jobId: string, state: JobState): { id: number; reason: string } | undefined {
     const r = this.db
       .prepare(
-        'SELECT reason FROM job_transitions WHERE job_id = ? AND to_state = ? ORDER BY id DESC LIMIT 1',
+        'SELECT id, reason FROM job_transitions WHERE job_id = ? AND to_state = ? ORDER BY id DESC LIMIT 1',
       )
-      .get(jobId, state) as { reason: string } | undefined;
-    return r?.reason;
+      .get(jobId, state) as { id: number; reason: string } | undefined;
+    return r === undefined ? undefined : { id: Number(r.id), reason: r.reason };
+  }
+
+  latestTransitionReasonInto(jobId: string, state: JobState): string | undefined {
+    return this.latestTransitionInto(jobId, state)?.reason;
   }
 
   transitions(jobId: string): { from: string; to: string; reason: string; actor: string; at: string }[] {

@@ -64,6 +64,13 @@ These corrections refine the implementation plan, not acceptance. Add correspond
 
 5. **Stop boundary.** No Ducky service activation, deployment, cutover, real-agent probe, live dispatcher/profile change, host-limit mutation, other-repository change or merge. All prior shared-admission/provider/owned-stop/cleanup/temp/recovery/live-integration requirements remain required. The two source fixes may narrow their implementation gaps but cannot certify runtime acceptance. Keep draft PR #15, Bead `ducky-squ` in_progress and `ready_to_merge=false` while any required gate remains. Required `Closes #8` still demands full acceptance before merge; never treat conditional prose as protection against premature automatic closure.
 
+### Implementation notes after independent review (2026-10-24)
+
+The quiet-pause and agent-cgroup slices exist in source and are unit-tested (see ADR 0030). Two limits are recorded here so no later reading overstates them, and neither is waived:
+
+- **Transport loss is not retry-preserving.** A pause that is delivered preserves `attempts`, the owner-input rounds, the workspace and the repository. A pause that cannot be delivered (an outage, or a coordinator without the route) is not reported as a failure and does not re-prompt, but the coordinator then applies ordinary lease expiry: `attempts + 1`, an unconfirmed-stop slot, and with the default budget of one a second expiry fails and orphans the job. Preserving the budget across transport loss needs a reviewed route by which the coordinator learns of the pause, and remains a required implementation and runtime blocker.
+- **Neither slice is live evidence.** No real Ducky agent, provider response or pause has been observed.
+
 ## Verification and stop condition
 
 Implement in meaningful batches; run focused tests then pnpm typecheck, pnpm test and pnpm build. Use pnpm backup and backup:verify safely, but do not present those as evidence for provider/network/admission. Record MemoryMax/MemoryHigh/MemorySwapMax, linger and timer readbacks; live supported provider eligibility, quota, Discord, Tailscale/logout and cross-program admission remain unverified unless actually tested on the intended host. No real-agent probe without deliberate authorization. Do not declare deployed. Independent reviewer checks exact pushed head; any unresolved BLOCKER/IMPORTANT or required integration check blocks merge.

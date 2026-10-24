@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { RETENTION_FORBIDDEN_TABLES } from '@ducky/contracts';
 import { openDatabase, type Db } from '../src/db.js';
 import { runMigrations } from '../src/migrate.js';
+import { createStore } from '../src/index.js';
 import { MIGRATIONS } from '../src/migrations.js';
 
 /**
@@ -194,5 +195,72 @@ describe('migration 38 is atomic', () => {
     const db = run((d) => d.prepare("UPDATE assistant_watch_events SET provider_state = 'APPROVED' WHERE id = 'e1'").run());
     expect(() => verify(db)).toThrow(/does not hold exactly the rows/);
     db.exec('ROLLBACK');
+  });
+});
+
+describe('a gap marker becomes durable only through a DELIVERED outbox row', () => {
+  const world = () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const store = createStore(db);
+    db.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo','/x','acme','demo',?)`).run(T0);
+    db.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key)
+       VALUES ('w1','wabcde',?, 'demo', 15, ?, 'active', ?, ?, 'acme/demo')`,
+    ).run(OWNER, T0, T0, T0);
+    const markers = [
+      { pr: 7, cls: 'approval' as const, reason: 'unavailable' as const, shown: 'shown' as const },
+      { pr: 8, cls: 'changes_requested' as const, reason: 'truncated' as const, shown: 'delivered_not_provably_shown' as const },
+    ];
+    expect(store.githubWatches.observe({
+      id: 'w1', expectedNextCheckAt: T0, expectedRepoKey: 'acme/demo', repoKey: 'acme/demo', snapshotHash: 'h', snapshotJson: '{}',
+      nextCheckAt: T1, atIso: T1, changed: true, readBoundaryAt: T1,
+      events: [{ id: 's1', fingerprint: 'fp', summary: 'Update', gapMarkers: markers }],
+    })).toBe(true);
+    return { db, store };
+  };
+  const count = (db: Db): number => (db.prepare('SELECT COUNT(*) n FROM github_watch_gap_markers').get() as { n: number }).n;
+
+  it('promotes nothing for a row that was queued, failed or abandoned', () => {
+    const { db, store } = world();
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0); // queued
+    store.githubWatches.recordEventFailure('s1', T1, 8); // a failed attempt
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0);
+    store.githubWatches.recordEventFailure('s1', T1, 1); // spent: abandoned
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0);
+    expect(count(db)).toBe(0);
+  });
+
+  it('promotes both markers once the row is delivered, idempotently, with the owner, repository and how provably shown', () => {
+    const { db, store } = world();
+    store.githubWatches.markEventDelivered('s1', T3);
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(2);
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0);
+    expect(store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 1, notProvablyShown: 1 });
+    expect(store.githubWatches.gapMarkers(OWNER, 10)).toMatchObject([
+      { ownerId: OWNER, watchId: 'w1', repoKey: 'acme/demo', pr: 7, reviewClass: 'approval', reason: 'unavailable', shown: 'shown', outboxRef: 's1', deliveredAt: T3 },
+      { pr: 8, reviewClass: 'changes_requested', reason: 'truncated', shown: 'delivered_not_provably_shown' },
+    ]);
+    expect(store.githubWatches.gapMarkerCounts('100000000000000009')).toEqual({ shown: 0, notProvablyShown: 0 });
+    expect(count(db)).toBe(2);
+  });
+
+  it('keeps the markers when the outbox row and then the watch are deleted', () => {
+    const { db, store } = world();
+    store.githubWatches.markEventDelivered('s1', T3);
+    store.githubWatches.promoteGapMarkers('s1');
+    db.prepare('DELETE FROM github_watch_events').run();
+    db.prepare('DELETE FROM github_watches').run();
+    expect(store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 1, notProvablyShown: 1 });
+    expect(store.githubWatches.gapMarkers(OWNER, 10)[0]).toMatchObject({ publicWatchId: null, repoKey: 'acme/demo' });
+  });
+
+  it('ignores a pending list that is not exactly what this build writes', () => {
+    const { db, store } = world();
+    db.prepare("UPDATE github_watch_events SET gap_markers = '[{\"pr\":0,\"cls\":\"x\",\"reason\":\"y\",\"shown\":\"z\"}]'").run();
+    store.githubWatches.markEventDelivered('s1', T3);
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0);
+    db.prepare("UPDATE github_watch_events SET gap_markers = 'not json'").run();
+    expect(store.githubWatches.promoteGapMarkers('s1')).toBe(0);
   });
 });

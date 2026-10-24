@@ -2067,4 +2067,123 @@ INSERT INTO assistant_watch_pause_periods (discord_user_id, started_at, started_
   SELECT discord_user_id, NULL, 'unknown', updated_at FROM assistant_watch_settings WHERE monitoring_enabled = 0;
 `,
   },
+  {
+    version: 37,
+    name: 'native_holders_held_ordinary_reviews_and_read_boundary',
+    // Migration 36 is published and is not revised. This one rebuilds two tables (a PRIMARY KEY cannot be
+    // altered), proves in the SAME transaction that every row and every value was copied, and only then
+    // drops the originals.
+    after: (db) => verifyNativeHolderRebuild(db),
+    sql: `
+-- Several NATIVE paths can tell the same exact transition (a feed card and an ordinary summary for one
+-- requested-changes review or one opening). With one row per transition the first holder owned it and every
+-- other holder's reservation was silently ignored, so an abandoned first holder erased the only receipt and
+-- the target told it again. Now every native holder keeps its OWN row, keyed by (path, via, ref); a delivery
+-- or a release touches only its holder's row, and the target side aggregates the holders. The target keeps
+-- exactly one claim per transition (the partial unique index).
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v36;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+   path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+         path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v36;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- What the migration staged from legacy feed rows keeps one row per HOLDER as well.
+ALTER TABLE native_legacy_seed RENAME TO native_legacy_seed_v36;
+CREATE TABLE native_legacy_seed (
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  via            TEXT NOT NULL CHECK (via IN ('feed_event','feed_commit')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT,
+  delivered_at   TEXT,
+  PRIMARY KEY (repo_key, transition_key, via, ref)
+);
+INSERT INTO native_legacy_seed
+  (repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at)
+  SELECT repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at
+    FROM native_legacy_seed_v36;
+
+-- An ordinary-summary requested-changes fact that cannot be told from a review the target already delivered
+-- (the ids cannot be compared and the provider instants are equal or unknown) is kept as its OWN held outbox
+-- row. It is never sent, never receipted, charges no attempt and holds no reservation; it is counted, it
+-- survives a restart, a cancel and retention, and it is unique per watch and exact transition. held_key is the
+-- transition key (a HASH of the review id, never the id); provider_at is the review's canonical instant.
+ALTER TABLE github_watch_events ADD COLUMN held_reason TEXT
+  CHECK (held_reason IS NULL OR held_reason IN ('ambiguous_review'));
+ALTER TABLE github_watch_events ADD COLUMN held_key TEXT;
+ALTER TABLE github_watch_events ADD COLUMN provider_at TEXT;
+CREATE UNIQUE INDEX ux_watch_events_held ON github_watch_events(watch_id, held_key) WHERE held_key IS NOT NULL;
+CREATE INDEX ix_watch_events_held ON github_watch_events(created_at) WHERE held_reason IS NOT NULL;
+
+-- The host instant BEFORE the last successful, complete pull request read of this watch STARTED. A pull
+-- request absent from that snapshot and created after it (plus the skew margin) cannot have been in it, so
+-- it is a proven opening. NULL when no such read is known: a legacy or first observation, a watch whose
+-- identity was never bound, and after any failed read (uninterrupted coverage is never assumed).
+ALTER TABLE github_watches ADD COLUMN read_boundary_at TEXT;
+`,
+  },
 ];
+
+/**
+ * Migration 37's proof, in its own transaction: the rebuilt tables hold exactly the rows and values the
+ * originals held, in both directions, before the originals are dropped. A difference throws, which rolls the
+ * whole migration back. Nothing is inferred and no row is dropped or invented.
+ */
+function verifyNativeHolderRebuild(db: import('./db.js').Db): void {
+  const same = (oldTable: string, newTable: string, columns: string): void => {
+    const count = (t: string): number => Number((db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);
+    const lost = (a: string, b: string): number =>
+      Number((db.prepare(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`).get() as { n: number }).n);
+    if (count(oldTable) !== count(newTable) || lost(oldTable, newTable) !== 0 || lost(newTable, oldTable) !== 0) {
+      throw new Error(`migration 37: ${newTable} does not hold exactly the rows of ${oldTable}`);
+    }
+    db.exec(`DROP TABLE ${oldTable}`);
+  };
+  same(
+    'native_transition_claims_v36', 'native_transition_claims',
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at, path, state, via, ref, ' +
+      'observed_at, delivered_to, delivered_at, created_at, updated_at',
+  );
+  same(
+    'native_legacy_seed_v36', 'native_legacy_seed',
+    'repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at',
+  );
+}

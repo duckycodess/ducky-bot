@@ -10,12 +10,17 @@ import { atomically } from '../db.js';
  * The exact reconciliation ledger between the native paths (the GitHub feed, the ordinary
  * repository watch) and the imported notification targets (ADR 0034).
  *
- * One row per owner, repository and exact transition. The primary key IS the protocol:
- * whoever inserts it owns the transition. A `native` row is a reservation made with an outbox
- * row (it is released if that row will never be sent, and becomes a receipt when it was
- * delivered); a `target` row exists only around one actual send attempt and becomes a receipt
- * on success. Nothing here reads the allowlist mirror, a timestamp alone, a count or a
- * snapshot as evidence, and nothing is a receipt until a send succeeded.
+ * One row per owner, repository, exact transition and HOLDER. Several native paths can tell
+ * the same transition (a feed card and an ordinary summary), so each keeps its own row, keyed
+ * by (path, via, ref): a delivery or a release touches only the row of the outbox row it
+ * belongs to, and one holder being abandoned can never erase another holder's receipt. The
+ * target keeps at most ONE row per transition (a partial unique index) and is decided against
+ * the AGGREGATE of the native holders: any delivered holder settles it, any reserved holder
+ * makes it wait. A `native` row is a reservation made with an outbox row (it is released if
+ * that row will never be sent, and becomes a receipt when it was delivered); a `target` row
+ * exists only around one actual send attempt and becomes a receipt on success. Nothing here
+ * reads the allowlist mirror, a timestamp alone, a count or a snapshot as evidence, and
+ * nothing is a receipt until a send succeeded.
  *
  * Every decision is made inside the caller's transaction, synchronously, so a check and the
  * reservation that follows it are one step.
@@ -156,7 +161,10 @@ export class NativeTransitionsRepo {
 
   // ---- writing a claim --------------------------------------------------------------
 
-  /** INSERT OR IGNORE: true when this call owns the transition now. */
+  /**
+   * INSERT OR IGNORE: true when this holder's row exists now. A native holder is never refused because
+   * another holder has the transition; the one target row per transition is the only exclusive claim.
+   */
   private insertClaim(c: {
     ownerId: string;
     repoKey: string;
@@ -207,15 +215,29 @@ export class NativeTransitionsRepo {
     return r.m === 2 ? 'delivered' : r.m === 1 ? 'reserved' : null;
   }
 
-  private byKey(ownerId: string, repoKey: string, key: string): { path: ClaimPath; state: 'reserved' | 'delivered'; ref: string } | undefined {
-    return this.db
-      .prepare('SELECT path, state, ref FROM native_transition_claims WHERE owner_id = ? AND repo_key = ? AND transition_key = ?')
-      .get(ownerId, repoKey, key) as { path: ClaimPath; state: 'reserved' | 'delivered'; ref: string } | undefined;
+  /**
+   * The strongest state among the rows of ONE exact transition on one path, across every holder:
+   * `delivered` beats `reserved`, null is none.
+   */
+  private byKeyState(ownerId: string, repoKey: string, key: string, path: ClaimPath): 'delivered' | 'reserved' | null {
+    const r = this.db
+      .prepare(
+        `SELECT MAX(CASE WHEN state = 'delivered' THEN 2 ELSE 1 END) AS m
+           FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND transition_key = ? AND path = ?`,
+      )
+      .get(ownerId, repoKey, key, path) as { m: number | null };
+    return r.m === 2 ? 'delivered' : r.m === 1 ? 'reserved' : null;
   }
 
-  private byKeyState(ownerId: string, repoKey: string, key: string, path: ClaimPath): 'delivered' | 'reserved' | null {
-    const r = this.byKey(ownerId, repoKey, key);
-    return r && r.path === path ? r.state : null;
+  /** The one target row of an exact transition, if any. */
+  private targetRow(ownerId: string, repoKey: string, key: string): { state: 'reserved' | 'delivered'; ref: string } | undefined {
+    return this.db
+      .prepare(
+        `SELECT state, ref FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND transition_key = ? AND path = 'target'`,
+      )
+      .get(ownerId, repoKey, key) as { state: 'reserved' | 'delivered'; ref: string } | undefined;
   }
 
   // ---- the native side --------------------------------------------------------------
@@ -417,20 +439,35 @@ export class NativeTransitionsRepo {
   }
 
   /**
-   * Native claims for the same item, whatever exact identity they carry. With `occurredMs`, only
-   * claims observed late enough to contain the event count: a review submitted AFTER a native
-   * observation (plus the skew margin) cannot have been in it, so that claim does not hold it back.
+   * Native claims for the same item, whatever exact identity they carry, across EVERY holder. ANY reserved
+   * holder makes the event wait (a send that has not happened may be the one that tells it). A delivered
+   * holder holds it back unless the event was provably submitted AFTER that holder's observation (plus the
+   * skew margin): with `occurredMs`, that proof has to hold against every delivered holder, so only the
+   * holders observed late enough to contain the event count and one of them is enough to withhold it.
    */
   private nativeSameItem(
     ownerId: string, repo: string, kind: TransitionKind, item: string, occurredMs: number | null,
   ): TargetResolution | null {
-    const state = occurredMs === null
-      ? this.strongest(ownerId, repo, kind, item, 'native')
-      : this.strongest(
-        ownerId, repo, kind, item, 'native', 'AND observed_at >= ?', new Date(occurredMs - NATIVE_LEGACY_SKEW_MS).toISOString(),
+    const contained = occurredMs === null
+      ? this.hasNative(ownerId, repo, kind, item, 'delivered')
+      : this.hasNative(
+        ownerId, repo, kind, item, 'delivered', 'AND observed_at >= ?', new Date(occurredMs - NATIVE_LEGACY_SKEW_MS).toISOString(),
       );
-    if (state === 'delivered') return { outcome: 'withhold', reason: 'ambiguous_evidence' };
-    return state === 'reserved' ? { outcome: 'wait' } : null;
+    if (contained) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
+    return this.hasNative(ownerId, repo, kind, item, 'reserved') ? { outcome: 'wait' } : null;
+  }
+
+  /** Whether ANY native holder of the item is in the given state (and satisfies `extra`). */
+  private hasNative(
+    ownerId: string, repoKey: string, kind: TransitionKind, item: string, state: 'reserved' | 'delivered',
+    extra = '', ...params: (string | number)[]
+  ): boolean {
+    return this.db
+      .prepare(
+        `SELECT 1 FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND kind = ? AND item = ? AND path = 'native' AND state = ? ${extra} LIMIT 1`,
+      )
+      .get(ownerId, repoKey, kind, item, state, ...params) !== undefined;
   }
 
   /**
@@ -454,9 +491,11 @@ export class NativeTransitionsRepo {
     if (t.status !== 'exact') return { reserved: false, resolution };
     const repo = transitionRepoKey(repoKey);
     if (repo === null) return { reserved: false, resolution: { outcome: 'wait' } };
-    const own = this.byKey(ownerId, repo, transitionKey(t.transition));
+    // Native holders were decided by `resolveTarget` above (any delivered covers, any reserved waits); what
+    // can already be on the key now is this target's own single row.
+    const own = this.targetRow(ownerId, repo, transitionKey(t.transition));
     if (own) {
-      if (own.path !== 'target' || own.state === 'reserved') return { reserved: false, resolution: { outcome: 'wait' } };
+      if (own.state === 'reserved') return { reserved: false, resolution: { outcome: 'wait' } };
       return own.ref === ref
         ? { reserved: false, resolution }
         : { reserved: false, resolution: { outcome: 'covered' }, selfCovered: true };

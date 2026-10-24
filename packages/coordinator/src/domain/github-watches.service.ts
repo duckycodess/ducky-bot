@@ -153,6 +153,18 @@ export class GitHubWatchService {
     }
   }
 
+  /**
+   * For `/status`: counts only, never a repository, review or pull request. Empty when there is nothing to
+   * say, otherwise ending in `; ` so it can lead the rest of the line.
+   */
+  statusNotes(): string {
+    const held = this.store.githubWatches.heldCount();
+    return held > 0
+      ? `${held} requested-changes fact(s) HELD and NOT sent: each cannot be told from a review the notification ` +
+        'target already delivered (kept through a cancel; no clearing control; a required blocker); '
+      : '';
+  }
+
   list(actor: ActorContext, includeCancelled = false, limit = 20): GitHubWatchRow[] {
     this.authz.requireOwner(actor);
     return this.store.githubWatches.listForOwner(actor.discordUserId, includeCancelled, limit);
@@ -271,6 +283,9 @@ export class GitHubWatchService {
       withTransaction(this.store.db, () => this.store.githubWatches.cancelForIdentity(watch.id, this.clock.nowIso()));
       return 'identity_stopped';
     }
+    // The host instant BEFORE any read starts, fixed now: what this snapshot is a view of cannot be
+    // older than this, so a pull request created after it cannot have been in the previous snapshot.
+    const readStartIso = new Date(this.clock.nowMs()).toISOString();
     // `prListAll` rather than `prList`: a merge is the disappearance of an open
     // pull request, and the open-only list could only ever report it as "gone".
     // Runs and issues are separate bounded reads; each is allowed to fail on its
@@ -343,6 +358,7 @@ export class GitHubWatchService {
         atIso,
         changed,
         events,
+        readBoundaryAt: readStartIso,
       });
       if (!committed) return 'lost' as const;
       // The named items are reserved with the outbox row that will tell them. INSERT OR IGNORE

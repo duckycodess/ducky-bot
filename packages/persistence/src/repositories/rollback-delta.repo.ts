@@ -72,6 +72,11 @@ export interface OwnerStateSnapshot {
   readonly nativeStaged: RawRow[];
   /** Native requested-changes cards on hold (a count: their keys carry a native review id). */
   readonly heldNativeCards: number;
+  /**
+   * Ordinary-summary requested-changes facts on hold, identifiers only (a HASH of the review id, the owner's
+   * own watch handle and the provider instant), including those of a cancelled or identity-stopped watch.
+   */
+  readonly heldOrdinaryReviews: RawRow[];
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
   /** A deletion cause row present at read time: a process died mid-deletion. */
@@ -188,6 +193,14 @@ export class RollbackDeltaRepo {
       heldNativeCards: Number(
         (this.db.prepare("SELECT COUNT(*) AS n FROM github_feed_events WHERE status = 'pending' AND held_reason IS NOT NULL").get() as
           { n: number }).n,
+      ),
+      heldOrdinaryReviews: read(
+        'github_watch_events_held',
+        `SELECT w.public_id AS watch_handle, w.state AS watch_state, e.repo_key, e.held_reason, e.held_key,
+                e.provider_at, e.created_at
+           FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
+          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL ORDER BY e.created_at, e.id`,
+        owner,
       ),
       truncated,
       deletionContext: (this.db.prepare('SELECT * FROM deletion_context WHERE id = 1').get() as RawRow | undefined) ?? null,

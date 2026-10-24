@@ -1,6 +1,6 @@
 import type { Db } from '../db.js';
 import { nowIso } from '../db.js';
-import type { GitHubWatchEventRow, GitHubWatchRow } from './types.js';
+import type { GitHubHeldReviewRow, GitHubWatchEventRow, GitHubWatchRow } from './types.js';
 
 const mapWatch = (r: Record<string, unknown>): GitHubWatchRow => ({
   id: String(r['id']),
@@ -18,6 +18,7 @@ const mapWatch = (r: Record<string, unknown>): GitHubWatchRow => ({
   cancelledAt: r['cancelled_at'] == null ? null : String(r['cancelled_at']),
   repoKey: r['repo_key'] == null ? null : String(r['repo_key']),
   cancelReason: r['cancel_reason'] == null ? null : (String(r['cancel_reason']) as 'identity_mismatch'),
+  readBoundaryAt: r['read_boundary_at'] == null ? null : String(r['read_boundary_at']),
 });
 
 const mapEvent = (r: Record<string, unknown>): GitHubWatchEventRow => ({
@@ -141,19 +142,40 @@ export class GitHubWatchesRepo {
      * would let a crash keep the cursor while losing the proposal.
      */
     events?: readonly { id: string; fingerprint: string; summary: string }[];
+    /**
+     * The host instant BEFORE the read this snapshot came from STARTED, committed with the snapshot under the
+     * same compare-and-set. Never later than the read it describes.
+     */
+    readBoundaryAt: string;
+    /**
+     * Requested-changes facts that cannot be told from one the target delivered. Each becomes its own HELD row
+     * in the same transaction as the snapshot: unique per watch and exact transition (a repeat is ignored),
+     * never sent, never receipted, no attempt charged.
+     */
+    held?: readonly { id: string; heldKey: string; summary: string; providerAt: string | null }[];
   }): boolean {
     const updated = this.db
       .prepare(
         `UPDATE github_watches
             SET snapshot_hash = ?, snapshot_json = ?, next_check_at = ?,
-                last_error = NULL, updated_at = ?, repo_key = ?
+                last_error = NULL, updated_at = ?, repo_key = ?, read_boundary_at = ?
           WHERE id = ? AND state = 'active' AND next_check_at = ? AND repo_key IS ?`,
       )
       .run(
-        input.snapshotHash, input.snapshotJson, input.nextCheckAt, input.atIso, input.repoKey,
+        input.snapshotHash, input.snapshotJson, input.nextCheckAt, input.atIso, input.repoKey, input.readBoundaryAt,
         input.id, input.expectedNextCheckAt, input.expectedRepoKey,
       );
     if (Number(updated.changes) !== 1) return false;
+
+    for (const h of input.held ?? []) {
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO github_watch_events
+             (id, watch_id, fingerprint, summary, created_at, repo_key, held_reason, held_key, provider_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'ambiguous_review', ?, ?)`,
+        )
+        .run(h.id, input.id, `held:${h.heldKey}`, h.summary, input.atIso, input.repoKey, h.heldKey, h.providerAt);
+    }
 
     for (const event of input.events ?? []) {
       this.db
@@ -170,12 +192,15 @@ export class GitHubWatchesRepo {
     return true;
   }
 
-  /** Advances a failed observation without changing the last good snapshot. */
+  /**
+   * Advances a failed observation without changing the last good snapshot. The read boundary is invalidated:
+   * a failed read is a gap, and uninterrupted coverage since the last good read is never assumed.
+   */
   recordFailure(id: string, expectedNextCheckAt: string, nextCheckAt: string, error: string, atIso = nowIso()): boolean {
     const result = this.db
       .prepare(
         `UPDATE github_watches
-            SET next_check_at = ?, last_error = ?, updated_at = ?
+            SET next_check_at = ?, last_error = ?, updated_at = ?, read_boundary_at = NULL
           WHERE id = ? AND state = 'active' AND next_check_at = ?`,
       )
       .run(nextCheckAt, error, atIso, id, expectedNextCheckAt);
@@ -196,9 +221,10 @@ export class GitHubWatchesRepo {
       .prepare(
         `UPDATE github_watch_events
             SET abandoned_at = ?
-          WHERE watch_id = ? AND delivered_at IS NULL AND abandoned_at IS NULL`,
+          WHERE watch_id = ? AND delivered_at IS NULL AND abandoned_at IS NULL AND held_reason IS NULL`,
       )
       .run(atIso, id);
+    // A HELD fact is undelivered work, not a pending send: cancelling the watch neither abandons nor frees it.
     return true;
   }
 
@@ -236,7 +262,7 @@ export class GitHubWatchesRepo {
                 e.attempts, e.last_attempt_at, e.abandoned_at, e.repo_key
            FROM github_watch_events e
            JOIN github_watches w ON w.id = e.watch_id
-          WHERE e.delivered_at IS NULL AND e.abandoned_at IS NULL
+          WHERE e.delivered_at IS NULL AND e.abandoned_at IS NULL AND e.held_reason IS NULL
           ORDER BY e.created_at ASC LIMIT ?`,
       )
       .all(limit)
@@ -248,7 +274,7 @@ export class GitHubWatchesRepo {
       .prepare(
         `UPDATE github_watch_events
             SET delivered_at = ?, attempts = attempts + 1, last_attempt_at = ?
-          WHERE id = ? AND delivered_at IS NULL AND abandoned_at IS NULL`,
+          WHERE id = ? AND delivered_at IS NULL AND abandoned_at IS NULL AND held_reason IS NULL`,
       )
       .run(atIso, atIso, id);
   }
@@ -259,8 +285,37 @@ export class GitHubWatchesRepo {
         `UPDATE github_watch_events
             SET attempts = attempts + 1, last_attempt_at = ?,
                 abandoned_at = CASE WHEN attempts + 1 >= ? THEN ? ELSE abandoned_at END
-          WHERE id = ? AND delivered_at IS NULL AND abandoned_at IS NULL`,
+          WHERE id = ? AND delivered_at IS NULL AND abandoned_at IS NULL AND held_reason IS NULL`,
       )
       .run(atIso, maxAttempts, atIso, id);
+  }
+
+  /** How many requested-changes facts are held (neither sent, abandoned nor receipted). Counts only. */
+  heldCount(): number {
+    return Number(
+      (this.db.prepare('SELECT COUNT(*) AS n FROM github_watch_events WHERE held_reason IS NOT NULL').get() as { n: number }).n,
+    );
+  }
+
+  /** The held facts, identifiers only (a hash of the review id, never the id), for the export. */
+  heldReviews(limit: number): GitHubHeldReviewRow[] {
+    return this.db
+      .prepare(
+        `SELECT e.id, e.watch_id, w.public_id, e.repo_key, e.held_key, e.provider_at, e.created_at, w.state
+           FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
+          WHERE e.held_reason IS NOT NULL ORDER BY e.created_at ASC, e.id ASC LIMIT ?`,
+      )
+      .all(limit)
+      .map((raw) => {
+        const r = raw as Record<string, unknown>;
+        return {
+          id: String(r['id']), watchId: String(r['watch_id']), publicWatchId: String(r['public_id']),
+          repoKey: r['repo_key'] == null ? null : String(r['repo_key']),
+          heldKey: String(r['held_key']),
+          providerAt: r['provider_at'] == null ? null : String(r['provider_at']),
+          createdAt: String(r['created_at']),
+          watchState: String(r['state']) as 'active' | 'cancelled',
+        };
+      });
   }
 }

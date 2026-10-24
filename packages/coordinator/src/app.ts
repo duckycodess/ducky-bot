@@ -696,7 +696,7 @@ export function createApp(
       : 'recorded, not executed (disabled)',
     executors: String(store.executors.listExecutors().filter((e) => e.state === 'active').length),
     githubWatches:
-      `${store.githubWatches.countActive(authz.ownerId)} active; ${assistantWatch.statusLine()}`,
+      `${store.githubWatches.countActive(authz.ownerId)} active; ${githubWatches.statusNotes()}${assistantWatch.statusLine()}`,
     githubFeed: githubFeed.statusLine(),
     repositoryWorkflow: skillBridge.describe(),
   });

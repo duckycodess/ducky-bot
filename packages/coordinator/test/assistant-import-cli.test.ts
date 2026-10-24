@@ -292,6 +292,28 @@ describe('--verify', () => {
     expect(v.code).toBe(5);
     expect(JSON.parse(v.out).nativeLedger).toMatchObject({ heldNativeCards: 1, clear: false });
   });
+
+  it('exits 5 while an ordinary-summary requested-changes fact is held, even after its watch was cancelled', () => {
+    const w = world();
+    w.makeBackup();
+    run(['--db', w.dbPath, '--file', w.file, '--backup', w.backup, '--apply'], { importEnvironment: sees });
+    const d = openDatabase({ location: w.dbPath });
+    d.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo','/x','acme','demo','2026-10-12T00:00:00.000Z')`).run();
+    d.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key, cancelled_at)
+       VALUES ('w1','wabcde','100000000000000001','demo', 15, NULL, 'cancelled', '2026-10-12T00:00:00.000Z', '2026-10-12T00:00:00.000Z', 'acme/demo', '2026-10-12T00:00:00.000Z')`,
+    ).run();
+    d.prepare(
+      `INSERT INTO github_watch_events (id, watch_id, fingerprint, summary, created_at, repo_key, held_reason, held_key)
+       VALUES ('h1','w1','held:k','held, not sent','2026-10-12T00:00:00.000Z','acme/demo','ambiguous_review','changes_requested:7:${'b'.repeat(64)}')`,
+    ).run();
+    d.close();
+    const v = run(['--db', w.dbPath, '--file', w.file, '--verify'], { importEnvironment: sees });
+    expect(v.code).toBe(5);
+    expect(JSON.parse(v.out).nativeLedger).toMatchObject({ heldOrdinaryReviews: 1, clear: false });
+    // Counts only: no handle, hash or repository.
+    expect(v.out).not.toMatch(/wabcde|bbbbbbbb|acme\/demo/);
+  });
 });
 
 

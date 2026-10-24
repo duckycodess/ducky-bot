@@ -330,7 +330,7 @@ describe('what a crash or a concurrent writer cannot be allowed to hide', () => 
   });
 });
 
-describe('the v3 export says what exact native reconciliation recorded', () => {
+describe('the v4 export says what exact native reconciliation recorded', () => {
   const claim = (h: Harness) => {
     h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', { kind: 'pr_opened', item: '7', stamp: null, hash: null, attempt: null }, 'feed_event', 'f1', NOW, NOW);
     h.store.nativeTransitions.markNativeDelivered('feed_event', 'f1', 'owner_dm', NOW);
@@ -343,7 +343,8 @@ describe('the v3 export says what exact native reconciliation recorded', () => {
     h.store.assistantWatch.setMonitoring(OWNER, false, NOW, 'import');
     claim(h);
     const d = exportDelta(h);
-    expect(d.schema).toBe('ducky-rollback-delta/v3');
+    expect(d.schema).toBe(ROLLBACK_DELTA_SCHEMA);
+    expect(d.schema).toBe('ducky-rollback-delta/v4');
     expect(d.complete).toBe(true);
     expect(d.state.pausePeriods).toEqual([
       expect.objectContaining({ startedAt: null, startedOrigin: 'import', startBoundAt: NOW, endedAt: null }),
@@ -415,5 +416,50 @@ describe('the v3 export says what exact native reconciliation recorded', () => {
     const after = buildRollbackDelta({ store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:02.000Z' });
     expect(after.state.nativeLedger.staged).toEqual([]);
     expect(after.state.nativeLedger.claims).toHaveLength(1);
+  });
+});
+
+describe('the v4 export lists every native holder and every held ordinary fact', () => {
+  const REST = 'a'.repeat(64);
+  const pr = { kind: 'pr_opened' as const, item: '7', stamp: null, hash: null, attempt: null };
+  const cr = { kind: 'changes_requested' as const, item: '7', stamp: null, hash: REST, attempt: null };
+
+  it('exports one claims row per holder of a transition, not one per transition', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', pr, 'feed_event', 'f1', NOW, NOW);
+    h.store.nativeTransitions.reserveNative(OWNER, 'acme/demo', pr, 'watch_summary', 's1', NOW, NOW);
+    h.store.nativeTransitions.markNativeDelivered('watch_summary', 's1', 'owner_dm', NOW);
+    const rows = exportDelta(h).state.nativeLedger.claims.filter((c) => c['item'] === '7');
+    expect(rows.map((c) => `${c['via']}:${c['state']}`).sort()).toEqual(['feed_event:reserved', 'watch_summary:delivered']);
+    expect(exportDelta(h).replay.join(' ')).toMatch(/several `claims` rows, one per native holder/);
+    h.close();
+  });
+
+  it('lists a held ordinary fact by hash, handle and instant, keeps it after the watch is cancelled, and counts it', () => {
+    const { h, apply } = boot();
+    expect(apply().ok).toBe(true);
+    h.store.db.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key)
+       VALUES ('w1','wabcde',?, 'demo', 15, ?, 'active', ?, ?, 'acme/demo')`,
+    ).run(OWNER, NOW, NOW, NOW);
+    expect(h.store.githubWatches.observe({
+      id: 'w1', expectedNextCheckAt: NOW, expectedRepoKey: 'acme/demo', repoKey: 'acme/demo', snapshotHash: 'h', snapshotJson: '{}',
+      nextCheckAt: NOW, atIso: NOW, changed: true, readBoundaryAt: NOW,
+      held: [{ id: 'h1', heldKey: `changes_requested:7:${cr.hash}`, summary: 'held, not sent', providerAt: NOW }],
+    })).toBe(true);
+    h.store.githubWatches.cancel(OWNER, 'w1', NOW);
+    const d = exportDelta(h);
+    expect(d.complete).toBe(true);
+    expect(d.state.nativeLedger.heldOrdinary).toEqual([
+      expect.objectContaining({
+        watchHandle: 'wabcde', watchState: 'cancelled', repoKey: 'acme/demo', heldReason: 'ambiguous_review',
+        heldKey: `changes_requested:7:${REST}`, providerAt: NOW,
+      }),
+    ]);
+    expect((deltaCounts(d) as { state: Record<string, number> }).state).toMatchObject({ heldOrdinaryReviews: 1 });
+    // Identifiers only: the held row's summary text and any raw review id never leave.
+    expect(JSON.stringify(d.state.nativeLedger.heldOrdinary)).not.toContain('held, not sent');
+    h.close();
   });
 });

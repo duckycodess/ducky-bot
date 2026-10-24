@@ -1098,7 +1098,7 @@ describe('counts and the export give the same answer, from the same classifier',
     await h.app.assistantWatch.tick();
     forge(h, id, 1, { identity: `${BASELINE_MARKER_PREFIX}v2:ci_started:9:${Date.parse(B)}` });
     const d = buildRollbackDelta({ store: h.store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:00.000Z' });
-    expect(d.schema).toBe('ducky-rollback-delta/v3');
+    expect(d.schema).toBe('ducky-rollback-delta/v4');
     const flagged = d.state.watchEvents.filter((e) => e['baselineMarker'] === true);
     expect(flagged.length).toBe(1);
     expect(flagged.length).toBe(h.store.assistantWatch.counts(OWNER).baselineMarkers);

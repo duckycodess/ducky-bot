@@ -191,6 +191,11 @@ export interface GitHubWatchRow {
   repoKey: string | null;
   /** Set when the SYSTEM cancelled the watch because its slug now names another repository. */
   cancelReason: 'identity_mismatch' | null;
+  /**
+   * The host instant BEFORE the last successful, complete pull request read STARTED. NULL when no such read
+   * is known (a legacy or first observation, an unbound identity, after a failed read).
+   */
+  readBoundaryAt: string | null;
 }
 
 /** A meaningful watch change waiting for owner-DM delivery. */
@@ -209,6 +214,20 @@ export interface GitHubWatchEventRow {
   abandonedAt: string | null;
   /** The repository the observation that produced this event queried; NULL on a legacy event. */
   repoKey: string | null;
+}
+
+/** A requested-changes fact the ordinary watch cannot tell from one the target delivered: held, never sent. */
+export interface GitHubHeldReviewRow {
+  id: string;
+  watchId: string;
+  publicWatchId: string;
+  repoKey: string | null;
+  /** The exact transition key: a HASH of the review id, never the id. */
+  heldKey: string;
+  providerAt: string | null;
+  createdAt: string;
+  /** Whether the watch is still active. A cancelled or identity-stopped watch keeps its held facts. */
+  watchState: 'active' | 'cancelled';
 }
 
 /** One durable, at-most-once execution attempt for an approved action. */

@@ -781,6 +781,9 @@ export class AssistantImportService {
     // A native requested-changes card held because it cannot be told from a review the target delivered
     // is a notification that was not sent either.
     const heldCards = this.store.githubFeed.heldEventCount();
+    // An ordinary-summary requested-changes fact held for the same reason, including one of a cancelled or
+    // identity-stopped watch: it stays undelivered work, so it keeps the ledger from being clear.
+    const heldOrdinary = this.store.githubWatches.heldCount();
     const nativeLedger: NativeLedgerReport = {
       readable: boundary !== undefined,
       fresh: boundary?.fresh ?? false,
@@ -788,7 +791,9 @@ export class AssistantImportService {
       withheldAmbiguous: held.ambiguousEvidence,
       cursorsAtOrBeforeCutoff: cursorsBelow,
       heldNativeCards: heldCards,
-      clear: boundary !== undefined && held.legacyUnproven + held.ambiguousEvidence + cursorsBelow + heldCards === 0,
+      heldOrdinaryReviews: heldOrdinary,
+      clear: boundary !== undefined &&
+        held.legacyUnproven + held.ambiguousEvidence + cursorsBelow + heldCards + heldOrdinary === 0,
     };
     const totals = Object.values(cats);
     const ok = totals.every((c) => c.missing === 0 && c.changedAtSource === 0);
@@ -815,6 +820,8 @@ export interface NativeLedgerReport {
   readonly cursorsAtOrBeforeCutoff: number;
   /** Native requested-changes cards held, neither sent nor skipped (ADR 0034). */
   readonly heldNativeCards: number;
+  /** Ordinary-summary requested-changes facts held (never sent, never receipted). */
+  readonly heldOrdinaryReviews: number;
   /** Nothing withheld or held, no cursor below the cutoff, and the boundary readable. */
   readonly clear: boolean;
 }

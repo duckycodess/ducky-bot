@@ -1,6 +1,7 @@
 # ADR 0034 — Exact, delivered-only reconciliation between native and imported notifications
 
-**Status:** accepted
+**Status:** accepted; extended by migration 37 (several native holders, exact ordinary
+requested-changes reviews, held ordinary facts, proven openings, export v4), see the sections below.
 **Supersedes** the coarse "imported typed observation takes precedence" rule of
 [ADR 0030](0030-private-assistant-migration-and-parity-capabilities.md) and the
 resume guard of [ADR 0032](0032-remaining-private-assistant-parity-behaviors.md).
@@ -76,10 +77,21 @@ unequal or missing id on the same pull request is treated as "possibly the same 
 
 That live equality check remains a required evidence gate; it would let both directions stop holding.
 
-### One reservation per transition, decided in one synchronous step
+### One reservation per transition and per HOLDER, decided in one synchronous step
 
-`native_transition_claims` (migration 36) has one row per owner, repository and exact
-transition; its primary key **is** the protocol.
+`native_transition_claims` holds one row per owner, repository, exact transition and native HOLDER:
+migration 36 keyed it by transition alone, so the first native holder owned it and a second holder's
+reservation was silently ignored (a feed card that reserved first and was abandoned erased the only
+receipt, and the target told the owner again). **Migration 37** (36 is published and is not revised)
+rebuilds the table, and the legacy staging table, with `(path, via, ref)` in the key, keeps exactly one
+**target** claim per transition (a partial unique index), and proves inside its own transaction that
+every row and every value was copied (counts and a column-for-column `EXCEPT` in both directions)
+before it drops the originals; any difference rolls the whole migration back. A delivery or a release
+touches only its own holder's row. The target is decided against the AGGREGATE of the native holders:
+any delivered exact holder settles the event, any reserved holder makes it wait; for a review of
+another id, the proof "it was submitted after the native observation" must hold against EVERY
+delivered holder (the latest `observed_at` plus the skew margin) and ANY reserved holder of that pull
+request makes the event wait.
 
 - A **native** path reserves the transition with its outbox row (a feed event, a buffered commit,
   an ordinary summary), in the same transaction that creates the row. The reservation becomes a
@@ -176,6 +188,79 @@ later names another repository stops the watch (`cancel_reason = identity_mismat
 repository diff, no silent re-baseline, no DM; its snapshot and every outbox row are kept, and
 `/status` counts it. An identity record is non-authoritative and grants no job, access or owner right.
 
+### Exact requested-changes reviews, held ordinary facts and proven openings (migration 37)
+
+The ordinary summary reads the bounded `reviews` list of each pull request (never the per-author
+`latestReviews`, which collapses reviews), and keeps per pull request a hashed set: the submitted
+requested-changes reviews (hash of the provider id and canonical instant, a rendered fact in the
+fingerprint) and every submitted review's 32-hex prefix (`seen`, comparison metadata, outside the
+fingerprint, so a review whose STATE later changed is never mistaken for a new one). Pending reviews
+and reviews without a submission instant are neither. No raw id, login or body is stored.
+
+- **Tri-state observations.** A read is `complete`, `unavailable` (the call failed, the list is absent,
+  or a requested change has no id) or `truncated` (100 or more reviews, which cannot be told from a
+  cut-off list). Unavailable and truncated carry the last COMPLETE facts forward unchanged and absorb
+  nothing; the older review-derived fields (approvals, requested changes, latest request instant,
+  conversation-comment count, commit count) follow the same rule field by field: a field is taken from a
+  read only when that read carried it, and never from a truncated payload, so a failed, partial or cut-off
+  read erases no requested change and turns no old comment into a new one. A complete read after a gap is
+  compared with the carried-forward set, so a review that arrived during the gap is told. Only when no
+  complete set ever existed (a legacy or first observation, a pull request newly entering the list) is the
+  set established silently, with no claim. Pull requests currently truncated are counted in `/status`;
+  the more-than-100-reviews limit is a required blocker.
+- **Versioned snapshot.** A legacy snapshot is compared and rendered through its legacy projection only (an
+  unchanged repository hashes the same through the upgrade and sends nothing) and its review metadata is
+  established silently. From then on the fingerprint covers every rendered review fact, so a review-only
+  change produces a real fact; availability and `seen` are outside it, so an unavailable read and its
+  recovery alone never create a generic snapshot message.
+- **One segment per pull request; claims only for what is read.** A new review's segment names the pull
+  request (`requested changes submitted on #n`) and claims the hash of each new review of it, only if the
+  whole segment lies inside the clamped, redacted text (a clipped segment claims nothing). The PR-level
+  decisions stay distinct lines with no per-review claim; a pull request whose new review is handled
+  exactly is not repeated in the aggregate line, whether the review was told, delivered by the target or held.
+- **The loop.** Each pass probes every named item. A target-delivered item is removed. A target send in
+  flight defers the WHOLE observation with nothing persisted. A review the ledger cannot tell from one the
+  target delivered (a different id at an equal or unknown provider instant) is neither told, dropped nor
+  allowed to stall the repository: it is committed with the snapshot as its own **held** outbox row
+  (`github_watch_events.held_reason`, unique per watch and exact transition, a hash only, never sent,
+  receipted or charged an attempt, no reservation), and the rest of the summary is delivered. The passes are
+  bounded by EVERY transition the observation could name (before any cap or clamp), not by the first
+  render, because removing one item can reveal one a cap had hidden; each pass that goes round again
+  removes at least one new key of that finite set, and exhaustion would defer, never send an unchecked
+  render.
+- **Held facts are undelivered work.** A held fact survives restart, a cancel (which does not abandon it)
+  and an identity stop, and retention never deletes it or the cancelled watch that holds it. It is counted
+  in `/status`, `import:assistant --verify` (`heldOrdinaryReviews`, which clears `clear` and makes the exit
+  5) and the export, and it has **no clearing control**; there is no owner Forget path for an ordinary
+  watch today, so none is invented here. It stays a required blocker until exact, authorized resolution.
+- **Openings are proved, never inferred.** `createdAt` is added to the fixed `prListAll` selector (a name
+  `gh pr list --json` already lists, recorded by the local repo-less `pnpm probe:gh`; no verb, flag,
+  endpoint or authority is added, pinned by tests). `github_watches.read_boundary_at` is the host instant
+  before the previous successful read STARTED, fixed before the awaited reads and committed with the
+  snapshot under the same compare-and-set; it is absent for a legacy or first observation and is cleared by
+  a failed read. A pull request is told as `opened: #n title`, with an opening claim, only when it is absent
+  from the previous snapshot AND its canonical creation instant is strictly greater than the boundary plus
+  the skew margin, for the repository the boundary was recorded for. It is then not also named as an update.
+  Anything else that enters the list is `(newly listed)` with no claim, whatever the list order, the cap, a
+  previous maximum, an equal second or a reopen. The skew margin is unproven live.
+- **Honest adjacent lines.** `comments` is the conversation-comment count, not a submitted review, and is
+  labelled so with no claim. A pull request absent from the capped, all-state top five is `no longer
+  listed (not necessarily closed)`, never a close.
+- **No new cutoff is claimed.** The exact families here (requested-changes reviews, openings) existed as
+  imported counterparts before; summaries sent before migration 37 told the PR-level lines with no identity,
+  and no historical window is called safe: those pre-37 facts stay UNRECONCILED required blockers and the
+  migration-36 cutoff and its withholding still apply. Submitted approved, commented and dismissed reviews
+  are NOT given a counterpart family here; that needs a separately coherent immutable review-state protocol,
+  a fresh per-family cutoff and private proof of the source's state semantics.
+
+### Rollback export v4 (v3 described below)
+
+Migration 37 changes what the ledger rows mean (one row per native holder) and adds held ordinary
+facts, so the export is `ducky-rollback-delta/v4`: `claims` has one row per holder, and
+`state.nativeLedger.heldOrdinary` lists the held facts (hash, owner watch handle, provider instant, watch
+state). A v1, v2 or v3 document is never inferred or rewritten. Operators migrate through 37 before the
+final export, and an older build cannot honour the holders or the held rows.
+
 ### Rollback export v3
 
 The export (`ducky-rollback-delta/v3`) adds the pause periods, the ledger boundary and every receipt
@@ -196,17 +281,22 @@ identifiers per delivered native transition and is accepted.
   an aggregate ("3 new issues", "and 7 more commits") and the detailed imported event can both reach
   the owner. A transition no codec can name has no counterpart and is told by both. A requested-changes
   review is **not** told twice by an id mismatch: it is withheld or held (above), which is durable
-  undelivered work, not a duplicate and not a deletion. A review alone is never settled for a follow-up DM.
-- **Required merge blockers (named, not accepted residuals, no claim of parity).** The ordinary
-  watch's summary lines are PR-level and carry no review id or per-item identity, so no safe settlement
-  exists for the following, and each is a **required merge blocker** that must be closed (by a source of
-  exact identity, or an owner-approved suppression rule) before this work is called parity: (1) the
-  ordinary "changes requested on #n" line against the imported requested-changes alert; (2) "approved: #n"
-  against an imported `review_approved`; (3) "new review comment(s) on #n" against an imported
-  `review_commented`; (4) a pull request newly listed in the capped snapshot ("#n title" in the update line)
-  against an imported `pr_opened`. Also open on the same terms: the closed-pull-request line, issue count
-  lines and workflow-run lines against their imported events, and the follow-up proposal. None is settled
-  by a count, a coarse suppression or a timestamp.
+  undelivered work, not a duplicate and not a deletion. A new submitted requested-changes review the ordinary
+  summary tells exactly is claimed, so the imported event settles silently. A review alone is never settled for a follow-up DM.
+- **Required merge blockers (named, not accepted residuals, no claim of parity).** What is now exact is a
+  NEW submitted requested-changes review and a PROVEN opening. Each of the following still carries no
+  per-item identity or no proof, so no safe settlement exists, and each is a **required merge blocker**
+  that must be closed (by a source of exact identity, or an owner-approved suppression rule) before this
+  work is called parity: (1) the PR-level "changes requested on #n" aggregate decision, which claims no
+  review; (2) "approved: #n" against an imported `review_approved` (a PR-level decision is not a review,
+  and approved reviews have no family or cutoff yet); (3) submitted COMMENTED and DISMISSED reviews against
+  an imported `review_commented` (the ordinary conversation-comment count is a different fact, relabelled,
+  not a receipt); (4) a pull request that is only "(newly listed)", not provably opened (created before the
+  boundary, at it, within the skew margin, without a creation time, after a failed read or on a legacy
+  observation); (5) pull requests with 100 or more reviews, which are counted and told no new review
+  exactly. Also open on the same terms: the no-longer-listed line, issue count lines and workflow-run lines
+  against their imported events, and the follow-up proposal. None is settled by a count, a coarse
+  suppression or a timestamp, and pre-migration-37 summary lines stay unreconciled.
 - **Undelivered work that remains, honestly.** A withheld event, and a held native card, is a notification
   that has NOT been sent. It is durable (kept, counted in `/status`, `--verify` and the export), not
   deleted, and not an acceptable omission: it stays a required cutover blocker until exact evidence or a
@@ -226,10 +316,11 @@ identifiers per delivered native transition and is accepted.
 - **Verification is a gate with its own exit code.** `pnpm import:assistant --verify` exits 0 only at parity
   (nothing missing or changed at the source, nothing drifted, the ledger clear), 3 when a record is missing
   or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a
-  withheld event, a held native card, a cursor at or before the cutoff, an unreadable boundary). The report
-  is counts only.
-- **Older code is incompatible.** Stop coordinators before migrating and never run an older build
-  against a migrated database: it would not know the reservations, so it could not honour them.
+  withheld event, a held native card, a held ordinary requested-changes fact, a cursor at or before the
+  cutoff, an unreadable boundary). The report is counts only.
+- **Older code is incompatible.** Stop coordinators before migrating, migrate through 37 before the final
+  export, and never run an older build against a migrated database: it would not know the reservations or
+  the holders, so it could not honour them.
 - A repeated import, a restart and a retry can neither lose nor duplicate a deterministic transition,
   within the at-least-once caveat above.
 

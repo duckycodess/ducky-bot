@@ -45,7 +45,10 @@ export class MutableGitHubReader implements GitHubReader {
 
   async prReviews(_ref: RepoRef, n: number): Promise<PrReviews> {
     this.calls.push(`prReviews:${n}`);
-    return this.reviews.get(n) ?? { number: n };
+    // The real `gh` always answers with the arrays, empty when there is nothing: a pull request with no
+    // reviews is a COMPLETE empty answer, not an absent one (an absent field proves nothing, and the watch
+    // keeps what it knew). A test that wants a partial answer sets one explicitly.
+    return this.reviews.get(n) ?? { number: n, reviews: [], latestReviews: [], comments: [], commits: [] };
   }
 
   async runList(_ref: RepoRef): Promise<WorkflowRuns> {

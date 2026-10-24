@@ -1167,13 +1167,15 @@ preferences with lookahead, captures, GitHub-digest and weather briefing section
 notification-only watch targets with typed checkpoints, held partial reads,
 separate alert and digest settlement and a fixed call budget; the
 `/watch list targets` / `/watch remove` owner controls; and exact, delivered-only
-reconciliation between the native paths and the imported targets (ADR 0034, migration 36):
-a ledger of native receipts and reservations by exact transition, a shared codec, ordinary
-watches that record the repository they queried, pause provenance, withheld-event accounting
-and a v3 rollback export. **Operator sequencing it needs:** stop the coordinator, back up,
+reconciliation between the native paths and the imported targets (ADR 0034, migrations 36 and 37):
+a ledger of native receipts and reservations by exact transition and by native HOLDER (a feed card and
+an ordinary summary can both hold one transition), a shared codec, ordinary watches that record the
+repository they queried, exact new requested-changes reviews and proven pull request openings in the
+ordinary summary, durable held facts, pause provenance, withheld-event accounting and a v4 rollback
+export. Migrate through 37 before the final export; an older build cannot honour the holders. **Operator sequencing it needs:** stop the coordinator, back up,
 migrate, and only then take the final source export, so imported cursors lie after the ledger
 cutoff; then require `pnpm import:assistant --verify` to exit 0 (it exits 5 when the data is present
-but not at parity: drift, a withheld event, a held native card or a cursor at or before the cutoff). Never run an older build against a migrated database.
+but not at parity: drift, a withheld event, a held native card, a held ordinary requested-changes fact or a cursor at or before the cutoff). Never run an older build against a migrated database.
 
 **Upgrade notes.** Migration 29 introduces the runtime lock, which a coordinator from an
 older build does not know; stop the coordinator before migrations, and never start an
@@ -1281,11 +1283,9 @@ fail-closed form of the blocker, not a decision to drop it.
   feed's duplicate cards are retired the same way, for the kinds an imported surface
   sees in full, under the same conditions. Paused, outside the cycle, preferences off,
   no GitHub section or briefings off keep the native DM and card. Unit-tested only.
-  **What this does NOT do (required blockers):** it trims native output prospectively only. It
-  does not reconcile what the two paths told the owner while monitoring was paused, nor across
-  an import that adds a new active target on an already-watched repository (events between the
-  source's last observation and the import), and a resume is refused rather than reconciled
-  (above). The duplicate-free observation gate stands.
+  **Superseded by ADR 0034:** that prospective trimming (and the resume refusal that went with it) was
+  replaced by exact, delivered-only reconciliation; nothing is left out on a promise of future coverage.
+  The duplicate-free observation gate stands.
 - **Equal-time late reviews:** a late event that shares the cursor's timestamp is
   reconciled by identity for commits, pull-request-level events, reviews, issues,
   runs and releases once Ducky has processed the boundary (a pull request touched at
@@ -1338,18 +1338,22 @@ fail-closed form of the blocker, not a decision to drop it.
   no item, so aggregate/detail overlap remains; a requested-changes review is withheld (imported side)
   or its native card HELD (feed side) when its id cannot be compared, until REST `node_id` equals the
   native id on a live provider (a live-probe gate nobody has run); **REQUIRED MERGE BLOCKERS, each
-  named, none an accepted residual and none a parity claim:** the ordinary summary's PR-level lines
-  (changes requested on #n, approved: #n, new review comment(s) on #n, and a pull request newly listed in
-  the capped snapshot) carry no per-item identity, so nothing safe settles them against the imported
-  events of the same name, and the closed-pull-request, issue-count and workflow-run lines are open on the
-  same terms; a start-up
+  named, none an accepted residual and none a parity claim:** a NEW submitted requested-changes review and
+  a PROVEN opening are exact now (migration 37), and every other overlap is open: the PR-level approval and
+  requested-changes decisions carry no per-review identity, submitted approved, commented and dismissed
+  reviews have no family or cutoff yet (the ordinary conversation-comment count is a different fact,
+  relabelled and claiming nothing), a pull request merely "newly listed" is not provably opened, pull
+  requests with 100 or more reviews are counted and told no new review exactly, the no-longer-listed (not
+  a close), issue-count and workflow-run lines and the follow-up are open on the same terms, and summaries
+  sent before migration 37 stay unreconciled (no new cutoff is claimed); a start-up
   crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
   ledger grows by a few identifiers per delivered native transition for the life of the database.
 - **Digest throughput is bounded, not certified fair:** a briefing looks at no more than 10,000 unread
   events, so a backlog beyond that can still starve later work. A **required throughput blocker** until a
   fair scheme is proven.
-- **Withheld events and held native cards are durable UNDELIVERED work**, kept and counted, never deleted
-  and not an acceptable omission; each stays a required cutover blocker with no clearing control.
+- **Withheld events, held native cards and held ordinary requested-changes facts are durable UNDELIVERED
+  work**, kept and counted (a held fact survives a cancel, an identity stop, a restart and retention), never
+  deleted and not an acceptable omission; each stays a required cutover blocker with no clearing control.
 - **Scratch databases migrated at `819a420`, `55266b9` or `09f9463` must be recreated** from a backup taken
   before migration 36 (it was revised in place before ever being deployed, so they lack `provider_at` and
   `held_reason`). No live-data reset is authorized.
@@ -1359,7 +1363,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2629 tests in 158 files**.
+The unmodified `pnpm test` command passes all **2705 tests in 161 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

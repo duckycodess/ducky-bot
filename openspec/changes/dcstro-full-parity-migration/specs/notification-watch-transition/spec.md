@@ -8,7 +8,7 @@ The system SHALL privately derive the effective selection from all existing owne
 - **THEN** owner-only notification observations may proceed within budgets while engineering operations remain forbidden
 
 ### Requirement: Private lifecycle and overlapping observations
-Imported notification targets SHALL remain private to the owner's audited destination and SHALL use existing owner-only list/cancel/Forget controls. Their allowlist independence SHALL never bypass native watch add authorization. The owner SHALL be told each exact transition once, by whichever path actually DELIVERS it first: a native path SHALL skip an item only for a transition the imported target has delivered, and an imported event a native path already delivered SHALL be settled silently. No native notification SHALL be suppressed on a promise of future coverage. Counts, unnamed aggregates, snapshots, skipped or baseline rows and timestamps alone SHALL NOT be receipts, so aggregate/detail overlap is an accepted, documented residual.
+Imported notification targets SHALL remain private to the owner's audited destination and SHALL use existing owner-only list/cancel/Forget controls. Their allowlist independence SHALL never bypass native watch add authorization. The owner SHALL be told each exact transition once, by whichever path actually DELIVERS it first: a native path SHALL skip an item only for a transition the imported target has delivered, and an imported event a native path already delivered SHALL be settled silently. No native notification SHALL be suppressed on a promise of future coverage. Counts, unnamed aggregates, snapshots, skipped or baseline rows and timestamps alone SHALL NOT be receipts. Aggregate/detail overlap therefore remains UNRECONCILED, and each unfinished overlap (the PR-level approval and requested-changes decisions, a pull request newly listed without proof of opening, a pull request no longer listed, issue-count lines, workflow-run lines, the actionable follow-up and the submitted approved/commented/dismissed review families) SHALL stay a required merge blocker, never an accepted residual.
 
 #### Scenario: Cancel and repeat import
 - **WHEN** the owner cancels a notification-only target and repeats the same import
@@ -52,6 +52,29 @@ The system SHALL preserve audited typed checkpoint and event identity semantics 
 #### Scenario: First inventory beyond the bounded capacity
 - **WHEN** a new runs or releases baseline cannot prove its whole inventory within the page cap (100 or more items)
 - **THEN** the surface is refused visibly as `window_exceeded` with its cursor still null and no recovery claimed, never baselined shallowly, and the limitation stays a named required blocker
+
+### Requirement: Exact requested-changes reviews and proven openings in the ordinary summary
+The ordinary watch SHALL name a requested-changes review exactly only when it is absent from the last COMPLETE set of that pull request's submitted reviews (the bounded `reviews` list, never the per-author view), identified by a hash of the provider's review id and its canonical submission instant, excluding pending reviews and reviews without a submission instant, and never because a review's state changed. Review observations SHALL be complete, unavailable or truncated (100 or more reviews): an unavailable or truncated read, including a successful answer that omits a field, SHALL carry the last proven values of every review-derived field forward, SHALL absorb nothing it did not see, SHALL create no message and no claim by itself, and a complete read after a gap SHALL tell the reviews that arrived during it. A first or legacy observation SHALL establish silently, a legacy snapshot SHALL be compared and rendered through its legacy projection only, and afterwards the fingerprint SHALL cover every rendered review fact. The PR-level decision lines SHALL remain distinct facts with no per-review claim. A conversation-comment count SHALL be labelled as such and claim no review. A pull request SHALL be told as opened, with an opening claim, only when it is absent from the previous snapshot AND its canonical creation instant is strictly later than the durable boundary (the host instant before the previous successful complete read started) plus the skew margin; otherwise it SHALL be labelled newly listed with no claim. A pull request absent from the capped snapshot SHALL be labelled no longer listed, never closed.
+
+#### Scenario: A new review beside old ones
+- **WHEN** a complete read shows a requested-changes review the previous complete set did not contain
+- **THEN** the summary names the pull request once, claims exactly that review, claims none of the older ones and does not repeat the same event as an aggregate line
+
+#### Scenario: Unplaceable review
+- **WHEN** the imported target delivered a review of the same pull request with a different id at an equal or unknown provider instant
+- **THEN** the review is neither told, dropped nor receipted: it becomes its own durable held row (unique per watch and exact transition, kept through cancel, restart and retention, counted in status, verify and export), and the rest of the summary is delivered
+
+#### Scenario: Target send in flight
+- **WHEN** the imported target is sending an item the summary would name
+- **THEN** the whole observation defers with nothing persisted and proceeds when the send settles or is released
+
+#### Scenario: Several native holders
+- **WHEN** a feed card and a summary both reserve one exact transition and either is abandoned
+- **THEN** each keeps its own ledger row, a delivery or release touches only its own, and the other's receipt still settles the imported event
+
+#### Scenario: Opening not proven
+- **WHEN** a pull request enters the capped list but was created before the boundary, at it, within the skew margin, with no creation time, after a failed read or on a legacy observation
+- **THEN** it is labelled newly listed and carries no opening claim
 
 ### Requirement: Owner monitoring control with exact pause provenance
 The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp, open no pause period and write no audit row. A change SHALL write the switch, its pause period and its audit row in one transaction at the injected time. An owner pause SHALL record its real start; an imported pause, or one recorded before provenance existed, SHALL record no real start, only the latest instant it is known to have begun. A pause period is provenance only and SHALL NOT suppress or authorize any delivery. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget, and pausing applies at the next tick. Resuming SHALL NOT be refused because native history exists: what native paths delivered SHALL be reconciled per exact transition as targets observe, and only an unreadable ledger boundary SHALL refuse. A resume SHALL NOT reset a checkpoint, and a repeated import SHALL NOT override the owner's choice (verification reports the difference).

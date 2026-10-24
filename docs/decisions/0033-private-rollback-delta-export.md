@@ -1,6 +1,6 @@
 # ADR 0033 — A private, read-only rollback-delta export
 
-**Status:** accepted (schema now `ducky-rollback-delta/v3`, see [ADR 0034](0034-exact-native-reconciliation.md))
+**Status:** accepted (schema now `ducky-rollback-delta/v4`, see [ADR 0034](0034-exact-native-reconciliation.md))
 **Extends** [ADR 0030](0030-private-assistant-migration-and-parity-capabilities.md)
 and [ADR 0020](0020-conservative-retention-and-per-entity-deletion.md); supersedes
 nothing.

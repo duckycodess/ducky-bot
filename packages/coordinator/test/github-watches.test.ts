@@ -150,7 +150,7 @@ describe('a watch sees more than open pull request titles', () => {
     h.close();
   });
 
-  it('reports new review comments', async () => {
+  it('reports new conversation comments, truthfully labelled: a comment count is not a submitted review', async () => {
     const reader = new MutableGitHubReader();
     seed(reader);
     const { h, clock } = await start(reader);
@@ -159,7 +159,10 @@ describe('a watch sees more than open pull request titles', () => {
     reader.prs = [{ ...reader.prs[0]!, updatedAt: '2026-09-01T02:00:00.000Z' }];
     await advance(h, clock);
 
-    expect(JSON.stringify(h.transport.sent)).toContain('new review comment(s) on #7');
+    expect(JSON.stringify(h.transport.sent)).toContain('new conversation comment(s) on #7');
+    expect(JSON.stringify(h.transport.sent)).not.toMatch(/review comment/);
+    // No claim of any kind: a conversation comment names no review.
+    expect(h.store.nativeTransitions.all().filter((c) => c.transition.kind === 'changes_requested')).toEqual([]);
     h.close();
   });
 

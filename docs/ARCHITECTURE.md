@@ -301,7 +301,13 @@ or not retention is configured
 `github_watches` stores the owner's explicit interval and the latest
 normalized, redacted snapshot; `github_watch_events` is a durable owner-DM
 outbox keyed by its snapshot fingerprint. Raw GitHub payloads, usernames and
-API responses are not stored.
+API responses are not stored. The snapshot is versioned and holds only hashes of
+provider review ids; `github_watches.read_boundary_at` is the host instant before
+the last successful read started, and a requested-changes fact the ledger cannot
+tell from one the notification target delivered is kept as its own held row in
+`github_watch_events` (never sent, counted). What each native path told the
+owner is recorded per exact transition and per holder in
+`native_transition_claims` (see [decisions/0034](decisions/0034-exact-native-reconciliation.md)).
 
 ## Work phases and dependency waits
 

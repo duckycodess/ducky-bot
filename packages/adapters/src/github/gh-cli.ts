@@ -54,10 +54,14 @@ export const GH_OPERATIONS: Readonly<
    * `--state all` with a small limit rather than a second call: a merge is the
    * disappearance of an open PR, which the open-only list could only ever report
    * as "it is gone".
+   *
+   * `createdAt` is a field `gh pr list --json` already lists (`pnpm probe:gh` records it, the feed's own
+   * list selects it). It is read only to PROVE an opening against the watch's last read boundary; it adds
+   * no verb, flag, endpoint or authority to this argv.
    */
   prListAll: (ref) => [
     'pr', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'all', '--limit', '20',
-    '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,reviewDecision',
+    '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,reviewDecision,createdAt',
   ],
 
   /**

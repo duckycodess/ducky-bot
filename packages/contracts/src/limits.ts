@@ -388,6 +388,12 @@ export const GITHUB_WATCH_BATCH = 5;
 export const GITHUB_WATCH_EVENT_BATCH = 20;
 export const GITHUB_WATCH_MAX_PR_CHECKS = 5;
 export const GITHUB_WATCH_SUMMARY_MAX = 1200;
+/**
+ * The most reviews of one pull request the exact requested-changes protocol will reason about. A read that
+ * returns this many cannot be told from one that was cut off, so it is `truncated`: no new review is
+ * inferred from it, the last complete facts are carried forward, and it is counted.
+ */
+export const GITHUB_WATCH_REVIEW_FACTS_MAX = 100;
 export const GITHUB_WATCH_MAX_DELIVERY_ATTEMPTS = 8;
 
 // ---- the installed workflow front door (issue #7) ---------------------------

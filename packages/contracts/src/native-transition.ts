@@ -131,6 +131,13 @@ export function reviewTransition(n: number, providerRef: string | null | undefin
   return hash !== null && NUMBER.test(String(n)) ? build('changes_requested', String(n), { hash }) : null;
 }
 
+/** The same transition from a hash this codec already produced (a stored one), or null when it is not one. */
+export function reviewTransitionFromHash(n: number, hash: string | null | undefined): Transition | null {
+  return typeof hash === 'string' && HASH.test(hash) && NUMBER.test(String(n))
+    ? build('changes_requested', String(n), { hash })
+    : null;
+}
+
 export function runTransition(runId: number | string, attempt: number | string | null | undefined): Transition | null {
   const run = String(runId);
   const att = attempt === null || attempt === undefined ? null : String(attempt);

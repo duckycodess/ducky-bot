@@ -216,7 +216,26 @@ export interface GitHubWatchEventRow {
   repoKey: string | null;
 }
 
-/** A requested-changes fact the ordinary watch cannot tell from one the target delivered: held, never sent. */
+/**
+ * A per-author review line that was ACTUALLY DELIVERED while the exact review list could not identify what it
+ * summarises. Blocking evidence, identifiers and reasons only: no title, no body, no review id.
+ */
+export interface GitHubGapMarkerRow {
+  id: number;
+  ownerId: string;
+  watchId: string;
+  /** The watch's handle, or null when the watch itself is gone (retention may delete it; the marker stays). */
+  publicWatchId: string | null;
+  repoKey: string | null;
+  pr: number;
+  reviewClass: 'approval' | 'changes_requested';
+  reason: 'no_comparison' | 'unavailable' | 'truncated';
+  shown: 'shown' | 'delivered_not_provably_shown';
+  outboxRef: string;
+  deliveredAt: string;
+}
+
+/** A review fact the ordinary watch cannot tell from one the target delivered: held, never sent. */
 export interface GitHubHeldReviewRow {
   id: string;
   watchId: string;

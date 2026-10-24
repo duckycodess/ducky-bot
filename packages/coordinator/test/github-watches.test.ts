@@ -123,9 +123,12 @@ describe('a watch sees more than open pull request titles', () => {
     h.close();
   });
 
-  it('reports an approval and a requested change from the review surface', async () => {
+  it('reports a decision change and the per-author view from the review surface, each as what it is', async () => {
     const reader = new MutableGitHubReader();
     seed(reader);
+    // A decision is a value only from a read that carried one: the watch has to have READ a decision before a
+    // change of it is a change.
+    reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'REVIEW_REQUIRED' }];
     const { h, clock } = await start(reader);
 
     reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'APPROVED', updatedAt: '2026-09-01T02:00:00.000Z' }];
@@ -134,7 +137,14 @@ describe('a watch sees more than open pull request titles', () => {
       latestReviews: [{ state: 'APPROVED', submittedAt: '2026-09-01T02:00:00.000Z' }],
     });
     await advance(h, clock);
-    expect(JSON.stringify(h.transport.sent)).toContain('approved: #7');
+    const approved = JSON.stringify(h.transport.sent);
+    // The decision is worded as a decision. The per-author line names no review, and says so: no exact list
+    // identified what it summarises, so it is labelled and (once delivered) remembered.
+    expect(approved).toContain('review decision now approved: #7');
+    expect(approved).toContain('approvals recorded on #7 (reviewer summary only)');
+    expect(h.store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 1, notProvablyShown: 0 });
+    // No review receipt of any kind: a decision and a per-author line name no review.
+    expect(h.store.nativeTransitions.all().filter((c) => /review|changes_requested/.test(c.transition.kind))).toEqual([]);
 
     h.transport.clear();
     reader.prs = [{
@@ -146,7 +156,10 @@ describe('a watch sees more than open pull request titles', () => {
       latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-09-01T03:00:00.000Z' }],
     });
     await advance(h, clock);
-    expect(JSON.stringify(h.transport.sent)).toContain('changes requested on #7');
+    const changes = JSON.stringify(h.transport.sent);
+    expect(changes).toContain('review decision now changes requested: #7');
+    expect(changes).toContain('changes requested on #7 (reviewer summary only)');
+    expect(h.store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 2, notProvablyShown: 0 });
     h.close();
   });
 

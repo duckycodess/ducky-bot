@@ -194,7 +194,7 @@ describe('an unavailable or truncated read proves nothing and absorbs nothing', 
     for (const k of ['approvals', 'changesRequested', 'reviewComments', 'commits', 'latestChangeRequestAt']) {
       expect(gap.prs[0]![k], k).toEqual(before.prs[0]![k]);
     }
-    expect(gap.prs[0]!['rf']).toMatchObject({ s: 'unavailable', known: true, cr: [{ h: hashOf('PRR_old') }] });
+    expect(gap.prs[0]!['rf']).toMatchObject({ s: 'unavailable', known: true, rv: [{ h: hashOf('PRR_old'), c: 'R' }] });
     // Recovery with the very same reviews: nothing is told as new.
     reader.failReviews = false;
     reader.prs = [pr(1, { updatedAt: at(3) })];
@@ -262,8 +262,8 @@ describe('an unavailable or truncated read proves nothing and absorbs nothing', 
     reader.setReviews(1, [...many, rv('PRR_brand_new', 'CHANGES_REQUESTED', at(1, 30))].slice(0, 100));
     await step();
     expect(crClaims(h)).toEqual([]);
-    const rf = (JSON.parse(watch(h).snapshotJson!) as { prs: { rf: { s: string; cr: { h: string }[] } }[] }).prs[0]!.rf;
-    expect(rf).toMatchObject({ s: 'truncated', cr: [{ h: hashOf('PRR_old') }] });
+    const rf = (JSON.parse(watch(h).snapshotJson!) as { prs: { rf: { s: string; rv: { h: string }[] } }[] }).prs[0]!.rf;
+    expect(rf).toMatchObject({ s: 'truncated', rv: [{ h: hashOf('PRR_old') }] });
     expect(h.app.githubWatches.statusNotes()).toMatch(/1 pull request\(s\) have 100 or more reviews/);
     expect(h.app.githubWatches.statusNotes()).not.toMatch(/PRR|acme|PR 1/);
     h.close();
@@ -301,7 +301,7 @@ describe('the upgrade from a legacy snapshot', () => {
     expect(sent(h)).toBe('[]');
     expect(h.store.db.prepare('SELECT COUNT(*) n FROM github_watch_events').get()).toEqual(events);
     const upgraded = JSON.parse(watch(h).snapshotJson!) as { v: number; prs: { rf: { known: boolean } }[] };
-    expect(upgraded.v).toBe(2);
+    expect(upgraded.v).toBe(3);
     expect(upgraded.prs[0]!.rf.known).toBe(true);
     h.close();
   });
@@ -333,17 +333,31 @@ describe('the upgrade from a legacy snapshot', () => {
     h.close();
   });
 
-  it('a comment-only review (no requested change) is comparison metadata: no message', async () => {
+  it('a comment-only review is a real fact now: told as a commented review, claimed in its own state, never as a requested change', async () => {
     const reader = new Reader();
     const { h, step } = await start(reader);
     reader.setReviews(1, [rv('PRR_c', 'COMMENTED', at(1))]);
     await step();
-    expect(sent(h)).toBe('[]');
-    // ... but it joined the seen set, so a later state change of it is not a new review.
+    expect(summaries(h).join(' ')).toContain('commented review submitted on #1');
+    expect(h.store.nativeTransitions.all().filter((c) => c.transition.kind === 'review_commented').map((c) => c.transition.hash))
+      .toEqual([hashOf('PRR_c')]);
+    expect(crClaims(h)).toEqual([]);
+    h.close();
+  });
+
+  it('a later state change to requested changes is refused as an impossible lifecycle change, never told as a new review', async () => {
+    const reader = new Reader();
+    const { h, step } = await start(reader);
+    reader.setReviews(1, [rv('PRR_c', 'COMMENTED', at(1))]);
+    await step();
+    h.transport.clear();
     reader.prs = [pr(1, { updatedAt: at(3) })];
     reader.setReviews(1, [rv('PRR_c', 'CHANGES_REQUESTED', at(1))]);
     await step();
     expect(crClaims(h)).toEqual([]);
+    expect(sent(h)).not.toContain('requested changes submitted');
+    const rf = (JSON.parse(watch(h).snapshotJson!) as { prs: { rf: { s: string; x?: string; rv: { c: string }[] } }[] }).prs[0]!.rf;
+    expect(rf).toMatchObject({ s: 'unavailable', x: 'lifecycle', rv: [{ c: 'C' }] });
     h.close();
   });
 });
@@ -368,7 +382,7 @@ describe('what the imported target delivered, holds or is sending', () => {
     // separate, still-unreconciled message and is not a summary.)
     expect(summaries(h)).toEqual([]);
     expect(crClaims(h).map((c) => c.path)).toEqual(['target']);
-    expect((JSON.parse(watch(h).snapshotJson!) as { prs: { rf: { cr: unknown[] } }[] }).prs[0]!.rf.cr).toHaveLength(1);
+    expect((JSON.parse(watch(h).snapshotJson!) as { prs: { rf: { rv: unknown[] } }[] }).prs[0]!.rf.rv).toHaveLength(1);
     h.close();
   });
 
@@ -431,8 +445,8 @@ describe('what the imported target delivered, holds or is sending', () => {
       // No reservation, no receipt of its own, and nothing sendable.
       expect(crClaims(h).filter((c) => c.path === 'native')).toEqual([]);
       expect(h.store.githubWatches.pendingEvents(10).filter((e) => e.summary.startsWith('Held'))).toEqual([]);
-      expect(watch(h).snapshotJson).toContain('"cr"');
-      expect(h.app.githubWatches.statusNotes()).toMatch(/1 requested-changes fact\(s\) HELD and NOT sent/);
+      expect(watch(h).snapshotJson).toContain('"rv"');
+      expect(h.app.githubWatches.statusNotes()).toMatch(/1 review fact\(s\) HELD and NOT sent/);
       h.close();
     });
 
@@ -573,7 +587,9 @@ describe('a claim exists only for a segment the owner can read', () => {
     await h.app.githubWatches.tick();
     h.transport.clear();
     reader.prs = list((n) => ({ updatedAt: at(1 + n), mergedAt: at(1 + n), state: 'MERGED' }));
-    for (let n = 1; n <= 5; n += 1) reader.setReviews(n, [rv(`PRR_${n}`, 'CHANGES_REQUESTED', at(1))]);
+    // No per-author view here: this scenario is about the clamp and the claims alone. (A per-author line that comes
+    // back when its exact segment is cut off is covered where it belongs, with the other observed states.)
+    for (let n = 1; n <= 5; n += 1) reader.setReviews(n, [rv(`PRR_${n}`, 'CHANGES_REQUESTED', at(1))], { latestReviews: [] });
     clock.advance(15 * MIN);
     await h.app.githubWatches.tick();
     const text = summaries(h)[0]!;
@@ -658,7 +674,7 @@ describe('a partial or cut-off successful answer is not an empty one', () => {
     reader.setReviews(1, many(), proven); // the other lists are separate connections and carry the same facts
     await step();
     expect(KEYS.map((k) => older(h)[k])).toEqual(before);
-    expect(older(h)['rf']).toMatchObject({ s: 'truncated', known: true, cr: [{ h: hashOf('PRR_old') }] });
+    expect(older(h)['rf']).toMatchObject({ s: 'truncated', known: true, rv: [{ h: hashOf('PRR_old'), c: 'R' }] });
     expect(sent(h)).toBe('[]');
     expect(crClaims(h).map((c) => c.transition.hash)).toEqual([hashOf('PRR_old')]); // the baseline's only
     h.close();
@@ -679,7 +695,7 @@ describe('a partial or cut-off successful answer is not an empty one', () => {
     expect(text).not.toContain('requested changes submitted'); // nothing exact is inferred from a cut-off list
     expect(older(h)['latestChangeRequestAt']).toBe(at(2));
     expect(older(h)['reviewComments']).toBe(3);
-    expect(older(h)['rf']).toMatchObject({ s: 'truncated', cr: [{ h: hashOf('PRR_old') }] });
+    expect(older(h)['rf']).toMatchObject({ s: 'truncated', rv: [{ h: hashOf('PRR_old'), c: 'R' }] });
     // No receipt for the new review: the aggregate line claims none.
     expect(crClaims(h).map((c) => c.transition.hash)).toEqual([hashOf('PRR_old')]);
     h.close();

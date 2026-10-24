@@ -348,6 +348,24 @@ export class NativeTransitionsRepo {
     return 'free';
   }
 
+  /**
+   * Whether ANY path delivered ANY state of this exact review (same provider-domain hash on the same pull
+   * request). It only chooses the wording of a dismissal ("a review was dismissed" against "a review was
+   * submitted and is dismissed"); it is never a receipt for a dismissal.
+   */
+  reviewTold(ownerId: string, repoKey: string, item: string, hash: string): boolean {
+    const repo = transitionRepoKey(repoKey);
+    if (repo === null) return false;
+    return this.db
+      .prepare(
+        `SELECT 1 FROM native_transition_claims
+          WHERE owner_id = ? AND repo_key = ? AND item = ? AND provider_hash = ? AND hash_domain = 'provider'
+            AND state = 'delivered'
+            AND kind IN ('changes_requested','review_approved','review_commented','review_dismissed') LIMIT 1`,
+      )
+      .get(ownerId, repo, item, hash) !== undefined;
+  }
+
   /** Reserves a transition for a native outbox row. False when something already owns it. */
   reserveNative(
     ownerId: string, repoKey: string, t: Transition, via: ClaimVia, ref: string, observedAt: string, atIso: string,

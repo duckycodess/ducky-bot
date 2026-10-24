@@ -7,8 +7,9 @@ import {
   GITHUB_WATCH_MAX_ISSUES, GITHUB_WATCH_MAX_PR_CHECKS, GITHUB_WATCH_MAX_RUNS,
   GITHUB_WATCH_SUMMARY_MAX, GitHubWatchAddInputSchema, newPublicWatchId,
   PublicWatchIdSchema, NATIVE_SUMMARY_NAMED_MAX, NATIVE_LEGACY_SKEW_MS, GITHUB_WATCH_REVIEW_FACTS_MAX,
-  canonicalStamp, hashProviderRef, mergedTransition, openedTransition, reviewTransitionFromHash, transitionKey,
-  transitionRepoKey, updatedTransition, type PrChecks, type PrList, type RepoView, type Transition,
+  canonicalStamp, hashProviderRef, mergedTransition, observedReviewTransition, openedTransition,
+  reviewTransitionFromHash, transitionKey, transitionRepoKey, updatedTransition, type GapClass, type GapReason,
+  type GapShown, type PrChecks, type PrList, type RepoView, type Transition,
 } from '@ducky/contracts';
 import { redact, type GitHubReader } from '@ducky/adapters';
 import { withTransaction, type GitHubWatchRow, type Store } from '@ducky/persistence';
@@ -45,8 +46,8 @@ interface NormalizedPr {
   /** Identifies the review that asked for changes, for follow-up dedup. */
   latestChangeRequestAt?: string;
   /**
-   * Exact requested-changes facts (version 2 snapshots). Absent on a legacy snapshot, which is read through
-   * its legacy projection only.
+   * Exact submitted-review facts (version 3 snapshots). Absent on a legacy snapshot, which is read through its
+   * legacy projection only. A version 2 snapshot is read through its own projection and converted on parse.
    */
   rf?: ReviewFacts;
 }
@@ -55,24 +56,55 @@ interface NormalizedPr {
 type ReviewFactStatus = 'complete' | 'unavailable' | 'truncated';
 
 /**
- * The exact submitted-review facts of one pull request, from the bounded `reviews` list (never the
- * per-author `latestReviews`). Hashes only: no raw id, login or body.
+ * A review's state as the snapshot records it: approved, requested changes, commented, dismissed, or a state word
+ * this build does not know (never told, never claimed, never a lifecycle conflict).
+ */
+type ReviewCode = 'A' | 'R' | 'C' | 'D' | 'U';
+
+/** One SUBMITTED review: its identity hash, the provider's canonical submission instant and its states. */
+interface ReviewFact {
+  /** `hashProviderRef` of the provider's review id (64 hex): never the id. */
+  h: string;
+  /** The provider's canonical submission instant. It identifies the REVIEW; it is never a dismissal time. */
+  at: string;
+  /** The state this review was FIRST observed in, never rewritten; null when it was known only by identity. */
+  f: ReviewCode | null;
+  /** The state it is in now. */
+  c: ReviewCode;
+}
+
+/**
+ * The exact submitted-review facts of one pull request, from the bounded `reviews` list (never the per-author
+ * `latestReviews`). Hashes only: no raw id, login or body.
  *
- * `cr` (the requested-changes reviews: hash and the provider's canonical instant) is a rendered fact and is
- * part of the fingerprint. `s` (how the last read went), `known` and `seen` are comparison metadata and are
- * not: an unavailable read or its recovery must not by itself create a generic snapshot message, and `seen`
- * (every submitted review, whatever its state, as a 32-hex prefix) exists so that a review whose STATE
- * later changed is never mistaken for a new one.
+ * `rv` (every submitted review: hash, instant, first and current state) is a rendered fact and is part of the
+ * fingerprint, except for state words this build does not know. `s` (how the last read went), `known`, `pb` and
+ * `x` are comparison metadata and are not: an unavailable read or its recovery must not by itself create a
+ * generic snapshot message.
  *
- * An unavailable or truncated read carries the last COMPLETE facts forward unchanged (so the reviews that
- * arrived during the gap are told on recovery) and never absorbs anything it did not see.
+ * An unavailable or truncated read carries the last COMPLETE facts forward unchanged (so the reviews that arrived
+ * during the gap are told on recovery) and never absorbs anything it did not see. A submitted review never
+ * leaves the list and changes state only by being dismissed: a complete read that contradicts either is refused
+ * like an unavailable one, carries the last proven facts, and is counted (`x`), never read as a new review.
  */
 interface ReviewFacts {
   s: ReviewFactStatus;
-  /** A complete set has existed: `seen` and `cr` are proven. False until the first complete read. */
+  /** A complete set has existed: `rv` is proven. False until the first complete read. */
   known: boolean;
-  seen: string[];
-  cr: { h: string; at: string }[];
+  /**
+   * The host instant fixed BEFORE the observation's reads began, written only beside a complete set under the
+   * observation's compare-and-set and carried unchanged on a gap. Null: no proof (legacy, first sight, an unbound
+   * or remapped watch). A review that existed before this instant is in this set.
+   */
+  pb: string | null;
+  rv: ReviewFact[];
+  /**
+   * A version 2 snapshot knew reviews by a 32-hex prefix alone, with no state: they are identities that are not
+   * new, whose prior state is unknown. The first complete read of this build absorbs them into `rv`.
+   */
+  seen?: string[];
+  /** Why exact facts are refused for this pull request: a review left the list, or its state changed impossibly. */
+  x?: 'left' | 'lifecycle';
 }
 
 interface NormalizedRun {
@@ -91,8 +123,8 @@ interface NormalizedIssue {
 }
 
 interface NormalizedSnapshot {
-  /** 2 once exact review facts are recorded. Absent on a legacy snapshot. */
-  v?: 2;
+  /** 2 once exact requested-changes facts were recorded, 3 once every review state is. Absent on a legacy snapshot. */
+  v?: 2 | 3;
   repoName: string;
   defaultBranch: string;
   openPrCount: number;
@@ -194,19 +226,33 @@ export class GitHubWatchService {
     const held = this.store.githubWatches.heldCount(this.ownerId);
     if (held > 0) {
       notes.push(
-        `${held} requested-changes fact(s) HELD and NOT sent: each cannot be told from a review the notification ` +
+        `${held} review fact(s) HELD and NOT sent: each cannot be told from a review the notification ` +
           'target already delivered (kept through a cancel; no clearing control; a required blocker)',
       );
     }
+    const evidence = reviewEvidenceCounts(this.store, this.ownerId);
     // Pull requests whose review list is too long to prove: no new review of theirs can be told exactly.
-    let truncated = 0;
-    for (const w of this.store.githubWatches.listForOwner(this.ownerId, false, MAX_GITHUB_WATCHES_PER_OWNER)) {
-      truncated += parseSnapshot(w.snapshotJson)?.prs.filter((pr) => pr.rf?.s === 'truncated').length ?? 0;
-    }
-    if (truncated > 0) {
+    if (evidence.truncated > 0) {
       notes.push(
-        `${truncated} pull request(s) have ${GITHUB_WATCH_REVIEW_FACTS_MAX} or more reviews: no new requested-changes ` +
-          'review of theirs is told exactly (a capability limit and a required blocker)',
+        `${evidence.truncated} pull request(s) have ${GITHUB_WATCH_REVIEW_FACTS_MAX} or more reviews: no new review ` +
+          'of theirs is told exactly (a capability limit and a required blocker)',
+      );
+    }
+    // A review that left the list, or changed state in a way the provider lifecycle does not allow: exact facts are
+    // refused for that pull request, the last proven facts are kept, and it stays counted (a required blocker).
+    if (evidence.refused > 0) {
+      notes.push(
+        `${evidence.refused} pull request(s) refused for exact review facts (a review left the list or changed state ` +
+          'impossibly; the last proven facts are kept; a required blocker)',
+      );
+    }
+    // Per-author lines told without exact review identity: delivered, durable, never cleared.
+    const gaps = this.store.githubWatches.gapMarkerCounts(this.ownerId);
+    if (gaps.shown + gaps.notProvablyShown > 0) {
+      notes.push(
+        `${gaps.shown + gaps.notProvablyShown} per-author review line(s) were delivered without exact review identity ` +
+          `(${gaps.shown} shown, ${gaps.notProvablyShown} not provably shown; kept through a cancel and retention; ` +
+          'no clearing control; a required blocker)',
       );
     }
     return notes.length > 0 ? `${notes.join('; ')}; ` : '';
@@ -298,6 +344,9 @@ export class GitHubWatchService {
         withTransaction(this.store.db, () => {
           this.store.githubWatches.markEventDelivered(event.id, now);
           this.store.nativeTransitions.markNativeDelivered('watch_summary', event.id, 'owner_dm', now);
+          // A per-author line told without exact review identity becomes durable evidence only now that the
+          // send succeeded, in the step that settles the row (never for a queued, failed or abandoned one).
+          this.store.githubWatches.promoteGapMarkers(event.id);
         });
         result.delivered += 1;
       } catch {
@@ -342,14 +391,23 @@ export class GitHubWatchService {
       this.reader.repoView(ref),
       this.reader.prListAll(ref),
     ]);
-    const { snapshot: normalized, createdAt } = await this.normalize(view, prs, ref, previous);
+    // The pre-read instant is a proof of what a review set contained only for the repository the watch is bound to.
+    const reviewBoundary = watch.repoKey !== null && watch.repoKey === repoKey ? readStartIso : null;
+    const { snapshot: normalized, createdAt } = await this.normalize(view, prs, ref, previous, reviewBoundary);
     const snapshotJson = canonicalJson(normalized);
     // A legacy snapshot is compared through its legacy projection ONLY, so the first observation after the
-    // upgrade neither announces "changed" for an unchanged repository nor lets new metadata decide anything.
-    // From then on the fingerprint covers every fact a line can render.
-    const fingerprint = fingerprintOf(normalized, 'v2');
-    const comparable = previous !== undefined && previous.v === undefined ? fingerprintOf(normalized, 'legacy') : fingerprint;
-    const changed = watch.snapshotHash !== comparable;
+    // upgrade neither announces "changed" for an unchanged repository nor lets new metadata decide anything. A
+    // version 2 snapshot is compared through its own projection AND by the review facts it already proves
+    // comparable (its identities and requested-changes states), so a genuinely new review is never swallowed by
+    // the upgrade. From then on the fingerprint covers every fact a line can render.
+    const fingerprint = fingerprintOf(normalized, 'v3');
+    const newFacts = previous !== undefined && previous.v === 2 ? reviewFactChanges(previous, normalized).length > 0 : false;
+    const comparable = previous === undefined
+      ? fingerprint
+      : previous.v === undefined
+        ? fingerprintOf(normalized, 'legacy')
+        : previous.v === 2 ? fingerprintOf(normalized, 'v2') : fingerprint;
+    const changed = watch.snapshotHash !== comparable || newFacts;
     // The read boundary is trusted only for the repository it was recorded for, and only beside a snapshot.
     const boundaryMs = previous !== undefined && watch.repoKey !== null && watch.repoKey === repoKey &&
       watch.readBoundaryAt !== null ? Date.parse(watch.readBoundaryAt) : Number.NaN;
@@ -387,22 +445,30 @@ export class GitHubWatchService {
       // unplaceable review neither repeats a notification nor stalls the rest of the repository.
       const excluded = new Set<string>();
       const held = new Map<string, { id: string; heldKey: string; summary: string; providerAt: string | null }>();
-      let rendered: Summary = { text: null, named: [], universe: [] };
+      let rendered: Summary = { text: null, named: [], universe: [], suppressed: [], markers: [] };
+      // Per-author lines that are shown after all, because the exact facts that stood for them were not conveyed.
+      const demoted = new Set<string>();
+      const priorState = (n: number, hash: string): boolean => ledger.reviewTold(this.ownerId, repoKey, String(n), hash);
       if (changed) {
         // The passes are bounded by EVERY transition the observation could name (before any cap or clamp),
         // not by what the first render happened to show: removing an item can reveal one a cap or the clamp
         // had hidden. Exclusion only removes from that finite set and every pass that goes round again
         // excluded at least one new key of it, so the loop always ends well inside the bound; a loop that
-        // somehow did not would defer, never send a render nobody checked.
+        // somehow did not would defer, never send a render nobody checked. A per-author line that was left out
+        // because exact facts stand for it comes back when one of those facts was not conveyed (cut off by the
+        // clamp, or inside a redacted summary): the set of demoted lines only grows and is bounded by the pull
+        // requests and the two classes, so that adds a fixed number of passes and no more.
         let passes = 0;
         let limit = 0;
         for (;;) {
-          rendered = summarizeChange(repo.slug, previous, normalized, { excluded, ...summaryContext });
-          if (passes === 0) limit = rendered.universe.length + 1;
+          rendered = summarizeChange(repo.slug, previous, normalized, { excluded, demoted, priorState, ...summaryContext });
+          if (passes === 0) limit = rendered.universe.length + 1 + 2 * GITHUB_WATCH_MAX_PR_CHECKS;
           let progressed = false;
           for (const c of rendered.named) {
             const key = transitionKey(c.t);
-            const probe = ledger.probeNative(this.ownerId, repoKey, c.t, c.providerAt);
+            const probe = ledger.probeNative(this.ownerId, repoKey, c.t, c.providerAt, {
+              boundary: c.boundary ?? null, stateChange: c.stateChange === true,
+            });
             if (probe === 'target_in_flight') return 'deferred' as const;
             if (excluded.has(key)) continue;
             if (probe === 'target_delivered') {
@@ -413,10 +479,22 @@ export class GitHubWatchService {
               // The text is stored with the row for the record and is NEVER sent: a held row is not pending work.
               held.set(key, {
                 id: randomUUID(), heldKey: key, providerAt: c.providerAt,
-                summary: `Held, not sent: a requested-changes review on #${c.t.item} cannot be told apart from one ` +
+                summary: `Held, not sent: a review fact on #${c.t.item} cannot be told apart from one ` +
                   'the notification target already delivered.',
               });
               progressed = true;
+            }
+          }
+          if (!progressed) {
+            // The probing is stable. A per-author line that exact facts stand for must not be left out on the
+            // strength of a fact the text did not actually show: that fact has no receipt and the owner has not
+            // read it. Show the line, and look again.
+            const shownKeys = new Set(rendered.named.map((c) => transitionKey(c.t)));
+            for (const sup of rendered.suppressed) {
+              if (!demoted.has(sup.key) && sup.renderedKeys.some((k) => !shownKeys.has(k))) {
+                demoted.add(sup.key);
+                progressed = true;
+              }
             }
           }
           if (!progressed) break;
@@ -427,7 +505,9 @@ export class GitHubWatchService {
       const summaryId = randomUUID();
       const events = [
         // `text === null`: everything that changed was an item an imported target delivered or a held one.
-        ...(changed && rendered.text !== null ? [{ id: summaryId, fingerprint, summary: rendered.text }] : []),
+        ...(changed && rendered.text !== null
+          ? [{ id: summaryId, fingerprint, summary: rendered.text, gapMarkers: rendered.markers }]
+          : []),
         ...followUps,
       ];
       const committed = this.store.githubWatches.observe({
@@ -471,6 +551,7 @@ export class GitHubWatchService {
     prs: PrList,
     ref: { owner: string; repo: string },
     previous: NormalizedSnapshot | undefined,
+    reviewBoundary: string | null,
   ): Promise<{ snapshot: NormalizedSnapshot; createdAt: Map<number, string> }> {
     const selected = prs.slice(0, GITHUB_WATCH_MAX_PR_CHECKS);
     const before = new Map((previous?.prs ?? []).map((p) => [p.number, p]));
@@ -538,9 +619,11 @@ export class GitHubWatchService {
         checks,
         headRefOid: redact(pr.headRefOid ?? reviews?.headRefOid ?? '').slice(0, 64),
         mergedAt: pr.mergedAt ?? reviews?.mergedAt ?? '',
-        reviewDecision: redact(pr.reviewDecision ?? reviews?.reviewDecision ?? '').slice(0, 40),
+        // A decision is a value only from a read that CARRIED it: a missing or empty field is "not read", so the
+        // last proven value stays and a failed read and its recovery never produce a decision change.
+        reviewDecision: redact(pr.reviewDecision ?? reviews?.reviewDecision ?? '').slice(0, 40) || (old?.reviewDecision ?? ''),
         ...reviewFields,
-        rf: deriveReviewFacts(reviews, old?.rf),
+        rf: deriveReviewFacts(reviews, old?.rf, reviewBoundary),
       };
     }));
 
@@ -572,7 +655,7 @@ export class GitHubWatchService {
 
     return {
       snapshot: {
-        v: 2,
+        v: 3,
         repoName: redact(view.name).slice(0, 180),
         defaultBranch: redact(view.defaultBranchRef?.name ?? 'unknown').slice(0, 180),
         // Only the ones still open: `prListAll` includes closed ones now.
@@ -607,6 +690,26 @@ export class GitHubWatchService {
   }
 }
 
+/**
+ * Counts only, over the owner's watches (any state): pull requests whose review list is at the bound (no new
+ * review can be told exactly), and pull requests for which exact review facts are REFUSED because a submitted
+ * review left the list or changed state in a way the provider lifecycle does not allow. Never a repository, a
+ * pull request number or a review.
+ */
+export function reviewEvidenceCounts(store: Store, ownerId: string): { truncated: number; refused: number } {
+  let truncated = 0;
+  let refused = 0;
+  for (const w of store.githubWatches.listForOwner(ownerId, true, MAX_GITHUB_WATCHES_PER_OWNER)) {
+    for (const pr of parseSnapshot(w.snapshotJson)?.prs ?? []) {
+      // A cancelled watch no longer reads anything, so its last truncated read is not a live limit; a refusal is
+      // evidence and stays counted whatever became of the watch.
+      if (pr.rf?.s === 'truncated' && w.state === 'active') truncated += 1;
+      if (pr.rf?.x !== undefined) refused += 1;
+    }
+  }
+  return { truncated, refused };
+}
+
 function parseSnapshot(raw: string | null): NormalizedSnapshot | undefined {
   if (!raw) return undefined;
   try {
@@ -614,8 +717,9 @@ function parseSnapshot(raw: string | null): NormalizedSnapshot | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const candidate = value as Partial<NormalizedSnapshot>;
     if (!Array.isArray(candidate.prs)) return undefined;
-    // Review facts are read back defensively: a value that is not exactly what this build writes is
-    // dropped (the pull request is then "never proven"), never trusted and never repaired.
+    // Review facts are read back defensively: a value that is not exactly what this build writes (or what version
+    // 2 wrote, which is converted) is dropped (the pull request is then "never proven"), never trusted and never
+    // repaired.
     const prs = candidate.prs.map((pr) => {
       const { rf, ...rest } = pr as NormalizedPr & { rf?: unknown };
       const clean = cleanReviewFacts(rf);
@@ -629,72 +733,168 @@ function parseSnapshot(raw: string | null): NormalizedSnapshot | undefined {
 
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
+const REVIEW_CODES: readonly string[] = ['A', 'R', 'C', 'D', 'U'];
 
+/** A version 3 set as written, or a version 2 set (`seen` prefixes and requested-changes `cr`) converted. */
 function cleanReviewFacts(raw: unknown): ReviewFacts | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const r = raw as Partial<ReviewFacts>;
-  if (r.s !== 'complete' && r.s !== 'unavailable' && r.s !== 'truncated') return undefined;
-  if (typeof r.known !== 'boolean' || !Array.isArray(r.seen) || !Array.isArray(r.cr)) return undefined;
-  if (r.seen.length > GITHUB_WATCH_REVIEW_FACTS_MAX || r.cr.length > GITHUB_WATCH_REVIEW_FACTS_MAX) return undefined;
-  if (!r.seen.every((h) => typeof h === 'string' && HEX32.test(h))) return undefined;
-  if (!r.cr.every((c) => c && typeof c.h === 'string' && HEX64.test(c.h) && canonicalStamp(c.at) === c.at)) return undefined;
-  return { s: r.s, known: r.known, seen: [...r.seen], cr: r.cr.map((c) => ({ h: c.h, at: c.at })) };
+  const r = raw as Record<string, unknown>;
+  if (r['s'] !== 'complete' && r['s'] !== 'unavailable' && r['s'] !== 'truncated') return undefined;
+  if (typeof r['known'] !== 'boolean') return undefined;
+  const status = r['s'] as ReviewFactStatus;
+  if (Array.isArray(r['rv'])) {
+    const rv = r['rv'] as Record<string, unknown>[];
+    if (rv.length > GITHUB_WATCH_REVIEW_FACTS_MAX) return undefined;
+    const pb = r['pb'] === null || r['pb'] === undefined ? null : typeof r['pb'] === 'string' ? canonicalStamp(r['pb']) : undefined;
+    if (pb === undefined || (r['pb'] != null && pb !== r['pb'])) return undefined;
+    const seenHashes = new Set<string>();
+    const facts: ReviewFact[] = [];
+    for (const f of rv) {
+      if (!f || typeof f['h'] !== 'string' || !HEX64.test(f['h']) || seenHashes.has(f['h'])) return undefined;
+      if (typeof f['at'] !== 'string' || canonicalStamp(f['at']) !== f['at']) return undefined;
+      if (typeof f['c'] !== 'string' || !REVIEW_CODES.includes(f['c'])) return undefined;
+      if (f['f'] !== null && (typeof f['f'] !== 'string' || !REVIEW_CODES.includes(f['f']))) return undefined;
+      seenHashes.add(f['h']);
+      facts.push({ h: f['h'], at: f['at'], f: f['f'] as ReviewCode | null, c: f['c'] as ReviewCode });
+    }
+    const seen = r['seen'];
+    if (seen !== undefined && (!Array.isArray(seen) || seen.length > GITHUB_WATCH_REVIEW_FACTS_MAX ||
+        !seen.every((h) => typeof h === 'string' && HEX32.test(h)))) return undefined;
+    const x = r['x'];
+    if (x !== undefined && x !== 'left' && x !== 'lifecycle') return undefined;
+    return {
+      s: status, known: r['known'] as boolean, pb, rv: facts,
+      ...(seen !== undefined && seen.length > 0 ? { seen: [...(seen as string[])] } : {}),
+      ...(x !== undefined ? { x } : {}),
+    };
+  }
+  // Version 2: the requested-changes reviews (hash and instant) and every submitted identity's prefix.
+  if (!Array.isArray(r['seen']) || !Array.isArray(r['cr'])) return undefined;
+  const seen = r['seen'] as unknown[];
+  const cr = r['cr'] as Record<string, unknown>[];
+  if (seen.length > GITHUB_WATCH_REVIEW_FACTS_MAX || cr.length > GITHUB_WATCH_REVIEW_FACTS_MAX) return undefined;
+  if (!seen.every((h) => typeof h === 'string' && HEX32.test(h))) return undefined;
+  if (!cr.every((c) => c && typeof c['h'] === 'string' && HEX64.test(c['h']) && typeof c['at'] === 'string' &&
+      canonicalStamp(c['at']) === c['at'])) return undefined;
+  const known = new Set(cr.map((c) => String(c['h']).slice(0, 32)));
+  return {
+    s: status, known: r['known'] as boolean, pb: null,
+    // A requested change proves an earlier state; a bare identity proves only that the review is not new.
+    rv: cr.map((c) => ({ h: String(c['h']), at: String(c['at']), f: 'R' as const, c: 'R' as const })),
+    ...(seen.some((h) => !known.has(String(h))) ? { seen: (seen as string[]).filter((h) => !known.has(h)) } : {}),
+  };
 }
 
+const codeOfState = (state: string): ReviewCode => {
+  switch (state) {
+    case 'APPROVED': return 'A';
+    case 'CHANGES_REQUESTED': return 'R';
+    case 'COMMENTED': return 'C';
+    case 'DISMISSED': return 'D';
+    default: return 'U';
+  }
+};
+
 /**
- * What a read of one pull request's `reviews` proves about its submitted requested-changes reviews.
+ * What a read of one pull request's `reviews` proves about its submitted reviews and their states.
  *
- * Only a COMPLETE read yields facts: it must have the list, it must be shorter than the bound (a full
- * list cannot be told from a cut-off one), and every requested-changes review in it must be identifiable.
- * A review still PENDING (a viewer's draft) or without a submission instant is not a submitted review and
- * is neither listed nor counted. Anything less carries the previous complete facts forward unchanged with
- * only the status moved: nothing unseen is absorbed, so a review that arrives during the gap is told when
- * a complete read returns.
+ * Only a COMPLETE read yields facts: it must have the list, it must be shorter than the bound (a full list
+ * cannot be told from a cut-off one), and every purported submitted review in it must be identifiable (an id and
+ * a submission instant). A review still PENDING (a viewer's draft) is not a submitted review and is neither
+ * listed nor counted. Anything less carries the previous complete facts forward unchanged with only the status
+ * moved: nothing unseen is absorbed, so a review that arrives during the gap is told when a complete read
+ * returns.
+ *
+ * A complete read is also checked against the lifecycle this build assumes (and does not claim to have proven
+ * live): a submitted review never leaves the list, and it changes state only by being dismissed. A read that
+ * contradicts either is treated like an unavailable one, never absorbed, never read as a new review, and counted.
  */
 function deriveReviewFacts(
   reviews: Awaited<ReturnType<GitHubReader['prReviews']>> | undefined,
   previous: ReviewFacts | undefined,
+  boundary: string | null,
 ): ReviewFacts {
-  const carry = (s: ReviewFactStatus): ReviewFacts =>
-    previous ? { ...previous, s } : { s, known: false, seen: [], cr: [] };
+  const carry = (s: ReviewFactStatus, x?: 'left' | 'lifecycle'): ReviewFacts => {
+    const kept = x ?? previous?.x;
+    return previous
+      ? { ...previous, s, ...(kept !== undefined ? { x: kept } : {}) }
+      : { s, known: false, pb: null, rv: [] };
+  };
   const list = reviews?.reviews;
   if (!Array.isArray(list)) return carry('unavailable');
   if (list.length >= GITHUB_WATCH_REVIEW_FACTS_MAX) return carry('truncated');
-  const seen = new Set<string>();
-  const cr = new Map<string, string>();
+  const current = new Map<string, { at: string; c: ReviewCode }>();
   for (const r of list) {
     const state = (r.state ?? '').toUpperCase();
+    if (state === 'PENDING') continue;
     const at = canonicalStamp(r.submittedAt);
-    if (state === 'PENDING' || at === null) continue;
     const h = hashProviderRef(r.id);
-    if (h === null) {
-      // A requested change that cannot be identified makes the whole read unusable for exact facts;
-      // any other review without an id cannot be a comparison baseline and is simply not one.
-      if (state === 'CHANGES_REQUESTED') return carry('unavailable');
-      continue;
-    }
-    seen.add(h.slice(0, 32));
-    if (state === 'CHANGES_REQUESTED') cr.set(h, at);
+    // A purported submitted review that cannot be identified makes the whole read unusable for exact facts.
+    if (h === null || at === null) return carry('unavailable');
+    current.set(h, { at, c: codeOfState(state) });
   }
-  return {
-    s: 'complete',
-    known: true,
-    seen: [...seen].sort(),
-    cr: [...cr].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([h, at]) => ({ h, at })),
-  };
+  const before = previous?.known ? new Map(previous.rv.map((f) => [f.h, f])) : new Map<string, ReviewFact>();
+  const seenPrefixes = previous?.known ? new Set(previous.seen ?? []) : new Set<string>();
+  if (previous?.known) {
+    // A submitted review never leaves the list: an identity that is gone is not a deletion this build can prove.
+    for (const f of previous.rv) if (!current.has(f.h)) return carry('unavailable', 'left');
+    const currentPrefixes = new Set([...current.keys()].map((h) => h.slice(0, 32)));
+    for (const p of seenPrefixes) if (!currentPrefixes.has(p)) return carry('unavailable', 'left');
+    for (const [h, v] of current) {
+      const p = before.get(h);
+      // A known state changes only to DISMISSED. An unknown state never conflicts.
+      if (p && p.c !== v.c && p.c !== 'U' && v.c !== 'D') return carry('unavailable', 'lifecycle');
+    }
+  }
+  const rv = [...current].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([h, v]): ReviewFact => {
+    const p = before.get(h);
+    // The first-observed state is never rewritten; a review known only by identity has none.
+    const f = p ? p.f : seenPrefixes.has(h.slice(0, 32)) ? null : v.c;
+    return { h, at: v.at, f, c: v.c };
+  });
+  return { s: 'complete', known: true, pb: boundary, rv };
 }
 
 /**
  * The fingerprint of a snapshot. `legacy` is exactly what versions before exact review facts hashed (so an
- * unchanged repository hashes the same through an upgrade); `v2` adds what a line can now render (the
- * requested-changes reviews) and still leaves out the comparison metadata (how the last read went, the seen
- * set), which is not a fact the owner is told.
+ * unchanged repository hashes the same through an upgrade). `v2` is what version 2 hashed (the requested-changes
+ * reviews); a version 2 snapshot is compared through it. `v3` adds every review state a line can now render and
+ * still leaves out the comparison metadata (how the last read went, the boundary, the anomaly mark, a state word
+ * this build does not know), which is not a fact the owner is told. `core` is what a line can say apart from the
+ * review summaries: when only the rest moved, nothing is worth a message.
  */
-function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2'): string {
+function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2' | 'v3' | 'core'): string {
   const { v: _version, prs, ...rest } = snapshot;
-  const projected = mode === 'legacy'
-    ? { ...rest, prs: prs.map(({ rf: _rf, ...pr }) => pr) }
-    : { v: 2, ...rest, prs: prs.map(({ rf, ...pr }) => ({ ...pr, cr: rf?.cr ?? [] })) };
+  let projected: unknown;
+  switch (mode) {
+    case 'legacy':
+      projected = { ...rest, prs: prs.map(({ rf: _rf, ...pr }) => pr) };
+      break;
+    case 'v2':
+      projected = {
+        v: 2, ...rest,
+        prs: prs.map(({ rf, ...pr }) => ({
+          ...pr, cr: (rf?.rv ?? []).filter((f) => f.c === 'R').map(({ h, at }) => ({ h, at })),
+        })),
+      };
+      break;
+    case 'v3':
+      projected = {
+        v: 3, ...rest,
+        prs: prs.map(({ rf, ...pr }) => ({
+          ...pr, rv: (rf?.rv ?? []).filter((f) => f.c !== 'U').map((f) => [f.h, f.at, f.c]),
+        })),
+      };
+      break;
+    case 'core':
+      projected = {
+        ...rest,
+        prs: prs.map(({
+          rf: _rf, approvals: _a, changesRequested: _c, commits: _m, latestChangeRequestAt: _l, reviewDecision: _d, ...pr
+        }) => pr),
+      };
+      break;
+  }
   return createHash('sha256').update(canonicalJson(projected)).digest('hex');
 }
 
@@ -708,6 +908,18 @@ function normalizeChecks(checks: PrChecks): string[] {
 interface NamedClaim {
   readonly t: Transition;
   readonly providerAt: string | null;
+  /** For a NEW review fact: the boundary of the previous complete set it is absent from (null: no proof). */
+  readonly boundary?: string | null;
+  /** The fact is a known review changing state (to DISMISSED). */
+  readonly stateChange?: boolean;
+}
+
+/** A per-author line segment rendered without exact review identity, checked against the final text. */
+interface GapMarkerOut {
+  readonly pr: number;
+  readonly cls: GapClass;
+  readonly reason: GapReason;
+  readonly shown: GapShown;
 }
 
 /** A rendered summary and the exact items its text NAMES (never a count, never an unnamed aggregate). */
@@ -719,11 +931,22 @@ interface Summary {
    * reconciliation loop works through. Exclusion only removes from it, so it bounds the passes.
    */
   readonly universe: readonly string[];
+  /**
+   * Per-author lines left out because exact facts of the same class stand for them: the key (`class:#`) and the
+   * keys of the facts the text still names for it. If one of those is not shown in full, the line comes back.
+   */
+  readonly suppressed: readonly { key: string; renderedKeys: readonly string[] }[];
+  /** The per-author segments rendered without exact review identity, with how provably each is shown. */
+  readonly markers: readonly GapMarkerOut[];
 }
 
 interface SummaryContext {
   /** Transition keys of items that must not be named: the target delivered them, or they are held. */
   readonly excluded?: ReadonlySet<string>;
+  /** Per-author lines (`class:#`) that must be shown even though exact facts stand for them. */
+  readonly demoted?: ReadonlySet<string>;
+  /** Whether any path already delivered some state of this review (it only chooses a dismissal's wording). */
+  readonly priorState?: (n: number, hash: string) => boolean;
   /**
    * The host instant before the read the previous snapshot came from STARTED; null when unknown (a legacy or
    * first observation, an unbound watch, after a failed read).
@@ -732,6 +955,63 @@ interface SummaryContext {
   /** Canonical creation instants of the current list, by number. */
   readonly createdAt: ReadonlyMap<number, string>;
 }
+
+/** One review fact the snapshots prove: a NEW review in its state, or a known review observed dismissed. */
+interface ReviewFactChange {
+  readonly n: number;
+  readonly h: string;
+  readonly at: string;
+  readonly code: 'A' | 'R' | 'C' | 'D';
+  readonly stateChange: boolean;
+  /** `pb` of the previous complete set a NEW review is absent from. Never set for a state change. */
+  readonly boundary: string | null;
+}
+
+/**
+ * The review facts a pair of snapshots PROVES, only against a complete, comparable previous set.
+ *
+ * - A review whose identity is in neither the previous set nor its identity-only list is NEW, and is a fact in
+ *   the state it is in now (approved, commented, requested changes, or dismissed on first sight). A state word
+ *   this build does not know is no fact.
+ * - A review in the previous set that is DISMISSED now and was not before is an observed dismissal: a state
+ *   change, claiming only the DISMISSED state, with no dismissal time (no allowed DTO provides one).
+ * - A review known only by identity (a version 2 snapshot) that is dismissed now proves nothing about its prior
+ *   state: it is established silently, with no claim. A version 2 requested change that is dismissed now does.
+ * Nothing here is inferred from a count, a timestamp or a decision.
+ */
+function reviewFactChanges(previous: NormalizedSnapshot, current: NormalizedSnapshot): ReviewFactChange[] {
+  const before = new Map(previous.prs.map((pr) => [pr.number, pr]));
+  const out: ReviewFactChange[] = [];
+  for (const pr of current.prs) {
+    const old = before.get(pr.number);
+    if (pr.rf?.s !== 'complete' || !old?.rf?.known) continue;
+    const prior = new Map(old.rf.rv.map((f) => [f.h, f]));
+    const identityOnly = new Set(old.rf.seen ?? []);
+    for (const f of pr.rf.rv) {
+      const p = prior.get(f.h);
+      if (!p) {
+        if (identityOnly.has(f.h.slice(0, 32)) || f.c === 'U') continue;
+        out.push({ n: pr.number, h: f.h, at: f.at, code: f.c, stateChange: false, boundary: old.rf.pb });
+      } else if (p.c !== f.c && f.c === 'D') {
+        out.push({ n: pr.number, h: f.h, at: f.at, code: 'D', stateChange: true, boundary: null });
+      }
+    }
+  }
+  return out;
+}
+
+const transitionOfChange = (c: ReviewFactChange): Transition | null =>
+  c.code === 'R'
+    ? reviewTransitionFromHash(c.n, c.h)
+    : observedReviewTransition(c.n, c.h, 'provider', c.code === 'A' ? 'APPROVED' : c.code === 'C' ? 'COMMENTED' : 'DISMISSED');
+
+const stampMs = (raw: string | undefined): number | null => {
+  const stamp = canonicalStamp(raw);
+  return stamp === null ? null : Date.parse(stamp);
+};
+
+/** A decision, in words. It names a decision state, never a submitted review. */
+const decisionWords = (value: string): string => value.toLowerCase().replace(/_/g, ' ');
 
 /**
  * What changed, in words, and which items the words actually name.
@@ -743,17 +1023,22 @@ interface SummaryContext {
  * only when removing those items left nothing to say.
  *
  * The named items come from the SAME slices the text is written from, so a receipt can only exist for an
- * item the owner was actually shown. Three kinds of fact carry an exact identity:
+ * item the owner was actually shown. These kinds of fact carry an exact identity:
  * - an update, only when the provider's `updatedAt` itself moved, and a merge by its merge instant (at most
  *   three of each are named);
- * - a requested-changes REVIEW, from the exact submitted-review list: only a review absent from the last
- *   complete set is new, its segment names the pull request, and the claim is the hash of the review's id;
+ * - a REVIEW in an observed state, from the exact submitted-review list and only against a complete comparable
+ *   previous set: a new requested-changes, approved or commented review, a review first seen dismissed, and a
+ *   known review observed dismissed. Each is claimed in its OWN state; approved and dismissed are different
+ *   tellings of one review, both accepted, so no claim is shared across states;
  * - an OPENING, only when the pull request is absent from the previous snapshot AND was created after the
  *   instant the previous read started (plus the skew margin). That is a proof against a boundary, never an
  *   inference from the capped list, its order, a maximum or an equal second. Any other pull request that
  *   enters the list is "newly listed" and carries no opening claim.
- * The PR-level decisions (approved, changes requested by the aggregate decision) and every count stay
- * distinct facts with NO per-review claim: nothing here calls an old review new, or one decision a review.
+ * A changed review DECISION is its own line and is never claimed, never suppressed because a review was
+ * submitted beside it, and never tied to a cause (no DTO proves one). A per-author line (approvals, changes
+ * requested) names no review and claims none; it is left out only for a pull request whose complete, comparable
+ * observation holds exact facts of the same class that are actually shown, and it is labelled (and counted once
+ * delivered) when no exact list could identify what it summarises.
  */
 function summarizeChange(
   slug: string,
@@ -762,24 +1047,31 @@ function summarizeChange(
   ctx: SummaryContext,
 ): Summary {
   const excluded = ctx.excluded ?? new Set<string>();
+  const demoted = ctx.demoted ?? new Set<string>();
   if (!previous) {
     return {
       text: clampSummary(`Started watching \`${slug}\`: ${current.openPrCount} open pull request(s).`),
       named: [],
       universe: [],
+      suppressed: [],
+      markers: [],
     };
   }
   /** One line of the summary and the items it names, with where each item's text ENDS inside the line. */
-  interface Part { text: string; items: { claims: NamedClaim[]; end: number }[] }
+  interface Part {
+    text: string;
+    items: { claims: NamedClaim[]; end: number; marker?: { pr: number; cls: GapClass; reason: GapReason } }[];
+  }
+  interface Entry { claims: NamedClaim[]; segment: string; marker?: { pr: number; cls: GapClass; reason: GapReason } }
   const parts: Part[] = [];
   /** Joins named segments after a prefix and remembers where each one ends. */
-  const named = (prefix: string, entries: { claims: NamedClaim[]; segment: string }[]): Part => {
+  const named = (prefix: string, entries: Entry[], sep = '; '): Part => {
     let text = prefix;
     const items: Part['items'] = [];
     entries.forEach((e, i) => {
-      if (i > 0) text += '; ';
+      if (i > 0) text += sep;
       text += e.segment;
-      if (e.claims.length > 0) items.push({ claims: e.claims, end: text.length });
+      if (e.claims.length > 0 || e.marker) items.push({ claims: e.claims, end: text.length, ...(e.marker ? { marker: e.marker } : {}) });
     });
     return { text, items };
   };
@@ -884,53 +1176,115 @@ function summarizeChange(
     ));
   }
 
-  // The PR-level approval decision. It names no review and claims none.
-  const newlyApproved = current.prs.filter((pr) => {
-    const old = before.get(pr.number);
-    return /APPROVED/i.test(pr.reviewDecision ?? '') && !/APPROVED/i.test(old?.reviewDecision ?? '');
-  });
-  if (newlyApproved.length > 0) parts.push(plain(`approved: ${newlyApproved.map((pr) => `#${pr.number}`).join(', ')}`));
-
-  // Exact requested-changes reviews: a review absent from the previous COMPLETE set, on a pull request
-  // whose previous snapshot held one. Without that baseline nothing is inferred (silent establishment).
-  const exact = new Map<number, { h: string; at: string }[]>();
+  // The PR-level DECISION. It names a decision state, not a review, and claims none. A value counts only from a
+  // read that carried it (a missing or empty field carries the last proven value), and a pull request that is new
+  // to the list has no transition.
+  const byDecision = new Map<string, number[]>();
   for (const pr of current.prs) {
     const old = before.get(pr.number);
-    if (pr.rf?.s !== 'complete' || !old?.rf?.known) continue;
-    const seen = new Set(old.rf.seen);
-    const fresh = pr.rf.cr.filter((c) => !seen.has(c.h.slice(0, 32)));
-    if (fresh.length > 0) exact.set(pr.number, fresh);
+    const was = old?.reviewDecision ?? '';
+    const now = pr.reviewDecision ?? '';
+    if (old === undefined || was === '' || now === '' || was === now) continue;
+    byDecision.set(now, [...(byDecision.get(now) ?? []), pr.number]);
   }
-  const exactEntries: { claims: NamedClaim[]; segment: string }[] = [];
-  for (const [n, fresh] of [...exact].sort(([a], [b]) => a - b)) {
-    const claims: NamedClaim[] = [];
-    for (const c of fresh) {
-      const t = reviewTransitionFromHash(n, c.h);
-      if (t !== null) universe.add(transitionKey(t));
-      if (t !== null && !excluded.has(transitionKey(t))) claims.push({ t, providerAt: c.at });
-    }
-    if (claims.length === 0) {
-      removed = true;
+  for (const [value, numbers] of byDecision) {
+    parts.push(plain(`review decision now ${decisionWords(value)}: ${numbers.map((n) => `#${n}`).join(', ')}`));
+  }
+
+  // ---- exact reviews, each in its OWN observed state ---------------------
+  type Bucket = 'R' | 'A' | 'C' | 'Dchange' | 'Dfirst';
+  const buckets = new Map<Bucket, Map<number, NamedClaim[]>>();
+  /** Per class and pull request: whether exact facts exist for it, and the keys of those still named. */
+  const exactFacts = new Map<string, string[]>();
+  const bucketOf = (c: ReviewFactChange): Bucket =>
+    c.code === 'D'
+      ? (c.stateChange || ctx.priorState?.(c.n, c.h) === true ? 'Dchange' : 'Dfirst')
+      : c.code;
+  let anyHandled = false;
+  for (const c of reviewFactChanges(previous, current)) {
+    const t = transitionOfChange(c);
+    if (t === null) continue;
+    const key = transitionKey(t);
+    universe.add(key);
+    const cls = c.code === 'R' ? 'changes_requested' : c.code === 'A' ? 'approval' : null;
+    if (cls !== null && !exactFacts.has(`${cls}:${c.n}`)) exactFacts.set(`${cls}:${c.n}`, []);
+    if (excluded.has(key)) {
+      anyHandled = true;
       continue;
     }
-    // One segment per pull request; every new review of it is claimed by that segment and only if the
-    // whole segment is shown.
-    exactEntries.push({ claims, segment: `#${n}` });
+    if (cls !== null) exactFacts.get(`${cls}:${c.n}`)!.push(key);
+    const b = bucketOf(c);
+    const byPr = buckets.get(b) ?? new Map<number, NamedClaim[]>();
+    byPr.set(c.n, [...(byPr.get(c.n) ?? []), { t, providerAt: c.at, boundary: c.boundary, stateChange: c.stateChange }]);
+    buckets.set(b, byPr);
   }
-  if (exactEntries.length > 0) parts.push(named('requested changes submitted on ', exactEntries));
+  const lines: [Bucket, string][] = [
+    ['R', 'requested changes submitted on '],
+    ['A', 'approval submitted on '],
+    ['C', 'commented review submitted on '],
+    ['Dchange', 'review dismissed (observed) on '],
+    ['Dfirst', 'review submitted and now dismissed on '],
+  ];
+  // The exact lines are written now but placed AFTER the per-author lines (below): the clamp cuts from the end, so a
+  // per-author line that comes back because its exact segment was cut off is read before the cut, not behind it.
+  const exactParts: Part[] = [];
+  for (const [bucket, prefix] of lines) {
+    const byPr = buckets.get(bucket);
+    if (!byPr || byPr.size === 0) continue;
+    // One segment per pull request; every fact of it is claimed by that segment and only if the whole segment is shown.
+    exactParts.push(named(prefix, [...byPr].sort(([a], [b]) => a - b).map(([n, claims]) => ({ claims, segment: `#${n}` }))));
+  }
+  // A fact the target delivered, or that is held, was left out of the lines: say nothing rather than a generic message.
+  if (anyHandled) removed = true;
 
-  // The aggregate decision, a DISTINCT fact with no per-review claim. A pull request whose requested-changes
-  // review is handled exactly above is not repeated here, whether that review was told, delivered by the
-  // target or held.
-  const newlyBlocked = current.prs.filter((pr) => {
-    if (exact.has(pr.number)) return false;
-    const old = before.get(pr.number);
-    if (!isChangesRequested(pr)) return false;
-    // A previous value that was never read is unknown, not "none": nothing is called new from it.
-    return old === undefined || (old.latestChangeRequestAt !== undefined &&
-      old.latestChangeRequestAt !== pr.latestChangeRequestAt);
+  // ---- per-author lines -----------------------------------------------------
+  //
+  // They come from `latestReviews` (one view per reviewer), name no review and claim none. A line is left out
+  // only for a pull request whose COMPLETE, COMPARABLE observation holds exact facts of the same class (and the
+  // loop above brings it back if one of those facts was not shown in full). Otherwise it is told, labelled when
+  // no exact list could identify what it summarises, and remembered once it was delivered.
+  const suppressed: { key: string; renderedKeys: string[] }[] = [];
+  const comparable = (pr: NormalizedPr, old: NormalizedPr | undefined): boolean =>
+    pr.rf?.s === 'complete' && old?.rf?.known === true;
+  const gapReason = (pr: NormalizedPr, old: NormalizedPr | undefined): GapReason | null => {
+    if (pr.rf?.s === 'truncated') return 'truncated';
+    if (pr.rf?.s === 'unavailable') return 'unavailable';
+    return comparable(pr, old) ? null : 'no_comparison';
+  };
+  const perAuthor = (cls: GapClass, wanted: (pr: NormalizedPr, old: NormalizedPr) => boolean): Entry[] => {
+    const entries: Entry[] = [];
+    for (const pr of current.prs) {
+      const old = before.get(pr.number);
+      if (old === undefined || !wanted(pr, old)) continue;
+      const key = `${cls}:${pr.number}`;
+      const facts = exactFacts.get(key);
+      if (facts !== undefined && comparable(pr, old) && !demoted.has(key)) {
+        suppressed.push({ key, renderedKeys: facts });
+        continue;
+      }
+      const reason = gapReason(pr, old);
+      entries.push({
+        claims: [],
+        segment: reason === null ? `#${pr.number}` : `#${pr.number} (reviewer summary only)`,
+        ...(reason === null ? {} : { marker: { pr: pr.number, cls, reason } }),
+      });
+    }
+    return entries;
+  };
+  // Requested changes by reviewer: a STRICTLY later canonical submission instant than the last one read. A moved-
+  // backward timestamp (a dismissal) and a pull request with no comparable baseline say nothing.
+  const changesEntries = perAuthor('changes_requested', (pr, old) => {
+    if ((pr.changesRequested ?? 0) <= 0 || old.latestChangeRequestAt === undefined) return false;
+    const now = stampMs(pr.latestChangeRequestAt);
+    if (now === null) return false;
+    const was = stampMs(old.latestChangeRequestAt);
+    return was === null || now > was;
   });
-  if (newlyBlocked.length > 0) parts.push(plain(`changes requested on ${newlyBlocked.map((pr) => `#${pr.number}`).join(', ')}`));
+  if (changesEntries.length > 0) parts.push(named('changes requested on ', changesEntries, ', '));
+  const approvalEntries = perAuthor('approval', (pr, old) =>
+    old.approvals !== undefined && pr.approvals !== undefined && pr.approvals > old.approvals);
+  if (approvalEntries.length > 0) parts.push(named('approvals recorded on ', approvalEntries, ', '));
+  parts.push(...exactParts);
 
   // `comments` is the pull request's CONVERSATION comment count, not a submitted review.
   const moreComments = current.prs.filter((pr) => {
@@ -949,7 +1303,12 @@ function summarizeChange(
   if (issueSummary) parts.push(plain(issueSummary));
 
   // Only items an imported target DELIVERED (or that are held) were taken out, and nothing remains to say.
-  if (parts.length === 0 && removed) return { text: null, named: [], universe: [...universe] };
+  if (parts.length === 0 && removed) return { text: null, named: [], universe: [...universe], suppressed, markers: [] };
+  // Nothing a line can say moved but review counts, a decision that was not a change between two read values, or a
+  // review state this build tells nothing about: that is not worth a generic message.
+  if (parts.length === 0 && fingerprintOf(previous, 'core') === fingerprintOf(current, 'core')) {
+    return { text: null, named: [], universe: [...universe], suppressed, markers: [] };
+  }
   if (parts.length === 0) parts.push(plain('The repository snapshot changed.'));
 
   // The text is clamped to a fixed length, and an item cut off by the clamp was NOT shown in full, so it
@@ -966,12 +1325,17 @@ function summarizeChange(
     ? -1
     : cleaned.length <= GITHUB_WATCH_SUMMARY_MAX ? Number.POSITIVE_INFINITY : GITHUB_WATCH_SUMMARY_MAX - 1;
   const claims: NamedClaim[] = [];
+  const markers: GapMarkerOut[] = [];
   let start = head.length;
   for (const p of parts) {
-    for (const it of p.items) if (start + it.end <= shownLimit) claims.push(...it.claims);
+    for (const it of p.items) {
+      const shown = start + it.end <= shownLimit;
+      if (shown) claims.push(...it.claims);
+      if (it.marker) markers.push({ ...it.marker, shown: shown ? 'shown' : 'delivered_not_provably_shown' });
+    }
     start += p.text.length + 2;
   }
-  return { text: clampSummary(full), named: claims, universe: [...universe] };
+  return { text: clampSummary(full), named: claims, universe: [...universe], suppressed, markers };
 }
 
 const isSet = (v: string | undefined): boolean => typeof v === 'string' && v !== '';

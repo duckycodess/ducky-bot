@@ -3,6 +3,7 @@ import { ExecutorLoop } from '../src/loop.js';
 import { MockPiOrchestrator } from '@ducky/adapters';
 import { checkMemoryHeadroom, defaultCgroupDir, type ReadText } from '../src/memory-headroom.js';
 import { loadExecutorEnv } from '../src/config.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 const MIB = 2 ** 20;
 const GIB = 2 ** 30;
@@ -96,7 +97,7 @@ describe('the executor loop and headroom', () => {
   const loopWith = (headroom: () => Promise<never>, claim = vi.fn(async () => undefined)) => {
     const log = vi.fn();
     const loop = new ExecutorLoop({
-      client: { claim } as never,
+      client: { claim } as never, intents: new MemoryPauseIntentStore(),
       orchestrator: new MockPiOrchestrator(),
       pollWaitMs: 0,
       version: '0.1.0',
@@ -157,6 +158,7 @@ describe('executor memory configuration', () => {
     DUCKY_EXECUTOR_KEY_ID: 'key-remote-1',
     DUCKY_EXECUTOR_TOKEN: 't'.repeat(20),
     DUCKY_EXECUTOR_HMAC_SECRET: 'h'.repeat(20),
+    DUCKY_EXECUTOR_STATE_DIR: '/var/lib/ducky/state',
   };
 
   it('defaults to the guard off with the documented operator-estimate reserves', () => {

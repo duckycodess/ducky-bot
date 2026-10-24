@@ -157,17 +157,99 @@ clears the lease, phase and deadline, and releases the Ducky-local slot only on
 that proof; resuming reacquires it and starts a fresh bounded attempt. A pause
 whose report is lost is retried within bounds, and a repeat for the same lease
 (including one that had lost to a cancellation or the deadline) is answered
-identically. **A pause that cannot be delivered at all (an outage, or a coordinator
-that does not know the route) is NOT retry-preserving.** The executor does not
-report a failure and does not prompt again, but the coordinator then sees only a
-silent lease and applies ordinary lease expiry: that spends an attempt, keeps
-the slot as an unconfirmed stop, and with the default budget of one attempt a
-second expiry fails the job and orphans the repository and the slot for the
-owner (after a cancellation it ends cancelled, orphaned the same way). With
-budget remaining, the recovery claim pauses without prompting. Preserving the
-attempt budget across transport loss needs the coordinator to learn of the pause
-by another route, and is a required, unimplemented follow-up. Nothing here says
-why the agent stopped, and no quota or sign-in state is inferred from the screen.
+identically.
+
+**Durable pause delivery (protocol 1).** A pause the executor could not deliver
+used to be silence: lease expiry spent an attempt, and with the default budget of
+one a second expiry failed the job and orphaned the repository and the slot. The
+coordinator cannot tell silence from a pause an executor holds durably, so a
+negotiated lease is treated differently, and everything else is unchanged.
+
+*What an executor does.* A quiet pause on a claim that negotiated the protocol is
+first written to the executor's own durable state (see below), then the host
+writer lock is released, then it is reported on a NEW route bound to the report's
+full identity (executor, job, original lease, workspace, agent, cause, report id)
+while a keepalive keeps the lease alive. If the intent cannot be written, nothing
+is released or reported and the lease lapses with its charge deferred. The intent
+is forgotten only on a 2xx whose body validates, echoes that whole identity, and
+carries a terminal disposition: `paused`, `overtaken_cancelled` or
+`overtaken_timed_out` (a cancellation or the deadline won on the coordinator's
+clock), or `superseded` (the coordinator had moved past that attempt and no hold
+was released by it). A transport failure, a 5xx, an unknown route, an unknown job,
+a mismatch, a refusal, a malformed 2xx, a mismatched identity and `pending` without
+a fresh proof all KEEP it. While one is owed, or any record cannot be read, the
+loop makes no claim, the runner starts no turn and the orchestrator sends no
+prompt. At startup and on every tick it first asks the coordinator what became of
+the report, because a committed report (a lost response, an owner resume) needs no
+proof; only a `pending` answer asks the executor for a FRESH positive proof --
+the exact recorded agent, an owned workspace, a fresh `idle` or `done`, and a
+durable journal entry saying its last turn settled -- before it reports. Historical
+quiet is never proof after a restart.
+
+*What the coordinator does.* A claim that advertises `pause-delivery-v1` is
+negotiated (an executor advertises it only when it holds no unresolved intent, so
+on a claim it is also the attestation "I hold none"). When such a lease expires
+with a recorded workspace, expiry writes a structured row (`job_lease_expiries`:
+lease digest, executor, workspace and agent snapshot, attempts before, charge
+state) and charges NOTHING: the job waits in `waiting_for_executor` holding its
+repository, its slot as an unconfirmed stop, its workspace and its original
+attempt deadline. That deferred attempt belongs to the executor that held the
+lease: only that executor, on an attested claim, can take the job again (any other
+executor or host, and the same one without the attestation, gets no claim and
+cannot charge, exhaust or supersede it), and that claim is the ordinary recovery it
+always was, charging once, with an exhausted budget ending the job and orphaning
+the holds exactly as before. The reservation timer skips such a job rather than
+failing it, so no fixed grace ever exhausts a durable pause; the owner's cancel,
+which orphans the holds for `/job cleanup`, is the other exit. A report for the
+expired lease is a lease-free reconcile on the edge `waiting_for_executor ->
+needs_owner_input`, in one transaction: the executor, the original lease's open
+expiry row, the recorded workspace and agent, the repository and the slot (the
+job's unconfirmed stop) must all match; then an owner cancellation wins, then the
+persisted deadline on the coordinator's clock, and otherwise the job pauses with
+no charge and no owner-input round. The same slot rule guards a report on a live
+lease (the job's attempt slot), so a foreign, missing or unrelated slot is never
+released. Receipts (`job_pause_receipts`, keyed by report id) make delivery
+idempotent across a lost response, a resume and a restart, and refuse a reused id.
+A report for an attempt already charged, resumed, cancelled or terminal is
+`superseded` and changes nothing, so a terminal orphan is never released by a late
+proof. Peers that do not negotiate (an older executor, or an older coordinator,
+which answers the new routes with 404) keep the ordinary accounting: the older
+coordinator is a coordinated-upgrade limit, and the executor then holds claims
+rather than downgrading a durable pause to a failure.
+
+*Dispatch provenance.* Whether an idle agent is quiet is a fact about the past, so
+a durable journal records `dispatching` BEFORE every prompt (the prompt is not sent
+if it cannot be recorded) and `settled` only after a settle was observed (a started
+agent, given nothing, is recorded settled before any prompt can exist). Recovery,
+cancel and timeout, an owner resume's prompt, and the fresh proof all read it: an
+entry that is absent, unreadable, about another agent or still `dispatching` is an
+orphan (`orphan_prompt_unsettled`), never a pause, a release or a prompt. This
+closes the earlier gap where, after a restart or a recovery claim replaced the
+in-memory turn, an idle reading looked like a finished agent. A job in flight when
+this was deployed has no record and therefore orphans, deliberately.
+
+*The executor's state is new persistence.* It lives at an explicit
+`DUCKY_EXECUTOR_STATE_DIR` per profile with no default and no executor-id fallback,
+refused under `/tmp`, `/var/tmp`, `/dev/shm`, `/run`, `TMPDIR` or
+`XDG_RUNTIME_DIR`; directories are real, owned and 0700 with no symlink in the
+path, files are 0600 and at most 8 KiB, written by temp file, fsync, rename and
+directory fsync, with a bounded count. A corrupt, oversized, foreign or
+wrong-shaped record fails closed (no claim, no prompt) and is never deleted,
+repaired or aged out. It holds ids and enums only.
+
+*Crash windows.* Before the intent is durable: nothing was released, the lease
+lapses deferred and the attested recovery charges once (a residual limit, not a
+retry-preserving pause). After the write, before the request: restart reconciles
+with a fresh proof and no charge. After the coordinator commits, before the
+response: the receipt answers and no proof is needed. After the response, before
+local removal: the same. After removal: nothing is pending. Owner resume or cancel
+before the replay: superseded or the receipt, and a newer attempt is never paused.
+Limits that remain: an executor that loses its state directory, or a host that is
+gone, falls back to ordinary recovery with the ordinary charge; a delivered answer
+is not Discord delivery (the owner's notification has its own retry); and none of
+this has been observed with a real Ducky agent. A coordinator restart's first
+reconcile tick expires leases at once, which is exactly why a negotiated expiry is
+deferred rather than charged.
 
 **A hold belongs to one job.** A repository reservation and the engineering slot
 that goes with it are released only by the job that holds them: the delete is
@@ -238,10 +320,12 @@ is kept in full, with the reason for each, in
 3. An authorized stop probe for a working agent, and with it confirmed
    owned-descendant cancel and timeout.
 4. The retry-preserving pause. Implemented in source and unit-tested for a
-   DELIVERED pause of a confirmed quiet agent without a result; never observed
-   live, and no provider quota or sign-in state exists to distinguish. NOT
-   retry-preserving when delivery fails (outage, version skew): that path
-   consumes an attempt through lease expiry and can exhaust the budget.
+   confirmed quiet agent without a result, including delivery lost to an outage,
+   an executor crash, lease expiry and a coordinator restart (durable pause
+   delivery, above); never observed live, and no provider quota or sign-in state
+   exists to distinguish. Still not retry-preserving: a crash before the intent is
+   durable, a lost executor state directory or host, an older coordinator (held,
+   not downgraded) and an older executor (ordinary accounting).
 5. A recorded, supported subscription route, sign-in and quota on this host.
 6. Herdr session pinning, separate from the dispatcher's.
 7. Safe periodic orphan, workspace and temp reclamation that preserves active

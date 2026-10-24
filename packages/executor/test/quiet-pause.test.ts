@@ -7,6 +7,7 @@ import type { ClaimResponse } from '@ducky/contracts';
 import type { OrchestrationOutcome, PiOrchestrator } from '@ducky/adapters';
 import { runClaimedJob } from '../src/runner.js';
 import { CoordinatorClient, PauseDeliveryError } from '../src/client.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 /**
  * The executor half of a system pause: a proven-quiet, result-less agent is
@@ -69,6 +70,7 @@ const returning = (outcome: OrchestrationOutcome): PiOrchestrator => ({
   name: 'stub', verified: false, runJob: async () => outcome,
   cancel: async () => ({ terminated: true, agentStatus: 'idle', detail: 'x' }),
   cleanup: async () => ({ closed: true, detail: 'closed' }),
+  proveQuiet: async () => ({ quiet: true, observed: 'idle' }),
 });
 
 const QUIET: OrchestrationOutcome = {
@@ -79,7 +81,7 @@ const QUIET: OrchestrationOutcome = {
 describe('runner on a quiet_pause outcome', () => {
   it('reports a lease-checked pause with the exact proof, not a failure', async () => {
     const c = makeClient(async () => ({ state: 'needs_owner_input', paused: true }));
-    await runClaimedJob({ client: c as never, orchestrator: returning(QUIET), heartbeatMs: 50_000 }, claim());
+    await runClaimedJob({ client: c as never, intents: new MemoryPauseIntentStore(), orchestrator: returning(QUIET), heartbeatMs: 50_000 }, claim());
 
     expect(c.pauseJob).toHaveBeenCalledTimes(1);
     expect(c.pauseJob).toHaveBeenCalledWith('job-1', {
@@ -98,7 +100,7 @@ describe('runner on a quiet_pause outcome', () => {
     });
     const log = vi.fn();
     await expect(
-      runClaimedJob({ client: c as never, orchestrator: returning(QUIET), heartbeatMs: 50_000, log }, claim()),
+      runClaimedJob({ client: c as never, intents: new MemoryPauseIntentStore(), orchestrator: returning(QUIET), heartbeatMs: 50_000, log }, claim()),
     ).resolves.toBeUndefined();
 
     expect(c.reportFailure).not.toHaveBeenCalled();
@@ -119,7 +121,7 @@ describe('runner on a quiet_pause outcome', () => {
         return QUIET;
       },
     };
-    await runClaimedJob({ client: c as never, orchestrator: slow, heartbeatMs: 5 }, claim());
+    await runClaimedJob({ client: c as never, intents: new MemoryPauseIntentStore(), orchestrator: slow, heartbeatMs: 5 }, claim());
     expect(c.cancelAck).toHaveBeenCalled();
     expect(c.pauseJob).not.toHaveBeenCalled();
   });
@@ -133,7 +135,7 @@ describe('runner on an unsettled orphan outcome', () => {
 
   it('reports it as an orphan with the honest detail, keeps the writer lock, and never pauses', async () => {
     const c = makeClient(async () => ({ state: 'needs_owner_input', paused: true }));
-    await runClaimedJob({ client: c as never, orchestrator: returning(UNSETTLED), heartbeatMs: 50_000 }, claim());
+    await runClaimedJob({ client: c as never, intents: new MemoryPauseIntentStore(), orchestrator: returning(UNSETTLED), heartbeatMs: 50_000 }, claim());
 
     expect(c.reportFailure).toHaveBeenCalledWith(
       'job-1', 'lease-1', 'orphan_prompt_unsettled',

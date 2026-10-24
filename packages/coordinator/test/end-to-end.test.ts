@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { MockPiOrchestrator, exampleImplementedResult } from '@ducky/adapters';
 import type { JobResultFile } from '@ducky/contracts';
-import { CoordinatorClient, ExecutorLoop } from '@ducky/executor';
+import { CoordinatorClient, ExecutorLoop, MemoryPauseIntentStore } from '@ducky/executor';
 import { buildServer } from '../src/http/server.js';
 import { makeHarness, secret } from './helpers.js';
 
@@ -82,7 +82,7 @@ describe('coordinator and executor end to end', () => {
     const orchestrator = new MockPiOrchestrator(() =>
       exampleImplementedResult('added the feature'),
     );
-    const loop = new ExecutorLoop({ client, orchestrator, pollWaitMs: 0, version: '0.1.0' });
+    const loop = new ExecutorLoop({ client, orchestrator, intents: new MemoryPauseIntentStore(), pollWaitMs: 0, version: '0.1.0' });
 
     await client.heartbeat({ version: '0.1.0', capabilities: [], activeJobIds: [] });
     expect(await loop.runOnce()).toBe('claimed');
@@ -115,7 +115,7 @@ describe('coordinator and executor end to end', () => {
       ],
     };
     const orchestrator = new MockPiOrchestrator(() => withAction);
-    const loop = new ExecutorLoop({ client, orchestrator, pollWaitMs: 0, version: '0.1.0' });
+    const loop = new ExecutorLoop({ client, orchestrator, intents: new MemoryPauseIntentStore(), pollWaitMs: 0, version: '0.1.0' });
     await loop.runOnce();
 
     expect(h.store.jobs.byId(job.id)?.state).toBe('needs_approval');
@@ -142,7 +142,7 @@ describe('coordinator and executor end to end', () => {
       round += 1;
       return round === 1 ? askFirst : exampleImplementedResult('used sqlite');
     });
-    const loop = new ExecutorLoop({ client, orchestrator, pollWaitMs: 0, version: '0.1.0' });
+    const loop = new ExecutorLoop({ client, orchestrator, intents: new MemoryPauseIntentStore(), pollWaitMs: 0, version: '0.1.0' });
 
     await loop.runOnce();
     expect(h.store.jobs.byId(job.id)?.state).toBe('needs_owner_input');
@@ -163,7 +163,7 @@ describe('coordinator and executor end to end', () => {
     const job = h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'bootstrap me', bootstrap: true });
 
     const orchestrator = new MockPiOrchestrator();
-    const loop = new ExecutorLoop({ client, orchestrator, pollWaitMs: 0, version: '0.1.0' });
+    const loop = new ExecutorLoop({ client, orchestrator, intents: new MemoryPauseIntentStore(), pollWaitMs: 0, version: '0.1.0' });
     await loop.runOnce();
 
     expect(h.store.jobs.byId(job.id)?.state).toBe('failed');

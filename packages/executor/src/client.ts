@@ -1,9 +1,11 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import {
-  DuckyError, EXECUTOR_HEADERS, canonicalRequest,
+  DuckyError, EXECUTOR_HEADERS, PAUSE_DELIVERY_CAPABILITY, PAUSE_DISPOSITION_PATH,
+  PAUSE_REPORT_PATH, PauseDeliveryResponseSchema, canonicalRequest,
   type CancelAckRequest, type ClaimResponse, type ExecutorFailureReason,
   type HeartbeatRequest, type JobHeartbeatRequest, type JobHeartbeatResponse,
   type JobPauseRequest, type JobPauseResponse, type JobResultFile,
+  type PauseDeliveryResponse, type PauseDispositionRequest, type PauseReportRequest,
 } from '@ducky/contracts';
 import { ClaimResponseSchema } from '@ducky/contracts';
 
@@ -24,6 +26,21 @@ export class PauseDeliveryError extends DuckyError {
   constructor(
     readonly status: number | undefined,
     message: string,
+    /**
+     * Why. Every kind means "hold", never "forget": only a validated terminal
+     * disposition retires an intent.
+     *
+     * - `transport`, `server`: could not reach it / it failed; try again;
+     * - `version_skew`: no such route (an older coordinator), a coordinated-upgrade limit;
+     * - `unknown_job`: the coordinator does not know the job;
+     * - `mismatch`: the coordinator knows no attempt that matches the report;
+     * - `refused`: it refused the report (400);
+     * - `unauthorized`: our credentials were rejected;
+     * - `malformed`: a 2xx whose body is not the disposition schema.
+     */
+    readonly kind:
+      | 'transport' | 'server' | 'version_skew' | 'unknown_job' | 'mismatch' | 'refused'
+      | 'unauthorized' | 'malformed' = 'transport',
   ) {
     super('not_found', message);
   }
@@ -91,12 +108,19 @@ export class CoordinatorClient {
     );
   }
 
-  async claim(waitMs: number): Promise<ClaimResponse | undefined> {
+  /**
+   * `holdsNoPauseIntent` is an attestation, not a preference: the capability
+   * `pause-delivery-v1` goes on the claim ONLY when this executor has no
+   * unresolved pause intent, because the coordinator reads it as "I hold none"
+   * and will otherwise not let this executor take a job whose lease expired
+   * with a deferred charge.
+   */
+  async claim(waitMs: number, opts: { holdsNoPauseIntent?: boolean } = {}): Promise<ClaimResponse | undefined> {
     const res = await this.post(
       '/api/v1/executor/claim',
       {
         executorId: this.opts.executorId,
-        capabilities: ['herdr-pi'],
+        capabilities: opts.holdsNoPauseIntent === true ? ['herdr-pi', PAUSE_DELIVERY_CAPABILITY] : ['herdr-pi'],
         waitMs,
         idempotencyKey: randomBytes(16).toString('base64url'),
       },
@@ -202,6 +226,79 @@ export class CoordinatorClient {
       );
     }
     throw last ?? new PauseDeliveryError(undefined, 'The pause report was not attempted.');
+  }
+
+  get executorId(): string {
+    return this.opts.executorId;
+  }
+
+  /**
+   * Delivers a durable pause report (protocol 1). A transport failure, a 5xx or
+   * a 429 is retried a bounded number of times -- safe, because the coordinator
+   * answers a repeat of the same report id identically. Anything else is thrown
+   * at once as a `PauseDeliveryError` of the matching kind, and a 2xx whose body
+   * is not the disposition schema is `malformed`.
+   */
+  async pauseReport(jobId: string, body: PauseReportRequest): Promise<PauseDeliveryResponse> {
+    const retry = this.opts.pauseRetry ?? { attempts: 4, delayMs: 2_000 };
+    const sleep = retry.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    let last: PauseDeliveryError | undefined;
+    for (let attempt = 0; attempt < retry.attempts; attempt += 1) {
+      if (attempt > 0) await sleep(retry.delayMs * attempt);
+      try {
+        return await this.deliveryCall(PAUSE_REPORT_PATH(jobId), body);
+      } catch (err) {
+        if (err instanceof PauseDeliveryError && (err.kind === 'transport' || err.kind === 'server')) {
+          last = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw last ?? new PauseDeliveryError(undefined, 'The pause report was not attempted.');
+  }
+
+  /** What became of a report. One attempt: the caller's loop is the retry. */
+  async pauseDisposition(jobId: string, body: PauseDispositionRequest): Promise<PauseDeliveryResponse> {
+    return this.deliveryCall(PAUSE_DISPOSITION_PATH(jobId), body);
+  }
+
+  private async deliveryCall(pathname: string, body: unknown): Promise<PauseDeliveryResponse> {
+    let res: Response;
+    try {
+      res = await this.post(pathname, body);
+    } catch {
+      throw new PauseDeliveryError(undefined, 'The coordinator could not be reached.', 'transport');
+    }
+    if (res.ok) {
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        throw new PauseDeliveryError(res.status, 'The coordinator answered with an unreadable body.', 'malformed');
+      }
+      const parsed = PauseDeliveryResponseSchema.safeParse(json);
+      if (!parsed.success) {
+        throw new PauseDeliveryError(res.status, 'The coordinator answered with an unexpected body.', 'malformed');
+      }
+      return parsed.data;
+    }
+    if (res.status >= 500 || res.status === 429) {
+      throw new PauseDeliveryError(res.status, `Coordinator responded ${res.status}.`, 'server');
+    }
+    if (res.status === 401) throw new PauseDeliveryError(401, 'The coordinator rejected our credentials.', 'unauthorized');
+    const code = await errorCode(res);
+    if (res.status === 404) {
+      // `not_found` is the coordinator saying it does not know the JOB. Any other
+      // 404 is a coordinator that has no such route.
+      throw code === 'not_found'
+        ? new PauseDeliveryError(404, 'The coordinator does not know that job.', 'unknown_job')
+        : new PauseDeliveryError(404, 'The coordinator does not speak durable pause delivery (version skew).', 'version_skew');
+    }
+    if (res.status === 409) {
+      throw new PauseDeliveryError(409, 'The coordinator knows no attempt that matches the report.', 'mismatch');
+    }
+    throw new PauseDeliveryError(res.status, `The coordinator refused the report (${res.status}).`, 'refused');
   }
 
   async reportFailure(

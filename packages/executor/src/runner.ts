@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   DuckyError, RECOVERY_WAIT_MS, isDuckyError,
   type ClaimResponse, type ExecutorFailureReason,
@@ -13,10 +13,20 @@ import { resolveWorkspace } from './workspace.js';
 import { acquireWriterLock } from './single-writer.js';
 import { JobSupervisor } from './supervisor.js';
 import { attemptDeadlineMs } from './attempt-deadline.js';
+import { deliverFresh } from './pause-delivery.js';
+import { PauseIntentSchema, type PauseIntentStore } from './pause-intents.js';
 
 export interface RunnerDeps {
   readonly client: CoordinatorClient;
   readonly orchestrator: PiOrchestrator;
+  /**
+   * The durable outbox of pauses this executor owes the coordinator. REQUIRED:
+   * with a negotiated claim a quiet pause is written here before anything is
+   * released or sent, and a pending record withholds every prompt.
+   */
+  readonly intents: PauseIntentStore;
+  /** Drops the dispatch journal of a job that finished cleanly and was cleaned up. */
+  readonly forgetJournal?: (jobId: string) => void;
   /** Recorded workspace for this job, when the executor has one from a prior turn. */
   readonly recordedWorkspace?: (jobId: string) => {
     workspaceId: string;
@@ -103,6 +113,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
 
   const spec: OrchestrationSpec = {
     jobId: claim.jobId,
+    leaseId: claim.leaseId,
     publicId: claim.publicId,
     repoSlug: claim.payload.repoSlug,
     slugKey,
@@ -181,6 +192,16 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   // A resumed job already owns a workspace, so its phase file may exist from
   // the moment the turn starts -- `onWorkspaceCreated` will not fire again.
   if (spec.recorded) supervisor.watchWorkspace(spec.recorded.workspacePath);
+
+  // A pause this executor still owes, or a record it cannot trust, withholds ALL
+  // model work here as well as in the claim loop: the loop is only one caller.
+  // Nothing is reported, so the lease simply lapses and its charge is deferred
+  // for the original executor's reconcile rather than spent.
+  const owed = deps.intents.list();
+  if (owed.intents.length > 0 || owed.blocked.length > 0) {
+    log(`job ${claim.publicId}: not started, a pause report is still owed or unreadable on this executor`);
+    return;
+  }
 
   const lock = acquireWriterLock(claim.payload.repoSlug);
   let outcome: OrchestrationOutcome | undefined;
@@ -292,7 +313,9 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   // because the release was unconditional) would let a retry on this host start
   // a second writer beside a live Pi agent -- the one thing the single-writer
   // guarantee exists to prevent.
-  const keepsWriterLock = outcome?.kind === 'orphan';
+  // A negotiated quiet pause keeps the lock until its intent is durable (below).
+  const durablePause = outcome?.kind === 'quiet_pause' && claim.pauseProtocol === 1;
+  const keepsWriterLock = outcome?.kind === 'orphan' || durablePause;
   if (!keepsWriterLock) lock.release();
 
   if (failure !== undefined) {
@@ -315,6 +338,9 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
   }
 
   if (Date.now() > deadlineMs) {
+    // A durable pause never got as far as its intent; it ends as the ordinary
+    // timeout report, so the lock it was holding back is released as before.
+    if (durablePause) lock.release();
     await client.reportFailure(claim.jobId, claim.leaseId, 'wall_clock_exceeded', {
       detail: 'The job exceeded its attempt budget.',
     });
@@ -363,6 +389,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         }
         log(`job ${claim.publicId} cleanup: ${cleaned.detail}`);
         if (cleaned.closed) {
+          deps.forgetJournal?.(claim.jobId);
           // Recorded only after the exact recorded workspace was proved closed,
           // through a lease-free route -- submitting the result already cleared
           // the lease, so the old registration call could never have succeeded
@@ -387,19 +414,61 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
         workspacePath: outcome.workspacePath,
         mode: resolved.mode,
       });
-      // The agent was proved quiet, so the writer lock was released above. The
-      // pause is idempotent for this lease and `pauseJob` retries a bounded
-      // number of times. If it still cannot be delivered it is NOT reported as
-      // a failure or a no-result, and the brief is NOT sent again. That is all
-      // this branch can promise. What follows is the coordinator's ordinary lease
-      // expiry, which KNOWS NOTHING of this pause: it spends an attempt
-      // (`attempts + 1`), keeps the slot as an unconfirmed stop, and can exhaust
-      // the attempt budget (terminal, with the repository and slot orphaned for
-      // the owner) or, after a cancellation, end the job cancelled with the same
-      // orphaned reservation. If budget remains, the recovery claim meets the
-      // quiet agent and pauses without prompting. So an OUTAGE or version skew on
-      // this one call is not retry-preserving; that is a required follow-up, not
-      // something this code achieves.
+
+      if (claim.pauseProtocol === 1) {
+        // DURABLE PAUSE. The obligation is written (and fsynced) first, THEN the
+        // host writer lock is released, THEN the report is sent: a crash at any
+        // later point leaves the obligation on disk, and a crash before it leaves
+        // the lock and every coordinator hold in place. If it cannot be written
+        // nothing is released and nothing is reported -- there is no best-effort
+        // downgrade -- so the lease simply lapses, its charge deferred, and the
+        // recovery claim meets the same quiet agent.
+        const intent = PauseIntentSchema.parse({
+          v: 1,
+          reportId: randomUUID(),
+          executorId: client.executorId,
+          jobId: claim.jobId,
+          publicId: claim.publicId,
+          leaseId: claim.leaseId,
+          workspaceId: outcome.workspaceId,
+          agentName: outcome.agentName,
+          cause: outcome.cause,
+          agentStatus: outcome.observed,
+        });
+        try {
+          deps.intents.write(intent);
+        } catch {
+          log(
+            `job ${claim.publicId}: the pause could not be recorded durably; nothing was released ` +
+              'or reported, and the lease will lapse with its charge deferred',
+          );
+          return;
+        }
+        lock.release();
+        // The lease stays alive while delivery is retried, and a cancellation seen
+        // meanwhile still wins inside the coordinator's transaction.
+        const keepalive = new JobSupervisor({
+          client,
+          jobId: claim.jobId,
+          leaseId: claim.leaseId,
+          ...(deps.heartbeatMs === undefined ? {} : { intervalMs: deps.heartbeatMs }),
+          ...(deps.log ? { log: deps.log } : {}),
+        });
+        keepalive.start();
+        try {
+          // An unresolved delivery is handed to the executor loop's reconcile, never
+          // to a new claim or a new prompt.
+          await deliverFresh({ client, intents: deps.intents, log }, intent);
+        } finally {
+          keepalive.stop();
+        }
+        return;
+      }
+
+      // The coordinator did not negotiate durable delivery (an older one): the
+      // ordinary, lease-checked pause. Delivered, it preserves the budget; lost, it
+      // is NOT reported as a failure and does not re-prompt, but ordinary lease
+      // expiry then spends an attempt. That limit is the older peer's, not hidden.
       try {
         const sent = await client.pauseJob(claim.jobId, {
           leaseId: claim.leaseId,

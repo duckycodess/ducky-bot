@@ -11,6 +11,7 @@ import { MemoryBriefWriter } from '../src/pi/brief-file.js';
 /** The brief travels as a file; these suites use synthetic workspace paths. */
 const briefs = (): MemoryBriefWriter => new MemoryBriefWriter();
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
+import { MemoryDispatchJournal } from '../src/pi/dispatch-journal.js';
 
 /** A stand-in `herdr` binary with scripted output, so no real Herdr is touched. */
 function fakeHerdr(script: string): string {
@@ -21,8 +22,13 @@ function fakeHerdr(script: string): string {
   return bin;
 }
 
+/** The durable record every recorded agent in these tests already has: its last turn settled. */
+const seeded = (): MemoryDispatchJournal =>
+  new MemoryDispatchJournal().seedSettled({ jobId: 'job-1', workspaceId: 'wX', agentName: 'ducky-pi-demo' });
+
 const spec = (over: Partial<OrchestrationSpec> = {}): OrchestrationSpec => ({
   jobId: 'job-1',
+  leaseId: 'lease-1',
   publicId: 'jabcde',
   repoSlug: 'demo',
   slugKey: toSlugKey('demo'),
@@ -78,7 +84,8 @@ describe('a Herdr outage is not an absent agent', () => {
 describe('an outage never triggers creation or destruction', () => {
   it('reports unavailable instead of creating a second workspace', async () => {
     const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const outcome = await orchestrator.runJob(spec());
 
@@ -111,7 +118,8 @@ describe('an outage never triggers creation or destruction', () => {
       return original(target);
     };
 
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
     const out = await orchestrator.cleanup(spec({ recorded }), 'wX');
 
     expect(calls).toBe(1);
@@ -123,7 +131,8 @@ describe('an outage never triggers creation or destruction', () => {
 
   it('never claims a termination it could not observe', async () => {
     const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
     const out = await orchestrator.cancel(
       spec({ recorded: { workspaceId: 'wX', agentName: 'ducky-pi-demo', workspacePath: '/repos/demo' } }),
     );

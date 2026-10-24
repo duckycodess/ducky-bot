@@ -45,6 +45,12 @@ export type DuckyErrorCode =
    * was refused with `agent_not_ready`. Transient, and retryable.
    */
   | 'herdr_agent_not_ready'
+  /**
+   * The durable record of what was submitted to an agent could not be written (or
+   * could not be trusted), so nothing was sent. A prompt without that record
+   * would make any later quiet reading unprovable.
+   */
+  | 'dispatch_journal_unavailable'
   | 'foreign_agent_conflict'
   | 'orphan_agent'
   | 'not_enabled_in_phase1'

@@ -4,10 +4,22 @@ import type { PiOrchestrator } from '@ducky/adapters';
 import type { CoordinatorClient } from './client.js';
 import { runClaimedJob } from './runner.js';
 import type { HeadroomVerdict } from './memory-headroom.js';
+import { reconcileIntent } from './pause-delivery.js';
+import type { PauseIntentStore } from './pause-intents.js';
 
 export interface LoopDeps {
   readonly client: CoordinatorClient;
   readonly orchestrator: PiOrchestrator;
+  /**
+   * The durable outbox of pauses this executor owes. REQUIRED. While any record
+   * is pending or unreadable no claim is made and no prompt is sent, and every
+   * claim that IS made attests that none is pending.
+   */
+  readonly intents: PauseIntentStore;
+  /** Drops the dispatch journal of a job that finished cleanly. */
+  readonly forgetJournal?: (jobId: string) => void;
+  /** How long to wait before reconciling an unresolved pause again. */
+  readonly pauseRetryMs?: number;
   readonly pollWaitMs: number;
   readonly version: string;
   readonly log?: (line: string) => void;
@@ -39,6 +51,8 @@ export class ExecutorLoop {
   #presence: NodeJS.Timeout | undefined;
   /** The reason the last claim was withheld, so a long hold logs once. */
   #heldFor: string | undefined;
+  /** Why claims are withheld for a pause, so a long hold logs once. */
+  #pauseHeldFor: string | undefined;
   /** Jobs this executor is running right now, reported on every heartbeat. */
   readonly #active = new Set<string>();
   private readonly workspaces = new Map<
@@ -91,7 +105,53 @@ export class ExecutorLoop {
     return [...this.#active];
   }
 
-  async runOnce(): Promise<'claimed' | 'idle' | 'held'> {
+  /**
+   * Settles every pause this executor owes BEFORE it can claim or prompt:
+   * startup, and every tick after. `'clear'` means nothing is owed and nothing is
+   * unreadable -- the only state in which a claim may be attempted, and what the
+   * claim's attestation rests on. Everything else holds, and says why once.
+   */
+  async reconcilePauses(): Promise<'clear' | 'held'> {
+    const log = this.deps.log ?? (() => {});
+    const owed = this.deps.intents.list();
+    if (owed.blocked.length > 0) {
+      const key = `blocked:${owed.blocked.join('|')}`;
+      if (this.#pauseHeldFor !== key) {
+        this.#pauseHeldFor = key;
+        log(
+          `claims withheld: ${owed.blocked.length} pause record(s) cannot be trusted ` +
+            `(${owed.blocked.slice(0, 3).join('; ')}); nothing was deleted or repaired`,
+        );
+      }
+      return 'held';
+    }
+    let held = false;
+    for (const intent of owed.intents) {
+      const res = await reconcileIntent(
+        {
+          client: this.deps.client,
+          orchestrator: this.deps.orchestrator,
+          intents: this.deps.intents,
+          log,
+        },
+        intent,
+      );
+      if (res === 'held') held = true;
+    }
+    if (held) {
+      if (this.#pauseHeldFor !== 'owed') {
+        this.#pauseHeldFor = 'owed';
+        log('claims withheld: a pause report is still owed to the coordinator');
+      }
+      return 'held';
+    }
+    if (this.#pauseHeldFor !== undefined) log('all owed pause reports settled; claiming again');
+    this.#pauseHeldFor = undefined;
+    return 'clear';
+  }
+
+  async runOnce(): Promise<'claimed' | 'idle' | 'held' | 'pause_held'> {
+    if ((await this.reconcilePauses()) === 'held') return 'pause_held';
     // Checked BEFORE the claim, because a claim is what starts a job. A refused
     // check leaves the job queued and the executor heartbeating, which is the
     // honest state: work is waiting, and nothing has been started that the
@@ -108,7 +168,8 @@ export class ExecutorLoop {
       if (this.#heldFor !== undefined) this.deps.log?.('memory headroom restored; claiming again');
       this.#heldFor = undefined;
     }
-    const claim = await this.deps.client.claim(this.deps.pollWaitMs);
+    // Reached only when nothing is owed, so the claim may attest as much.
+    const claim = await this.deps.client.claim(this.deps.pollWaitMs, { holdsNoPauseIntent: true });
     if (!claim) return 'idle';
 
     this.#active.add(claim.jobId);
@@ -118,6 +179,8 @@ export class ExecutorLoop {
         {
           client: this.deps.client,
           orchestrator: this.deps.orchestrator,
+          intents: this.deps.intents,
+          ...(this.deps.forgetJournal ? { forgetJournal: this.deps.forgetJournal } : {}),
           recordedWorkspace: (jobId) => this.workspaces.get(jobId),
           onWorkspace: (jobId, info) =>
             this.workspaces.set(jobId, {
@@ -154,6 +217,7 @@ export class ExecutorLoop {
         backoff = 1000;
         if (outcome === 'idle') await sleep(250);
         else if (outcome === 'held') await sleep(this.deps.headroomRetryMs ?? 15_000);
+        else if (outcome === 'pause_held') await sleep(this.deps.pauseRetryMs ?? 30_000);
       } catch (err) {
         // `ownerMessage` is already safe by construction; an arbitrary error
         // message is not, and this is the one place a non-Ducky error reaches a

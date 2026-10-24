@@ -269,15 +269,29 @@ open. All fourteen are required, and the list matches
    is NOT a quota feature. Ducky infers no cause, there is no provider quota
    state, counter or sign-in-versus-quota distinction until a real response is
    recorded (item 5), and no real pause has been observed, so the issue's
-   quota-pause criterion is not met. **Not retry-preserving when delivery
-   fails:** if the pause report cannot reach the coordinator (an outage, or a
-   coordinator that lacks the route during an upgrade), the executor neither
-   fails the job nor prompts again, but the coordinator applies ordinary lease
-   expiry, which spends an attempt, keeps the slot as an unconfirmed stop, and
-   with the default one-attempt budget fails and orphans the job on a second
-   expiry. Deploy coordinator and executor together, and treat a logged
-   "pause was not delivered" as needing the owner's attention. Preserving the
-   budget across transport loss remains required and unimplemented.
+   quota-pause criterion is not met. **Durable pause delivery (source, unit- and
+   on-disk-tested, never run with a real agent):** a quiet pause is written to the
+   executor's durable state (`DUCKY_EXECUTOR_STATE_DIR`, required, explicit, never
+   under `/tmp`, `TMPDIR` or the runtime directory) before anything is released or
+   sent, and kept until the coordinator answers for that exact report. A lease that
+   expires meanwhile is not charged and not exhausted; the job waits holding its
+   repository, slot and workspace for the original executor's report or attested
+   recovery claim, and the owner's cancel is the other exit. Operate it like this:
+   - **A log line `claims withheld: a pause report is still owed`** means the
+     coordinator is unreachable, an older one that lacks the routes (a
+     coordinated-upgrade limit, never downgraded to a failure), or the agent is not
+     provably quiet now. The executor holds every claim and prompt and retries;
+     nothing is deleted. Fix the cause, or inspect the job with `/job`.
+   - **`pause record(s) cannot be trusted`** means a file in
+     `pause-intents/` is corrupt, oversized, foreign or the wrong shape. Nothing was
+     deleted or repaired; read it, decide, and move it aside by hand. If a held
+     intent's job was forgotten (`/forget`) the coordinator answers `not_found`
+     forever; confirm that through `/jobs`, then remove that one file by hand.
+   - **Never** place the state directory under a temp or runtime path, share it
+     between profiles, or delete `dispatch-journal/` to "clear" a job: a job with no
+     journal entry is treated as unproven and orphaned, deliberately.
+   Still not retry-preserving: a crash before the intent is durable, a lost state
+   directory or host, an older coordinator and an older executor.
 5. **Supported subscription route, sign-in and quota on this host.** No
    `openclaw` binary or provider profile exists in this account at the time of
    writing. Route, eligibility and quota are unverified, and the binary's absence

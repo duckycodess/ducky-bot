@@ -180,6 +180,9 @@ DUCKY_EXECUTOR_ID=wsl-laptop
 DUCKY_EXECUTOR_KEY_ID=k1
 DUCKY_EXECUTOR_TOKEN=...
 DUCKY_EXECUTOR_HMAC_SECRET=...
+# Required: where this profile keeps its pause outbox and dispatch journal. Absolute,
+# private, and NOT under /tmp, TMPDIR or the runtime directory.
+DUCKY_EXECUTOR_STATE_DIR=/home/you/.local/state/ducky/development/executor-state
 ```
 
 ## The phone capture page

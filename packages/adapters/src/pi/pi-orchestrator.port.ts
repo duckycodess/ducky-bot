@@ -4,6 +4,8 @@ import type {
 
 export interface OrchestrationSpec {
   readonly jobId: string;
+  /** The lease this attempt runs under; recorded with every dispatch the journal keeps. */
+  readonly leaseId: string;
   readonly publicId: string;
   readonly repoSlug: string;
   /** Normalized slug that fits herdr's 32-char agent-name rule with the prefix. */
@@ -144,6 +146,21 @@ export type PromptGuard = (
   context: PromptGuardContext,
 ) => Promise<PromptGuardVerdict>;
 
+/**
+ * A fresh, positive proof that a job's recorded agent is quiet, taken without
+ * any in-memory turn (an executor that restarted has none) and therefore
+ * resting on the durable dispatch journal as well as on a fresh look.
+ */
+export type QuietProof =
+  | { readonly quiet: true; readonly observed: JobPauseQuietStatus }
+  | { readonly quiet: false; readonly detail: string };
+
+export interface QuietProofTarget {
+  readonly jobId: string;
+  readonly workspaceId: string;
+  readonly agentName: string;
+}
+
 export interface PiOrchestrator {
   readonly name: string;
   /** False until `pnpm probe:herdr` has recorded live fixtures for this host. */
@@ -154,6 +171,14 @@ export interface PiOrchestrator {
    * Implementations must not fabricate a termination they cannot observe.
    */
   cancel(spec: OrchestrationSpec): Promise<CancelOutcome>;
+  /**
+   * Proves, now, that the exact recorded agent is quiet: a durable journal entry
+   * saying its last submitted turn settled, the recorded name and workspace and a
+   * pane, an owned workspace, and a fresh `idle` or `done`. An earlier reading, an
+   * absent or unreadable journal, a dispatched-but-unsettled prompt and every
+   * other state are NOT quiet. Never sends anything to the agent.
+   */
+  proveQuiet(target: QuietProofTarget): Promise<QuietProof>;
   /**
    * Closes a workspace after a successful terminal result.
    *

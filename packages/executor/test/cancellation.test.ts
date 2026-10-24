@@ -7,6 +7,7 @@ import { MockPiOrchestrator, exampleImplementedResult } from '@ducky/adapters';
 import type { ClaimResponse } from '@ducky/contracts';
 import { runClaimedJob } from '../src/runner.js';
 import { JobSupervisor } from '../src/supervisor.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 /** A real empty git repo, so workspace resolution runs its genuine path. */
 let repoPath = '';
@@ -127,7 +128,7 @@ describe('cancelling a running job', () => {
     });
 
     await runClaimedJob(
-      { client: client as never, orchestrator, heartbeatMs: 5 },
+      { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 5 },
       claim(),
     );
 
@@ -155,7 +156,7 @@ describe('cancelling a running job', () => {
     });
 
     await runClaimedJob(
-      { client: client as never, orchestrator, heartbeatMs: 5 },
+      { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 5 },
       claim(),
     );
 
@@ -182,7 +183,7 @@ describe('cancelling a running job', () => {
         detail: 'still working',
       },
     });
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 5 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 5 }, claim());
 
     // Held on purpose: a retry on this host must not start a second writer
     // beside an agent that may still be live.
@@ -196,7 +197,7 @@ describe('cancelling a running job', () => {
       runUntilAborted: true,
       cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
     });
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 5 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 5 }, claim());
 
     const { acquireWriterLock } = await import('../src/single-writer.js');
     expect(() => acquireWriterLock('demo').release()).not.toThrow();
@@ -209,7 +210,7 @@ describe('cancelling a running job', () => {
       cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
     });
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1 }, claim());
 
     // The work the owner stopped is never accepted or cleaned up after.
     expect(client.submitResult).not.toHaveBeenCalled();
@@ -238,7 +239,7 @@ describe('cancelling a running job', () => {
       return originalRun(spec);
     };
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1 }, claim());
     expect(releaseRun).toBeDefined();
 
     // Cancellation wins even though a result was available.
@@ -254,7 +255,7 @@ describe('cancelling a running job', () => {
     const client = fakeClient(99);
     const orchestrator = new MockPiOrchestrator();
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 50 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 50 }, claim());
 
     expect(client.submitResult).toHaveBeenCalled();
     expect(orchestrator.cleanups).toHaveLength(1);
@@ -268,7 +269,7 @@ describe('cancelling a running job', () => {
     client.submitResult = vi.fn(async () => ({ state: 'needs_approval', accepted: true, duplicate: false }));
     const orchestrator = new MockPiOrchestrator();
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 50 }, claim());
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 50 }, claim());
 
     // An approval is still pending, so the workspace stays for inspection.
     expect(orchestrator.cleanups).toHaveLength(0);
@@ -280,7 +281,7 @@ describe('cancelling a running job', () => {
     const orchestrator = new MockPiOrchestrator();
 
     await runClaimedJob(
-      { client: client as never, orchestrator, heartbeatMs: 50 },
+      { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 50 },
       claim(),
     );
 

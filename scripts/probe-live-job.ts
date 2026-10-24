@@ -34,6 +34,7 @@ import { MockDiscordTransport } from '../packages/coordinator/src/discord/mock.t
 import type { Incoming } from '../packages/coordinator/src/discord/transport.js';
 import { CoordinatorClient } from '../packages/executor/src/client.js';
 import { ExecutorLoop } from '../packages/executor/src/loop.js';
+import { openExecutorState } from '../packages/executor/src/executor-state.js';
 import { HerdrCli, HerdrPiOrchestrator, redact } from '../packages/adapters/src/index.js';
 import { JOB_MAX_WALL_CLOCK_MS } from '../packages/contracts/src/index.js';
 
@@ -372,7 +373,12 @@ async function run(live: Live): Promise<ProbeOutcome> {
     },
   });
   if (!(await herdr.available())) throw new Error('herdr is not reachable; nothing to certify');
-  const orchestrator = new HerdrPiOrchestrator({ herdr, verified: false });
+  // The production orchestrator will not exist without its durable journal, so the
+  // probe gives it one: an explicit directory of its own, outside any temp root.
+  const state = openExecutorState(path.join(os.homedir(), '.local', 'state', 'ducky-probe-live-job'), {
+    uid: process.getuid?.() ?? -1,
+  });
+  const orchestrator = new HerdrPiOrchestrator({ herdr, verified: false, journal: state.journal });
   out(`EVIDENCE 1  orchestrator=${orchestrator.name} verified=${orchestrator.verified}`);
   if (orchestrator.name !== 'herdr-pi') throw new Error('not the production orchestrator');
 
@@ -410,7 +416,8 @@ async function run(live: Live): Promise<ProbeOutcome> {
   out(`job ${row.publicId} created (${row.state})`);
 
   const loop = new ExecutorLoop({
-    client, orchestrator, pollWaitMs: 1_000, version: 'probe-b',
+    client, orchestrator, intents: state.intents, forgetJournal: (id) => state.journal.forget(id),
+    pollWaitMs: 1_000, version: 'probe-b',
     log: (line) => out(`executor: ${line}`),
   });
   live.loop = loop;

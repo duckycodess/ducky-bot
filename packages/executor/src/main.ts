@@ -7,6 +7,7 @@ import { ExecutorLoop } from './loop.js';
 import { checkMemoryHeadroom, defaultCgroupDir } from './memory-headroom.js';
 import { createAgentPromptGuard } from './agent-cgroup.js';
 import { assertSubscriptionOnlyEnvironment } from '@ducky/contracts';
+import { openExecutorState } from './executor-state.js';
 
 /**
  * A logger that exists before `loadExecutorEnv()` can throw.
@@ -39,6 +40,12 @@ async function main(): Promise<void> {
     hmacSecret: env.DUCKY_EXECUTOR_HMAC_SECRET,
   });
 
+  // Durable local state, at the explicit profile path. If it cannot be opened
+  // with the required ownership and permissions the executor does not start:
+  // model work without the dispatch journal and the pause outbox would make every
+  // later quiet reading unprovable.
+  const state = openExecutorState(env.DUCKY_EXECUTOR_STATE_DIR, { uid: process.getuid?.() ?? -1 });
+
   const herdr = new HerdrCli({ bin: env.DUCKY_HERDR_BIN });
   const herdrUp = await herdr.available();
 
@@ -64,6 +71,15 @@ async function main(): Promise<void> {
     ? new HerdrPiOrchestrator({
         herdr,
         verified: env.DUCKY_HERDR_VERIFIED === '1',
+        journal: state.journal,
+        // The same refusal at the orchestrator, so a caller other than the loop
+        // and the runner cannot send model work while a pause is owed.
+        promptGate: () => {
+          const owed = state.intents.list();
+          return owed.intents.length > 0 || owed.blocked.length > 0
+            ? 'a pause report is still owed or unreadable on this executor'
+            : undefined;
+        },
         ...(agentGuard ? { beforePrompt: agentGuard } : {}),
       })
     : new MockPiOrchestrator();
@@ -89,6 +105,8 @@ async function main(): Promise<void> {
   const loop = new ExecutorLoop({
     client,
     orchestrator,
+    intents: state.intents,
+    forgetJournal: (jobId) => state.journal.forget(jobId),
     ...(env.DUCKY_MEMORY_GUARD === 'cgroup'
       ? { headroom: () => checkMemoryHeadroom(headroomConfig) }
       : {}),

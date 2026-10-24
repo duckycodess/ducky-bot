@@ -6,6 +6,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { HerdrPiOrchestrator, MemoryBriefWriter, MockHerdr } from '@ducky/adapters';
 import type { ClaimResponse } from '@ducky/contracts';
 import { runClaimedJob } from '../src/runner.js';
+import { MemoryDispatchJournal } from '@ducky/adapters';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 /**
  * A timeout releases the repository, the writer lock and the engineering slot
@@ -67,6 +69,7 @@ const makeClient = () => ({
 /** An orchestrator whose prompt settles at once and whose result re-read then takes a while. */
 const orchestratorOver = (herdr: MockHerdr) =>
   new HerdrPiOrchestrator({
+    journal: new MemoryDispatchJournal(),
     herdr,
     briefWriter: new MemoryBriefWriter(),
     pollIntervalMs: 5,
@@ -80,7 +83,7 @@ const orchestratorOver = (herdr: MockHerdr) =>
 const run = async (herdr: MockHerdr) => {
   const client = makeClient();
   await runClaimedJob(
-    { client: client as never, orchestrator: orchestratorOver(herdr), heartbeatMs: 50_000 },
+    { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator: orchestratorOver(herdr), heartbeatMs: 50_000 },
     claim(700),
   );
   return client;

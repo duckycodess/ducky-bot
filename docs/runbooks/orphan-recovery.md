@@ -11,11 +11,21 @@ submits a result that was already written.
 Nothing is re-run behind your back, and no second writer is ever started beside
 a workspace that may still have uncommitted changes.
 
+An executor that negotiated durable pause delivery may hold a quiet-pause report
+the coordinator never received. For such a lease the expiry is **not charged**:
+the job waits as `waiting_for_executor` with its repository, engineering slot and
+workspace kept, and only the original executor can finish it (by delivering its
+report, which pauses the job for you with the attempt budget intact, or by its
+ordinary recovery claim). No timer fails it. If that executor is gone for good,
+`/job cancel` ends the job and converts its holds to an orphan, and `/job
+cleanup` clears them after you have looked.
+
 ## When a repository stays blocked
 
 `/jobs` shows a job as `failed` with `orphan_agent_still_working`,
 `orphan_agent_blocked` or `orphan_prompt_unsettled` (a prompt was submitted and
-the turn was never seen to settle, so the agent may still start), and new jobs for
+the turn was never seen to settle -- or nothing durable records that it did, which
+is the same to Ducky -- so the agent may still start), and new jobs for
 that repository stay `queued`.
 
 That is deliberate. A Pi agent may still be running, so the reservation is

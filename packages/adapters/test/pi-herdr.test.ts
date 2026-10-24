@@ -10,6 +10,7 @@ const briefs = (): MemoryBriefWriter => new MemoryBriefWriter();
 import { exampleImplementedResult } from '../src/pi/pi.mock.js';
 import type { ResultReader } from '../src/pi/result-file.js';
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
+import { MemoryDispatchJournal } from '../src/pi/dispatch-journal.js';
 
 const SLUG = 'demo-repo';
 const slugKey = toSlugKey(SLUG);
@@ -20,8 +21,13 @@ const reader = (result: ReturnType<typeof exampleImplementedResult> | undefined)
   read: async () => result,
 });
 
+/** The durable record every recorded agent in these tests already has: its last turn settled. */
+const seeded = (): MemoryDispatchJournal =>
+  new MemoryDispatchJournal().seedSettled({ jobId: 'job-1', workspaceId: WS, agentName: AGENT });
+
 const spec = (over: Partial<OrchestrationSpec> = {}): OrchestrationSpec => ({
   jobId: 'job-1',
+  leaseId: 'lease-1',
   publicId: 'jabcde',
   repoSlug: SLUG,
   slugKey,
@@ -62,6 +68,7 @@ function orchestratorWith(
   result: ReturnType<typeof exampleImplementedResult> | undefined,
 ): HerdrPiOrchestrator {
   return new HerdrPiOrchestrator({
+    journal: seeded(),
     briefWriter: briefs(),
     herdr,
     resultReader: reader(result),
@@ -149,6 +156,7 @@ describe('Herdr/Pi orchestration', () => {
     });
     // settles on the first poll
     const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: reader(exampleImplementedResult()),
@@ -197,7 +205,8 @@ describe('Herdr/Pi orchestration', () => {
   it('is experimental until a live probe has been recorded', () => {
     expect(orchestratorWith(new MockHerdr(), undefined).verified).toBe(false);
     expect(
-      new HerdrPiOrchestrator({ herdr: new MockHerdr(), verified: true, briefWriter: briefs() }).verified,
+      new HerdrPiOrchestrator({
+    journal: seeded(), herdr: new MockHerdr(), verified: true, briefWriter: briefs() }).verified,
     ).toBe(true);
   });
 });
@@ -207,6 +216,7 @@ describe('worktree mode uses the checkout path Herdr reports', () => {
     const herdr = new MockHerdr();
     const seen: string[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: {
@@ -232,6 +242,7 @@ describe('worktree mode uses the checkout path Herdr reports', () => {
     const herdr = new MockHerdr();
     const seen: string[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: {
@@ -262,7 +273,8 @@ describe('cancellation against the real adapter shape', () => {
     const herdr = new MockHerdr();
     // Models `herdr agent prompt --wait`: it does not return on its own.
     herdr.promptBlocks = true;
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const controller = new AbortController();
     const started = Date.now();
@@ -282,7 +294,8 @@ describe('cancellation against the real adapter shape', () => {
       agents: [owned('working')],
       workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
     });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const outcome = await orchestrator.cancel(spec({ recorded }));
     expect(outcome.terminated).toBe(false);
@@ -299,7 +312,8 @@ describe('cancellation against the real adapter shape', () => {
       agents: [owned('idle')],
       workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
     });
-    const outcome = await new HerdrPiOrchestrator({ herdr: proven, sleep: async () => {}, briefWriter: briefs() })
+    const outcome = await new HerdrPiOrchestrator({
+    journal: seeded(), herdr: proven, sleep: async () => {}, briefWriter: briefs() })
       .cancel(spec({ recorded }));
     expect(outcome.terminated).toBe(true);
 
@@ -310,7 +324,8 @@ describe('cancellation against the real adapter shape', () => {
       ['absent', [], []],
     ] as const) {
       const herdr = new MockHerdr({ available: true, agents: [...agents], workspaces: [...workspaces] });
-      const o = await new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() })
+      const o = await new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() })
         .cancel(spec({ recorded }));
       expect(o.terminated, status).toBe(false);
     }
@@ -318,7 +333,8 @@ describe('cancellation against the real adapter shape', () => {
 
   it('never claims termination when Herdr itself cannot be reached', async () => {
     const herdr = new MockHerdr({ available: false, agents: [], workspaces: [] });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
     const outcome = await orchestrator.cancel(spec({ recorded }));
     expect(outcome.terminated).toBe(false);
     expect(outcome.agentStatus).toBe('unknown');
@@ -332,7 +348,8 @@ describe('workspace cleanup is ownership-proving', () => {
       agents: [],
       workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
     });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const out = await orchestrator.cleanup(spec({ recorded, mode: 'direct' }), WS);
     expect(out.closed).toBe(true);
@@ -346,7 +363,8 @@ describe('workspace cleanup is ownership-proving', () => {
       // A human's workspace that happens to be labelled "ducky".
       workspaces: [{ workspace_id: 'wUser', label: 'ducky' }],
     });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
 
     const mismatched = await orchestrator.cleanup(spec({ recorded }), 'wUser');
     expect(mismatched.closed).toBe(false);
@@ -368,7 +386,8 @@ describe('workspace cleanup is ownership-proving', () => {
       agents: [owned('working')],
       workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
     });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
     const out = await orchestrator.cleanup(spec({ recorded }), WS);
     expect(out.closed).toBe(false);
     expect(herdr.countOf('workspaceClose')).toBe(0);
@@ -380,7 +399,8 @@ describe('workspace cleanup is ownership-proving', () => {
       agents: [],
       workspaces: [{ workspace_id: WS, label: workspaceLabelFor(slugKey) }],
     });
-    const orchestrator = new HerdrPiOrchestrator({ herdr, sleep: async () => {}, briefWriter: briefs() });
+    const orchestrator = new HerdrPiOrchestrator({
+    journal: seeded(), herdr, sleep: async () => {}, briefWriter: briefs() });
     await orchestrator.cleanup(spec({ recorded, mode: 'worktree' }), WS);
     expect(herdr.countOf('worktreeRemove')).toBe(1);
     expect(herdr.countOf('workspaceClose')).toBe(0);
@@ -424,6 +444,7 @@ describe('prompt settling', () => {
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     herdr.promptSettlesAs = 'blocked';
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => { reads += 1; return undefined; } },
@@ -450,6 +471,7 @@ describe('prompt settling', () => {
     // Models the real race: the lifecycle change is observed before the
     // agent's last write has landed on disk.
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: {
@@ -473,6 +495,7 @@ describe('prompt settling', () => {
     let reads = 0;
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => { reads += 1; return undefined; } },
@@ -698,6 +721,7 @@ describe('a stalled prompt', () => {
 
   const orch = (herdr: MockHerdr, result: ReturnType<typeof exampleImplementedResult> | undefined) =>
     new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: reader(result),
@@ -741,6 +765,7 @@ describe('a stalled prompt', () => {
   it('is an orphan when the late-starting agent is still working at the deadline', async () => {
     const herdr = stalling(['working']);
     const o = new HerdrPiOrchestrator({
+    journal: seeded(),
       briefWriter: briefs(),
       herdr,
       resultReader: reader(undefined),
@@ -789,6 +814,7 @@ describe('brief handover through the workspace', () => {
     const writer = new MemoryBriefWriter();
     const longBrief = `# Ducky job\n${'instruction line\n'.repeat(200)}`;
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       herdr,
       briefWriter: writer,
       resultReader: reader(exampleImplementedResult()),
@@ -815,6 +841,7 @@ describe('brief handover through the workspace', () => {
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     const writer = new MemoryBriefWriter();
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       herdr,
       briefWriter: writer,
       resultReader: reader(exampleImplementedResult()),
@@ -834,6 +861,7 @@ describe('brief handover through the workspace', () => {
   it('fails the turn rather than pasting when the brief cannot be written', async () => {
     const herdr = new MockHerdr({ available: true, agents: [], workspaces: [] });
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       herdr,
       briefWriter: { write: async () => { throw new Error('read-only workspace'); } },
       resultReader: reader(exampleImplementedResult()),
@@ -864,6 +892,7 @@ describe('stale phase on a resumed turn', () => {
     };
 
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       herdr,
       briefWriter: { write: async () => { order.push('brief'); return '.ducky/brief.md'; } },
       phaseReader: {
@@ -891,6 +920,7 @@ describe('stale phase on a resumed turn', () => {
     });
 
     const orch = new HerdrPiOrchestrator({
+    journal: seeded(),
       herdr,
       briefWriter: new MemoryBriefWriter(),
       phaseReader: { read: async () => undefined, clear: async () => { cleared += 1; } },

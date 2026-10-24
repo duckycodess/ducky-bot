@@ -6,6 +6,7 @@ import { MemoryBriefWriter } from '../src/pi/brief-file.js';
 import { HerdrPiOrchestrator, agentNameFor, toSlugKey, workspaceLabelFor } from '../src/pi/pi-herdr.js';
 import { exampleImplementedResult } from '../src/pi/pi.mock.js';
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
+import { MemoryDispatchJournal } from '../src/pi/dispatch-journal.js';
 
 /**
  * When does a turn that left no result earn a PAUSE?
@@ -21,8 +22,12 @@ const WS = 'wDemo';
 const LABEL = workspaceLabelFor(slugKey);
 const recorded = { workspaceId: WS, agentName: AGENT, workspacePath: '/repos/demo' };
 
+/** The durable record every recorded agent in these tests already has: its last turn settled. */
+const seeded = (): MemoryDispatchJournal =>
+  new MemoryDispatchJournal().seedSettled({ jobId: 'job-1', workspaceId: WS, agentName: AGENT });
+
 const spec = (over: Partial<OrchestrationSpec> = {}): OrchestrationSpec => ({
-  jobId: 'job-1', publicId: 'jabcde', repoSlug: SLUG, slugKey, mode: 'worktree',
+  jobId: 'job-1', leaseId: 'lease-1', publicId: 'jabcde', repoSlug: SLUG, slugKey, mode: 'worktree',
   repoPath: '/repos/demo', branch: 'ducky/job-jabcde', base: 'main', brief: 'do the thing',
   recoveryRequired: false, promptTimeoutMs: 1000, recoveryWaitMs: 50, ...over,
 });
@@ -34,6 +39,7 @@ const agent = (status: AgentInfo['agent_status'], over: Partial<AgentInfo> = {})
 
 const orch = (herdr: MockHerdr, result = undefined as ReturnType<typeof exampleImplementedResult> | undefined) =>
   new HerdrPiOrchestrator({
+    journal: seeded(),
     briefWriter: new MemoryBriefWriter(),
     herdr,
     resultReader: { read: async () => result },

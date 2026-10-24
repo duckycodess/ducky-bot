@@ -11,6 +11,7 @@ import { MemoryBriefWriter } from '../src/pi/brief-file.js';
 const briefs = (): MemoryBriefWriter => new MemoryBriefWriter();
 import { exampleImplementedResult } from '../src/pi/pi.mock.js';
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
+import { MemoryDispatchJournal } from '../src/pi/dispatch-journal.js';
 
 const FIXTURE = path.resolve(
   import.meta.dirname,
@@ -55,6 +56,7 @@ describe('Herdr reports home-relative paths', () => {
 describe('a real worktree path survives the registration boundary', () => {
   const spec = (over: Partial<OrchestrationSpec> = {}): OrchestrationSpec => ({
     jobId: 'job-1',
+    leaseId: 'lease-1',
     publicId: 'jabcde',
     repoSlug: 'demo',
     slugKey: toSlugKey('demo'),
@@ -73,6 +75,7 @@ describe('a real worktree path survives the registration boundary', () => {
     const herdr = new MockHerdr();
     const seen: { workspacePath: string; worktreePath: string | null }[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+      journal: new MemoryDispatchJournal(),
       briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => exampleImplementedResult() },
@@ -98,6 +101,7 @@ describe('a real worktree path survives the registration boundary', () => {
     const herdr = new MockHerdr();
     const states: string[] = [];
     const orchestrator = new HerdrPiOrchestrator({
+      journal: new MemoryDispatchJournal(),
       briefWriter: briefs(),
       herdr,
       resultReader: { read: async () => exampleImplementedResult() },

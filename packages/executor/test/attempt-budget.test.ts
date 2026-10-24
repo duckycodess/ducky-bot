@@ -11,6 +11,7 @@ import {
 import { attemptDeadlineMs } from '../src/attempt-deadline.js';
 import { runClaimedJob } from '../src/runner.js';
 import { JobSupervisor } from '../src/supervisor.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 let repoPath = '';
 beforeAll(() => {
@@ -159,7 +160,7 @@ describe('a claimed attempt that runs out of budget', () => {
       },
     });
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1000 }, claim(soon(60)));
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1000 }, claim(soon(60)));
 
     expect(orchestrator.cancels).toHaveLength(1);
     expect(client.reportFailure).toHaveBeenCalledWith(
@@ -188,7 +189,7 @@ describe('a claimed attempt that runs out of budget', () => {
       },
     });
 
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1000 }, claim(soon(60)));
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1000 }, claim(soon(60)));
 
     expect(client.reportFailure).toHaveBeenCalledWith(
       'job-1', 'lease-1', 'orphan_agent_still_working',
@@ -205,7 +206,7 @@ describe('a claimed attempt that runs out of budget', () => {
     const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult());
 
     await runClaimedJob(
-      { client: client as never, orchestrator, heartbeatMs: 1000 },
+      { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1000 },
       claim(new Date(Date.now() - 60_000).toISOString()),
     );
 
@@ -220,7 +221,7 @@ describe('a claimed attempt that runs out of budget', () => {
     const client = fakeClient();
     const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult());
     await runClaimedJob(
-      { client: client as never, orchestrator, heartbeatMs: 1000 },
+      { client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1000 },
       claim(soon(30 * 60_000)),
     );
     const wait = orchestrator.runs[0]!.promptTimeoutMs;
@@ -231,7 +232,7 @@ describe('a claimed attempt that runs out of budget', () => {
   it('applies the bounded local default when a claim carries no deadline', async () => {
     const client = fakeClient();
     const orchestrator = new MockPiOrchestrator(() => exampleImplementedResult());
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 1000 }, claim(undefined));
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 1000 }, claim(undefined));
     const wait = orchestrator.runs[0]!.promptTimeoutMs;
     expect(wait).toBeLessThanOrEqual(ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS);
     expect(wait).toBeGreaterThan(ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS - 60_000);
@@ -243,7 +244,7 @@ describe('a claimed attempt that runs out of budget', () => {
       runUntilAborted: true,
       cancelOutcome: { terminated: true, agentStatus: 'idle', detail: 'stopped' },
     });
-    await runClaimedJob({ client: client as never, orchestrator, heartbeatMs: 5 }, claim(soon(60_000)));
+    await runClaimedJob({ client: client as never, intents: new MemoryPauseIntentStore(), orchestrator, heartbeatMs: 5 }, claim(soon(60_000)));
 
     expect(client.cancelAck).toHaveBeenCalledWith(
       'job-1', expect.objectContaining({ terminated: true }),

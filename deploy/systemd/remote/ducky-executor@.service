@@ -35,7 +35,12 @@ EnvironmentFile=%h/.config/ducky/executor-%i.env
 Environment=DUCKY_MEMORY_GUARD=cgroup
 
 Environment=TMPDIR=%h/.local/state/ducky/%i/tmp
-ExecStartPre=/usr/bin/install -d -m 0700 %h/.local/state/ducky/%i %h/.local/state/ducky/%i/tmp
+# This profile's durable executor state (pause outbox and dispatch journal). A
+# SIBLING of TMPDIR, never inside it: nothing that sweeps temp may reach it, and it
+# is per instance so two profiles can never share one. The executor refuses to
+# start if it cannot open it with the right ownership and mode.
+Environment=DUCKY_EXECUTOR_STATE_DIR=%h/.local/state/ducky/%i/executor-state
+ExecStartPre=/usr/bin/install -d -m 0700 %h/.local/state/ducky/%i %h/.local/state/ducky/%i/tmp %h/.local/state/ducky/%i/executor-state
 
 ExecStart=/usr/bin/env node %h/projects/ducky/packages/executor/dist/main.js
 Restart=always

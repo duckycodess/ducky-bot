@@ -3,7 +3,8 @@ import path from 'node:path';
 import type { JobResultFile } from '@ducky/contracts';
 import { RESULT_RELATIVE_PATH } from './result-file.js';
 import type {
-  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
+  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator, QuietProof,
+  QuietProofTarget,
 } from './pi-orchestrator.port.js';
 
 export const exampleImplementedResult = (summary = 'Mock implementation completed.'): JobResultFile => ({
@@ -25,6 +26,8 @@ export interface MockPiOptions {
   readonly runUntilAborted?: boolean;
   /** What `cancel()` reports; defaults to a clean termination. */
   readonly cancelOutcome?: CancelOutcome;
+  /** What `proveQuiet()` reports; defaults to a quiet, idle agent. */
+  readonly quietProof?: QuietProof;
   readonly writeFileToDisk?: boolean;
 }
 
@@ -55,6 +58,13 @@ export class MockPiOrchestrator implements PiOrchestrator {
   ): Promise<{ closed: boolean; detail: string }> {
     this.cleanups.push({ spec, workspaceId });
     return { closed: true, detail: 'Mock workspace closed.' };
+  }
+
+  readonly proofs: QuietProofTarget[] = [];
+
+  async proveQuiet(target: QuietProofTarget): Promise<QuietProof> {
+    this.proofs.push(target);
+    return this.options.quietProof ?? { quiet: true, observed: 'idle' };
   }
 
   async cancel(spec: OrchestrationSpec): Promise<CancelOutcome> {

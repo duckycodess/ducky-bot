@@ -6,8 +6,36 @@ import {
 import type { Db } from '../db.js';
 import { isoPlus, nowIso } from '../db.js';
 import {
-  fromBool, toBool, type AdmissionRow, type JobRow, type OwnerInputRow, type ReservationRow,
+  fromBool, toBool, type AdmissionRow, type ExpiryChargeState, type ExpiryDisposition,
+  type JobRow, type LeaseExpiryRow, type OwnerInputRow, type PauseReceiptRow, type ReservationRow,
 } from './types.js';
+
+const mapExpiry = (r: Record<string, unknown>): LeaseExpiryRow => ({
+  id: Number(r['id']),
+  jobId: String(r['job_id']),
+  leaseDigest: String(r['lease_digest']),
+  executorId: String(r['executor_id']),
+  workspaceId: r['workspace_id'] == null ? null : String(r['workspace_id']),
+  agentName: r['agent_name'] == null ? null : String(r['agent_name']),
+  attemptsBefore: Number(r['attempts_before']),
+  deliveryProtocol: Number(r['delivery_protocol']) === 1 ? 1 : 0,
+  chargeState: String(r['charge_state']) as ExpiryChargeState,
+  disposition: String(r['disposition']) as ExpiryDisposition,
+  createdAt: String(r['created_at']),
+  settledAt: r['settled_at'] == null ? null : String(r['settled_at']),
+});
+
+const mapReceipt = (r: Record<string, unknown>): PauseReceiptRow => ({
+  reportId: String(r['report_id']),
+  jobId: String(r['job_id']),
+  executorId: String(r['executor_id']),
+  leaseDigest: String(r['lease_digest']),
+  workspaceId: String(r['workspace_id']),
+  agentName: String(r['agent_name']),
+  cause: String(r['cause']),
+  disposition: String(r['disposition']) as PauseReceiptRow['disposition'],
+  createdAt: String(r['created_at']),
+});
 
 const mapJob = (r: Record<string, unknown>): JobRow => ({
   id: String(r['id']),
@@ -37,6 +65,7 @@ const mapJob = (r: Record<string, unknown>): JobRow => ({
   finishedAt: r['finished_at'] == null ? null : String(r['finished_at']),
   attemptDeadlineAt:
     r['attempt_deadline_at'] == null ? null : String(r['attempt_deadline_at']),
+  deliveryProtocol: Number(r['delivery_protocol']) === 1 ? 1 : 0,
 });
 
 /**
@@ -196,6 +225,7 @@ export class JobsRepo {
       finishedAt: string | null;
       workPhase: JobWorkPhase | null;
       attemptDeadlineAt: string | null;
+      deliveryProtocol: 0 | 1;
     }> = {},
   ): JobRow {
     const job = this.byId(jobId);
@@ -219,6 +249,7 @@ export class JobsRepo {
     if ('retainedWorkspaceId' in patch) put('retained_workspace_id', patch.retainedWorkspaceId ?? null);
     if ('startedAt' in patch) put('started_at', patch.startedAt ?? null);
     if ('finishedAt' in patch) put('finished_at', patch.finishedAt ?? null);
+    if ('deliveryProtocol' in patch) put('delivery_protocol', patch.deliveryProtocol ?? 0);
 
     // An attempt budget belongs to the attempt. It survives the one move that
     // is still the SAME attempt (a lease expiry back to waiting_for_executor,
@@ -267,8 +298,28 @@ export class JobsRepo {
     // and reported a result before the job could get here), so the engineering
     // slot is released with it while the repository reservation is kept. The
     // answered job reacquires the slot at its next claim.
-    if (job.state === 'running' && (PAUSED_STATES as readonly string[]).includes(to)) {
+    //
+    // The second source state is the lease-free reconcile of a durable pause
+    // report (`waiting_for_executor` -> `needs_owner_input`): the executor's
+    // exact, bound report of a quiet agent is what makes that quiescent, and the
+    // coordinator only takes this edge from `JobsService.settlePauseReport`.
+    if (
+      (job.state === 'running' || job.state === 'waiting_for_executor') &&
+      (PAUSED_STATES as readonly string[]).includes(to)
+    ) {
       this.releaseAdmission(jobId);
+    }
+
+    // An expired lease whose accounting was deferred is open only while the job
+    // waits for its executor. Leaving that state any way except a claim (which
+    // charges it) or a bound pause report (which reconciles it) ends the
+    // question: nothing is charged for an attempt the owner or the clock ended.
+    if (
+      job.state === 'waiting_for_executor' &&
+      to !== 'running' &&
+      to !== 'needs_owner_input'
+    ) {
+      this.settlePendingExpiries(jobId, to === 'cancelled' ? 'cancelled' : 'failed', 'not_charged', ts);
     }
 
     this.refreshReservationForState(job.repoSlug, jobId, to);
@@ -502,6 +553,118 @@ export class JobsRepo {
     this.db
       .prepare(`UPDATE engineering_admission SET reason = 'unconfirmed_stop' WHERE job_id = ?`)
       .run(jobId);
+  }
+
+  /**
+   * The slot of a job whose quiet agent was just proved, by an exact bound
+   * report, to have stopped: an unconfirmed stop becomes an ordinary attempt
+   * slot so the existing release rules free it. Scoped to the job and a no-op
+   * for any other holder.
+   */
+  confirmQuiescence(jobId: string): void {
+    this.db
+      .prepare(
+        `UPDATE engineering_admission SET reason = 'active_attempt'
+          WHERE job_id = ? AND reason = 'unconfirmed_stop'`,
+      )
+      .run(jobId);
+  }
+
+  // ------------------------------------------------- expiry + receipts ----
+
+  recordLeaseExpiry(input: {
+    jobId: string;
+    leaseDigest: string;
+    executorId: string;
+    workspaceId: string | null;
+    agentName: string | null;
+    attemptsBefore: number;
+    deliveryProtocol: 0 | 1;
+    chargeState: ExpiryChargeState;
+    disposition: ExpiryDisposition;
+  }): void {
+    const ts = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO job_lease_expiries
+           (job_id, lease_digest, executor_id, workspace_id, agent_name, attempts_before,
+            delivery_protocol, charge_state, disposition, created_at, settled_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(job_id, lease_digest) DO NOTHING`,
+      )
+      .run(
+        input.jobId, input.leaseDigest, input.executorId, input.workspaceId, input.agentName,
+        input.attemptsBefore, input.deliveryProtocol, input.chargeState, input.disposition, ts,
+        input.disposition === 'pending' ? null : ts,
+      );
+  }
+
+  expiryFor(jobId: string, leaseDigest: string): LeaseExpiryRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM job_lease_expiries WHERE job_id = ? AND lease_digest = ?')
+      .get(jobId, leaseDigest);
+    return r ? mapExpiry(r as Record<string, unknown>) : undefined;
+  }
+
+  /** The job's open deferred expiry, if any. At most one: a claim settles it before a new lease exists. */
+  pendingExpiry(jobId: string): LeaseExpiryRow | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT * FROM job_lease_expiries WHERE job_id = ? AND disposition = 'pending'
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get(jobId);
+    return r ? mapExpiry(r as Record<string, unknown>) : undefined;
+  }
+
+  expiriesFor(jobId: string): LeaseExpiryRow[] {
+    return this.db
+      .prepare('SELECT * FROM job_lease_expiries WHERE job_id = ? ORDER BY id')
+      .all(jobId)
+      .map((r) => mapExpiry(r as Record<string, unknown>));
+  }
+
+  /** Settles one expiry exactly once: only a still-pending row changes. */
+  settleExpiry(id: number, disposition: ExpiryDisposition, chargeState: ExpiryChargeState): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE job_lease_expiries SET disposition = ?, charge_state = ?, settled_at = ?
+          WHERE id = ? AND disposition = 'pending'`,
+      )
+      .run(disposition, chargeState, nowIso(), id);
+    return Number(res.changes) > 0;
+  }
+
+  private settlePendingExpiries(
+    jobId: string,
+    disposition: ExpiryDisposition,
+    chargeState: ExpiryChargeState,
+    ts: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE job_lease_expiries SET disposition = ?, charge_state = ?, settled_at = ?
+          WHERE job_id = ? AND disposition = 'pending'`,
+      )
+      .run(disposition, chargeState, ts, jobId);
+  }
+
+  receiptById(reportId: string): PauseReceiptRow | undefined {
+    const r = this.db.prepare('SELECT * FROM job_pause_receipts WHERE report_id = ?').get(reportId);
+    return r ? mapReceipt(r as Record<string, unknown>) : undefined;
+  }
+
+  insertReceipt(row: Omit<PauseReceiptRow, 'createdAt'>): void {
+    this.db
+      .prepare(
+        `INSERT INTO job_pause_receipts
+           (report_id, job_id, executor_id, lease_digest, workspace_id, agent_name, cause, disposition, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        row.reportId, row.jobId, row.executorId, row.leaseDigest, row.workspaceId, row.agentName,
+        row.cause, row.disposition, nowIso(),
+      );
   }
 
   refreshReservationForState(repoSlug: string, jobId: string, state: JobState): void {

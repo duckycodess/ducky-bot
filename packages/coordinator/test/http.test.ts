@@ -313,3 +313,86 @@ describe('executor pause route', () => {
     h.close();
   });
 });
+
+describe('executor durable pause-delivery routes', () => {
+  const REG = {
+    workspaceId: 'wX', label: 'ducky-mgd:demo', mode: 'direct', agentName: 'ducky-pi-demo',
+    workspacePath: '/tmp/ducky-demo', state: 'active',
+  };
+  const REPORT = {
+    protocol: 1, reportId: '11111111-1111-4111-8111-111111111111', cause: 'agent_idle_no_result',
+    workspaceId: 'wX', agentName: 'ducky-pi-demo', agentStatus: 'idle', quiescent: true,
+  };
+
+  async function claimed(h: ReturnType<typeof makeHarness>, app: FastifyInstance, capabilities: string[]) {
+    h.app.jobs.submit(h.owner, { repoSlug: 'demo', task: 'a', bootstrap: false });
+    const claim = (
+      await app.inject(
+        sign(h, '/api/v1/executor/claim', {
+          executorId: h.executorId, capabilities, waitMs: 0, idempotencyKey: 'abcdefgh',
+        }),
+      )
+    ).json() as { jobId: string; leaseId: string; pauseProtocol?: number };
+    expect(
+      (await app.inject(sign(h, `/api/v1/executor/jobs/${claim.jobId}/workspace`, { leaseId: claim.leaseId, ...REG })))
+        .statusCode,
+    ).toBe(200);
+    return claim;
+  }
+
+  it('negotiates on the claim, answers a structured disposition, and refuses with distinguishable errors', async () => {
+    const h = makeHarness();
+    const app = await boot(h);
+    const claim = await claimed(h, app, ['herdr-pi', 'pause-delivery-v1']);
+    expect(claim.pauseProtocol).toBe(1);
+    const report = `/api/v1/executor/jobs/${claim.jobId}/pause-report`;
+    const disposition = `/api/v1/executor/jobs/${claim.jobId}/pause-disposition`;
+    const digest = createHash('sha256').update(claim.leaseId).digest('hex').slice(0, 16);
+    const query = { ...REPORT, leaseDigest: digest } as Record<string, unknown>;
+    delete query['agentStatus'];
+    delete query['quiescent'];
+
+    const pending = await app.inject(sign(h, disposition, query));
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json()).toMatchObject({ disposition: 'pending', reportId: REPORT.reportId, jobId: claim.jobId });
+
+    const first = await app.inject(sign(h, report, { leaseId: claim.leaseId, ...REPORT }));
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({ disposition: 'paused', state: 'needs_owner_input', leaseDigest: digest });
+    expect(h.store.jobs.byId(claim.jobId)).toMatchObject({ state: 'needs_owner_input', attempts: 0 });
+
+    const again = await app.inject(sign(h, report, { leaseId: claim.leaseId, ...REPORT }));
+    expect(again.json()).toEqual(first.json());
+    expect((await app.inject(sign(h, disposition, query))).json()).toMatchObject({ disposition: 'paused' });
+
+    // 409 lease_mismatch (nothing matches), 404 not_found (no such job), 400 (schema / reused id).
+    const stale = await app.inject(
+      sign(h, report, { leaseId: 'not-the-lease', ...REPORT, reportId: '22222222-2222-4222-8222-222222222222' }),
+    );
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toEqual({ error: 'lease_mismatch' });
+    const unknown = await app.inject(sign(h, '/api/v1/executor/jobs/no-such-job/pause-report', { leaseId: 'l', ...REPORT }));
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: 'not_found' });
+    for (const bad of [{ protocol: 2 }, { quiescent: false }, { agentStatus: 'working' }, { reportId: 'x' }, { extra: 1 }]) {
+      const res = await app.inject(sign(h, report, { leaseId: claim.leaseId, ...REPORT, ...bad }));
+      expect(res.statusCode, JSON.stringify(bad)).toBe(400);
+    }
+    const reused = await app.inject(sign(h, report, { leaseId: claim.leaseId, ...REPORT, agentName: 'ducky-pi-x' }));
+    expect(reused.statusCode).toBe(400);
+
+    for (const url of [report, disposition]) {
+      const anon = await app.inject({ method: 'POST', url, payload: '{}', headers: { 'content-type': 'application/json' } });
+      expect(anon.statusCode).toBe(401);
+    }
+    h.close();
+  });
+
+  it('does not negotiate with an executor that did not advertise the capability', async () => {
+    const h = makeHarness();
+    const app = await boot(h);
+    const claim = await claimed(h, app, ['herdr-pi']);
+    expect(claim.pauseProtocol).toBeUndefined();
+    h.close();
+  });
+});

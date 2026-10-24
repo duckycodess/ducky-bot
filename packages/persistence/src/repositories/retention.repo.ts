@@ -112,6 +112,10 @@ export class RetentionRepo {
     del('DELETE FROM job_events WHERE job_id = ?');
     del('DELETE FROM job_owner_inputs WHERE job_id = ?');
     del('DELETE FROM job_results WHERE job_id = ?');
+    // The pause-delivery ledgers only ever describe a job that has already
+    // ended (the guard above refused anything else), so they go with it.
+    del('DELETE FROM job_pause_receipts WHERE job_id = ?');
+    del('DELETE FROM job_lease_expiries WHERE job_id = ?');
     del('DELETE FROM job_dependencies WHERE job_id = ?');
     // No foreign key, but the guard has proved every row is closed.
     del('DELETE FROM herdr_workspaces WHERE job_id = ?');

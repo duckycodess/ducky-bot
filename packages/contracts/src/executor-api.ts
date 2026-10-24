@@ -109,6 +109,14 @@ export const ClaimResponseSchema = z.strictObject({
    * field. Upgrade the coordinator and executor together.
    */
   attemptDeadlineAt: z.string().optional(),
+  /**
+   * Present (as 1) only when this executor advertised `pause-delivery-v1` AND
+   * this coordinator speaks it. It is what tells the executor that a quiet-pause
+   * report it cannot deliver can be reconciled later without charging the
+   * attempt, and it is what makes the coordinator defer this lease's expiry
+   * accounting. Absent means the ordinary path, unchanged.
+   */
+  pauseProtocol: z.literal(1).optional(),
 });
 export type ClaimResponse = z.infer<typeof ClaimResponseSchema>;
 

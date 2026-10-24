@@ -1,6 +1,6 @@
 import {
   AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, ENGINEERING_ATTEMPT_GRACE_MS,
-  EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
+  EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS, leaseDigest,
   TASK_PREVIEW_SETTLED_TTL_MS, TASK_PREVIEW_SWEEP_BATCH,
   isTerminal,
 } from '@ducky/contracts';
@@ -123,9 +123,32 @@ export class Reconciler {
       withTransaction(this.store.db, () => {
         const attempts = job.attempts + 1;
 
+        // The identity and accounting of THIS lease, written in the expiry
+        // transaction so a later bound report can find exactly the attempt it
+        // describes. A lease that negotiated durable pause delivery is not
+        // charged here: the coordinator cannot tell silence from a pause the
+        // executor holds durably, so the charge (and any exhaustion) waits for
+        // the next claim of this job -- or never happens, if a bound report
+        // reconciles it first. Every hold is kept meanwhile. An older peer's
+        // lease takes the ordinary path below, unchanged.
+        const recorded = this.store.herdrWorkspaces.openForJob(job.id);
+        const expiry = {
+          jobId: job.id,
+          leaseDigest: leaseDigest(job.leaseId ?? ''),
+          executorId: job.executorId ?? '',
+          workspaceId: recorded?.workspaceId ?? null,
+          agentName: recorded?.agentName ?? null,
+          attemptsBefore: job.attempts,
+          deliveryProtocol: job.deliveryProtocol,
+        } as const;
+        const deferrable =
+          job.deliveryProtocol === 1 && !job.cancelRequested && job.leaseId !== null &&
+          job.executorId !== null && recorded !== undefined;
+
         // The owner asked for this job to stop. Requeueing it would run the
         // work again after a cancellation, so expiry is the terminal outcome.
         if (job.cancelRequested) {
+          this.recordExpiry(expiry, 'charged', 'cancelled');
           this.store.jobs.transition(
             job.id,
             'cancelled',
@@ -158,7 +181,25 @@ export class Reconciler {
           return;
         }
 
+        if (deferrable) {
+          this.recordExpiry(expiry, 'deferred', 'pending');
+          this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired_deferred', 'system:reconciler', {
+            recoveryRequired: true,
+            leaseId: null,
+            leaseExpiresAt: null,
+          });
+          this.store.jobs.markAdmissionUnconfirmed(job.id);
+          this.store.jobs.appendEvent(
+            job.id,
+            'lease_expired_deferred',
+            'The executor stopped reporting. Nothing was charged yet: its pause report, if it holds ' +
+              'one, can still reconcile this attempt, and every hold is kept until then.',
+          );
+          return;
+        }
+
         if (attempts > job.maxAttempts) {
+          this.recordExpiry(expiry, 'charged', 'exhausted');
           this.store.jobs.transition(job.id, 'failed', 'lease_expired_exhausted', 'system:reconciler', {
             attempts,
             finishedAt: this.now().toISOString(),
@@ -185,6 +226,7 @@ export class Reconciler {
           }
           return;
         }
+        this.recordExpiry(expiry, 'charged', 'charged');
         this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired', 'system:reconciler', {
           attempts,
           recoveryRequired: true,
@@ -208,6 +250,19 @@ export class Reconciler {
     return n;
   }
 
+  private recordExpiry(
+    base: {
+      jobId: string; leaseDigest: string; executorId: string; workspaceId: string | null;
+      agentName: string | null; attemptsBefore: number; deliveryProtocol: 0 | 1;
+    },
+    chargeState: 'deferred' | 'charged',
+    disposition: 'pending' | 'charged' | 'exhausted' | 'cancelled',
+  ): void {
+    // A lease that was never issued cannot be digested into an identity.
+    if (base.executorId === '' || base.leaseDigest === leaseDigest('')) return;
+    this.store.jobs.recordLeaseExpiry({ ...base, chargeState, disposition });
+  }
+
   /**
    * Explicit, atomic outcome per state. `orphan_agent` reservations have a NULL
    * expiry and are therefore never seen here: only /job cleanup clears them.
@@ -227,6 +282,13 @@ export class Reconciler {
         n += 1;
         continue;
       }
+
+      // A lease whose charge was deferred is waiting for its own executor's
+      // durable pause report or attested recovery claim. Silence is not the
+      // absence of that report, so a timer must not fail, orphan or supersede
+      // it: every hold stays until the executor reports, recovers it, or the
+      // owner cancels (which orphans, and /job cleanup clears).
+      if (job.state === 'waiting_for_executor' && this.store.jobs.pendingExpiry(job.id)) continue;
 
       // Recorded after the transaction commits, so bookkeeping can never roll
       // back the expiry -- and counted here because the branch below runs

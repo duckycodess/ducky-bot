@@ -6,9 +6,12 @@ import {
   MAX_OWNER_INPUT_ROUNDS, ORPHAN_FAILURE_REASONS, RESERVATION_TTL_MS,
   SYSTEM_PAUSE_OWNER_TEXT, SYSTEM_RESUME_REASON, leaseDigest, parsePauseOvertakenReason,
   pauseOvertakenReason, systemPauseReason,
+  PAUSE_DELIVERY_CAPABILITY, PAUSE_DELIVERY_PROTOCOL,
   canTransitionWorkPhase,
   isTerminal, newPublicJobId, type ClaimResponse, type ExecutorFailureReason,
   type JobPauseRequest, type JobPauseResponse,
+  type PauseDeliveryResponse, type PauseDisposition, type PauseDispositionRequest,
+  type PauseReportRequest,
   type JobProgress, type JobState, type JobSubmitInput, type JobWorkPhase,
 } from '@ducky/contracts';
 import { DUCKY_AGENT_PREFIX, DUCKY_WORKSPACE_LABEL_PREFIX } from '@ducky/contracts';
@@ -472,7 +475,11 @@ export class JobsService {
    * a concurrent claim by a different job for the same repo makes no change and
    * this transaction aborts.
    */
-  claim(executorId: string, idempotencyKey: string): ClaimResponse | undefined {
+  claim(
+    executorId: string,
+    idempotencyKey: string,
+    capabilities: readonly string[] = [],
+  ): ClaimResponse | undefined {
     // Disabled engineering answers no claim, and answers it before the
     // idempotency cache so a response cached while it was enabled is not
     // replayed after the operator switched it off.
@@ -488,6 +495,34 @@ export class JobsService {
       // per repository; now the claim predicate has to know who is asking.
       const job = this.store.jobs.nextClaimable(this.claimableSlugsFor(executorId));
       if (!job) return undefined;
+
+      // An expiry whose charge was deferred (a lease that negotiated durable
+      // pause delivery) belongs to the executor that held that lease. Silence
+      // is not the absence of a durable intent: that executor may be offline
+      // with an exact pause report on its disk. So the job is claimable ONLY by
+      // that executor, and only by a claim that advertises the capability --
+      // which an executor does solely when it has no unresolved intent of its
+      // own, so the capability on a claim doubles as that attestation. Any other
+      // claim (another executor or host, or the same one without the
+      // attestation) is answered with nothing: it cannot consume the deferred
+      // attempt, exhaust it, or supersede the intent, and every hold stays.
+      //
+      // The attested claim is then the ordinary recovery it always was: it
+      // charges the expiry exactly once, and an exhausted budget ends the job the
+      // way the reconciler ends one and hands out no claim.
+      const negotiated = capabilities.includes(PAUSE_DELIVERY_CAPABILITY);
+      const deferred = this.store.jobs.pendingExpiry(job.id);
+      let chargedAttempts: number | undefined;
+      if (deferred) {
+        if (deferred.executorId !== executorId || !negotiated) return undefined;
+        const charged = deferred.attemptsBefore + 1;
+        if (charged > job.maxAttempts) {
+          this.exhaustDeferredExpiry(job, deferred.id, charged);
+          return undefined;
+        }
+        this.store.jobs.settleExpiry(deferred.id, 'charged', 'charged');
+        chargedAttempts = charged;
+      }
 
       const acquired = this.store.jobs.acquireReservation(
         job.repoSlug,
@@ -520,6 +555,8 @@ export class JobsService {
         // running job with no phase at all.
         workPhase: INITIAL_WORK_PHASE,
         attemptDeadlineAt,
+        deliveryProtocol: negotiated ? 1 : 0,
+        ...(chargedAttempts === undefined ? {} : { attempts: chargedAttempts }),
       });
       this.store.jobs.appendEvent(job.id, 'claimed', 'Picked up by the executor.');
       this.store.auditLog.record({
@@ -551,6 +588,7 @@ export class JobsService {
         leaseId,
         leaseExpiresAt,
         attemptDeadlineAt,
+        ...(negotiated ? { pauseProtocol: PAUSE_DELIVERY_PROTOCOL } : {}),
         payload: {
           repoSlug: repo.slug,
           absolutePath: placement.absolutePath,
@@ -881,71 +919,307 @@ export class JobsService {
         );
       }
 
-      // The quiet release below frees the engineering slot, so the job must
-      // provably be the holder of its own repository: a reservation that is
-      // missing, someone else's, or already an orphan is not something this
-      // report may settle.
-      const held = this.store.jobs.reservation(job.repoSlug);
-      if (!held || held.jobId !== job.id || held.reason === 'orphan_agent') {
-        throw new DuckyError(
-          'invalid_input',
-          'This job does not hold its repository reservation, so it cannot be paused.',
-        );
-      }
+      const outcome = this.settleQuietReport(job, executorId, leaseId, input, 'live');
+      return outcome === 'paused'
+        ? { state: 'needs_owner_input', paused: true }
+        : { state: outcome === 'overtaken_cancelled' ? 'cancelled' : 'failed', paused: false };
+    });
+  }
 
-      const actor = `executor:${executorId}`;
-      const finishedAt = this.now().toISOString();
+  /**
+   * The one place a proved-quiet report becomes a decision. Everything the
+   * caller already established is its own business (which lease, which route);
+   * everything below is the same for a live lease and for the lease-free
+   * reconcile of an expired one, and is decided in the caller's transaction.
+   *
+   * Order, and nothing here can be reordered by what the executor says:
+   *
+   * 1. the job must provably hold its own repository (and, after a lease
+   *    expiry, its own engineering slot): a missing, foreign or orphaned hold
+   *    is not something this report may settle;
+   * 2. an owner cancellation wins, then an elapsed attempt deadline, judged on
+   *    the coordinator's clock against the deadline persisted at claim;
+   * 3. only then is the job paused: no attempt is spent or refunded, no
+   *    owner-input round is consumed, the reservation and workspace are kept.
+   *
+   * A bound report proves the agent quiet, so for the pause and for both
+   * overtaken outcomes it may clear THIS job's unconfirmed stop and nothing
+   * else. It never resurrects or releases a terminal orphan: callers refuse a
+   * job that is not in the state their path requires before they get here.
+   */
+  private settleQuietReport(
+    job: JobRow,
+    executorId: string,
+    leaseId: string,
+    input: Pick<JobPauseRequest, 'cause' | 'workspaceId' | 'agentName' | 'agentStatus'>,
+    mode: 'live' | 'reconcile',
+  ): 'paused' | 'overtaken_cancelled' | 'overtaken_timed_out' {
+    const held = this.store.jobs.reservation(job.repoSlug);
+    if (!held || held.jobId !== job.id || held.reason === 'orphan_agent') {
+      throw new DuckyError(
+        'invalid_input',
+        'This job does not hold its repository reservation, so it cannot be paused.',
+      );
+    }
+    // The quiet release below frees the engineering slot, so the slot must
+    // provably be THIS job's, in the state this path expects: an attempt slot
+    // for a live lease, an unconfirmed stop for the reconcile of an expired one.
+    // A missing slot, another job's, or one in the other state belongs to an
+    // unrelated attempt and is not something this report may settle or release.
+    const slot = this.store.jobs.admission();
+    const expectedSlot = mode === 'live' ? 'active_attempt' : 'unconfirmed_stop';
+    if (slot?.jobId !== job.id || slot.reason !== expectedSlot) {
+      throw new DuckyError(
+        'invalid_input',
+        'This job does not hold the engineering slot this report would release.',
+      );
+    }
 
-      if (job.cancelRequested) {
-        this.store.jobs.transition(job.id, 'cancelled', pauseOvertakenReason('cancelled', leaseId), actor, {
-          finishedAt, leaseId: null, leaseExpiresAt: null,
-        });
-        this.store.jobs.appendEvent(job.id, 'cancelled', 'Executor confirmed the agent quiet after the cancellation request.');
-        this.store.auditLog.record({
-          event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
-          subjectKind: 'job', subjectRef: job.publicId, detail: 'quiet at pause; cancellation won',
-        });
-        this.releaseUnlessOrphan(job);
-        return { state: 'cancelled', paused: false };
-      }
+    const actor = `executor:${executorId}`;
+    const finishedAt = this.now().toISOString();
+    const expiry =
+      mode === 'reconcile' ? this.store.jobs.expiryFor(job.id, leaseDigest(leaseId)) : undefined;
 
-      if (job.attemptDeadlineAt !== null && Date.parse(job.attemptDeadlineAt) <= this.now().getTime()) {
-        this.store.jobs.transition(job.id, 'failed', pauseOvertakenReason('timed_out', leaseId), actor, {
-          finishedAt, leaseId: null, leaseExpiresAt: null,
-          retainedWorkspaceId: input.workspaceId,
-        });
-        this.store.jobs.appendEvent(
-          job.id,
-          'wall_clock_exceeded',
-          'The attempt budget ran out before the pause landed; the agent was observed quiet.',
-        );
-        this.store.auditLog.record({
-          event: 'job.failed', actorKind: 'executor', actorRef: executorId,
-          subjectKind: 'job', subjectRef: job.publicId, outcome: 'failed',
-          detail: 'wall_clock_exceeded; quiet at pause',
-        });
-        this.releaseUnlessOrphan(job);
-        return { state: 'failed', paused: false };
-      }
+    if (job.cancelRequested) {
+      if (expiry) this.store.jobs.settleExpiry(expiry.id, 'overtaken_cancelled', 'not_charged');
+      this.store.jobs.confirmQuiescence(job.id);
+      this.store.jobs.transition(job.id, 'cancelled', pauseOvertakenReason('cancelled', leaseId), actor, {
+        finishedAt, leaseId: null, leaseExpiresAt: null,
+      });
+      this.store.jobs.appendEvent(job.id, 'cancelled', 'Executor confirmed the agent quiet after the cancellation request.');
+      this.store.auditLog.record({
+        event: 'job.cancelled', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, detail: 'quiet at pause; cancellation won',
+      });
+      this.releaseUnlessOrphan(job);
+      return 'overtaken_cancelled';
+    }
 
-      this.store.jobs.transition(job.id, 'needs_owner_input', reason, actor, {
-        leaseId: null,
-        leaseExpiresAt: null,
-        recoveryRequired: false,
+    if (job.attemptDeadlineAt !== null && Date.parse(job.attemptDeadlineAt) <= this.now().getTime()) {
+      if (expiry) this.store.jobs.settleExpiry(expiry.id, 'overtaken_timed_out', 'not_charged');
+      this.store.jobs.confirmQuiescence(job.id);
+      this.store.jobs.transition(job.id, 'failed', pauseOvertakenReason('timed_out', leaseId), actor, {
+        finishedAt, leaseId: null, leaseExpiresAt: null,
+        retainedWorkspaceId: input.workspaceId,
       });
       this.store.jobs.appendEvent(
         job.id,
-        'system_paused',
-        `Paused for the owner (${input.cause.replace(/_/g, ' ')}); agent ${input.agentName} observed ${input.agentStatus}. ` +
-          'No attempt was spent and the workspace was kept.',
+        'wall_clock_exceeded',
+        'The attempt budget ran out before the pause landed; the agent was observed quiet.',
       );
       this.store.auditLog.record({
-        event: 'job.system_paused', actorKind: 'executor', actorRef: executorId,
-        subjectKind: 'job', subjectRef: job.publicId,
-        detail: `${input.cause}; lease ${leaseDigest(leaseId)}`,
+        event: 'job.failed', actorKind: 'executor', actorRef: executorId,
+        subjectKind: 'job', subjectRef: job.publicId, outcome: 'failed',
+        detail: 'wall_clock_exceeded; quiet at pause',
       });
-      return { state: 'needs_owner_input', paused: true };
+      this.releaseUnlessOrphan(job);
+      return 'overtaken_timed_out';
+    }
+
+    if (expiry) this.store.jobs.settleExpiry(expiry.id, 'paused', 'not_charged');
+    this.store.jobs.transition(job.id, 'needs_owner_input', systemPauseReason(input.cause, leaseId), actor, {
+      leaseId: null,
+      leaseExpiresAt: null,
+      recoveryRequired: false,
     });
+    this.store.jobs.appendEvent(
+      job.id,
+      'system_paused',
+      `Paused for the owner (${input.cause.replace(/_/g, ' ')}); agent ${input.agentName} observed ${input.agentStatus}. ` +
+        (mode === 'reconcile'
+          ? "The executor's durable report reconciled after its lease expired. "
+          : '') +
+        'No attempt was spent and the workspace was kept.',
+    );
+    this.store.auditLog.record({
+      event: 'job.system_paused', actorKind: 'executor', actorRef: executorId,
+      subjectKind: 'job', subjectRef: job.publicId,
+      detail: `${input.cause}; lease ${leaseDigest(leaseId)}${mode === 'reconcile' ? '; reconciled' : ''}`,
+    });
+    return 'paused';
+  }
+
+  /**
+   * Delivery of a durable pause report (protocol 1).
+   *
+   * Decided in ONE transaction, from the report's full identity -- executor,
+   * job, original lease, workspace, agent, cause, report id:
+   *
+   * 1. a committed report (a receipt) answers the same thing again and mutates
+   *    nothing, whatever has happened to the job since: a lost response, an
+   *    owner resume, a coordinator restart;
+   * 2. the job's CURRENT lease: the live path, as the first route;
+   * 3. no lease, `waiting_for_executor`, and the open deferred expiry of exactly
+   *    that lease for that executor: the lease-free reconcile. No new lease is
+   *    created, so no new expiry can be charged;
+   * 4. an expiry of that lease that is already settled, or a job that has moved
+   *    on: `superseded`, answered and changed nowhere;
+   * 5. anything else is a refusal that mutates nothing and that the executor
+   *    must NOT treat as permission to forget the report.
+   */
+  deliverPause(executorId: string, jobId: string, req: PauseReportRequest): PauseDeliveryResponse {
+    return withTransaction(this.store.db, () => {
+      const job = this.store.jobs.byId(jobId);
+      if (!job) throw new DuckyError('not_found', 'Unknown job.');
+      const digest = leaseDigest(req.leaseId);
+
+      const receipt = this.store.jobs.receiptById(req.reportId);
+      if (receipt) {
+        this.assertReceiptIdentity(receipt, job.id, executorId, req, digest);
+        return this.deliveryResponse(job, executorId, req, digest, receipt.disposition);
+      }
+
+      const recorded = this.store.herdrWorkspaces.openForJob(job.id);
+      const proofMatches =
+        recorded !== undefined &&
+        recorded.workspaceId === req.workspaceId &&
+        recorded.agentName === req.agentName;
+      const expiry = this.store.jobs.expiryFor(job.id, digest);
+      const ownExpiry = expiry !== undefined && expiry.executorId === executorId;
+
+      if (job.executorId === executorId && job.leaseId !== null && job.leaseId === req.leaseId) {
+        if (!proofMatches) {
+          throw new DuckyError('invalid_input', 'That workspace and agent are not the ones recorded for this job.');
+        }
+        const outcome = this.settleQuietReport(job, executorId, req.leaseId, req, 'live');
+        return this.commitReceipt(job, executorId, req, digest, outcome);
+      }
+
+      if (
+        job.executorId === executorId && job.leaseId === null &&
+        job.state === 'waiting_for_executor' && ownExpiry && expiry.disposition === 'pending'
+      ) {
+        if (
+          !proofMatches ||
+          expiry.workspaceId !== req.workspaceId ||
+          expiry.agentName !== req.agentName ||
+          expiry.chargeState !== 'deferred'
+        ) {
+          throw new DuckyError('invalid_input', 'That workspace and agent are not the ones recorded for this attempt.');
+        }
+        const outcome = this.settleQuietReport(job, executorId, req.leaseId, req, 'reconcile');
+        return this.commitReceipt(job, executorId, req, digest, outcome);
+      }
+
+      if (ownExpiry) return this.deliveryResponse(job, executorId, req, digest, 'superseded');
+      throw new DuckyError('lease_mismatch', 'That report does not match any attempt of this job.');
+    });
+  }
+
+  /**
+   * What became of a report, read-only. `pending` means "send it (or prove it
+   * again and send it)"; the terminal answers mean the executor may forget it.
+   */
+  pauseDisposition(
+    executorId: string,
+    jobId: string,
+    req: PauseDispositionRequest,
+  ): PauseDeliveryResponse {
+    const job = this.store.jobs.byId(jobId);
+    if (!job) throw new DuckyError('not_found', 'Unknown job.');
+    const respond = (d: PauseDisposition): PauseDeliveryResponse =>
+      this.deliveryResponse(job, executorId, req, req.leaseDigest, d);
+
+    const receipt = this.store.jobs.receiptById(req.reportId);
+    if (receipt) {
+      this.assertReceiptIdentity(receipt, job.id, executorId, req, req.leaseDigest);
+      return respond(receipt.disposition);
+    }
+    if (job.executorId === executorId && job.leaseId !== null && leaseDigest(job.leaseId) === req.leaseDigest) {
+      return respond('pending');
+    }
+    const expiry = this.store.jobs.expiryFor(job.id, req.leaseDigest);
+    if (expiry && expiry.executorId === executorId) {
+      return respond(
+        expiry.disposition === 'pending' && job.state === 'waiting_for_executor' && job.leaseId === null
+          ? 'pending'
+          : 'superseded',
+      );
+    }
+    throw new DuckyError('lease_mismatch', 'That report does not match any attempt of this job.');
+  }
+
+  private assertReceiptIdentity(
+    receipt: NonNullable<ReturnType<Store['jobs']['receiptById']>>,
+    jobId: string,
+    executorId: string,
+    req: { workspaceId: string; agentName: string; cause: string },
+    digest: string,
+  ): void {
+    if (
+      receipt.jobId !== jobId || receipt.executorId !== executorId || receipt.leaseDigest !== digest ||
+      receipt.workspaceId !== req.workspaceId || receipt.agentName !== req.agentName ||
+      receipt.cause !== req.cause
+    ) {
+      throw new DuckyError('invalid_input', 'That report id was already used for a different report.');
+    }
+  }
+
+  private commitReceipt(
+    job: JobRow,
+    executorId: string,
+    req: PauseReportRequest,
+    digest: string,
+    outcome: 'paused' | 'overtaken_cancelled' | 'overtaken_timed_out',
+  ): PauseDeliveryResponse {
+    this.store.jobs.insertReceipt({
+      reportId: req.reportId, jobId: job.id, executorId, leaseDigest: digest,
+      workspaceId: req.workspaceId, agentName: req.agentName, cause: req.cause, disposition: outcome,
+    });
+    const after = this.store.jobs.byId(job.id) ?? job;
+    return this.deliveryResponse(after, executorId, req, digest, outcome);
+  }
+
+  private deliveryResponse(
+    job: JobRow,
+    executorId: string,
+    req: { reportId: string; workspaceId: string; agentName: string; cause: PauseReportRequest['cause'] },
+    digest: string,
+    disposition: PauseDisposition,
+  ): PauseDeliveryResponse {
+    return {
+      protocol: PAUSE_DELIVERY_PROTOCOL,
+      reportId: req.reportId,
+      workspaceId: req.workspaceId,
+      agentName: req.agentName,
+      cause: req.cause,
+      jobId: job.id,
+      executorId,
+      leaseDigest: digest,
+      disposition,
+      state: job.state,
+    };
+  }
+
+  /**
+   * The ordinary exhaustion of a deferred expiry, at the claim that would have
+   * been its recovery: the budget is spent, so the job ends and -- because a
+   * recorded workspace may still hold a live agent -- its repository and slot
+   * stay held for the owner, exactly as the ordinary expiry path leaves them.
+   */
+  private exhaustDeferredExpiry(job: JobRow, expiryId: number, charged: number): void {
+    this.store.jobs.settleExpiry(expiryId, 'exhausted', 'charged');
+    this.store.jobs.transition(job.id, 'failed', 'lease_expired_exhausted', 'system:coordinator', {
+      attempts: charged,
+      finishedAt: this.now().toISOString(),
+      leaseId: null,
+      leaseExpiresAt: null,
+    });
+    this.store.jobs.appendEvent(
+      job.id,
+      'lease_expired_exhausted',
+      'The executor stopped reporting and no attempts remain. Workspace retained.',
+    );
+    if (this.store.herdrWorkspaces.openForJob(job.id)) {
+      this.store.jobs.markReservationOrphan(job.repoSlug);
+      this.store.jobs.appendEvent(
+        job.id,
+        'reservation_orphaned',
+        `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+      );
+    } else {
+      this.releaseUnlessOrphan(job);
+    }
   }
 
   /**

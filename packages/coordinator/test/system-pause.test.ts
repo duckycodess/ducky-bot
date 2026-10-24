@@ -446,12 +446,13 @@ describe('superseded owner-input notifications', () => {
 });
 
 /**
- * HONEST BOUNDARY. A pause the executor cannot deliver is not a pause. The job
- * is still running as far as the coordinator knows, so the reconciler treats the
- * silence as a lease expiry -- which SPENDS an attempt, keeps the slot as an
- * unconfirmed stop, and can exhaust the budget. These pin that behaviour so no
- * wording can claim otherwise. Retry-preserving delivery under an outage or
- * version skew is a required, unimplemented follow-up.
+ * HONEST BOUNDARY, ORDINARY PATH. These claims do not negotiate durable pause
+ * delivery (no `pause-delivery-v1` capability), which is what an older executor
+ * is. For such a peer a pause that is not delivered before its lease expires is
+ * silence, so the reconciler applies ordinary lease expiry: it SPENDS an attempt,
+ * keeps the slot as an unconfirmed stop, and can exhaust the budget. These pin
+ * that behaviour so no wording can claim otherwise. A negotiated lease is
+ * deferred instead: see `pause-delivery.test.ts`.
  */
 describe('a pause that was never delivered', () => {
   const at = (h: H, ms: number) =>

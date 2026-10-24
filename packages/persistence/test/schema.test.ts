@@ -491,3 +491,74 @@ describe('migration 21: briefing delivery targets', () => {
 function fresh0() {
   return openDatabase({ location: ':memory:' });
 }
+
+describe('migration 29: pause delivery', () => {
+  const seed = (db: ReturnType<typeof fresh>) => {
+    const store = createStore(db);
+    store.repos.upsert({
+      slug: 'one', localPath: '/tmp/one', allowJobs: true, defaultBranch: 'main',
+      githubOwner: null, githubRepo: null, allowWorktree: true, allowBootstrap: false,
+      bootstrapAllowedEntries: ['.git'], enabled: true,
+    });
+    store.jobs.create({
+      id: 'a', publicId: 'pa', discordUserId: '1', repoSlug: 'one', task: 't', context: null,
+      bootstrap: false, maxAttempts: 1, maxOwnerInputRounds: 3, state: 'queued',
+    });
+    return store;
+  };
+  const expiry = {
+    jobId: 'a', leaseDigest: '0123456789abcdef', executorId: 'exec-a', workspaceId: 'w',
+    agentName: 'ducky-pi-x', attemptsBefore: 0, deliveryProtocol: 1 as const,
+    chargeState: 'deferred' as const, disposition: 'pending' as const,
+  };
+
+  it('defaults every existing job to the ordinary path and constrains the column', () => {
+    const db = fresh();
+    const store = seed(db);
+    expect(store.jobs.byId('a')?.deliveryProtocol).toBe(0);
+    expect(() => db.prepare('UPDATE jobs SET delivery_protocol = 2').run()).toThrow();
+    db.close();
+  });
+
+  it('keeps one structured row per expired lease, and settles it exactly once', () => {
+    const db = fresh();
+    const store = seed(db);
+    store.jobs.recordLeaseExpiry(expiry);
+    // The same lease cannot be recorded twice (a repeated expiry pass is a no-op).
+    store.jobs.recordLeaseExpiry({ ...expiry, attemptsBefore: 5 });
+    expect(store.jobs.expiriesFor('a')).toHaveLength(1);
+    expect(store.jobs.pendingExpiry('a')).toMatchObject({ attemptsBefore: 0, chargeState: 'deferred' });
+
+    const id = store.jobs.pendingExpiry('a')!.id;
+    expect(store.jobs.settleExpiry(id, 'paused', 'not_charged')).toBe(true);
+    expect(store.jobs.settleExpiry(id, 'charged', 'charged')).toBe(false);
+    expect(store.jobs.expiryFor('a', expiry.leaseDigest)).toMatchObject({
+      disposition: 'paused', chargeState: 'not_charged',
+    });
+    expect(store.jobs.pendingExpiry('a')).toBeUndefined();
+
+    expect(() =>
+      db.prepare(`UPDATE job_lease_expiries SET disposition = 'maybe'`).run(),
+    ).toThrow();
+    expect(() =>
+      db.prepare(`UPDATE job_lease_expiries SET charge_state = 'maybe'`).run(),
+    ).toThrow();
+    db.close();
+  });
+
+  it('keys a receipt on its report id, so a report can be committed once', () => {
+    const db = fresh();
+    const store = seed(db);
+    const row = {
+      reportId: '11111111-1111-4111-8111-111111111111', jobId: 'a', executorId: 'exec-a',
+      leaseDigest: '0123456789abcdef', workspaceId: 'w', agentName: 'ducky-pi-x',
+      cause: 'agent_idle_no_result', disposition: 'paused' as const,
+    };
+    store.jobs.insertReceipt(row);
+    expect(store.jobs.receiptById(row.reportId)).toMatchObject(row);
+    expect(() => store.jobs.insertReceipt(row)).toThrow();
+    expect(() => store.jobs.insertReceipt({ ...row, reportId: 'x', jobId: 'missing' })).toThrow();
+    expect(() => store.jobs.insertReceipt({ ...row, reportId: 'y', disposition: 'superseded' as never })).toThrow();
+    db.close();
+  });
+});

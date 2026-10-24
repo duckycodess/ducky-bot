@@ -7,6 +7,7 @@ export * from './approval.js';
 export * from './job-result.js';
 export * from './executor-api.js';
 export * from './system-pause.js';
+export * from './pause-delivery.js';
 export * from './discord.js';
 export * from './owner-only-surface.js';
 export * from './github.js';

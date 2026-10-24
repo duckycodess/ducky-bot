@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { checkCommandAllowed } from '@ducky/contracts';
 import { FORBIDDEN_GH_VERBS, GH_OPERATIONS, GhCliReader } from '../src/github/gh-cli.js';
 
 describe('gh adapter', () => {
@@ -38,5 +39,27 @@ describe('gh adapter', () => {
     await expect(reader.repoView({ owner: 'o', repo: '../../etc' })).rejects.toThrow(
       /not configured/,
     );
+  });
+});
+
+describe('the pull request list the watch reads for openings', () => {
+  const argv = GH_OPERATIONS.prListAll({ owner: 'acme', repo: 'demo' });
+
+  it('is exactly this argv: the one added selector is createdAt, and no verb, flag or endpoint came with it', () => {
+    expect(argv).toEqual([
+      'pr', 'list', '-R', 'acme/demo', '--state', 'all', '--limit', '20',
+      '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,reviewDecision,createdAt',
+    ]);
+    // Flags are exactly the four it always had.
+    expect(argv.filter((a) => a.startsWith('-'))).toEqual(['-R', '--state', '--limit', '--json']);
+    expect(argv).not.toContain('api');
+  });
+
+  it('is allowed by the central gate as the read it is, and the same argv with a forbidden flag or a write verb is not', () => {
+    expect(checkCommandAllowed('gh', argv)).toBeUndefined();
+    expect(checkCommandAllowed('gh', [...argv, '--force'])).toBeDefined();
+    expect(checkCommandAllowed('gh', ['pr', 'merge', '7', '-R', 'acme/demo'])).toBeDefined();
+    expect(checkCommandAllowed('gh', ['api', '--method', 'GET', 'repos/acme/demo/pulls'])).toBeDefined();
+    expect(checkCommandAllowed('gh', ['api', '--method', 'POST', 'repos/acme/demo/pulls'])).toBeDefined();
   });
 });

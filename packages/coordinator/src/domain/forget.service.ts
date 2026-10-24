@@ -1,6 +1,6 @@
 import {
   AUDIT_OWNER_REF, FORGET_REFUSAL_MESSAGE, FORGET_TARGET_LABEL,
-  DuckyError, type ForgetEntityTarget, type ForgetRefusal,
+  DuckyError, WEEKDAY_NAMES, type ForgetEntityTarget, type ForgetRefusal,
 } from '@ducky/contracts';
 import type { ConversationProvider } from '@ducky/adapters';
 import { withTransaction, type Store } from '@ducky/persistence';
@@ -343,12 +343,35 @@ export class ForgetService {
         return { found: true, target, id: row.id, describes: `${row.status} · ${row.content}` };
       }
       case 'schedule': {
-        const ids = store.retention.scheduleIdsByPrefix(owner, id);
-        if (ids.length === 0) return unknown(target, id);
-        if (ids.length > 1) return ambiguous(target, id);
-        const row = store.schedules.byIdForOwner(owner, ids[0]!);
-        if (!row) return unknown(target, id);
-        return { found: true, target, id: row.id, describes: `${row.startsAt} · ${row.title}` };
+        // One handle reaches a confirmed row, a weekly rule or an exception. A
+        // prefix that fits two of them, even across kinds, is ambiguous and is
+        // refused: guessing which one the owner meant is the one thing a
+        // deletion path must never do.
+        const oneOff = store.retention.scheduleIdsByPrefix(owner, id);
+        const recurring = store.scheduleRules.idsByPrefix(owner, id);
+        if (oneOff.length + recurring.length === 0) return unknown(target, id);
+        if (oneOff.length + recurring.length > 1) return ambiguous(target, id);
+        if (oneOff.length === 1) {
+          const row = store.schedules.byIdForOwner(owner, oneOff[0]!);
+          if (!row) return unknown(target, id);
+          return { found: true, target, id: row.id, describes: `${row.startsAt} · ${row.title}` };
+        }
+        const hit = recurring[0]!;
+        if (hit.kind === 'rule') {
+          const rule = store.scheduleRules.ruleByIdForOwner(owner, hit.id);
+          if (!rule) return unknown(target, id);
+          return {
+            found: true, target, id: rule.id,
+            describes: `every ${WEEKDAY_NAMES[rule.weekday]} ${rule.startTime} · ${rule.label}` +
+              (rule.active ? '' : ' (replaced batch)'),
+          };
+        }
+        const ex = store.scheduleRules.exceptionByIdForOwner(owner, hit.id);
+        if (!ex) return unknown(target, id);
+        return {
+          found: true, target, id: ex.id,
+          describes: `${ex.date} · ${ex.kind} · ${ex.courseCode ?? ex.label ?? 'all classes'}`,
+        };
       }
     }
   }
@@ -391,7 +414,10 @@ export class ForgetService {
 
     const owner = actor.discordUserId;
     const store = this.deps.store;
-    const rows = withTransaction(store.db, () => {
+    // The cause rides along so an imported record's tombstone says WHY it went, in one
+    // word, and nothing else: a deletion record that quoted what it deleted would
+    // defeat the deletion.
+    const rows = store.withDeletionCause('forget', () => withTransaction(store.db, () => {
       switch (target) {
         case 'task': {
           // The task AND the notifications it owns. Counted, so the owner is
@@ -406,9 +432,16 @@ export class ForgetService {
         case 'capture':
           return store.retention.deleteCaptureById(owner, preview.id);
         case 'schedule':
-          return store.retention.deleteScheduleById(owner, preview.id);
+          // The id is unique across the three tables, so exactly one of these
+          // removes a row. Each is owner-scoped in its own WHERE clause, and a
+          // trigger leaves an imported record's identity as a tombstone.
+          return (
+            store.retention.deleteScheduleById(owner, preview.id) +
+            store.scheduleRules.deleteRule(owner, preview.id) +
+            store.scheduleRules.deleteException(owner, preview.id)
+          );
       }
-    });
+    }));
 
     if (rows === 0) {
       // It was there a moment ago and is not now. Report the truth rather than

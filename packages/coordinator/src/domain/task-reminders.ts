@@ -22,13 +22,30 @@ import { isoOf, type OwnerClock } from './owner-clock.js';
  * passed is noise at best and wrong at worst.
  */
 export function planTaskReminderFires(
-  task: Pick<TaskRow, 'dueAt' | 'dueAllDay'>,
+  task: Pick<TaskRow, 'dueAt' | 'dueAllDay' | 'reminderPolicy'>,
   nowMs: number,
   timeZone: string,
+  /** The owner's default offset list, in minutes. Used only by a task whose policy defers to it. */
+  defaultOffsetsMinutes?: readonly number[],
 ): number[] {
   if (!task.dueAt) return [];
   const dueMs = Date.parse(task.dueAt);
   if (Number.isNaN(dueMs)) return [];
+
+  const policy = task.reminderPolicy ?? null;
+  if (policy && !policy.enabled) return [];
+
+  // A task that arrived with a policy and a TIMED deadline reminds by its
+  // offsets, and a deadline that is still ahead with no offset left to fire
+  // still gets ONE reminder at the deadline, so it cannot pass in silence. A
+  // native task has no policy and keeps ADR 0026's rules exactly.
+  if (policy && !task.dueAllDay) {
+    const offsets = policy.offsetsMinutes ?? defaultOffsetsMinutes ?? NATIVE_OFFSETS_MINUTES;
+    const fires = [...new Set(offsets.map((m) => dueMs - m * 60_000).filter((ms) => ms > nowMs))].sort(
+      (a, b) => a - b,
+    );
+    return fires.length === 0 && dueMs > nowMs ? [dueMs] : fires;
+  }
 
   const candidates = task.dueAllDay
     ? [allDayFireMs(dueMs, timeZone)]
@@ -36,6 +53,9 @@ export function planTaskReminderFires(
 
   return [...new Set(candidates.filter((ms) => ms > nowMs))].sort((a, b) => a - b);
 }
+
+/** The native 24 h and 1 h offsets, in minutes, for a policy that defers to the default. */
+const NATIVE_OFFSETS_MINUTES: readonly number[] = TASK_REMINDER_OFFSETS_MS.map((ms) => ms / 60_000);
 
 /** 08:00 on the civil day a date-only deadline names, in the owner's zone. */
 function allDayFireMs(dueMs: number, timeZone: string): number {
@@ -55,6 +75,11 @@ export interface TaskReminderSync {
 export interface TaskReminderLinkerDeps {
   readonly store: Store;
   readonly clock: OwnerClock;
+  /**
+   * The owner's default offset list, when imported preferences are in force.
+   * Read per call, so a preference change applies to the next resync.
+   */
+  readonly defaultOffsetsMinutes?: (() => readonly number[] | undefined) | undefined;
 }
 
 /**
@@ -90,7 +115,9 @@ export class TaskReminderLinker {
 
     if (task.status !== 'open') return { scheduled: 0, cancelled };
 
-    const fires = planTaskReminderFires(task, nowMs, this.deps.clock.timeZone);
+    const fires = planTaskReminderFires(
+      task, nowMs, this.deps.clock.timeZone, this.deps.defaultOffsetsMinutes?.(),
+    );
     if (fires.length === 0) return { scheduled: 0, cancelled };
 
     this.assertCapacity(ownerId, fires.length);

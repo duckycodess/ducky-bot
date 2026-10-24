@@ -44,7 +44,8 @@ export class CapturesService {
   delete(actor: ActorContext, id: string): void {
     this.authz.requireOwner(actor);
     const row = this.owned(actor, id);
-    this.store.captures.delete(row.id);
+    // A capture the owner deleted by hand, which a bridge must not bring back.
+    this.store.withDeletionCause('owner_delete', () => this.store.captures.delete(row.id));
   }
 
   private owned(actor: ActorContext, id: string): CaptureRow {

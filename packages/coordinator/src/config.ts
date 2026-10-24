@@ -16,7 +16,7 @@ import {
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   GITHUB_FEED_INTERVAL_DEFAULT_MINUTES, GITHUB_FEED_INTERVAL_MAX_MINUTES,
   GITHUB_FEED_INTERVAL_MIN_MINUTES, GITHUB_FEED_MAX_SELECTED, canonicalRepoKey, parseRepoKey,
-  blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
+  GH_OWNER_RE, blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -258,8 +258,24 @@ export const EnvSchema = z.object({
    * typo fails at boot rather than at 07:00.
    */
   DUCKY_BRIEFING_ENABLED: bool(false),
-  DUCKY_BRIEFING_MORNING_AT: z.string().max(5).default('07:30'),
-  DUCKY_BRIEFING_EVENING_AT: z.string().max(5).default('20:30'),
+  // No default here: whether the operator SET a time is information. An imported
+  // preference may replace the documented default, but never an explicit value.
+  DUCKY_BRIEFING_MORNING_AT: z.string().max(5).optional(),
+  DUCKY_BRIEFING_EVENING_AT: z.string().max(5).optional(),
+  /**
+   * Whether this profile applies the owner's IMPORTED preferences (briefing
+   * slot enablement and times, weekends, lookahead, captures, weather). Off by
+   * default. Preferences are presentation and scheduling only: they never
+   * decide who may do anything, and frozen configuration always wins.
+   */
+  DUCKY_IMPORTED_PREFERENCES: bool(false),
+  /**
+   * Where the briefing's weather comes from. All three or none: a forecast for
+   * somewhere nobody named would be worse than no forecast. Never stored data.
+   */
+  DUCKY_WEATHER_LATITUDE: z.coerce.number().min(-90).max(90).optional(),
+  DUCKY_WEATHER_LONGITUDE: z.coerce.number().min(-180).max(180).optional(),
+  DUCKY_WEATHER_LOCATION: z.string().min(1).max(80).optional(),
   /**
    * Where a proactive briefing goes. `dm` is the default and is what every
    * existing instance already does, so an upgrade changes nothing.
@@ -283,6 +299,32 @@ export const EnvSchema = z.object({
    * person's review queue as the owner's.
    */
   DUCKY_GITHUB_FEED_ENABLED: bool(false),
+  /**
+   * Turns on the real typed reader behind notification-only watch targets (ADR
+   * 0031): the exact `gh api --method GET` shapes the owner approved for issue 9,
+   * through the central policy and `runArgv`. OFF by default, so nothing changes
+   * for an operator who did nothing: with it off the shipped reader observes
+   * nothing and an import that carries watch targets is refused. It grants no
+   * job, no model access and no repository permission, and enabling it is an
+   * operator decision that waits for runtime eligibility (issue 8).
+   */
+  DUCKY_ASSISTANT_WATCH_READER_ENABLED: bool(false),
+  /**
+   * Repository DISCOVERY for notification-only targets: the authenticated account's
+   * repositories (owner, collaborator, organization member), five pages of a
+   * hundred at most, every six hours. Off by default and refused unless the reader
+   * is enabled and the account that IS the owner is named: the account cannot be
+   * proven through an approved read, so it is stated here, as with review requests.
+   * `RELATIONSHIPS` limits what is ever stored; anything outside never reaches
+   * the database. Forks the account owns and archived repositories are not polled
+   * unless included, as in the source. Discovered targets count toward the 1,000
+   * ceiling; overflow is reported, never truncated.
+   */
+  DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED: bool(false),
+  DUCKY_ASSISTANT_WATCH_ACCOUNT: z.string().max(100).optional(),
+  DUCKY_ASSISTANT_WATCH_RELATIONSHIPS: z.string().max(100).default('owner,organization,collaborator'),
+  DUCKY_ASSISTANT_WATCH_INCLUDE_FORKS: bool(false),
+  DUCKY_ASSISTANT_WATCH_INCLUDE_ARCHIVED: bool(false),
   DUCKY_GITHUB_FEED_INTERVAL_MINUTES: z.coerce.number().int()
     .min(GITHUB_FEED_INTERVAL_MIN_MINUTES)
     .max(GITHUB_FEED_INTERVAL_MAX_MINUTES)
@@ -754,10 +796,16 @@ export function resolveThreadParentChannelIds(env: Env): readonly string[] {
  * Both times are checked here, at startup, for the same reason the timezone is:
  * a briefing that fired at an hour nobody configured would be worse than none.
  */
+export const BRIEFING_DEFAULT_MORNING_AT = '07:30';
+export const BRIEFING_DEFAULT_EVENING_AT = '20:30';
+
 export const resolveBriefingSchedule = (env: Env): {
   enabled: boolean;
   morningAt: string;
   eveningAt: string;
+  /** True when the operator set the time, so an imported preference must not replace it. */
+  morningExplicit: boolean;
+  eveningExplicit: boolean;
   delivery: BriefingDelivery;
   channelId?: string | undefined;
 } => {
@@ -779,10 +827,44 @@ export const resolveBriefingSchedule = (env: Env): {
 
   return {
     enabled: env.DUCKY_BRIEFING_ENABLED,
-    morningAt: assertValidSlotTime(env.DUCKY_BRIEFING_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT'),
-    eveningAt: assertValidSlotTime(env.DUCKY_BRIEFING_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT'),
+    morningAt: assertValidSlotTime(
+      env.DUCKY_BRIEFING_MORNING_AT ?? BRIEFING_DEFAULT_MORNING_AT, 'DUCKY_BRIEFING_MORNING_AT',
+    ),
+    eveningAt: assertValidSlotTime(
+      env.DUCKY_BRIEFING_EVENING_AT ?? BRIEFING_DEFAULT_EVENING_AT, 'DUCKY_BRIEFING_EVENING_AT',
+    ),
+    morningExplicit: env.DUCKY_BRIEFING_MORNING_AT !== undefined,
+    eveningExplicit: env.DUCKY_BRIEFING_EVENING_AT !== undefined,
     delivery,
     ...(channelId === undefined ? {} : { channelId }),
+  };
+};
+
+/** Whether this profile applies the owner's imported preferences. Off by default. */
+export const resolveImportedPreferences = (env: Env): boolean => env.DUCKY_IMPORTED_PREFERENCES;
+
+/**
+ * The weather location, or undefined when none is configured.
+ *
+ * All three variables or none: a forecast for coordinates nobody named, or with
+ * a name that does not belong to them, would be wrong with confidence.
+ */
+export const resolveWeather = (
+  env: Env,
+): { latitude: number; longitude: number; location: string } | undefined => {
+  const parts = [env.DUCKY_WEATHER_LATITUDE, env.DUCKY_WEATHER_LONGITUDE, env.DUCKY_WEATHER_LOCATION];
+  const set = parts.filter((p) => p !== undefined).length;
+  if (set === 0) return undefined;
+  if (set !== 3) {
+    throw new DuckyError(
+      'invalid_input',
+      'DUCKY_WEATHER_LATITUDE, DUCKY_WEATHER_LONGITUDE and DUCKY_WEATHER_LOCATION go together: set all three or none.',
+    );
+  }
+  return {
+    latitude: env.DUCKY_WEATHER_LATITUDE!,
+    longitude: env.DUCKY_WEATHER_LONGITUDE!,
+    location: env.DUCKY_WEATHER_LOCATION!,
   };
 };
 
@@ -948,6 +1030,51 @@ export const resolveSkillBridge = (env: Env): {
  * reader enforces, so a typo fails at startup instead of becoming a feed that
  * quietly never observes anything.
  */
+export interface ResolvedWatchConfig {
+  readonly readerEnabled: boolean;
+  readonly account: string | null;
+  readonly discovery: boolean;
+  readonly relationships: ReadonlySet<'owner' | 'organization' | 'collaborator'>;
+  readonly includeForks: boolean;
+  readonly includeArchived: boolean;
+}
+
+/**
+ * The frozen configuration of notification-only watching. Inconsistent settings
+ * are refused rather than interpreted: discovery without the reader or without a
+ * named account would otherwise quietly never run.
+ */
+export function resolveWatchConfig(env: Env): ResolvedWatchConfig {
+  const account = env.DUCKY_ASSISTANT_WATCH_ACCOUNT?.trim() || null;
+  if (account !== null && !GH_OWNER_RE.test(account)) {
+    throw new DuckyError('invalid_input', 'DUCKY_ASSISTANT_WATCH_ACCOUNT is not a GitHub login.');
+  }
+  const relationships = new Set<'owner' | 'organization' | 'collaborator'>();
+  for (const part of env.DUCKY_ASSISTANT_WATCH_RELATIONSHIPS.split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (part !== 'owner' && part !== 'organization' && part !== 'collaborator') {
+      throw new DuckyError('invalid_input', 'DUCKY_ASSISTANT_WATCH_RELATIONSHIPS has an unknown value.');
+    }
+    relationships.add(part);
+  }
+  if (env.DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED) {
+    if (!env.DUCKY_ASSISTANT_WATCH_READER_ENABLED) {
+      throw new DuckyError('invalid_input', 'Discovery needs DUCKY_ASSISTANT_WATCH_READER_ENABLED.');
+    }
+    if (account === null) {
+      throw new DuckyError('invalid_input', 'Discovery needs DUCKY_ASSISTANT_WATCH_ACCOUNT: the login that is the owner.');
+    }
+    if (relationships.size === 0) {
+      throw new DuckyError('invalid_input', 'Discovery needs at least one allowed relationship.');
+    }
+  }
+  return {
+    readerEnabled: env.DUCKY_ASSISTANT_WATCH_READER_ENABLED, account,
+    discovery: env.DUCKY_ASSISTANT_WATCH_DISCOVERY_ENABLED, relationships,
+    includeForks: env.DUCKY_ASSISTANT_WATCH_INCLUDE_FORKS,
+    includeArchived: env.DUCKY_ASSISTANT_WATCH_INCLUDE_ARCHIVED,
+  };
+}
+
 export function resolveGitHubFeed(env: Env): {
   enabled: boolean;
   intervalMinutes: number;

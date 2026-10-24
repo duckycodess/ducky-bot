@@ -2,7 +2,7 @@ import type {
   AgentCardStatus, ApprovalExecutionState, ApprovalState, AuditActorKind, AuditEvent, AuditOutcome,
   AuditSubjectKind, CaptureState, ConversationRole, DependencyCheckStatus, DependencyState,
   DependencyType, GitHubFeedKind, GitHubFeedTarget, GitHubWatchState, JobState, JobWorkPhase, RecurrenceKind, ReminderState,
-  QueueState, SkillCommand, TaskPriority, TaskState,
+  QueueState, SkillCommand, TaskCategory, TaskPriority, TaskState,
 } from '@ducky/contracts';
 
 export interface RepoRow {
@@ -183,6 +183,19 @@ export interface GitHubWatchRow {
   createdAt: string;
   updatedAt: string;
   cancelledAt: string | null;
+  /**
+   * The repository (canonical `owner/repo`) this watch actually queried, bound at creation or at its
+   * first observation after the identity was recorded. NULL for a watch that predates it: its past is
+   * unknown and is never filled in from today's allowlist mapping.
+   */
+  repoKey: string | null;
+  /** Set when the SYSTEM cancelled the watch because its slug now names another repository. */
+  cancelReason: 'identity_mismatch' | null;
+  /**
+   * The host instant BEFORE the last successful, complete pull request read STARTED. NULL when no such read
+   * is known (a legacy or first observation, an unbound identity, after a failed read).
+   */
+  readBoundaryAt: string | null;
 }
 
 /** A meaningful watch change waiting for owner-DM delivery. */
@@ -199,6 +212,41 @@ export interface GitHubWatchEventRow {
   attempts: number;
   lastAttemptAt: string | null;
   abandonedAt: string | null;
+  /** The repository the observation that produced this event queried; NULL on a legacy event. */
+  repoKey: string | null;
+}
+
+/**
+ * A per-author review line that was ACTUALLY DELIVERED while the exact review list could not identify what it
+ * summarises. Blocking evidence, identifiers and reasons only: no title, no body, no review id.
+ */
+export interface GitHubGapMarkerRow {
+  id: number;
+  ownerId: string;
+  watchId: string;
+  /** The watch's handle, or null when the watch itself is gone (retention may delete it; the marker stays). */
+  publicWatchId: string | null;
+  repoKey: string | null;
+  pr: number;
+  reviewClass: 'approval' | 'changes_requested';
+  reason: 'no_comparison' | 'unavailable' | 'truncated' | 'not_conveyed';
+  shown: 'shown' | 'delivered_not_provably_shown';
+  outboxRef: string;
+  deliveredAt: string;
+}
+
+/** A review fact the ordinary watch cannot tell from one the target delivered: held, never sent. */
+export interface GitHubHeldReviewRow {
+  id: string;
+  watchId: string;
+  publicWatchId: string;
+  repoKey: string | null;
+  /** The exact transition key: a HASH of the review id, never the id. */
+  heldKey: string;
+  providerAt: string | null;
+  createdAt: string;
+  /** Whether the watch is still active. A cancelled or identity-stopped watch keeps its held facts. */
+  watchState: 'active' | 'cancelled';
 }
 
 /** One durable, at-most-once execution attempt for an approved action. */
@@ -303,10 +351,25 @@ export interface TaskRow {
   dueAt: string | null;
   dueAllDay: boolean;
   priority: TaskPriority;
+  /** The source's urgent priority, ranked above `high`. Stored beside `priority`, not in it. */
+  urgent?: boolean;
+  /** The source's category, or null. Absent reads as null. */
+  category?: TaskCategory | null;
   status: TaskState;
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /**
+   * A per-task reminder policy, or null for the native defaults (ADR 0030).
+   * Only a task that arrived with one has one. Absent reads as null.
+   */
+  reminderPolicy?: ReminderPolicy | null;
+}
+
+/** Whether a task reminds at all, and at which offsets (null: the owner's default list). */
+export interface ReminderPolicy {
+  readonly enabled: boolean;
+  readonly offsetsMinutes: readonly number[] | null;
 }
 
 /**
@@ -572,6 +635,10 @@ export interface GitHubFeedEventRow {
   deliveredAt: string | null;
   deliveredTo: GitHubFeedTarget | null;
   createdAt: string;
+  /** The provider's canonical instant for the fact the card tells (a review's submission), or null. */
+  providerAt: string | null;
+  /** Set when the card cannot be told from one the target delivered: never sent, skipped or receipted. */
+  heldReason: 'ambiguous_review' | null;
 }
 
 export interface GitHubFeedCommitRow {

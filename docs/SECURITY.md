@@ -409,6 +409,8 @@ was turned away. It now records:
 | `provider.failed` | the conversation boundary | the provider name and the error CODE, never the owner's message |
 | `config.rejected` | credential-file reload | the variable NAME, never a path or a value |
 | `workflow.requested` | a `$grill-me` / `$ticket` / `$agentize` run reaching a terminal status | the command TOKEN and the status word, never the repository, the issue or anything the owner typed |
+| `schedule.batch_rolled_back` | `/schedule rollback:<code>` | restored and replaced rule COUNTS only; subject kind `config`; written by the strict audit method in the flipping transaction, so a failed write undoes the flip |
+| `watch.monitoring_changed` | `/watch monitoring state:on\|off`, when the state really changes | `on to off` or `off to on` only; a no-op writes nothing; strict and in the same transaction as the switch and its pause-period row |
 
 **Local commit / push / PR outcomes** are covered by the existing
 `approval.execution_started` / `_succeeded` / `_failed` events, whose `detail`
@@ -457,9 +459,11 @@ may be shown rather than around who may act.
 - **Selection is not allowlisting.** The selected list is a separate table keyed
   by `owner/repo`. Nothing in the feed writes to `repos`, sets `allow_jobs`, or
   reaches an executor, so being watched grants no job target and no write path.
-- **Two reads have an exact argv shape.** `gh api` is allowed only as
+- **Reads with an exact argv shape.** `gh api` is allowed only as
   `api --method GET repos/{owner}/{repo}/commits?sha=<branch>&per_page=30&page=N`
-  and `gh search prs` only as the fixed review-request query. Each is built from
+  and as the seven typed notification-watch endpoints of ADR 0031 (repository,
+  pulls, reviews, issues, runs, releases, discovery), and `gh search prs` only as
+  the fixed review-request query. Each is built from
   validated parts and re-checked from scratch by the central command policy:
   another method, field, header, host, jq/template/cache/paginate flag, graphql,
   absolute URL, traversal, placeholder or alternate encoding is unclassified and
@@ -471,6 +475,70 @@ may be shown rather than around who may act.
 - **Failures say nothing.** An unreachable or inaccessible repository degrades
   its own reads with a generic message and exponential backoff; no stderr, path
   or credential is recorded, and `/status` reports the degraded coverage.
+
+## The private-assistant migration
+
+Importing the owner's private assistant is the one place Ducky is handed a large
+body of personal data at once, so every rule here is mechanical rather than a
+promise. See [ADR 0030](decisions/0030-private-assistant-migration-and-parity-capabilities.md).
+
+- **Offline and not a route.** The importer is a CLI. No Discord command, phone
+  route or transport reaches it, and nothing it calls can send a message.
+- **Applying is gated by facts, not flags.** The database, the document and the
+  backup are judged by where their REAL path lands (a symlink into the repository
+  is refused) and must be `0600` in `0700` directories; the shared `runtime_lock`
+  must be obtainable, and it is taken FIRST, for a dry run as well; then the backup
+  must pass SQLite's integrity check and match the live database by the CONTENT of
+  every table (a digest compared in memory and never stored or printed), not by row
+  counts. The coordinator holds the lock while it runs, takes it right after
+  migrations and before any other write, and refreshes it on a fixed period of its
+  own. A holder is live on the same host while its boot is current, its pid exists
+  and that pid began when the holder began; from another host, while its heartbeat
+  is fresh. A live holder is never replaced, including by an equal pid on another
+  host or a second handle in the same process; a row from an earlier boot or a
+  replaced pid is recovered. A source namespace is pinned once the ledger has seen
+  one. The coordinator refuses to start during an import. The lock protects only
+  builds that take it: a coordinator from an older build does not know the table, so
+  it must be stopped before migrations are applied.
+- **Frozen configuration is the only authority.** The owner, profile and
+  timezone come from the profile's configuration; a document naming another
+  owner is a hard stop. Imported preferences live in `owner_preferences`,
+  which authorization never reads, apply only when the profile sets
+  `DUCKY_IMPORTED_PREFERENCES`, narrow briefings but never enable them, and never
+  replace an explicitly configured time (a disagreement refuses the import).
+- **Reports say counts and rule names.** An unknown key in a document is refused
+  without naming it; a rejected value is never quoted; the CLI prints no title,
+  id, repository, preference or path.
+- **Identity survives deletion, content does not.** The correlation ledger keeps a
+  content fingerprint only while its record exists. Deleting the record, by
+  Forget, retention or a foreign-key cascade, turns the row into an identity-only
+  tombstone by trigger, so a re-import cannot resurrect it and nothing about
+  what was deleted remains. Retention never touches the ledger.
+- **Notification-only targets are not an authorization.** They never reference
+  `repos`, never set `allow_jobs`, and never reach an executor. Their alerts go to
+  the owner's DM and their digest to the owner's briefing, never to the shared
+  GitHub feed channel. The capture inbox and the repository digest appear only in
+  the owner's DM copy of a briefing, never in a channel copy, and the importer
+  refuses preferences that want them with a channel delivery. The same holds for a
+  briefing the owner asks for: `/briefing` and "brief me" include them only in a DM or
+  a reply that is guaranteed ephemeral, never in a role channel (where replies
+  persist) or a guild message reply. When an imported target
+  observes a repository the native feed's duplicate card is retired, but only for
+  pull requests, issues and change requests, which an imported surface sees in full. Titles
+  are scrubbed of links, addresses and @mentions before they are stored.
+- **One new outbound request, to one host.** The briefing weather is a key-less
+  read over HTTPS from `api.open-meteo.com` only, built from numbers and constants
+  (no owner text is ever sent), with a timeout, redirects refused, a body ceiling
+  enforced as the response streams, and a cache, and
+  it runs only when a location is configured and an imported preference asks for
+  it. The typed watch reader (ADR 0031) adds seven GET-only `gh api` shapes, each
+  four argv words with a canonical endpoint that the central policy re-parses and
+  rebuilds byte for byte; it is off by default
+  (`DUCKY_ASSISTANT_WATCH_READER_ENABLED`) and, when on, grants no job, model or
+  repository permission. A 403, 429 or authentication failure stops the cycle for
+  ten minutes and advances no cursor; failures are recorded as short codes, never
+  provider text. Discovery's reader method refuses unless frozen configuration
+  enables it, and this build does not.
 
 ## Egress and redaction
 

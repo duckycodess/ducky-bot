@@ -1,3 +1,4 @@
+import { weatherAdvice } from '@ducky/adapters';
 import {
   BRIEFING_PROVENANCE, BRIEFING_TITLE, REMINDER_STATE_LABEL, TASK_STATE_LABEL,
   discordTimestamp, discordWhen, formatZoned, parseStoredWallClock,
@@ -5,9 +6,13 @@ import {
   type ReminderState, type TaskPriority,
 } from '@ducky/contracts';
 import type {
-  GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleRow, TaskRow,
+  GitHubWatchEventRow, GitHubWatchRow, PendingReminderOccurrenceRow, ReminderRow, ScheduleExceptionRow,
+  ScheduleRow, TaskRow, WatchEventWithTarget, WatchTargetRow,
 } from '@ducky/persistence';
+import type { RollbackOutcome, RollbackPreview } from '@ducky/persistence';
+import type { SetMonitoringOutcome } from '../domain/assistant-watch.service.js';
 import type { Briefing, BriefingSection } from '../domain/briefing.service.js';
+import { bareRepoName } from '../domain/assistant-watch.engine.js';
 import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } from './message.js';
 
 /**
@@ -26,6 +31,8 @@ import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } 
 
 const short = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
+/** An urgent task, ranked above `high`. */
+const URGENT_MARK = '!!!';
 const PRIORITY_MARK = {
   high: '!!',
   normal: '·',
@@ -51,7 +58,8 @@ export function taskDue(task: TaskRow, tz: string): string {
 const taskLine = (task: TaskRow, tz: string): string => {
   const due = taskDue(task, tz);
   return [
-    `\`${task.publicId}\` ${PRIORITY_MARK[task.priority]} ${short(task.title, 120)}`,
+    `\`${task.publicId}\` ${task.urgent ? URGENT_MARK : PRIORITY_MARK[task.priority]} ${short(task.title, 120)}` +
+      (task.category ? ` · ${task.category}` : ''),
     due === '' ? null : `-# due ${due}`,
   ]
     .filter(Boolean)
@@ -212,6 +220,138 @@ export function watchAdded(row: GitHubWatchRow): OutboundMessage {
   };
 }
 
+/**
+ * A requested-changes alert for a notification-only target.
+ *
+ * Private by construction: it carries a bare repository name, a number and
+ * scrubbed text, never a person's name or a link. The shared GitHub channel is
+ * not a destination for this message, and its only caller addresses the owner's
+ * DM.
+ */
+export function assistantWatchAlert(event: WatchEventWithTarget): OutboundMessage {
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+  } catch {
+    payload = {};
+  }
+  const number = typeof payload['number'] === 'number' ? ` · PR #${payload['number']}` : '';
+  const title = typeof payload['title'] === 'string' ? payload['title'] : '';
+  const summary = typeof payload['summary'] === 'string' && payload['summary'] !== ''
+    ? payload['summary']
+    : 'A reviewer requested revisions on this pull request.';
+  return {
+    embeds: [{
+      title: 'Requested changes',
+      description: [`${bareRepoName(event.display)}${number}`, title ? short(title, 140) : '', '', short(summary, 600)]
+        .filter((l, i) => l !== '' || i === 2)
+        .join('\n'),
+      fields: [{ name: 'When', value: discordTimestamp(event.occurredAt, 'f') || 'unknown' }],
+      color: DUCKY_COLORS.attention,
+    }],
+    ephemeral: false,
+  };
+}
+
+export function assistantWatchCancelled(row: WatchTargetRow): OutboundMessage {
+  return { content: `Repository watch \`${row.publicId}\` cancelled.`, ephemeral: true };
+}
+
+/** The notification targets, one page, as counts and bare repository names. */
+export function assistantWatchesList(
+  rows: readonly WatchTargetRow[],
+  counts: { active: number; cancelled: number; targets: number },
+  page: number,
+  pageSize: number,
+): OutboundMessage {
+  if (counts.targets === 0) return { content: 'No notification-only watch targets.', ephemeral: true };
+  if (rows.length === 0) {
+    return { content: `No targets on page ${page + 1}.`, ephemeral: true };
+  }
+  const pages = Math.max(1, Math.ceil(counts.targets / pageSize));
+  return {
+    embeds: [{
+      title: `Notification targets (${counts.active} active, ${counts.cancelled} cancelled)`,
+      description: rows
+        .map((r) => `\`${r.publicId}\` ${r.display} · ${r.state}`)
+        .join('\n'),
+      footer: `Page ${page + 1} of ${pages}. Read-only: these only tell you what happened; they grant nothing.`,
+    }],
+    ephemeral: true,
+  };
+}
+
+/**
+ * The owner's global monitoring switch. Private and counts-only: it never names a
+ * repository. The only refusal is an unreadable native ledger; history is reconciled event by event.
+ */
+export function watchMonitoring(out: SetMonitoringOutcome): OutboundMessage {
+  if (!out.ok) {
+    return {
+      content: 'Monitoring stays off: the record of what your other notifications already told you cannot be ' +
+        'read, and nothing is watched against it. Nothing was changed.',
+      ephemeral: true,
+    };
+  }
+  if (!out.changed) {
+    return { content: `Notification monitoring is already ${out.enabled ? 'on' : 'off'}. Nothing changed.`, ephemeral: true };
+  }
+  return {
+    content: out.enabled
+      ? 'Notification monitoring is on. Every target resumes exactly where it stood; nothing was reset. ' +
+        'Anything your other notifications already told you is not sent again, and anything that cannot be ' +
+        'placed exactly is withheld and counted in /status rather than guessed.'
+      : 'Notification monitoring is off. A read already in progress finishes; nothing starts after it. ' +
+        'No target, cursor or pending notification was changed.',
+    ephemeral: true,
+  };
+}
+
+/** Counts and the confirmation code only: never a batch, a label or a course. */
+export function scheduleRollbackPreview(p: RollbackPreview): OutboundMessage {
+  if (!p.ok) return { content: scheduleRollbackRefusal(p.reason), ephemeral: true };
+  return {
+    content:
+      `Rolling back would replace ${p.activeBatches} active batch${p.activeBatches === 1 ? '' : 'es'} ` +
+      `(${p.activeRules} rule${p.activeRules === 1 ? '' : 's'}) and restore the most recently replaced one ` +
+      `(${p.restoreRules} rule${p.restoreRules === 1 ? '' : 's'}). Nothing is deleted and no exception changes.\n` +
+      `To confirm exactly this, send \`/schedule rollback:${p.code}\`. The code stops working the moment ` +
+      'anything about your schedule batches changes, and a used code cannot be used again.',
+    ephemeral: true,
+  };
+}
+
+export function scheduleRollbackResult(out: RollbackOutcome): OutboundMessage {
+  if (!out.ok) return { content: scheduleRollbackRefusal(out.reason), ephemeral: true };
+  return {
+    content:
+      `Schedule rolled back: ${out.replacedRules} rule${out.replacedRules === 1 ? '' : 's'} replaced, ` +
+      `${out.restoredRules} restored. Nothing was deleted.`,
+    ephemeral: true,
+  };
+}
+
+function scheduleRollbackRefusal(
+  reason: 'nothing_to_restore' | 'order_unknown' | 'inconsistent_batch' | 'clock_not_newer' | 'stale',
+): string {
+  switch (reason) {
+    case 'nothing_to_restore':
+      return 'There is no replaced schedule batch to restore. Nothing was changed.';
+    case 'order_unknown':
+      return 'I cannot tell which replaced batch is the most recent (a replaced batch has no known time, or two are tied), so I will not ' +
+        'guess. Nothing was changed.';
+    case 'inconsistent_batch':
+      return 'A schedule batch is split (some of its rules are active and some are not, or they were replaced at ' +
+        'different times), so I cannot tell what a rollback would restore. Nothing was changed.';
+    case 'clock_not_newer':
+      return 'The time now is not after your latest schedule change (a replaced batch is stamped at this instant ' +
+        'or in the future), so a new rollback cannot be ordered safely. Nothing was changed.';
+    case 'stale':
+      return 'That confirmation no longer matches your schedule batches (they changed, or it was already used). ' +
+        'Nothing was changed. Send `/schedule rollback:preview` to start again.';
+  }
+}
+
 export function watchCancelled(row: GitHubWatchRow): OutboundMessage {
   return { content: `Repository watch \`${row.publicId}\` cancelled.`, ephemeral: true };
 }
@@ -281,6 +421,14 @@ const scheduleLine = (e: ScheduleRow, tz: string): string =>
     .filter(Boolean)
     .join(' · ');
 
+/** Cuts text to a limit on a line boundary, and says so. Embed fields are bounded. */
+const fit = (text: string, max: number): string => {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 40);
+  const at = cut.lastIndexOf('\n');
+  return `${at > 0 ? cut.slice(0, at) : cut}\n-# …and more not shown`;
+};
+
 const bullets = (lines: readonly string[]): string =>
   lines.map((l) => `• ${l}`).join('\n');
 
@@ -320,6 +468,82 @@ export function briefingMessage(b: Briefing): OutboundMessage {
   const reminderText = (r: ReminderRow): string =>
     `${r.nextFireAt ? discordWhen(r.nextFireAt, tz, 't') : 'unscheduled'} · ${short(r.text, 90)}`;
 
+  // What changed about the day's classes, in the owner's own terms: the course
+  // or label it targets ("All classes" when it targets neither) and what happened.
+  const exceptionText = (e: ScheduleExceptionRow): string =>
+    `${short(e.courseCode ?? e.label ?? 'All classes', 80)}: ${e.kind}` +
+    (e.note ? ` · ${short(e.note, 80)}` : '');
+
+  /** The forecast, as a fact: a label, the numbers it has, the place, and one fixed note. */
+  const weatherField = (): void => {
+    const w = b.weather;
+    if (!w) return;
+    const temp = w.temperatureC === null ? '' : ` · ${Math.round(w.temperatureC)}°C`;
+    const range =
+      w.highC !== null && w.lowC !== null ? `${Math.round(w.lowC)}° to ${Math.round(w.highC)}°` : '';
+    const rain = w.rainChance === null ? '' : `${w.rainChance}% chance of rain`;
+    const advice = weatherAdvice(w);
+    fields.push({
+      name: b.kind === 'evening' ? "Tomorrow's weather" : 'Weather',
+      value:
+        `**${w.label}**${temp}\n-# ${[range, rain, short(w.location, 60)].filter(Boolean).join(' · ')}` +
+        (advice ? `\n${advice}` : ''),
+    });
+  };
+
+  /**
+   * What happened in the watched repositories. Bounded to fit one embed field;
+   * a cut is said, never silent. The lines were scrubbed when they were
+   * recorded, and carry no person's name and no link.
+   */
+  const githubFields = (): void => {
+    const g = b.github;
+    if (!g) return;
+    if (g.empty) {
+      fields.push({ name: 'GitHub', value: 'Nothing new since the last digest.' });
+      return;
+    }
+    const lines: string[] = [];
+    for (const r of g.repos) {
+      lines.push(`**${short(r.name, 60)}**`);
+      for (const l of r.lines) lines.push(`-# ${short(l, 120)}`);
+    }
+    if (g.truncatedRepos > 0) {
+      lines.push(`-# ${g.truncatedRepos} quieter repositor${g.truncatedRepos === 1 ? 'y' : 'ies'} not shown`);
+    }
+    fields.push({ name: 'GitHub', value: fit(lines.join('\n'), 1000) });
+    if (g.attention.length > 0) {
+      fields.push({ name: 'GitHub needs attention', value: fit(bullets(g.attention), 1000) });
+    }
+  };
+
+  /** Lookahead and captures exist only when an imported preference asked for them. */
+  const extras = (): void => {
+    if (b.lookahead && b.lookahead.tasks.rows.length > 0) {
+      add(
+        `Next ${b.lookahead.days} day${b.lookahead.days === 1 ? '' : 's'}`,
+        b.lookahead.tasks,
+        taskText,
+      );
+    }
+    if (b.captures && b.captures.total > 0) {
+      if (b.captures.listed) {
+        const more = b.captures.total - b.captures.rows.length;
+        fields.push({
+          name: 'Quick-capture review',
+          value:
+            bullets(b.captures.rows.map((c) => short(c.content, 110))) +
+            (more > 0 ? `\n-# and ${more} more in the inbox` : ''),
+        });
+      } else {
+        fields.push({
+          name: 'Quick-capture inbox',
+          value: `${b.captures.total} unresolved item${b.captures.total === 1 ? '' : 's'}`,
+        });
+      }
+    }
+  };
+
   const overflowNote = (b: Briefing): string | undefined =>
     b.overdueTotal > b.tasksOverdue.rows.length
       ? `\n-# and ${b.overdueTotal - b.tasksOverdue.rows.length} more overdue`
@@ -330,13 +554,21 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     add('Still open, due today', b.tasksDueToday, taskText);
     add('Overdue', b.tasksOverdue, taskText, overflowNote(b));
     add('Tomorrow', b.scheduleTomorrow, scheduleText);
+    if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
+    weatherField();
     add('Reminders tomorrow', b.remindersTomorrow, reminderText);
+    extras();
+    githubFields();
   } else {
+    weatherField();
     add('Today', b.scheduleToday, scheduleText);
+    if (b.scheduleExceptions) add('Schedule changes', b.scheduleExceptions, exceptionText);
     add('Due today', b.tasksDueToday, taskText);
     add('Overdue', b.tasksOverdue, taskText, overflowNote(b));
     add('Reminders still to come today', b.remindersToday, reminderText);
     if (b.kind === 'today') add('Completed today', b.tasksClosedToday, taskText);
+    extras();
+    githubFields();
   }
 
   if (fields.length === 0) {

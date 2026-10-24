@@ -35,6 +35,49 @@ export const RETENTION_FORBIDDEN_TABLES = [
    */
   'github_feed_repos',
   'github_feed_cursors',
+  /**
+   * The private-assistant migration's state (ADR 0030). The correlation ledger
+   * is what stops a re-import resurrecting a deleted record, a rule is a live
+   * recurring schedule rather than a finished record, and a watch target's
+   * checkpoints and settled events are what stop an old event looking new.
+   */
+  'assistant_import_identities',
+  'schedule_rules',
+  'schedule_exceptions',
+  'owner_preferences',
+  'assistant_watch_targets',
+  'assistant_watch_checkpoints',
+  'assistant_watch_events',
+  'assistant_watch_calls',
+  /**
+   * Discovery's pass position, the tombstones that keep a deleted target deleted, the
+   * global monitoring switch, and the one-row cause a deletion path names. All state,
+   * none a finished record.
+   */
+  'assistant_watch_discovery',
+  'assistant_watch_discovery_tombstones',
+  'assistant_watch_settings',
+  'deletion_context',
+  /**
+   * What the native paths (the feed, the ordinary watch) told the owner, by exact
+   * transition, and the cutoff before which nothing was recorded (ADR 0034). A receipt pruned
+   * for being old would let a transition already told be told again, and the cutoff erased
+   * would hide that history exists. Identifiers only, no text; lifetime growth is accepted.
+   */
+  'native_transition_claims',
+  'native_ledger_boundary',
+  'native_legacy_seed',
+  /**
+   * Per-author review lines that were ACTUALLY DELIVERED while the exact review list could not identify what
+   * they summarise (migration 38). It is independent of `github_watch_events` and `github_watches`, which
+   * retention deletes: a delivered, unidentified line is blocking evidence that outlives its outbox row and its
+   * watch, and nothing clears it. Identifiers and reasons only, never a title or a body.
+   */
+  'github_watch_gap_markers',
+  /** When the owner's monitoring was paused and by whom: status and export provenance. */
+  'assistant_watch_pause_periods',
+  /** Who may write this database right now. */
+  'runtime_lock',
 ] as const;
 export type RetentionForbiddenTable = (typeof RETENTION_FORBIDDEN_TABLES)[number];
 

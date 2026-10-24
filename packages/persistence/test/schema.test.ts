@@ -238,6 +238,33 @@ describe('the audit log can persist everything its vocabulary allows', () => {
     db.close();
   });
 
+  it('has the two owner-control events, without a migration: `event` has no CHECK', () => {
+    expect(AUDIT_EVENTS).toContain('schedule.batch_rolled_back');
+    expect(AUDIT_EVENTS).toContain('watch.monitoring_changed');
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const sql = String((db.prepare("SELECT sql FROM sqlite_master WHERE name = 'audit_log'").get() as { sql: string }).sql);
+    expect(sql).not.toMatch(/CHECK\s*\(\s*event/i);
+    db.close();
+  });
+
+  it('`recordStrict` writes at the supplied time and PROPAGATES a failure, unlike `record`', () => {
+    const db = openDatabase({ location: ':memory:' });
+    runMigrations(db);
+    const store = createStore(db);
+    store.auditLog.recordStrict({
+      at: '2026-01-02T03:04:05.000Z', event: 'watch.monitoring_changed', actorKind: 'owner', actorRef: 'owner',
+      subjectKind: 'config', subjectRef: 'watch.monitoring', detail: 'on to off',
+    });
+    expect(store.auditLog.recent(5)[0]).toMatchObject({ at: '2026-01-02T03:04:05.000Z', outcome: 'ok', detail: 'on to off' });
+    // A kind the table refuses: `record` swallows it, `recordStrict` throws.
+    const bad = { event: 'watch.monitoring_changed', actorKind: 'nobody' } as never;
+    expect(() => store.auditLog.record(bad)).not.toThrow();
+    expect(() => store.auditLog.recordStrict({ ...(bad as object), at: '2026-01-02T03:04:05.000Z' } as never)).toThrow();
+    expect(store.auditLog.recent(5)).toHaveLength(1);
+    db.close();
+  });
+
   it('keeps existing rows across the rebuild in migration 13', () => {
     // The rebuild copies rows verbatim; a lost audit row is a lost audit row.
     const db = openDatabase({ location: ':memory:' });

@@ -1,92 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type {
-  CommitsPage, FeedPrChecks, IssueList, PrChecks, PrList, PrReviews, PrView, RepoView, ReviewRequestSearch,
-  WorkflowRuns,
-} from '@ducky/contracts';
-import type { GitHubReader, RepoRef } from '@ducky/adapters';
 import { TestClock, OWNER, STRANGER, makeHarness } from './helpers.js';
+import { MutableGitHubReader } from './github-watch-helpers.js';
 
 const START = '2026-09-01T00:00:00.000Z';
-
-class MutableGitHubReader implements GitHubReader {
-  repo: RepoView = { name: 'demo', defaultBranchRef: { name: 'main' } };
-  prs: PrList = [];
-  checks = new Map<number, PrChecks>();
-  calls: string[] = [];
-
-  async repoView(_ref: RepoRef): Promise<RepoView> {
-    this.calls.push('repoView');
-    return this.repo;
-  }
-
-  async prList(_ref: RepoRef): Promise<PrList> {
-    this.calls.push('prList');
-    return this.prs;
-  }
-
-  async prView(_ref: RepoRef, n: number): Promise<PrView> {
-    this.calls.push(`prView:${n}`);
-    return { number: n, title: 'unused', state: 'OPEN' };
-  }
-
-  async prChecks(_ref: RepoRef, n: number): Promise<PrChecks> {
-    this.calls.push(`prChecks:${n}`);
-    return this.checks.get(n) ?? [];
-  }
-
-  // The wider surface the final milestone added. Defaults are EMPTY, never
-  // helpful: a stub that answers more than the real thing is how five live
-  // Herdr defects survived a full unit suite.
-  reviews = new Map<number, PrReviews>();
-  runs: WorkflowRuns = [];
-  issues: IssueList = [];
-
-  async prListAll(_ref: RepoRef): Promise<PrList> {
-    this.calls.push('prListAll');
-    return this.prs;
-  }
-
-  async prReviews(_ref: RepoRef, n: number): Promise<PrReviews> {
-    this.calls.push(`prReviews:${n}`);
-    return this.reviews.get(n) ?? { number: n };
-  }
-
-  async runList(_ref: RepoRef): Promise<WorkflowRuns> {
-    this.calls.push('runList');
-    return this.runs;
-  }
-
-  async issueList(_ref: RepoRef): Promise<IssueList> {
-    this.calls.push('issueList');
-    return this.issues;
-  }
-
-  // The GitHub feed's reads. A watch never calls them, and the empty answers
-  // keep it that way: a watch test that reached for one would see nothing.
-  async feedPrList(_ref: RepoRef): Promise<PrList> {
-    return [];
-  }
-
-  async feedIssueList(_ref: RepoRef): Promise<IssueList> {
-    return [];
-  }
-
-  async feedRunList(_ref: RepoRef): Promise<WorkflowRuns> {
-    return [];
-  }
-
-  async feedPrChecks(): Promise<FeedPrChecks> {
-    return [];
-  }
-
-  async reviewRequests(): Promise<ReviewRequestSearch> {
-    return [];
-  }
-
-  async commits(): Promise<CommitsPage> {
-    return [];
-  }
-}
 
 describe('GitHub repository watches', () => {
   it('deduplicates unchanged snapshots and delivers meaningful owner updates', async () => {
@@ -207,9 +123,12 @@ describe('a watch sees more than open pull request titles', () => {
     h.close();
   });
 
-  it('reports an approval and a requested change from the review surface', async () => {
+  it('reports a decision change and the per-author view from the review surface, each as what it is', async () => {
     const reader = new MutableGitHubReader();
     seed(reader);
+    // A decision is a value only from a read that carried one: the watch has to have READ a decision before a
+    // change of it is a change.
+    reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'REVIEW_REQUIRED' }];
     const { h, clock } = await start(reader);
 
     reader.prs = [{ ...reader.prs[0]!, reviewDecision: 'APPROVED', updatedAt: '2026-09-01T02:00:00.000Z' }];
@@ -218,7 +137,14 @@ describe('a watch sees more than open pull request titles', () => {
       latestReviews: [{ state: 'APPROVED', submittedAt: '2026-09-01T02:00:00.000Z' }],
     });
     await advance(h, clock);
-    expect(JSON.stringify(h.transport.sent)).toContain('approved: #7');
+    const approved = JSON.stringify(h.transport.sent);
+    // The decision is worded as a decision. The per-author line names no review, and says so: no exact list
+    // identified what it summarises, so it is labelled and (once delivered) remembered.
+    expect(approved).toContain('review decision now approved: #7');
+    expect(approved).toContain('approvals recorded on #7 (reviewer summary only)');
+    expect(h.store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 1, notProvablyShown: 0 });
+    // No review receipt of any kind: a decision and a per-author line name no review.
+    expect(h.store.nativeTransitions.all().filter((c) => /review|changes_requested/.test(c.transition.kind))).toEqual([]);
 
     h.transport.clear();
     reader.prs = [{
@@ -230,11 +156,14 @@ describe('a watch sees more than open pull request titles', () => {
       latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: '2026-09-01T03:00:00.000Z' }],
     });
     await advance(h, clock);
-    expect(JSON.stringify(h.transport.sent)).toContain('changes requested on #7');
+    const changes = JSON.stringify(h.transport.sent);
+    expect(changes).toContain('review decision now changes requested: #7');
+    expect(changes).toContain('changes requested on #7 (reviewer summary only)');
+    expect(h.store.githubWatches.gapMarkerCounts(OWNER)).toEqual({ shown: 2, notProvablyShown: 0 });
     h.close();
   });
 
-  it('reports new review comments', async () => {
+  it('reports new conversation comments, truthfully labelled: a comment count is not a submitted review', async () => {
     const reader = new MutableGitHubReader();
     seed(reader);
     const { h, clock } = await start(reader);
@@ -243,7 +172,10 @@ describe('a watch sees more than open pull request titles', () => {
     reader.prs = [{ ...reader.prs[0]!, updatedAt: '2026-09-01T02:00:00.000Z' }];
     await advance(h, clock);
 
-    expect(JSON.stringify(h.transport.sent)).toContain('new review comment(s) on #7');
+    expect(JSON.stringify(h.transport.sent)).toContain('new conversation comment(s) on #7');
+    expect(JSON.stringify(h.transport.sent)).not.toMatch(/review comment/);
+    // No claim of any kind: a conversation comment names no review.
+    expect(h.store.nativeTransitions.all().filter((c) => c.transition.kind === 'changes_requested')).toEqual([]);
     h.close();
   });
 

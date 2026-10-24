@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { DuckyError, ScheduleDraftSchema, type ScheduleDraft } from '@ducky/contracts';
+import {
+  AUDIT_OWNER_REF, DuckyError, ScheduleDraftSchema, WEEKDAY_NAMES, type ScheduleDraft,
+} from '@ducky/contracts';
 import type { ScheduleExtractionProvider, ScheduleSource } from '@ducky/adapters';
-import { withTransaction, type Store } from '@ducky/persistence';
+import {
+  withTransaction, type RollbackOutcome, type RollbackPreview, type Store,
+} from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { PendingDraft, PendingScheduleStore } from './pending-schedules.js';
 
@@ -10,6 +14,8 @@ export interface SchedulesServiceDeps {
   readonly authz: Authorizer;
   readonly pending: PendingScheduleStore;
   readonly extractor: ScheduleExtractionProvider;
+  /** The injected clock: a rollback is stamped and audited at this time. */
+  readonly nowIso: () => string;
 }
 
 export type PreviewOutcome =
@@ -29,12 +35,14 @@ export class SchedulesService {
   private readonly authz: Authorizer;
   private readonly pending: PendingScheduleStore;
   private readonly extractor: ScheduleExtractionProvider;
+  private readonly nowIso: () => string;
 
   constructor(deps: SchedulesServiceDeps) {
     this.store = deps.store;
     this.authz = deps.authz;
     this.pending = deps.pending;
     this.extractor = deps.extractor;
+    this.nowIso = deps.nowIso;
   }
 
   get providerName(): string {
@@ -109,6 +117,74 @@ export class SchedulesService {
   list(actor: ActorContext, limit = 25): ReturnType<Store['schedules']['listForOwner']> {
     this.authz.requireOwner(actor);
     return this.store.schedules.listForOwner(actor.discordUserId, limit);
+  }
+
+  /**
+   * Every schedule record the owner can delete, as a handle and a description:
+   * confirmed one-off rows, weekly rules (including a replaced batch, which is
+   * inert but still the owner's) and exceptions. Handles are the first eight
+   * characters of the id; an ambiguous one is refused by `/forget`, not guessed.
+   */
+  listRecords(actor: ActorContext, limit = 25): { id: string; describes: string }[] {
+    this.authz.requireOwner(actor);
+    const owner = actor.discordUserId;
+    const oneOff = this.store.schedules.listForOwner(owner, limit).map((row) => ({
+      id: row.id.slice(0, 8),
+      describes: `${row.startsAt} · ${row.title}`,
+    }));
+    const rules = this.store.scheduleRules.listAllRulesForOwner(owner, limit).map((r) => ({
+      id: r.id.slice(0, 8),
+      describes: `every ${WEEKDAY_NAMES[r.weekday]} ${r.startTime} · ${r.label}` +
+        (r.active ? '' : ' (replaced batch)'),
+    }));
+    const exceptions = this.store.scheduleRules.listExceptionsForOwner(owner, limit).map((e) => ({
+      id: e.id.slice(0, 8),
+      describes: `${e.date} · ${e.kind} · ${e.courseCode ?? e.label ?? 'all classes'}`,
+    }));
+    return [...oneOff, ...rules, ...exceptions].slice(0, limit);
+  }
+
+  /**
+   * What rolling the weekly schedule back one batch would do, in counts, and the
+   * code that confirms exactly that. Writes nothing and nothing it returns names a
+   * batch, a label or a course. Owner-only.
+   */
+  previewRollback(actor: ActorContext): RollbackPreview {
+    this.authz.requireOwner(actor);
+    return this.store.scheduleRules.rollbackPreview(actor.discordUserId, this.nowIso());
+  }
+
+  /**
+   * Flips the weekly schedule back one batch, but only for a code that still names
+   * the state it was issued for (ADR 0032).
+   *
+   * The flip is the existing semantics: the active batch becomes replaced and the
+   * most recently replaced one with a KNOWN replacement time becomes active. Here
+   * the code is recomputed, compared, the flip made and the audit row written in
+   * ONE transaction with the injected clock, so a stale or replayed code changes
+   * nothing and a failed audit write undoes the flip. It deletes no row and
+   * touches no exception. A deliberate second rollback, from a fresh preview, flips
+   * again, as the service always did; whether the source's repeated rollback is the
+   * same is a private-audit question this repository cannot answer (its semantics are
+   * UNPROVEN, a named parity blocker).
+   */
+  confirmRollback(actor: ActorContext, code: string): RollbackOutcome {
+    this.authz.requireOwner(actor);
+    const at = this.nowIso();
+    return withTransaction(this.store.db, () =>
+      this.store.scheduleRules.rollbackBatch(actor.discordUserId, at, code, (done) => {
+        this.store.auditLog.recordStrict({
+          at,
+          event: 'schedule.batch_rolled_back',
+          actorKind: 'owner',
+          actorRef: AUDIT_OWNER_REF,
+          subjectKind: 'config',
+          subjectRef: 'schedule.batches',
+          outcome: 'ok',
+          detail: `restored ${done.restoredRules} replaced ${done.replacedRules}`,
+        });
+      }),
+    );
   }
 
   private expiredMessage(): string {

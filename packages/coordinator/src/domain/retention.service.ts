@@ -107,7 +107,9 @@ export class RetentionService {
     let outcome: RetentionOutcome = 'ok';
 
     try {
-      counts = this.pass();
+      // Everything a pass deletes is retention, so an imported record that ages out
+      // leaves a tombstone that says so (and a Forget leaves one that says that).
+      counts = this.store.withDeletionCause('retention', () => this.pass());
     } catch (err) {
       outcome = 'failed';
       this.log('retention.failed', { err });

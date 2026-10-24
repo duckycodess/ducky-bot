@@ -71,6 +71,33 @@ export class AuditLogRepo {
     }
   }
 
+  /**
+   * The same row, written so that a failure PROPAGATES, at a time the caller
+   * supplies.
+   *
+   * For the few owner controls whose change must not exist without its record
+   * (ADR 0032): the caller runs this inside the transaction that makes the change,
+   * so a failed write rolls the change back. Everything else keeps `record`, which
+   * must never break what it records.
+   */
+  recordStrict(input: AuditRecordInput & { readonly at: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO audit_log (at, event, actor_kind, actor_ref, subject_kind, subject_ref, outcome, detail)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        input.at,
+        input.event,
+        input.actorKind,
+        input.actorRef == null ? null : clamp(input.actorRef, AUDIT_SUBJECT_REF_MAX),
+        input.subjectKind ?? null,
+        input.subjectRef == null ? null : clamp(input.subjectRef, AUDIT_SUBJECT_REF_MAX),
+        input.outcome ?? 'ok',
+        input.detail == null ? null : clamp(input.detail, AUDIT_DETAIL_MAX),
+      );
+  }
+
   recent(limit: number): AuditLogRow[] {
     return this.db
       .prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT ?')

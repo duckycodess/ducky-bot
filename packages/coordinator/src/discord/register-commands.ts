@@ -15,6 +15,7 @@ const COMMANDS = [
   { name: 'schedule', description: 'Preview and confirm schedule entries (owner only)', options: [
     { name: 'text', type: 3, required: false, description: 'Schedule text' },
     { name: 'file', type: 11, required: false, description: 'A .txt or .csv file' },
+    { name: 'rollback', type: 3, required: false, description: 'Roll the weekly schedule back one batch: preview, then the code it shows (use alone)' },
   ] },
   { name: 'jobs', description: 'Recent coding jobs (owner only)' },
   { name: 'job', description: 'Coding job control (owner only)', options: [
@@ -46,12 +47,19 @@ const COMMANDS = [
       { name: 'every', type: 4, required: false, description: 'Minutes between checks (15-1440)' },
     ] },
     { name: 'list', type: 1, description: 'List active repository watches', options: [
-      { name: 'filter', type: 3, required: false, description: 'active | all', choices: [
+      { name: 'filter', type: 3, required: false, description: 'active | all | targets', choices: [
         { name: 'active', value: 'active' }, { name: 'all', value: 'all' },
+        { name: 'targets', value: 'targets' },
       ] },
+      { name: 'page', type: 4, required: false, description: 'Page of notification targets' },
     ] },
     { name: 'remove', type: 1, description: 'Cancel a repository watch', options: [
       { name: 'id', type: 3, required: true, description: 'Watch id' },
+    ] },
+    { name: 'monitoring', type: 1, description: 'Turn notification-target monitoring on or off', options: [
+      { name: 'state', type: 3, required: true, description: 'on | off', choices: [
+        { name: 'on', value: 'on' }, { name: 'off', value: 'off' },
+      ] },
     ] },
   ] },
   /**

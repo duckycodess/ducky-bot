@@ -72,12 +72,15 @@ export class FileDispatchJournal implements DispatchJournal {
   }
 
   /** Only for a job nothing will ever run again; its journal answers nothing more. */
-  forget(jobId: string): void {
-    if (!JOB_ID_RE.test(jobId)) return;
+  forget(jobId: string): boolean {
+    if (!JOB_ID_RE.test(jobId)) return false;
     try {
       this.dir.remove(`${jobId}.json`);
+      return true;
     } catch {
-      /* a kept record is harmless; it is bounded and is never trusted for another job */
+      // A kept record is harmless (it is bounded and is never trusted for another
+      // job), but the caller must not count it as removed.
+      return false;
     }
   }
 }

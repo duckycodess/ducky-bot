@@ -71,7 +71,7 @@ describe('pruning, on the coordinator\'s word only', () => {
     const d = deps(journal, (id) => states[id]);
     const r = await sweepJournal(d);
 
-    expect(r).toEqual({ pruned: 5, kept: 5, unanswered: 0 });
+    expect(r).toEqual({ pruned: 5, removalFailed: 0, kept: 5, unanswered: 0 });
     expect([...(journal.jobIds() ?? [])].sort()).toEqual(['live1', 'live2', 'live3', 'live4', 'live5']);
   });
 
@@ -131,8 +131,93 @@ describe('pruning, on the coordinator\'s word only', () => {
     const journal = journalOf(200);
     await fill(journal, Array.from({ length: 100 }, (_, i) => `job-${i}`));
     const d = deps(journal, () => status('running', false));
-    await sweepJournal(d, 10);
+    await sweepJournal(d, { maxQueries: 10 });
     expect(d.calls).toHaveBeenCalledTimes(10);
+  });
+});
+
+describe('a bounded sweep is fair, and counts only removals that happened', () => {
+  const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `job-${String(i).padStart(3, '0')}`);
+
+  it('REGRESSION: reaches finished records behind more live ones than one sweep can ask about', async () => {
+    const journal = journalOf(100);
+    const all = ids(100);
+    await fill(journal, all);
+    // The first 70 can still run; the last 30 are finished. A sweep asks about only 16.
+    const live = new Set(all.slice(0, 70));
+    const asked: string[] = [];
+    const client = {
+      jobStatus: vi.fn(async (id: string) => {
+        asked.push(id);
+        return live.has(id) ? status('running', false) : status('completed', true);
+      }),
+    };
+    const cursor = { after: undefined as string | undefined };
+    const d = { client: client as never, journal, intents: new MemoryPauseIntentStore(), log: vi.fn() };
+
+    let total = 0;
+    for (let sweep = 0; sweep < 7; sweep += 1) total += (await sweepJournal(d, { maxQueries: 16, cursor })).pruned;
+
+    expect(total).toBe(30);
+    expect([...(journal.jobIds() ?? [])].sort()).toEqual(all.slice(0, 70));
+    // Fair: the first pass over the records asked about each at most once.
+    expect(new Set(asked.slice(0, 100)).size).toBe(asked.slice(0, 100).length);
+  });
+
+  it('without the cursor a bounded sweep would never get past the live prefix (what it fixes)', async () => {
+    const journal = journalOf(100);
+    const all = ids(100);
+    await fill(journal, all);
+    const client = { jobStatus: vi.fn(async (id: string) => (id < 'job-070' ? status('running', false) : status('completed', true))) };
+    const d = { client: client as never, journal, intents: new MemoryPauseIntentStore(), log: vi.fn() };
+    for (let sweep = 0; sweep < 7; sweep += 1) await sweepJournal(d, { maxQueries: 16 });
+    expect(journal.jobIds()).toHaveLength(100);
+  });
+
+  it('a FULL journal scans its whole bounded capacity and stops the moment there is room', async () => {
+    const journal = journalOf(100);
+    const all = ids(100);
+    await fill(journal, all);
+    const client = {
+      executorId: 'exec-a',
+      heartbeat: vi.fn(async () => undefined),
+      claim: vi.fn(async () => undefined as ClaimResponse | undefined),
+      jobStatus: vi.fn(async (id: string) => (id < 'job-080' ? status('running', false) : status('completed', true))),
+    };
+    const loop = new ExecutorLoop({
+      client: client as never, journal, intents: new MemoryPauseIntentStore(), pollWaitMs: 0, version: 't',
+      log: vi.fn(), journalSweepMs: 3_600_000, orchestrator: { name: 's', verified: false } as never,
+    });
+    expect(await loop.runOnce()).toBe('idle');
+    // 80 live records asked about, then the first finished one freed a slot and the scan stopped.
+    expect(client.jobStatus).toHaveBeenCalledTimes(81);
+    expect(client.claim).toHaveBeenCalledTimes(1);
+    expect(journal.jobIds()).toHaveLength(99);
+  });
+
+  it('counts only records that were really removed, and says so when one could not be', async () => {
+    const dir = path.join(scratch, 'journal-rm');
+    const realFs = await import('node:fs');
+    const fsOps = {
+      ...realFs,
+      unlinkSync: (p: Parameters<typeof realFs.unlinkSync>[0]) => {
+        if (String(p).endsWith('job-b.json')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        return realFs.unlinkSync(p);
+      },
+    };
+    const journal = new FileDispatchJournal(StateDir.open(dir, { uid, forbiddenRoots: [], maxRecords: 8, fsOps }));
+    await fill(journal, ['job-a', 'job-b']);
+    const log = vi.fn();
+    const d = { client: { jobStatus: async () => status('completed', true) } as never, journal, intents: new MemoryPauseIntentStore(), log };
+    const r = await sweepJournal(d);
+
+    expect(r).toMatchObject({ pruned: 1, removalFailed: 1 });
+    expect(journal.jobIds()).toEqual(['job-b']);
+    const said = log.mock.calls.flat().join('\n');
+    expect(said).toMatch(/dropped 1 record/);
+    expect(said).toMatch(/1 finished job record\(s\) could not be removed/);
+    expect(journal.forget('job-b')).toBe(false);
+    expect(journal.forget('job-a')).toBe(true);
   });
 });
 
@@ -158,7 +243,8 @@ describe('a full journal stops claims before an agent exists', () => {
     const { loop, client } = makeLoop(journal, () => status('completed', true));
     expect(await loop.runOnce()).toBe('idle');
     expect(client.claim).toHaveBeenCalledTimes(1);
-    expect(journal.jobIds()).toEqual([]);
+    // The full-journal scan stops the moment there is room: one slot was enough.
+    expect(journal.jobIds()).toHaveLength(2);
   });
 
   it('with every entry belonging to a job that can still run, makes no claim, deletes nothing, and says so once', async () => {

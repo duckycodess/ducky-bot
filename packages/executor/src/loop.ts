@@ -5,7 +5,7 @@ import type { CoordinatorClient } from './client.js';
 import { runClaimedJob } from './runner.js';
 import type { HeadroomVerdict } from './memory-headroom.js';
 import { reconcileIntent } from './pause-delivery.js';
-import { sweepJournal } from './journal-sweep.js';
+import { sweepJournal, type SweepCursor } from './journal-sweep.js';
 import type { FileDispatchJournal } from './dispatch-journal-file.js';
 import type { PauseIntentStore } from './pause-intents.js';
 
@@ -72,6 +72,7 @@ export class ExecutorLoop {
   /** Why claims are withheld for a pause, so a long hold logs once. */
   #pauseHeldFor: string | undefined;
   #lastJournalSweep = 0;
+  readonly #sweepCursor: SweepCursor = { after: undefined };
   #journalFull = false;
   /** Jobs this executor is running right now, reported on every heartbeat. */
   readonly #active = new Set<string>();
@@ -181,12 +182,20 @@ export class ExecutorLoop {
     const journal = this.deps.journal!;
     const now = Date.now();
     const due = now - this.#lastJournalSweep >= (this.deps.journalSweepMs ?? 600_000);
-    if (due || !journal.hasRoom()) {
+    const full = !journal.hasRoom();
+    if (due || full) {
       this.#lastJournalSweep = now;
+      // A routine sweep is bounded and fair (it resumes where the last one stopped).
+      // A FULL journal scans up to its whole bounded capacity, stopping the moment
+      // there is room, so reclaimable records behind a run of live ones are found.
       await sweepJournal(
         {
           client: this.deps.client, journal, intents: this.deps.intents,
           log: this.deps.log ?? (() => {}),
+        },
+        {
+          cursor: this.#sweepCursor,
+          ...(full ? { maxQueries: journal.capacity, stopWhenRoom: true } : {}),
         },
       ).catch(() => undefined);
     }

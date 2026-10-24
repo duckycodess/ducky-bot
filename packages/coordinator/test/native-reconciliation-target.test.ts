@@ -318,4 +318,3 @@ describe('an import decides what it writes against the same ledger', () => {
     return { h, verify };
   }
 });
-

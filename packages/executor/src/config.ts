@@ -28,6 +28,12 @@ export const ExecutorEnvSchema = z.object({
    */
   DUCKY_MEMORY_RESERVE_ENGINEERING_MIB: z.coerce.number().int().min(1).default(2048),
   DUCKY_MEMORY_RESERVE_NOTIFICATIONS_MIB: z.coerce.number().int().min(1).default(512),
+  /**
+   * Room kept free for the model provider's own process on this host. An
+   * operator estimate like the others, not a measurement; set 0 only where no
+   * provider process shares the account.
+   */
+  DUCKY_MEMORY_RESERVE_PROVIDER_MIB: z.coerce.number().int().min(0).default(512),
 });
 
 export type ExecutorEnv = z.infer<typeof ExecutorEnvSchema>;

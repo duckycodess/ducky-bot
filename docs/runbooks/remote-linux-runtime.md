@@ -249,20 +249,27 @@ open. All fourteen are required, and the list matches
 
 1. **Cross-program and cross-profile admission.** No supported protocol exists
    with agent-flow. The Ducky slot is local to one coordinator database.
-2. **Effective, ancestor-aware headroom.** The guard in section 1 reads one slice
-   directory. It does not read ancestor cgroups or the lower ceiling of the unit
-   that holds the Herdr server, and a passing check is not a reservation another
-   program also respects.
+2. **Effective, ancestor-aware headroom.** Implemented in source and unit-tested:
+   before every prompt the executor reads the cgroup of the owned agent's own
+   foreground processes (found through `herdr pane process-info`) and every
+   ancestor, and the tightest remaining room must cover the engineering,
+   provider and notification reserves. Still required: a run with a real Ducky
+   agent (the one recorded pane response is a manager role pane, not Pi), and a
+   shared reservation, because a passing check is not one another program also
+   respects.
 3. **Active-agent stop.** The recorded Herdr adapter has no supported way to stop
    a working agent. A timeout of a working agent becomes an orphan that holds the
    repository and the slot for the owner; confirmed owned-descendant cancel and
    timeout need an authorized real-agent stop probe.
-4. **Idle or no-result model stop without consuming retry budget.** Not
-   implemented. A turn that ends idle with no result is still reported as an
-   ordinary `no_result` failure. The quota-pause criterion in the issue is
-   therefore NOT met, and there is no provider quota state, counter or
-   sign-in-versus-quota distinction to build on until a real response is
-   recorded.
+4. **Idle or no-result model stop without consuming retry budget.** Implemented
+   in source and unit-tested for a confirmed quiet agent (fresh, positive name,
+   workspace and pane match and `idle` or `done`): the job pauses on the existing
+   owner-input state without spending an attempt or a question round, keeps its
+   workspace and repository, and resumes through the owner's answer control. It
+   is NOT a quota feature. Ducky infers no cause, there is no provider quota
+   state, counter or sign-in-versus-quota distinction until a real response is
+   recorded (item 5), and no real pause has been observed, so the issue's
+   quota-pause criterion is not met.
 5. **Supported subscription route, sign-in and quota on this host.** No
    `openclaw` binary or provider profile exists in this account at the time of
    writing. Route, eligibility and quota are unverified, and the binary's absence

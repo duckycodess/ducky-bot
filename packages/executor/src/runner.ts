@@ -454,7 +454,7 @@ export async function runClaimedJob(deps: RunnerDeps, claim: ClaimResponse): Pro
       await client.reportFailure(claim.jobId, claim.leaseId, 'no_result', {
         workspaceId: outcome.workspaceId,
         agentName: outcome.agentName,
-        detail: 'The agent finished without writing a valid result file.',
+        detail: outcome.detail ?? 'The agent finished without writing a valid result file.',
       });
       return;
   }

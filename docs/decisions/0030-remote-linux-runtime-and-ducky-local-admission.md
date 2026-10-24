@@ -88,6 +88,55 @@ current Herdr server was read as running inside `agent-flow-herdr.service`, whos
 limits apply to descendants that remain in its cgroup, but membership of any
 individual agent, tool or provider process is unverified.
 
+**The agent's own cgroup, before every prompt.** The account check above runs
+before a claim and says nothing about where the agent actually is. So, before
+EVERY prompt attempt (including the retries after `agent_not_ready` and a
+resumed agent's), the executor asks Herdr for the owned pane's live foreground
+processes (`herdr pane process-info`, read-only, with argv, cmdline and cwd
+dropped at the schema), reads each process's own unified cgroup from `/proc`,
+and evaluates `memory.current` against both `memory.high` and `memory.max` at
+that cgroup and every ancestor up to the cgroup-v2 mount. The tightest
+remaining free bytes governs, siblings count through their common ancestor's
+usage, and the engineering, provider (512 MiB default) and notification
+reserves are required at every level, which is deliberately conservative.
+Every foreground process must itself be bounded by a finite limit somewhere in
+its own chain: a tightly bounded sibling cannot vouch for an unbounded one.
+Identity is proved, not assumed: same UID, foreground process-group
+membership, a stable start time and cgroup across the reads, `cgroup.procs`
+membership, a verified cgroup-v2 mount, no links, and a second look at the
+pane and the agent after the reads. The agent itself must be the recorded name
+and workspace in the pane pinned at the start (the root pane a fresh start used,
+or the pane of the owned agent first observed on a resume), and freshly `idle`
+or `done` and not `interactive_ready: false` both before and after the reads, so
+the guard never permits a prompt into a working, blocked, unknown or not-ready
+target. The pre-claim account check applies the same rule to its own parsing: a
+literal `max` is the only non-numeric value that means unlimited, and an invalid
+or unsafe number, or an unsafe reserve sum, refuses. Malformed, unsafe, overflowing, missing or
+moved data refuses; a missing memory file is skipped only where the parent
+proves the controller is off; no finite ancestor means no proof. There is no
+fallback to the executor's, the account's or any service's cgroup. A refusal
+withholds the prompt and pauses the job (below) once the agent is freshly
+proved quiet. This is a check at one instant, not an atomic reservation shared
+with another program and not continuous enforcement.
+
+**A quiet agent with no result pauses; it does not fail.** An agent that
+settles `idle` or `done` without a valid result, a stalled prompt nothing picked
+up, and a prompt withheld by the guard above all end the attempt with a
+lease-checked pause on the existing `needs_owner_input` state, but only after a
+fresh look positively matches the recorded agent name, workspace id and pane and
+a Ducky-managed workspace, and reports `idle` or `done`. Working and blocked keep
+their orphan outcomes; absent, unknown, unreadable or mismatched keep the
+unchanged `no_result` failure, which keeps the repository reserved. The
+coordinator decides in one transaction: a repeated report for the same lease is
+answered identically, the workspace, agent and repository reservation must be the
+recorded ones, and an owner cancellation then an elapsed deadline win. A pause
+spends no attempt and no owner-input round, keeps the workspace and reservation,
+clears the lease, phase and deadline, and releases the Ducky-local slot only on
+that proof; resuming reacquires it and starts a fresh bounded attempt. A pause
+the executor cannot deliver is never downgraded to a failure: the lease expires
+and the recovery claim pauses again rather than prompting. Nothing here says why
+the agent stopped, and no quota or sign-in state is inferred from the screen.
+
 **No friend-facing model by default.** `DUCKY_ADDITIONAL_USER_AI_ENABLED`
 (default off) is frozen into the Authorizer. `Authorizer.mayConverse` is the one
 question every model-reaching path asks, including Branch and Compact, native
@@ -141,13 +190,15 @@ is kept in full, with the reason for each, in
 [runbook](../runbooks/remote-linux-runtime.md#6-what-is-not-implemented-and-what-blocks-merge-and-deployment):
 
 1. Atomic cross-program and cross-profile admission with agent-flow.
-2. Effective, ancestor-aware memory headroom. The guard reads one slice
-   directory, not its ancestors or the lower ceiling of the unit holding the Herdr
-   server, and is a check followed by a claim, not a shared reservation.
+2. Effective, ancestor-aware memory headroom. Implemented in source and
+   unit-tested (the agent's own cgroup chain, checked before every prompt), but
+   not observed with a real Ducky agent, and still a check rather than a
+   reservation another program respects.
 3. An authorized stop probe for a working agent, and with it confirmed
    owned-descendant cancel and timeout.
-4. The idle or no-result pause that must not consume retry budget (a turn that
-   ends idle without a result is still an ordinary `no_result` failure).
+4. The retry-preserving pause. Implemented in source and unit-tested for a
+   confirmed quiet agent without a result; never observed live, and no provider
+   quota or sign-in state exists to distinguish.
 5. A recorded, supported subscription route, sign-in and quota on this host.
 6. Herdr session pinning, separate from the dispatcher's.
 7. Safe periodic orphan, workspace and temp reclamation that preserves active

@@ -156,3 +156,31 @@ export const HERDR_DIRTY_WORKTREE_CODES: readonly string[] = ['dirty_worktree_re
  * distinguishable from an outage -- retrying is correct, failing the job is not.
  */
 export const HERDR_NOT_READY_CODES: readonly string[] = ['agent_not_ready'];
+
+/**
+ * `herdr pane process-info`: the live foreground processes of one pane.
+ *
+ * Published by `herdr api schema --json` (PaneProcessInfo). Deliberately parsed
+ * with a STRIPPING object, not a loose one: each foreground process also carries
+ * `argv`, `cmdline` and `cwd`, which can hold arguments and paths, and nothing
+ * here needs them. Dropping them at this boundary means no caller can log or
+ * forward them by accident. Only the pid is ever used to identify a process.
+ *
+ * The one recorded response is from a manager role pane (a wrapper and the
+ * agent both in the foreground group), which is interface evidence only and not
+ * evidence of how a Ducky Pi agent's pane looks.
+ */
+export const PaneProcessSchema = z.object({
+  pid: z.number().int().nonnegative(),
+  name: z.string().optional(),
+});
+
+export const PaneProcessInfoSchema = z.object({
+  pane_id: z.string(),
+  shell_pid: z.number().int().nonnegative().nullish(),
+  foreground_process_group_id: z.number().int().nonnegative().nullish(),
+  foreground_processes: z.array(PaneProcessSchema).default([]),
+});
+export type PaneProcessInfo = z.infer<typeof PaneProcessInfoSchema>;
+
+export const PaneProcessInfoResultSchema = z.object({ process_info: PaneProcessInfoSchema });

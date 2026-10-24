@@ -101,7 +101,46 @@ export type OrchestrationOutcome =
     }
   | { kind: 'conflict'; reason: 'foreign_agent_conflict'; agentName: string }
   | { kind: 'unavailable' }
-  | { kind: 'no_result'; workspaceId: string; agentName: string; workspacePath: string };
+  | {
+      kind: 'no_result';
+      workspaceId: string;
+      agentName: string;
+      workspacePath: string;
+      /** Owner-safe wording for why, when it is not the ordinary "finished without a result". */
+      detail?: string;
+    };
+
+/** The exact agent a prompt is about to be sent to, freshly proven. */
+export interface PromptGuardTarget {
+  readonly agentName: string;
+  readonly workspaceId: string;
+  readonly paneId: string;
+}
+
+export interface PromptGuardContext {
+  /**
+   * A fresh, positively identified look at the SAME agent (recorded name,
+   * recorded workspace id, a pane id), or `undefined` when that cannot be
+   * proved right now. A guard calls it again after its own reads so that an
+   * agent that moved or was replaced in between cannot pass on stale proof.
+   */
+  proveAgent(): Promise<PromptGuardTarget | undefined>;
+}
+
+export type PromptGuardVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Consulted immediately before EVERY prompt attempt -- the first one, the
+ * retries after `agent_not_ready`, and a resumed agent's -- because model work
+ * is what the check exists to withhold. A refusal (or an exception) withholds
+ * the prompt; it never sends it anyway.
+ */
+export type PromptGuard = (
+  target: PromptGuardTarget,
+  context: PromptGuardContext,
+) => Promise<PromptGuardVerdict>;
 
 export interface PiOrchestrator {
   readonly name: string;

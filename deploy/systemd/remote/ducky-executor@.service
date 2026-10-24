@@ -7,6 +7,8 @@
 # runbook records what is and is not verified about the Herdr server's own
 # cgroup). The bound that matters is the user slice, and the memory guard below
 # reads THAT before every claim rather than pretending this unit is the limit.
+# Before every prompt it also checks the cgroup the agent's own processes are in,
+# and each ancestor, found through Herdr rather than assumed from this unit.
 #
 # Use a Herdr session that belongs to Ducky. The repository has not recorded how
 # to pin one (no Herdr session setting is documented in docs/integrations/herdr.md),

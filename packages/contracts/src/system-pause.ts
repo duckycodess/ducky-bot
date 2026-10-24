@@ -89,7 +89,8 @@ export const SYSTEM_PAUSE_OWNER_TEXT: Record<JobPauseCause, string> = {
     'something else, and it has not guessed. The workspace and repository are kept. ' +
     'Check the agent, then resume to start a fresh bounded attempt.',
   memory_headroom_unproven:
-    "Ducky could not prove enough memory headroom for the agent's own cgroup and every " +
-    'ancestor, so it withheld the prompt. Nothing was sent to the model. The workspace and ' +
-    'repository are kept. Resume once memory is available.',
+    'Ducky could not prove that the agent was the recorded one, ready for input, and had ' +
+    "enough memory headroom in its own cgroup and every ancestor, so it withheld the prompt. " +
+    'Nothing was sent to the model. The workspace and repository are kept. Resume once ' +
+    'memory is available.',
 };

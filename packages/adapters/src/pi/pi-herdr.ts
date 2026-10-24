@@ -10,8 +10,17 @@ import { FileBriefWriter, briefPointerPrompt, type BriefWriter } from './brief-f
 import { FilePhaseReader, type PhaseReader } from './phase-file.js';
 import { PI_READY_CONSECUTIVE_OBSERVATIONS, observePiPromptReady } from './pi-ready.js';
 import type {
-  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
+  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator, PromptGuard,
+  PromptGuardTarget,
 } from './pi-orchestrator.port.js';
+import type { JobPauseCause } from '@ducky/contracts';
+
+/** Raised inside this module when the pre-prompt guard declines; never leaves it. */
+class PromptWithheld extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
 
 export { RESULT_RELATIVE_PATH };
 
@@ -83,6 +92,11 @@ export interface HerdrPiOptions {
   readonly readyMarkerWaitMs?: number;
   /** Bounded retries of a prompt refused with `agent_not_ready`. */
   readonly readyRetries?: number;
+  /**
+   * Checked immediately before every prompt attempt. Omitted means no check,
+   * which is how the guard stays off by default. See `PromptGuard`.
+   */
+  readonly beforePrompt?: PromptGuard;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -116,6 +130,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   private readonly readyWaitMs: number;
   private readonly readyMarkerWaitMs: number;
   private readonly readyRetries: number;
+  private readonly beforePrompt: PromptGuard | undefined;
 
   constructor(opts: HerdrPiOptions) {
     this.herdr = opts.herdr;
@@ -133,6 +148,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     this.readyWaitMs = opts.readyWaitMs ?? 120_000;
     this.readyMarkerWaitMs = opts.readyMarkerWaitMs ?? HERDR_READY_MARKER_WAIT_MS;
     this.readyRetries = opts.readyRetries ?? 3;
+    this.beforePrompt = opts.beforePrompt;
   }
 
   /**
@@ -324,7 +340,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (recovered) {
         return { kind: 'result', result: recovered, workspaceId, agentName, workspacePath, reused: true };
       }
-      return this.noResultOutcome({ workspaceId, agentName, workspacePath });
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath, paneId: agent.pane_id });
     }
 
     // idle or done. If a previous turn already wrote a result and only the
@@ -344,11 +360,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       // on positive identity and idle/done proof, otherwise the unproven
       // `no_result` or the working/blocked orphan. Falling through to a prompt
       // here would send model work without the proof this branch exists for.
-      return this.noResultOutcome({ workspaceId, agentName, workspacePath });
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath, paneId: agent.pane_id });
     }
 
+    // Pinned to the pane of the owned agent as first observed and proved, not to
+    // whatever pane a later lookup by name happens to return.
     return this.promptAndSettle(spec, {
-      workspaceId, agentName, workspacePath, reused: true,
+      workspaceId, agentName, workspacePath, reused: true, paneId: agent.pane_id,
     });
   }
 
@@ -402,8 +420,10 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     // The agent exists now, so the record should no longer say `creating`.
     await spec.onAgentStarted?.({ workspaceId, agentName });
 
+    // The pane is pinned to the root pane this very call started the agent in, so
+    // a same-name agent that appears in another pane cannot be mistaken for it.
     return this.promptAndSettle(spec, {
-      workspaceId, agentName, workspacePath, reused: false,
+      workspaceId, agentName, workspacePath, reused: false, paneId: rootPaneId,
     });
   }
 
@@ -427,7 +447,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    */
   private async promptAndSettle(
     spec: OrchestrationSpec,
-    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean },
+    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean; paneId?: string },
   ): Promise<OrchestrationOutcome> {
     // The brief goes over as a FILE, and only a one-line pointer is pasted.
     // A 3.3 KB brief was measured on this host being left unsent in Pi's input
@@ -448,8 +468,9 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
 
     let settled: AgentInfo | undefined;
     try {
-      settled = await this.submitWhenReady(at.agentName, briefPointerPrompt(briefPath), spec);
+      settled = await this.submitWhenReady(at, briefPointerPrompt(briefPath), spec);
     } catch (err) {
+      if (err instanceof PromptWithheld) return this.withheldOutcome(err, at);
       return this.afterPromptFailure(err, at, spec);
     }
 
@@ -490,10 +511,17 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    * sign-in or anything else is not something Herdr's status can say.
    */
   private async noResultOutcome(
-    at: { workspaceId: string; agentName: string; workspacePath: string },
+    at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
+    cause: JobPauseCause = 'agent_idle_no_result',
+    detail?: string,
   ): Promise<OrchestrationOutcome> {
     const base = { workspaceId: at.workspaceId, agentName: at.agentName };
-    const noResult = { kind: 'no_result' as const, ...base, workspacePath: at.workspacePath };
+    const noResult = {
+      kind: 'no_result' as const,
+      ...base,
+      workspacePath: at.workspacePath,
+      ...(detail === undefined ? {} : { detail }),
+    };
     let agent: AgentInfo | undefined;
     try {
       agent = await this.herdr.agentGet(at.agentName);
@@ -511,21 +539,29 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     if (!(await this.workspaceIsOurs(at.workspaceId))) return noResult;
     return {
       kind: 'quiet_pause',
-      cause: 'agent_idle_no_result',
+      cause,
       observed: agent.agent_status,
       ...base,
       workspacePath: at.workspacePath,
     };
   }
 
-  /** Positive identity: the recorded name, the recorded workspace id, and a pane. */
-  private isRecordedAgent(agent: AgentInfo, at: { workspaceId: string; agentName: string }): boolean {
+  /**
+   * Positive identity: the recorded name, the recorded workspace id, and a pane
+   * -- the PINNED pane when one was fixed at the start or at the first owned
+   * observation, so a same-name replacement elsewhere is not "the agent".
+   */
+  private isRecordedAgent(
+    agent: AgentInfo,
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): boolean {
     return (
       agent.name === at.agentName &&
       agent.name.startsWith(DUCKY_AGENT_PREFIX) &&
       typeof agent.workspace_id === 'string' &&
       agent.workspace_id === at.workspaceId &&
-      agent.pane_id.length > 0
+      agent.pane_id.length > 0 &&
+      (at.paneId === undefined || agent.pane_id === at.paneId)
     );
   }
 
@@ -551,7 +587,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    */
   private async afterPromptFailure(
     err: unknown,
-    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean },
+    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean; paneId?: string },
     spec?: OrchestrationSpec,
   ): Promise<OrchestrationOutcome> {
     // A STALL is not a failure of the submission. Herdr delivered the text and
@@ -655,6 +691,62 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   }
 
   /**
+   * The pre-prompt guard declined, so NO prompt was sent. The agent is paused
+   * only after a fresh look proves it quiet (it was just started or resumed and
+   * given nothing, so it normally is); anything unproven keeps the unchanged
+   * fail-closed outcome, which retains the repository for the owner.
+   */
+  private withheldOutcome(
+    err: PromptWithheld,
+    at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
+  ): Promise<OrchestrationOutcome> {
+    return this.noResultOutcome(
+      at,
+      'memory_headroom_unproven',
+      'The prompt was withheld before any model work was sent: ' + err.reason,
+    );
+  }
+
+  /**
+   * A fresh look at the agent, returned only when it is BOTH the recorded one
+   * and in a state a prompt may be sent to: `idle` or `done`, and not reporting
+   * `interactive_ready: false`. The guard calls this before its reads and again
+   * after, so it can never permit a prompt into a working, blocked, unknown or
+   * not-yet-ready target, whatever the readiness wait did or did not conclude.
+   */
+  private async proveAgent(
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): Promise<PromptGuardTarget | undefined> {
+    let agent: AgentInfo | undefined;
+    try {
+      agent = await this.herdr.agentGet(at.agentName);
+    } catch {
+      return undefined;
+    }
+    if (!agent || !this.isRecordedAgent(agent, at)) return undefined;
+    if (agent.agent_status !== 'idle' && agent.agent_status !== 'done') return undefined;
+    if (agent.interactive_ready === false) return undefined;
+    return { agentName: at.agentName, workspaceId: at.workspaceId, paneId: agent.pane_id };
+  }
+
+  private async assertPromptAllowed(
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): Promise<void> {
+    if (!this.beforePrompt) return;
+    const target = await this.proveAgent(at);
+    if (!target) {
+      throw new PromptWithheld('the target agent could not be positively identified as the recorded one and ready for input');
+    }
+    let verdict;
+    try {
+      verdict = await this.beforePrompt(target, { proveAgent: () => this.proveAgent(at) });
+    } catch {
+      throw new PromptWithheld('the memory headroom check failed unexpectedly');
+    }
+    if (!verdict.ok) throw new PromptWithheld(verdict.reason);
+  }
+
+  /**
    * Reads the result file, retrying a bounded number of times.
    *
    * Not a poll for work to finish -- the turn has already settled. This closes
@@ -684,15 +776,20 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    *   writer.
    */
   private async submitWhenReady(
-    agentName: string,
+    at: { workspaceId: string; agentName: string; paneId?: string },
     text: string,
     spec: OrchestrationSpec,
   ): Promise<AgentInfo | undefined> {
+    const agentName = at.agentName;
     await this.awaitInteractiveReady(agentName, spec);
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.readyRetries; attempt += 1) {
       if (spec.signal?.aborted) break;
+      // At the last safe boundary, on EVERY attempt: a retry after
+      // `agent_not_ready` is a second chance to send model work, and the agent
+      // may since have moved into a tighter cgroup.
+      await this.assertPromptAllowed(at);
       try {
         return await this.herdr.agentPrompt(agentName, text, spec.promptTimeoutMs, spec.signal);
       } catch (err) {

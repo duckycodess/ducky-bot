@@ -5,6 +5,7 @@ import { loadExecutorEnv } from './config.js';
 import { CoordinatorClient } from './client.js';
 import { ExecutorLoop } from './loop.js';
 import { checkMemoryHeadroom, defaultCgroupDir } from './memory-headroom.js';
+import { createAgentPromptGuard } from './agent-cgroup.js';
 import { assertSubscriptionOnlyEnvironment } from '@ducky/contracts';
 
 /**
@@ -43,8 +44,28 @@ async function main(): Promise<void> {
 
   // Honest by construction: without a reachable Herdr the executor uses the
   // mock orchestrator and says so, rather than pretending to drive Pi.
+  const MIB = 2 ** 20;
+  // With the guard on, model work is also withheld unless the cgroup the AGENT
+  // is actually in -- and every ancestor of it -- has room. This is in addition
+  // to the account-level check before a claim, which it does not replace.
+  const agentGuard =
+    env.DUCKY_MEMORY_GUARD === 'cgroup'
+      ? createAgentPromptGuard({
+          herdr,
+          uid: process.getuid?.() ?? -1,
+          reserves: {
+            engineeringBytes: env.DUCKY_MEMORY_RESERVE_ENGINEERING_MIB * MIB,
+            providerBytes: env.DUCKY_MEMORY_RESERVE_PROVIDER_MIB * MIB,
+            notificationBytes: env.DUCKY_MEMORY_RESERVE_NOTIFICATIONS_MIB * MIB,
+          },
+        })
+      : undefined;
   const orchestrator = herdrUp
-    ? new HerdrPiOrchestrator({ herdr, verified: env.DUCKY_HERDR_VERIFIED === '1' })
+    ? new HerdrPiOrchestrator({
+        herdr,
+        verified: env.DUCKY_HERDR_VERIFIED === '1',
+        ...(agentGuard ? { beforePrompt: agentGuard } : {}),
+      })
     : new MockPiOrchestrator();
 
   log.info('executor.starting', {
@@ -55,11 +76,11 @@ async function main(): Promise<void> {
 
   // With the guard on, a claim is attempted only when the account's memory
   // cgroup provably has room; an unreadable or unlimited slice refuses.
-  const MIB = 2 ** 20;
   const headroomConfig = {
     cgroupDir: env.DUCKY_MEMORY_CGROUP_DIR ?? defaultCgroupDir(process.getuid?.() ?? 0),
     engineeringReserveBytes: env.DUCKY_MEMORY_RESERVE_ENGINEERING_MIB * MIB,
     notificationReserveBytes: env.DUCKY_MEMORY_RESERVE_NOTIFICATIONS_MIB * MIB,
+    providerReserveBytes: env.DUCKY_MEMORY_RESERVE_PROVIDER_MIB * MIB,
   };
   if (env.DUCKY_MEMORY_GUARD === 'cgroup') {
     log.info('executor.memory_guard', { cgroupDir: headroomConfig.cgroupDir });

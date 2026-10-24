@@ -81,7 +81,7 @@ describe('migration 37 rebuilds the ledger from a populated migration 36 without
     const claimsBefore = snapshot(db, 'native_transition_claims', 'owner_id, repo_key, transition_key');
     const seedBefore = snapshot(db, 'native_legacy_seed', 'repo_key, transition_key');
     expect(claimsBefore).toHaveLength(4);
-    expect(runMigrations(db, { now: () => T3 })).toEqual([37]);
+    expect(runMigrations(db, { upTo: 37, now: () => T3 })).toEqual([37]);
     expect(snapshot(db, 'native_transition_claims', 'owner_id, repo_key, transition_key')).toEqual(claimsBefore);
     expect(snapshot(db, 'native_legacy_seed', 'repo_key, transition_key')).toEqual(seedBefore);
     const names = (db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%v36%'").all() as { name: string }[]);
@@ -157,7 +157,7 @@ describe('migration 37 rebuilds the ledger from a populated migration 36 without
       );
       seed.run(T0, 'owner_dm', T1);
     });
-    runMigrations(db, { now: () => T3 });
+    runMigrations(db, { upTo: 37, now: () => T3 });
     // After migration 37 a second staged holder of the same transition is no longer ignored.
     db.prepare(
       `INSERT INTO native_legacy_seed (repo_key, transition_key, kind, item, via, ref, observed_at)

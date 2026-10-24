@@ -67,6 +67,13 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'native_transition_claims',
   'native_ledger_boundary',
   'native_legacy_seed',
+  /**
+   * Per-author review lines that were ACTUALLY DELIVERED while the exact review list could not identify what
+   * they summarise (migration 38). It is independent of `github_watch_events` and `github_watches`, which
+   * retention deletes: a delivered, unidentified line is blocking evidence that outlives its outbox row and its
+   * watch, and nothing clears it. Identifiers and reasons only, never a title or a body.
+   */
+  'github_watch_gap_markers',
   /** When the owner's monitoring was paused and by whom: status and export provenance. */
   'assistant_watch_pause_periods',
   /** Who may write this database right now. */

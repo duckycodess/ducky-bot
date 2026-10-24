@@ -26,8 +26,40 @@ import type { WatchEventKind } from './assistant-watch.js';
 
 export const TRANSITION_KINDS = [
   'commit', 'pr_opened', 'pr_updated', 'pr_merged', 'changes_requested', 'issue_opened', 'ci_failed',
+  'review_approved', 'review_commented', 'review_dismissed',
 ] as const;
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
+
+/**
+ * The OBSERVED-STATE review families (migration 38). A fact is a review in an observed state: the same review
+ * can legitimately be told once as approved and later as dismissed, and both tellings are accepted source
+ * behaviour, so no key is shared across states. `review_dismissed` means ONLY "this review was observed in
+ * state DISMISSED": it carries no dismissal time, actor or cause (no approved DTO provides one).
+ */
+export const OBSERVED_REVIEW_KINDS = ['review_approved', 'review_commented', 'review_dismissed'] as const;
+export type ObservedReviewKind = (typeof OBSERVED_REVIEW_KINDS)[number];
+export const isObservedReviewKind = (k: string): k is ObservedReviewKind =>
+  (OBSERVED_REVIEW_KINDS as readonly string[]).includes(k);
+
+/**
+ * Which identity a stored hash is. `provider` is `hashProviderRef` of the provider's review id; the gh GraphQL
+ * `reviews[].id` and the REST `node_id` are both hashed in it (whether they are EQUAL is the unproven live
+ * gate). `source_identity` hashes the imported event's own identity string plus its observed-state scope, and
+ * exists only for a review row that carries no provider hash. Hashes of different domains are never equal and
+ * never proof of a different review.
+ */
+export const HASH_DOMAINS = ['provider', 'source_identity'] as const;
+export type HashDomain = (typeof HASH_DOMAINS)[number];
+
+/** The observed state a review fact names. The last spelling is a stateless commented row: BOTH candidates. */
+export const REVIEW_OBSERVED_STATES = ['APPROVED', 'COMMENTED', 'DISMISSED', 'COMMENTED|DISMISSED'] as const;
+export type ReviewObservedState = (typeof REVIEW_OBSERVED_STATES)[number];
+
+/** Every state word a stored review row can carry (a requested change included, for lifecycle checks). */
+export const REVIEW_PROVIDER_STATES = ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'] as const;
+export type ReviewProviderState = (typeof REVIEW_PROVIDER_STATES)[number];
+export const isReviewProviderState = (v: unknown): v is ReviewProviderState =>
+  typeof v === 'string' && (REVIEW_PROVIDER_STATES as readonly string[]).includes(v);
 
 export interface Transition {
   readonly kind: TransitionKind;
@@ -35,10 +67,14 @@ export interface Transition {
   readonly item: string;
   /** A canonical `toISOString` instant, for updates and merges. */
   readonly stamp: string | null;
-  /** A 64-hex hash of a provider review id, for requested changes. */
+  /** A 64-hex hash of a review identity (see `domain`), for the review families. */
   readonly hash: string | null;
   /** A rerun attempt, for a failed run. */
   readonly attempt: string | null;
+  /** Which identity `hash` is. Absent means `provider`, which is every pre-38 transition. */
+  readonly domain?: HashDomain;
+  /** The observed state, for the observed-state review families only. */
+  readonly state?: ReviewObservedState | null;
 }
 
 /** Where an imported event kind stands against the native paths. Exhaustive, by `satisfies`. */
@@ -50,9 +86,12 @@ export const IMPORTED_COUNTERPART = {
   // Native count lines ("no longer open") never name an item.
   pr_closed: null,
   review_requested_changes: 'changes_requested',
-  // Native approvals are a PR-level decision and its comments a count, not a review id.
-  review_approved: null,
-  review_commented: null,
+  // A submitted review in an OBSERVED STATE (migration 38). The ordinary summary names new approved and
+  // commented reviews and observed dismissals exactly; a PR-level decision and the conversation-comment count
+  // stay distinct facts that claim nothing. `review_commented` carries COMMENTED or DISMISSED (the source's
+  // collapsed vocabulary), told apart by the stored provider state.
+  review_approved: 'review_approved',
+  review_commented: 'review_commented',
   review_pending: null,
   issue_opened: 'issue_opened',
   // Native issue lines are counts only.
@@ -138,6 +177,29 @@ export function reviewTransitionFromHash(n: number, hash: string | null | undefi
     : null;
 }
 
+/** The kind that names a review observed in this state. A candidate set is a stateless commented row. */
+export const observedStateKind = (state: ReviewObservedState): ObservedReviewKind =>
+  state === 'APPROVED' ? 'review_approved' : state === 'DISMISSED' ? 'review_dismissed' : 'review_commented';
+
+/**
+ * A domain-separated identity hash of an imported event that carries no provider hash. It covers the event's own
+ * identity string and the state scope, so the two source rows of one review (told approved, then dismissed)
+ * never share a hash, and it can never equal a provider hash (the prefix differs).
+ */
+export function hashSourceIdentity(identity: string, scope: ReviewObservedState): string | null {
+  if (identity.length === 0 || identity.length > 300) return null;
+  return createHash('sha256').update(`ducky-source-review:v1:${identity}:${scope}`).digest('hex');
+}
+
+/** One review fact: a pull request, a review identity in a domain, and the state it was observed in. */
+export function observedReviewTransition(
+  n: number, hash: string | null | undefined, domain: HashDomain, state: ReviewObservedState,
+): Transition | null {
+  if (typeof hash !== 'string' || !HASH.test(hash) || !NUMBER.test(String(n))) return null;
+  const t: Transition = { ...build(observedStateKind(state), String(n), { hash }), domain, state };
+  return isWellFormedTransition(t) ? t : null;
+}
+
 export function runTransition(runId: number | string, attempt: number | string | null | undefined): Transition | null {
   const run = String(runId);
   const att = attempt === null || attempt === undefined ? null : String(attempt);
@@ -151,6 +213,11 @@ export function transitionKey(t: Transition): string {
     case 'pr_updated': case 'pr_merged': return `${t.kind}:${t.item}:${t.stamp}`;
     case 'changes_requested': return `${t.kind}:${t.item}:${t.hash}`;
     case 'ci_failed': return `${t.kind}:${t.item}:${t.attempt}`;
+    // The domain is part of the key, so a provider hash and a source-identity hash can never collide, and a
+    // stateless commented row has a target-only key no native fact can equal.
+    case 'review_approved': case 'review_commented': case 'review_dismissed':
+      return `${t.kind}:${t.item}${t.domain === 'source_identity' ? ':src' : ''}:${t.hash}` +
+        (t.state === 'COMMENTED|DISMISSED' ? ':unknown_state' : '');
   }
 }
 
@@ -163,6 +230,16 @@ export function isWellFormedTransition(t: Transition): boolean {
       return NUMBER.test(t.item) && t.stamp !== null && canonicalStamp(t.stamp) === t.stamp && !t.hash && !t.attempt;
     case 'changes_requested': return NUMBER.test(t.item) && t.hash !== null && HASH.test(t.hash) && !t.stamp && !t.attempt;
     case 'ci_failed': return RUN.test(t.item) && t.attempt !== null && ATTEMPT.test(t.attempt) && !t.stamp && !t.hash;
+    case 'review_approved': case 'review_commented': case 'review_dismissed': {
+      if (!NUMBER.test(t.item) || t.hash === null || !HASH.test(t.hash) || t.stamp || t.attempt) return false;
+      const domain = t.domain ?? 'provider';
+      if (domain !== 'provider' && domain !== 'source_identity') return false;
+      const state = t.state ?? null;
+      if (state === null || !(REVIEW_OBSERVED_STATES as readonly string[]).includes(state)) return false;
+      if (observedStateKind(state) !== t.kind) return false;
+      // A candidate set is only ever a source-identity, target-only fact: a provider hash names ONE state.
+      return state !== 'COMMENTED|DISMISSED' || domain === 'source_identity';
+    }
   }
 }
 
@@ -210,6 +287,18 @@ export interface TargetEventFacts {
   readonly providerHash: string | null;
   /** The rerun attempt, for a failed run. */
   readonly attempt: string | null;
+  /**
+   * The review state the row was OBSERVED in (APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED), stored from
+   * migration 38 on. Absent on a row observed before it and on every imported-document row: never guessed.
+   */
+  readonly providerState?: string | null;
+  /**
+   * The provider's canonical submission instant, only when the provider supplied one. Absent or null is
+   * UNKNOWN: the source's own fallback is "now", which is never a submission instant.
+   */
+  readonly providerAt?: string | null;
+  /** The host instant the event row was committed: an upper bound on when the review existed. */
+  readonly createdAt?: string | null;
 }
 
 export type TargetTransition =
@@ -254,6 +343,26 @@ export function targetTransition(e: TargetEventFacts): TargetTransition {
       const t = m ? updatedTransition(Number(m[1]), m[2]!) : null;
       return t ? { status: 'exact', transition: t } : invalid();
     }
+    case 'review_approved':
+    case 'review_commented': {
+      const n = head(/^(\d+):review:/);
+      if (n === null || !NUMBER.test(n)) return invalid();
+      // The state the row names: an approval is APPROVED; a commented row is COMMENTED or DISMISSED when its
+      // stored state says so and a CANDIDATE SET otherwise (never guessed).
+      const state: ReviewObservedState = e.kind === 'review_approved'
+        ? 'APPROVED'
+        : e.providerState === 'COMMENTED' || e.providerState === 'DISMISSED'
+          ? e.providerState
+          : 'COMMENTED|DISMISSED';
+      // A provider hash names exactly one state; without one (or without a state) the identity string is the
+      // identity, in its own domain.
+      const provider = state !== 'COMMENTED|DISMISSED' && e.providerHash !== null && e.providerHash !== undefined &&
+        HASH.test(e.providerHash);
+      const t = provider
+        ? observedReviewTransition(Number(n), e.providerHash, 'provider', state)
+        : observedReviewTransition(Number(n), hashSourceIdentity(e.identity, state), 'source_identity', state);
+      return t ? { status: 'exact', transition: t } : invalid();
+    }
     case 'review_requested_changes': {
       const n = head(/^(\d+):review:/);
       if (n === null || !NUMBER.test(n)) return invalid();
@@ -272,3 +381,19 @@ export function targetTransition(e: TargetEventFacts): TargetTransition {
       return { status: 'none' };
   }
 }
+
+// ---- unidentified per-author review lines that were actually delivered (gap markers) ----------------------
+
+/**
+ * A per-author review line ("approvals ...", "changes requested on ...") names no review id. When one is told
+ * while the exact review list could not identify what it summarises, the line may overlap a review an imported
+ * target tells, and no receipt can settle it. A delivered one is durable, counted, blocking evidence (never a
+ * receipt, never cleared).
+ */
+export const GAP_CLASSES = ['approval', 'changes_requested'] as const;
+export type GapClass = (typeof GAP_CLASSES)[number];
+export const GAP_REASONS = ['no_comparison', 'unavailable', 'truncated'] as const;
+export type GapReason = (typeof GAP_REASONS)[number];
+/** `shown`: the whole segment lies inside the clamp and redaction left the summary unchanged. */
+export const GAP_SHOWN = ['shown', 'delivered_not_provably_shown'] as const;
+export type GapShown = (typeof GAP_SHOWN)[number];

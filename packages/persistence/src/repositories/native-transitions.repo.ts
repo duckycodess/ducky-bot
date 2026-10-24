@@ -1,5 +1,5 @@
 import {
-  NATIVE_LEGACY_SKEW_MS, canonicalStamp, feedEventTransition, isWellFormedTransition, targetTransition,
+  NATIVE_LEGACY_SKEW_MS, canonicalStamp, feedEventTransition, isObservedReviewKind, isWellFormedTransition, targetTransition,
   transitionKey, transitionRepoKey,
   type TargetEventFacts, type Transition, type TransitionKind,
 } from '@ducky/contracts';
@@ -416,7 +416,12 @@ export class NativeTransitionsRepo {
       const near = this.nativeSameItem(ownerId, repo, x.kind, x.item, occurredMs);
       if (near) return near;
     }
-    if (this.legacyHeld(occurredMs)) return { outcome: 'withhold', reason: 'legacy_unproven' };
+    // The observed-state review families are exempt from the migration-36 cutoff: they were deliverable before
+    // they had a counterpart, and migration 38 only records provenance. Withholding them by time would make
+    // history that was never a receipt look like one.
+    if (!isObservedReviewKind(x.kind) && this.legacyHeld(occurredMs)) {
+      return { outcome: 'withhold', reason: 'legacy_unproven' };
+    }
     return { outcome: 'deliver' };
   }
 

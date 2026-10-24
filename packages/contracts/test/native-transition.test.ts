@@ -4,6 +4,7 @@ import {
   IMPORTED_COUNTERPART, WATCH_EVENT_KINDS, WatchReviewsSchema, WatchRunsSchema, canonicalStamp, commitTransition,
   feedEventTransition, hashProviderRef, isWellFormedTransition, mergedTransition, openedTransition, reviewTransition,
   runTransition, targetTransition, transitionKey, transitionRepoKey, updatedTransition,
+  hashSourceIdentity, observedReviewTransition, observedStateKind, type Transition,
 } from '../src/index.js';
 
 const facts = (kind: (typeof WATCH_EVENT_KINDS)[number], identity: string, extra: { occurredAt?: string; providerHash?: string | null; attempt?: string | null } = {}) => ({
@@ -11,10 +12,11 @@ const facts = (kind: (typeof WATCH_EVENT_KINDS)[number], identity: string, extra
 });
 
 describe('the codec decides, per imported kind, what a native path could have told', () => {
-  it('has an entry for EVERY imported event kind, and only seven families have a native counterpart', () => {
+  it('has an entry for EVERY imported event kind, and only nine families have a native counterpart', () => {
     expect(Object.keys(IMPORTED_COUNTERPART).sort()).toEqual([...WATCH_EVENT_KINDS].sort());
-    expect(new Set(Object.values(IMPORTED_COUNTERPART).filter((v) => v !== null)).size).toBe(7);
-    for (const none of ['pr_closed', 'review_approved', 'review_commented', 'review_pending', 'issue_updated', 'issue_closed',
+    // The seven earlier families, and the observed-state approved and commented reviews (migration 38).
+    expect(new Set(Object.values(IMPORTED_COUNTERPART).filter((v) => v !== null)).size).toBe(9);
+    for (const none of ['pr_closed', 'review_pending', 'issue_updated', 'issue_closed',
       'release', 'ci_started', 'ci_recovered', 'default_branch_change'] as const) {
       expect(IMPORTED_COUNTERPART[none], none).toBeNull();
       expect(targetTransition(facts(none, '1:x')).status, none).toBe('none');
@@ -126,5 +128,78 @@ describe('the approved review and run DTOs carry the exact ids, bounded and opti
       ],
     });
     expect(runs.workflow_runs.map((r) => r.run_attempt)).toEqual([2, undefined, undefined, undefined]);
+  });
+});
+
+
+describe('the observed-state review families (migration 38)', () => {
+  const H = hashProviderRef('PRR_1')!;
+  const exact = (f: ReturnType<typeof facts> & { providerState?: string | null }): Transition => {
+    const t = targetTransition(f);
+    if (t.status !== 'exact') throw new Error(`expected exact, got ${t.status}`);
+    return t.transition;
+  };
+
+  it('keys a review by its pull request, its identity domain and the state it was observed in', () => {
+    expect(transitionKey(observedReviewTransition(7, H, 'provider', 'APPROVED')!)).toBe(`review_approved:7:${H}`);
+    expect(transitionKey(observedReviewTransition(7, H, 'provider', 'DISMISSED')!)).toBe(`review_dismissed:7:${H}`);
+    expect(transitionKey(observedReviewTransition(7, H, 'provider', 'COMMENTED')!)).toBe(`review_commented:7:${H}`);
+    expect(transitionKey(observedReviewTransition(7, H, 'source_identity', 'APPROVED')!)).toBe(`review_approved:7:src:${H}`);
+    expect(transitionKey(observedReviewTransition(7, H, 'source_identity', 'COMMENTED|DISMISSED')!))
+      .toBe(`review_commented:7:src:${H}:unknown_state`);
+    // The existing requested-changes key is unchanged.
+    expect(transitionKey(reviewTransition(7, 'PRR_1')!)).toBe(`changes_requested:7:${H}`);
+  });
+
+  it('never shares a key across states or domains, so no state is deduplicated against another', () => {
+    const keys = (['APPROVED', 'COMMENTED', 'DISMISSED'] as const).flatMap((st) =>
+      (['provider', 'source_identity'] as const).map((d) => transitionKey(observedReviewTransition(7, H, d, st)!)));
+    expect(new Set(keys).size).toBe(6);
+    expect(observedStateKind('COMMENTED|DISMISSED')).toBe('review_commented');
+  });
+
+  it('refuses a malformed fact: a state that does not match its kind, a provider candidate set, a bad hash or number', () => {
+    const base = { kind: 'review_approved' as const, item: '7', stamp: null, hash: H, attempt: null };
+    expect(isWellFormedTransition({ ...base, domain: 'provider', state: 'APPROVED' })).toBe(true);
+    expect(isWellFormedTransition({ ...base, domain: 'provider', state: 'DISMISSED' })).toBe(false);
+    expect(isWellFormedTransition({ ...base, domain: 'provider', state: null })).toBe(false);
+    expect(isWellFormedTransition({ ...base, kind: 'review_commented', domain: 'provider', state: 'COMMENTED|DISMISSED' })).toBe(false);
+    expect(isWellFormedTransition({ ...base, kind: 'review_commented', domain: 'source_identity', state: 'COMMENTED|DISMISSED' })).toBe(true);
+    expect(isWellFormedTransition({ ...base, hash: 'zz', domain: 'provider', state: 'APPROVED' })).toBe(false);
+    expect(observedReviewTransition(0, H, 'provider', 'APPROVED')).toBeNull();
+    expect(observedReviewTransition(7, null, 'provider', 'APPROVED')).toBeNull();
+  });
+
+  it('names an approved row by its provider hash when it has one, and by its source identity otherwise', () => {
+    const withHash = exact(facts('review_approved', '7:review:99', { providerHash: H }));
+    expect(withHash).toMatchObject({ kind: 'review_approved', domain: 'provider', state: 'APPROVED', hash: H });
+    const noHash = exact(facts('review_approved', '7:review:99'));
+    expect(noHash).toMatchObject({ kind: 'review_approved', domain: 'source_identity', state: 'APPROVED' });
+    expect(noHash.hash).toBe(hashSourceIdentity('7:review:99', 'APPROVED'));
+    expect(noHash.hash).not.toBe(H);
+  });
+
+  it('tells a commented row from a dismissed one by its stored state, and never guesses a stateless one', () => {
+    expect(exact({ ...facts('review_commented', '7:review:1', { providerHash: H }), providerState: 'COMMENTED' }))
+      .toMatchObject({ kind: 'review_commented', domain: 'provider', state: 'COMMENTED' });
+    expect(exact({ ...facts('review_commented', '7:review:1', { providerHash: H }), providerState: 'DISMISSED' }))
+      .toMatchObject({ kind: 'review_dismissed', domain: 'provider', state: 'DISMISSED' });
+    const stateless = exact(facts('review_commented', '7:review:1', { providerHash: H }));
+    // A hash with no state is not trusted as one state's identity: it falls to the identity string, a candidate set.
+    expect(stateless).toMatchObject({ kind: 'review_commented', domain: 'source_identity', state: 'COMMENTED|DISMISSED' });
+    expect(transitionKey(stateless)).toMatch(/^review_commented:7:src:[0-9a-f]{64}:unknown_state$/);
+  });
+
+  it('gives the two source rows of one review two different source hashes', () => {
+    const a = exact(facts('review_approved', '7:review:5'));
+    const c = exact(facts('review_commented', '7:review:5'));
+    expect(a.hash).not.toBe(c.hash);
+    expect(hashSourceIdentity('7:review:5', 'COMMENTED')).not.toBe(hashSourceIdentity('7:review:5', 'DISMISSED'));
+    expect(hashSourceIdentity('', 'APPROVED')).toBeNull();
+  });
+
+  it('reads an identity it cannot parse as having no native counterpart to be confused with', () => {
+    expect(targetTransition(facts('review_approved', 'garbage')).status).toBe('none');
+    expect(targetTransition(facts('review_commented', '0:review:1')).status).toBe('none');
   });
 });

@@ -2160,6 +2160,145 @@ CREATE INDEX ix_watch_events_held ON github_watch_events(created_at) WHERE held_
 ALTER TABLE github_watches ADD COLUMN read_boundary_at TEXT;
 `,
   },
+  {
+    version: 38,
+    name: 'observed_state_review_families_gap_markers_and_hash_domains',
+    // Migration 37 is published and is not revised. Two tables are rebuilt here (a CHECK cannot be widened in
+    // place) and the rebuild is proved row for row, in the SAME transaction, before the originals are dropped.
+    after: (db, ctx) => verifyReviewFamilyRebuild(db, ctx.at),
+    sql: `
+-- Observed-state review families (ADR 0034). A fact is a review in an OBSERVED state: the same review can be told
+-- approved and later dismissed, and both are accepted source behaviour, so no key is shared across states. The
+-- claims ledger is rebuilt only to widen its kind CHECK and to say which identity a hash is (hash_domain) and
+-- which state a review fact names (provider_state). Every existing row is copied as a provider-domain row with
+-- no state, which is exactly what it was.
+DROP INDEX ux_native_claims_one_target;
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v37;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed',
+                    'review_approved','review_commented','review_dismissed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  -- Which identity provider_hash is. A hash of one domain is never equal to, and never proof of a different
+  -- review than, a hash of the other.
+  hash_domain    TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  -- The state a review fact names; NULL for every other kind. The last spelling is a stateless commented row.
+  provider_state TEXT CHECK (provider_state IS NULL OR provider_state IN
+                   ('APPROVED','COMMENTED','DISMISSED','COMMENTED|DISMISSED')),
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+   path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+         path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v37;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- The imported event rows. Rebuilt only because the withheld reason gains \`state_conflict\` (an impossible
+-- lifecycle change, never delivered as a fact). It also stores what a review row was OBSERVED as: its state,
+-- the provider's submission instant only when the provider supplied one (NULL is unknown: the source falls back
+-- to "now", which is never a submission instant), and the domain of provider_hash. Rows observed before this
+-- migration and every imported-document row keep NULL state and NULL instant: nothing is guessed.
+DROP INDEX ix_assistant_watch_events_digest;
+DROP INDEX ix_assistant_watch_events_alert;
+ALTER TABLE assistant_watch_events RENAME TO assistant_watch_events_v37;
+CREATE TABLE assistant_watch_events (
+  id              TEXT PRIMARY KEY,
+  target_id       TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL,
+  surface         TEXT NOT NULL CHECK (surface IN
+                    ('commits','pulls','issues','runs','releases','default_branch')),
+  held            INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0,1)),
+  identity        TEXT NOT NULL,
+  occurred_at     TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  origin          TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  alerted_at      TEXT,
+  alert_attempts  INTEGER NOT NULL DEFAULT 0,
+  alert_abandoned_at TEXT,
+  digested_at     TEXT,
+  created_at      TEXT NOT NULL,
+  withheld_reason TEXT
+    CHECK (withheld_reason IS NULL OR withheld_reason IN ('legacy_unproven','ambiguous_evidence','state_conflict')),
+  settled_by      TEXT CHECK (settled_by IS NULL OR settled_by IN ('native_receipt')),
+  provider_hash   TEXT,
+  hash_domain     TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  provider_state  TEXT CHECK (provider_state IS NULL OR provider_state IN
+                    ('APPROVED','CHANGES_REQUESTED','COMMENTED','DISMISSED')),
+  provider_at     TEXT,
+  attempt         TEXT,
+  UNIQUE (target_id, kind, identity)
+);
+INSERT INTO assistant_watch_events
+  (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts,
+   alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt)
+  SELECT id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts,
+         alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt
+    FROM assistant_watch_events_v37;
+CREATE INDEX ix_assistant_watch_events_digest
+  ON assistant_watch_events(created_at) WHERE digested_at IS NULL;
+CREATE INDEX ix_assistant_watch_events_alert
+  ON assistant_watch_events(created_at) WHERE alerted_at IS NULL AND alert_abandoned_at IS NULL;
+
+-- The staged legacy rows and the held ordinary facts say which identity their hash is, too. Existing rows are
+-- provider-domain rows, which is what they were.
+ALTER TABLE native_legacy_seed ADD COLUMN hash_domain TEXT NOT NULL DEFAULT 'provider'
+  CHECK (hash_domain IN ('provider','source_identity'));
+ALTER TABLE github_watch_events ADD COLUMN hash_domain TEXT NOT NULL DEFAULT 'provider'
+  CHECK (hash_domain IN ('provider','source_identity'));
+-- The per-author line segments a summary rendered while the exact review list could not identify them: PENDING
+-- evidence only, written with the outbox row. A marker is promoted to a durable one only by a successful send.
+ALTER TABLE github_watch_events ADD COLUMN gap_markers TEXT;
+
+-- Per-author review lines that were ACTUALLY DELIVERED while no exact review list could identify them. Owner
+-- scoped and independent of github_watch_events and github_watches (retention deletes both), so a delivered
+-- line outlives its outbox row and its watch. Never cleared by recovery, a cancel, a remap, a restart or
+-- retention. Identifiers and reasons only: no title, no body, no review id.
+CREATE TABLE github_watch_gap_markers (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id      TEXT NOT NULL,
+  watch_id      TEXT NOT NULL,
+  repo_key      TEXT,
+  pr_number     INTEGER NOT NULL CHECK (pr_number > 0),
+  review_class  TEXT NOT NULL CHECK (review_class IN ('approval','changes_requested')),
+  reason        TEXT NOT NULL CHECK (reason IN ('no_comparison','unavailable','truncated')),
+  shown         TEXT NOT NULL CHECK (shown IN ('shown','delivered_not_provably_shown')),
+  outbox_ref    TEXT NOT NULL,
+  delivered_at  TEXT NOT NULL,
+  UNIQUE (outbox_ref, pr_number, review_class)
+);
+CREATE INDEX ix_gap_markers_owner ON github_watch_gap_markers(owner_id);
+
+-- Provenance only: when the observed-state review families began. It is exported and reported, and it is NEVER
+-- used to withhold an event that was deliverable before (these counterparts are exempt from the migration-36
+-- cutoff); earlier unidentified aggregate history stays an unresolved overlap, not a receipt.
+ALTER TABLE native_ledger_boundary ADD COLUMN review_families_at TEXT;
+`,
+  },
 ];
 
 /**
@@ -2167,6 +2306,40 @@ ALTER TABLE github_watches ADD COLUMN read_boundary_at TEXT;
  * originals held, in both directions, before the originals are dropped. A difference throws, which rolls the
  * whole migration back. Nothing is inferred and no row is dropped or invented.
  */
+/**
+ * Migration 38's proof, in its own transaction, for the two rebuilt tables: every row and every value of the
+ * originals is in the rebuilt tables and nothing else is, and every copied row is what it always was (a
+ * provider-domain row with no recorded state or instant). A difference throws and rolls the whole migration back.
+ */
+function verifyReviewFamilyRebuild(db: import('./db.js').Db, at: string): void {
+  const scalar = (sql: string): number => Number((db.prepare(sql).get() as { n: number }).n);
+  const same = (oldTable: string, newTable: string, columns: string, extra: string): void => {
+    const lost = (a: string, b: string): number =>
+      scalar(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`);
+    if (
+      scalar(`SELECT COUNT(*) AS n FROM ${oldTable}`) !== scalar(`SELECT COUNT(*) AS n FROM ${newTable}`) ||
+      lost(oldTable, newTable) !== 0 || lost(newTable, oldTable) !== 0 ||
+      scalar(`SELECT COUNT(*) AS n FROM ${newTable} WHERE NOT (${extra})`) !== 0
+    ) {
+      throw new Error(`migration 38: ${newTable} does not hold exactly the rows of ${oldTable}`);
+    }
+    db.exec(`DROP TABLE ${oldTable}`);
+  };
+  same(
+    'native_transition_claims_v37', 'native_transition_claims',
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at, path, state, via, ref, ' +
+      'observed_at, delivered_to, delivered_at, created_at, updated_at',
+    `hash_domain = 'provider' AND provider_state IS NULL`,
+  );
+  same(
+    'assistant_watch_events_v37', 'assistant_watch_events',
+    'id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts, ' +
+      'alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt',
+    `hash_domain = 'provider' AND provider_state IS NULL AND provider_at IS NULL`,
+  );
+  db.prepare('UPDATE native_ledger_boundary SET review_families_at = ? WHERE id = 1 AND review_families_at IS NULL').run(at);
+}
+
 function verifyNativeHolderRebuild(db: import('./db.js').Db): void {
   const same = (oldTable: string, newTable: string, columns: string): void => {
     const count = (t: string): number => Number((db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);

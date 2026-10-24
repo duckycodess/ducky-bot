@@ -1172,8 +1172,8 @@ a ledger of native receipts and reservations by exact transition, a shared codec
 watches that record the repository they queried, pause provenance, withheld-event accounting
 and a v3 rollback export. **Operator sequencing it needs:** stop the coordinator, back up,
 migrate, and only then take the final source export, so imported cursors lie after the ledger
-cutoff; then require `pnpm import:assistant --verify` to report zero withheld events and zero
-cursors at or before the cutoff. Never run an older build against a migrated database.
+cutoff; then require `pnpm import:assistant --verify` to exit 0 (it exits 5 when the data is present
+but not at parity: drift, a withheld event, a held native card or a cursor at or before the cutoff). Never run an older build against a migrated database.
 
 **Upgrade notes.** Migration 29 introduces the runtime lock, which a coordinator from an
 older build does not know; stop the coordinator before migrations, and never start an
@@ -1233,8 +1233,9 @@ fail-closed form of the blocker, not a decision to drop it.
   imported event with a native counterpart at or before the migration-36 cutoff (plus one second)
   and no exact receipt is **withheld**, never delivered or settled, counted in `/status`, `--verify`
   and the export, with no clearing control; counts and unnamed aggregates are never receipts (aggregate/
-  detail overlap remains); a requested-changes review is told twice until REST `node_id` equality with
-  the native id is proven on a live provider. Unit and synthetic tests only; command registration with
+  detail overlap remains); a requested-changes review is withheld or held, never told twice by an id
+  mismatch, until REST `node_id` equality with the native id is proven on a live provider. Unit and
+  synthetic tests only; command registration with
   Discord is not performed here.
 - **Alert content:** a requested-changes alert omits the source's "areas
   mentioned". The review BODY is now read (and is the only approved source: file and
@@ -1334,8 +1335,14 @@ fail-closed form of the blocker, not a decision to drop it.
   for shape on a public repository only.
 - **Native reconciliation limits (ADR 0034), required until closed:** events that predate the
   ledger are withheld and counted with no clearing control; counts and unnamed aggregates prove
-  no item, so aggregate/detail overlap remains; a requested-changes review is told twice until REST
-  `node_id` equals the native id on a live provider (a live-probe gate nobody has run); a start-up
+  no item, so aggregate/detail overlap remains; a requested-changes review is withheld (imported side)
+  or its native card HELD (feed side) when its id cannot be compared, until REST `node_id` equals the
+  native id on a live provider (a live-probe gate nobody has run); **REQUIRED MERGE BLOCKERS, each
+  named, none an accepted residual and none a parity claim:** the ordinary summary's PR-level lines
+  (changes requested on #n, approved: #n, new review comment(s) on #n, and a pull request newly listed in
+  the capped snapshot) carry no per-item identity, so nothing safe settles them against the imported
+  events of the same name, and the closed-pull-request, issue-count and workflow-run lines are open on the
+  same terms; a start-up
   crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
   ledger grows by a few identifiers per delivered native transition for the life of the database.
 - **A real typed reader, the rollback-delta export and every operational gate**
@@ -1344,7 +1351,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2606 tests in 158 files**.
+The unmodified `pnpm test` command passes all **2629 tests in 158 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

@@ -28,7 +28,7 @@ Imported notification targets SHALL remain private to the owner's audited destin
 
 #### Scenario: A requested-changes review compared by id
 - **WHEN** a native card and an imported event name the same pull request
-- **THEN** they match only by exact equality of the review node id (hashed), never by timestamp alone; a review whose id is missing is withheld while any native path could tell it, and a provably later review is delivered; live equality of the two ids is a required evidence gate
+- **THEN** they match only by exact equality of the review node id (hashed), never by timestamp alone; a review whose id is missing or unequal is never told twice: the imported event is withheld while a native card could be the same review, and a native card is HELD (durably, neither sent nor skipped nor receipted, counted) when the target delivered a review of that pull request whose provider instant is equal or unknown; a review with a provably different provider instant is delivered; live equality of the two ids is a required evidence gate
 
 #### Scenario: History the ledger cannot place
 - **WHEN** a database is not verifiably new and an imported event with a native counterpart occurred at or before the migration cutoff plus one second with no exact receipt

@@ -368,8 +368,8 @@ approved (A1-A7, C1-C5), with these choices a reviewer should check against the 
   could ever tell it is delivered. This is stricter than "withhold on a native claim" because a send
   with no exact key leaves no reservation a later native card could see.
 - **The review comparison is a hash of the REST `node_id` against the native id (exact equality);
-  live equality is unproven** (the reviews probe returned an empty answer; no probe was run), so until
-  it is proven a review may be told twice, never silently suppressed. No timestamp is ever a match;
+  live equality is unproven** (the reviews probe returned an empty answer; no probe was run). SUPERSEDED by the
+  correction record below: a mismatch is withheld or held, never told twice. No timestamp is ever a match;
   one only proves a review later than a native observation and so deliverable.
 - **Target reservation rules.** A second send of a transition never runs while one is in flight; the
   same event's other mode may follow a delivered one; another event of an already-told transition is
@@ -390,6 +390,34 @@ write; lifetime ledger growth; migration-36 operator sequencing and `--verify` c
 runs/releases depth, skew, imported/shallow target and window limits of the earlier runs; AI wording,
 meals and areas; issue #8 runtime eligibility; the private reverse bridge; and every operational gate
 below. `ready_to_merge=false`, draft PR and Bead `in_progress` stand.
+
+### Reviewer correction record (REQUEST_CHANGES at `09f9463`)
+
+Fixed in the commit after `09f9463` (code and permanent tests) and its documentation commit; every item
+below has a persisted regression, none is waived.
+
+- **B1 (target-first review duplicate): fixed.** The earlier wording "a requested-changes review is told
+  twice until live equality is proven" was wrong and is removed from the documents: an id mismatch never
+  tells one review twice. Native first: the imported event waits, then is withheld, unless provably later.
+  Target first: provider instants (stored on the native event and the target claim) tell reviews apart; a
+  different known instant sends, an equal or unknown one HOLDS the native card durably (no send, skip,
+  receipt, reservation or attempt; out of the pending batch; kept across restart and sweep; counted in
+  `/status`, `--verify`, v3). Two distinct reviews in one second are held, not told: a loss, counted.
+- **I1 (verify exit code): fixed.** Exit 0 only at parity, 3 missing or changed at source, 5 present but not
+  at parity; documented in the CLI, AGENTS.md, the runbook, ADR 0034 and CURRENT_STATE.
+- **I2 (clamped claims): fixed.** Only items fully inside the clamp are reserved.
+- **I3 (ordinary PR-level overlaps): REQUIRED MERGE BLOCKERS, named.** The ordinary summary's "changes
+  requested on #n", "approved: #n", "new review comment(s) on #n" and a pull request newly listed in the capped
+  snapshot carry no per-item identity, so nothing safe settles them against the imported events of the same
+  name; the closed-pull-request, issue-count and workflow-run lines are open on the same terms. Recorded in
+  ADR 0034, CURRENT_STATE, the runbook and OpenSpec task 5.7 as blockers, not accepted residuals; no coarse
+  settlement was added and no parity is claimed. PR evidence must list them.
+- **M1 (broad legacy hold):** unchanged and conservative; it stays a required blocker (a safe narrowing was
+  not found).
+- **M2 (digest starvation): fixed** with a paged, bounded scan and a >1,000-waiting test. **M3 (unseeded
+  export): fixed** (staged rows and the held count are exported). **Nits:** digest reservation released on the
+  no-destination path (defensive; that path carries no digest today, so no regression test is possible);
+  `node_id` comment states the equality is unproven.
 
 ## Required operational gates, not waived
 

@@ -17,7 +17,7 @@ pnpm probe:gh         # records which --json fields this gh supports; local, rep
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
-pnpm import:assistant --db <db> --file <doc.json>   # validate a migration document (a dry run); --verify compares, --backup <db> --apply writes
+pnpm import:assistant --db <db> --file <doc.json>   # validate a migration document (a dry run); --verify compares (exit 0 only at parity; 5 = present but NOT at parity: drift or the native ledger is not clear), --backup <db> --apply writes
 pnpm export:rollback-delta --db <db> --out <file>   # private, read-only delta since an import (ADR 0033); counts only on the terminal; exit 5 when incomplete
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
 pnpm phone:passcode                # prints a scrypt verifier for the phone page; reads stdin, contacts nothing

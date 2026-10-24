@@ -54,8 +54,27 @@ bounded optional field with no change to the endpoint, argv or policy, and the n
 carries the id GraphQL calls `id`. Nothing is decoded or normalised, only a hash is kept (a
 domain-separated SHA-256, never the id), and an unusable value becomes "absent", never a failure.
 Whether the two ids are equal on a live provider is **unproven** (the live reviews probe returned an
-empty answer): if they differ, nothing matches and the effect is a withheld review (below), never a
-silent suppression. That live equality check is a required evidence gate.
+empty answer). A deterministic mismatch must never tell one review twice, so in **both** directions an
+unequal or missing id on the same pull request is treated as "possibly the same review", never as
+"different", and never as a silent suppression:
+
+- **Native card first** (a feed card was delivered or is reserved): the imported event waits while the card
+  is reserved, and is **withheld** once it is delivered, unless the review was submitted after the native
+  observation (plus the one-second margin), which proves it a different review and delivers it.
+- **Target first** (the target delivered or is sending a review of that pull request): a native card with an
+  unequal hash is compared by the **provider's canonical instant** of each review, stored on the native
+  event (`github_feed_events.provider_at`, the review's `submittedAt`) and on the target claim
+  (`native_transition_claims.provider_at`, the event's occurrence). A send in flight makes the card wait.
+  A delivered review with a **different** known instant proves a different review and the card is sent.
+  An **equal or unknown** instant cannot be told apart, so the card is **HELD**: durably
+  (`github_feed_events.held_reason = ambiguous_review`), neither sent, skipped nor receipted, holding no
+  reservation and charging no attempt, excluded from the pending batch (so held cards cannot starve the
+  cards behind them), counted in `/status`, `import:assistant --verify` (`heldNativeCards`, which also
+  clears `clear`) and the v3 export. A restart and the orphan sweep keep it. Two distinct reviews in the same
+  second are therefore held, not told. A held card is a notification not sent, by design, and has no
+  clearing control.
+
+That live equality check remains a required evidence gate; it would let both directions stop holding.
 
 ### One reservation per transition, decided in one synchronous step
 
@@ -160,7 +179,8 @@ repository diff, no silent re-baseline, no DM; its snapshot and every outbox row
 ### Rollback export v3
 
 The export (`ducky-rollback-delta/v3`) adds the pause periods, the ledger boundary and every receipt
-and reservation (identifiers only), and on each event `withheldReason`, `settledBy`, `providerHash`
+and reservation (identifiers only), the rows the migration staged that no reader has seeded yet (so an
+unseeded database is not under-reported), the count of held native cards, and on each event `withheldReason`, `settledBy`, `providerHash`
 (a hash) and `attempt`. A v1 or v2 document carries none of it and is not inferred or rewritten. An
 unreadable boundary makes the export incomplete. Retention may never touch the ledger, boundary,
 staging or pause tables (they are on `RETENTION_FORBIDDEN_TABLES`); lifetime growth is a few
@@ -174,12 +194,30 @@ identifiers per delivered native transition and is accepted.
   imported target will later settle silently.
 - **Duplicates that remain, honestly.** A count line or an unnamed aggregate never proves an item, so
   an aggregate ("3 new issues", "and 7 more commits") and the detailed imported event can both reach
-  the owner. A requested-changes review is told twice while REST `node_id` and the native id are not
-  proven equal on a live provider (unequal ids never match). A transition no codec can name has no
-  counterpart and is told by both.
+  the owner. A transition no codec can name has no counterpart and is told by both. A requested-changes
+  review is **not** told twice by an id mismatch: it is withheld or held (above), which is loss, not
+  duplication. A review alone is never settled for a follow-up DM.
+- **Required merge blockers (named, not accepted residuals, no claim of parity).** The ordinary
+  watch's summary lines are PR-level and carry no review id or per-item identity, so no safe settlement
+  exists for the following, and each is a **required merge blocker** that must be closed (by a source of
+  exact identity, or an owner-approved suppression rule) before this work is called parity: (1) the
+  ordinary "changes requested on #n" line against the imported requested-changes alert; (2) "approved: #n"
+  against an imported `review_approved`; (3) "new review comment(s) on #n" against an imported
+  `review_commented`; (4) a pull request newly listed in the capped snapshot ("#n title" in the update line)
+  against an imported `pr_opened`. Also open on the same terms: the closed-pull-request line, issue count
+  lines and workflow-run lines against their imported events, and the follow-up proposal. None is settled
+  by a count, a coarse suppression or a timestamp.
 - **Loss that remains, honestly.** A withheld event is a notification that was never sent, by design,
   and is counted. On a not-new database with the cutoff after the source's own times, a large
   backlog of counterpart events is withheld until the sequencing above is followed.
+- **Bounded scans, stated.** A briefing reads unread events in pages of 400 until it has 400 deliverable
+  ones or has looked at 10,000, so a long run of waiting events cannot hide a deliverable one behind it;
+  beyond 10,000 unread events the scan stops and the rest wait for a later briefing.
+- **Verification is a gate with its own exit code.** `pnpm import:assistant --verify` exits 0 only at parity
+  (nothing missing or changed at the source, nothing drifted, the ledger clear), 3 when a record is missing
+  or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a
+  withheld event, a held native card, a cursor at or before the cutoff, an unreadable boundary). The report
+  is counts only.
 - **Older code is incompatible.** Stop coordinators before migrating and never run an older build
   against a migrated database: it would not know the reservations, so it could not honour them.
 - A repeated import, a restart and a retry can neither lose nor duplicate a deterministic transition,

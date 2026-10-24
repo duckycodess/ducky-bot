@@ -191,7 +191,7 @@ export class GitHubWatchService {
    */
   statusNotes(): string {
     const notes: string[] = [];
-    const held = this.store.githubWatches.heldCount();
+    const held = this.store.githubWatches.heldCount(this.ownerId);
     if (held > 0) {
       notes.push(
         `${held} requested-changes fact(s) HELD and NOT sent: each cannot be told from a review the notification ` +
@@ -410,6 +410,7 @@ export class GitHubWatchService {
               progressed = true;
             } else if (probe === 'ambiguous') {
               excluded.add(key);
+              // The text is stored with the row for the record and is NEVER sent: a held row is not pending work.
               held.set(key, {
                 id: randomUUID(), heldKey: key, providerAt: c.providerAt,
                 summary: `Held, not sent: a requested-changes review on #${c.t.item} cannot be told apart from one ` +
@@ -499,17 +500,17 @@ export class GitHubWatchService {
       // What the review read says about the OLDER fields. An unavailable read is not an empty one: those
       // fields keep the last values proven by an earlier read (and stay absent when none exists), so a
       // failed read neither erases a requested change nor makes every old comment look new on recovery.
-      // A field comes from a read ONLY when that read actually carried it: a successful answer that omits
-      // `latestReviews`, `comments` or `commits` (the schema makes each optional) says nothing about them,
-      // and a payload at the review bound is a partial one whatever it carries. In both cases the last
-      // value proven by an earlier read stays (and a field never proven stays absent), so neither a
-      // failed, nor a partial, nor a cut-off read erases a requested change or turns old comments new.
-      const partial = reviews === undefined ||
-        (Array.isArray(reviews.reviews) && reviews.reviews.length >= GITHUB_WATCH_REVIEW_FACTS_MAX);
+      // A field comes from a read ONLY when that read actually carried it, each from its OWN list: a
+      // successful answer that omits `latestReviews`, `comments` or `commits` (the schema makes each
+      // optional) says nothing about that field, and a failed read says nothing about any. Then the last
+      // value proven by an earlier read stays (and a field never proven stays absent), so neither a failed
+      // nor a partial read erases a requested change or turns old comments new. The three lists are
+      // separate connections: a `reviews` list at the bound cuts off only the exact facts (`rf`, below),
+      // never the per-author view, the comments or the commits, which keep updating from their own lists.
       const reviewFields: Pick<
         NormalizedPr, 'approvals' | 'changesRequested' | 'reviewComments' | 'commits' | 'latestChangeRequestAt'
       > = {};
-      const latestRead = !partial && Array.isArray(reviews?.latestReviews) ? reviews!.latestReviews! : undefined;
+      const latestRead = Array.isArray(reviews?.latestReviews) ? reviews!.latestReviews! : undefined;
       if (latestRead) {
         const changeRequests = latestRead.filter((r) => /CHANGES_REQUESTED/i.test(r.state ?? ''));
         reviewFields.approvals = latestRead.filter((r) => /APPROVED/i.test(r.state ?? '')).length;
@@ -523,9 +524,9 @@ export class GitHubWatchService {
         if (old?.changesRequested !== undefined) reviewFields.changesRequested = old.changesRequested;
         if (old?.latestChangeRequestAt !== undefined) reviewFields.latestChangeRequestAt = old.latestChangeRequestAt;
       }
-      if (!partial && Array.isArray(reviews?.comments)) reviewFields.reviewComments = reviews!.comments!.length;
+      if (Array.isArray(reviews?.comments)) reviewFields.reviewComments = reviews!.comments!.length;
       else if (old?.reviewComments !== undefined) reviewFields.reviewComments = old.reviewComments;
-      if (!partial && Array.isArray(reviews?.commits)) reviewFields.commits = reviews!.commits!.length;
+      if (Array.isArray(reviews?.commits)) reviewFields.commits = reviews!.commits!.length;
       else if (old?.commits !== undefined) reviewFields.commits = old.commits;
       return {
         number: pr.number,
@@ -956,10 +957,14 @@ function summarizeChange(
   const head = `Update for \`${slug}\`: `;
   const full = `${head}${parts.map((p) => p.text).join('. ')}.`;
   const cleaned = redact(full);
-  const shownLimit = cleaned.length <= GITHUB_WATCH_SUMMARY_MAX
-    ? Number.POSITIVE_INFINITY
-    // A redaction that changed the text moved every later offset: nothing is guaranteed.
-    : cleaned === full ? GITHUB_WATCH_SUMMARY_MAX - 1 : -1;
+  // A claim is a statement that the owner READ the segment. Redaction can span segments (a private-key block
+  // runs from a BEGIN marker in one title to an END marker in another and swallows what lies between), so
+  // when redacting the whole text changes anything at all, no offset is trustworthy and nothing is claimed:
+  // the duplicate that may leave is the honest, still-required blocker, never a false receipt. Only when the
+  // text is untouched does the clamp decide which whole segments fit.
+  const shownLimit = cleaned !== full
+    ? -1
+    : cleaned.length <= GITHUB_WATCH_SUMMARY_MAX ? Number.POSITIVE_INFINITY : GITHUB_WATCH_SUMMARY_MAX - 1;
   const claims: NamedClaim[] = [];
   let start = head.length;
   for (const p of parts) {

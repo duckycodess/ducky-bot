@@ -783,7 +783,7 @@ export class AssistantImportService {
     const heldCards = this.store.githubFeed.heldEventCount();
     // An ordinary-summary requested-changes fact held for the same reason, including one of a cancelled or
     // identity-stopped watch: it stays undelivered work, so it keeps the ledger from being clear.
-    const heldOrdinary = this.store.githubWatches.heldCount();
+    const heldOrdinary = this.store.githubWatches.heldCount(owner);
     const nativeLedger: NativeLedgerReport = {
       readable: boundary !== undefined,
       fresh: boundary?.fresh ?? false,

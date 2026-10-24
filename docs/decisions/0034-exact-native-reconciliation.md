@@ -158,7 +158,14 @@ nothing.
 An event that cannot be named exactly (a review without a node id, a run without an attempt) is
 withheld whenever a native path could tell it (a native claim for the item, or a feed row for the
 repository, which is a durable tombstone), because "no native claim yet" proves nothing about one
-written later. When no native path could ever tell it, it is delivered. A timestamp is only ever used
+written later. For a requested-changes review, "a native path could tell it" now also includes ANY ordinary
+watch row bound to the repository, in any state (active, cancelled or identity-stopped, a tombstone just as
+a feed row is), because the ordinary summary tells exact new reviews and an imported event delivered
+without an exact id (every imported-document review) would otherwise be told a second time when the
+ordinary watch next sees that review. Nothing native is suppressed by this: it only withholds the imported
+event. A run without an attempt is unaffected (the ordinary watch tells no exact run), and an unbound
+legacy watch row (no recorded repository) cannot tell a review yet, since it must establish its first
+complete set silently. When no native path could ever tell it, it is delivered. A timestamp is only ever used
 to prove an event **later** than a native observation, so a genuinely new second review is delivered.
 
 A withheld event and its advancing cursor commit atomically. It has **no clearing control** (a
@@ -199,12 +206,14 @@ and reviews without a submission instant are neither. No raw id, login or body i
 
 - **Tri-state observations.** A read is `complete`, `unavailable` (the call failed, the list is absent,
   or a requested change has no id) or `truncated` (100 or more reviews, which cannot be told from a
-  cut-off list). Unavailable and truncated carry the last COMPLETE facts forward unchanged and absorb
-  nothing; the older review-derived fields (approvals, requested changes, latest request instant,
-  conversation-comment count, commit count) follow the same rule field by field: a field is taken from a
-  read only when that read carried it, and never from a truncated payload, so a failed, partial or cut-off
-  read erases no requested change and turns no old comment into a new one. A complete read after a gap is
-  compared with the carried-forward set, so a review that arrived during the gap is told. Only when no
+  cut-off list). Unavailable and truncated carry the last COMPLETE EXACT facts forward unchanged and absorb
+  nothing. The older review-derived fields (approvals, requested changes, latest request instant,
+  conversation-comment count, commit count) are separate connections (`latestReviews`, `comments`,
+  `commits`), and each follows its own rule: it is taken from a read only when that read carried that
+  list, and otherwise the last proven value stays, so a failed or partial read erases no requested change
+  and turns no old comment into a new one. A `reviews` list at the bound cuts off ONLY the exact facts: the
+  aggregate "changes requested" line and the conversation-comment line keep updating from their own lists,
+  as they did before this change. A complete read after a gap is compared with the carried-forward set, so a review that arrived during the gap is told. Only when no
   complete set ever existed (a legacy or first observation, a pull request newly entering the list) is the
   set established silently, with no claim. Pull requests currently truncated are counted in `/status`;
   the more-than-100-reviews limit is a required blocker.
@@ -215,7 +224,14 @@ and reviews without a submission instant are neither. No raw id, login or body i
   recovery alone never create a generic snapshot message.
 - **One segment per pull request; claims only for what is read.** A new review's segment names the pull
   request (`requested changes submitted on #n`) and claims the hash of each new review of it, only if the
-  whole segment lies inside the clamped, redacted text (a clipped segment claims nothing). The PR-level
+  whole segment lies inside the clamped, redacted text. A claim says the owner READ the segment, and
+  redaction can span segments (a private-key block opened in one title and closed in another swallows what
+  lies between), so when redacting the whole summary changes anything, NOTHING in it is claimed; the
+  duplicate that can leave is the named blocker, never a false receipt. A segment the clamp cut off claims
+  nothing, and the pull request of a clipped exact segment is still left out of the aggregate line, so the
+  owner may read nothing about that requested change in that summary (the same class of clamp loss the
+  aggregate line already had; with no receipt written the target may tell it as well, a possible duplicate
+  that stays a named required blocker). The PR-level
   decisions stay distinct lines with no per-review claim; a pull request whose new review is handled
   exactly is not repeated in the aggregate line, whether the review was told, delivered by the target or held.
 - **The loop.** Each pass probes every named item. A target-delivered item is removed. A target send in
@@ -230,7 +246,7 @@ and reviews without a submission instant are neither. No raw id, login or body i
   render.
 - **Held facts are undelivered work.** A held fact survives restart, a cancel (which does not abandon it)
   and an identity stop, and retention never deletes it or the cancelled watch that holds it. It is counted
-  in `/status`, `import:assistant --verify` (`heldOrdinaryReviews`, which clears `clear` and makes the exit
+  in `/status`, `import:assistant --verify` (`heldOrdinaryReviews`, owner-scoped like the export, which clears `clear` and makes the exit
   5) and the export, and it has **no clearing control**; there is no owner Forget path for an ordinary
   watch today, so none is invented here. It stays a required blocker until exact, authorized resolution.
 - **Openings are proved, never inferred.** `createdAt` is added to the fixed `prListAll` selector (a name

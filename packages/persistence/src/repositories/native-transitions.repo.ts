@@ -425,8 +425,11 @@ export class NativeTransitionsRepo {
    * node id, a run without its attempt). No exact receipt can ever be written for it, so a send could
    * not be seen by a native path that tells the same fact LATER, and "no native claim yet" proves
    * nothing. It is therefore delivered only when no native path could ever tell it: the repository
-   * has no feed row at all (a durable tombstone) and no native claim exists for the item. Otherwise
-   * it is withheld, counted, never sent and never settled.
+   * has no feed row at all (a durable tombstone), no native claim exists for the item and, for a
+   * requested-changes review, NO ordinary watch row is bound to the repository in any state (the
+   * ordinary summary tells exact new reviews, and a cancelled or identity-stopped row is a tombstone
+   * just as a feed row is). Otherwise it is withheld, counted, never sent and never settled. Nothing
+   * native is suppressed by this: it only keeps the target from telling what a native path will tell.
    */
   private ambiguous(
     ownerId: string, repo: string, family: TransitionKind, item: string, occurredMs: number,
@@ -435,7 +438,12 @@ export class NativeTransitionsRepo {
     if (near) return near;
     if (this.legacyHeld(occurredMs)) return { outcome: 'withhold', reason: 'legacy_unproven' };
     const feed = this.db.prepare('SELECT 1 FROM github_feed_repos WHERE repo_key = ?').get(repo);
-    return feed !== undefined ? { outcome: 'withhold', reason: 'ambiguous_evidence' } : { outcome: 'deliver' };
+    if (feed !== undefined) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
+    if (family === 'changes_requested') {
+      const ordinary = this.db.prepare('SELECT 1 FROM github_watches WHERE repo_key = ? LIMIT 1').get(repo);
+      if (ordinary !== undefined) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
+    }
+    return { outcome: 'deliver' };
   }
 
   /**

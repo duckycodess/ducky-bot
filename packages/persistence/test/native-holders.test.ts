@@ -313,19 +313,19 @@ describe('held ordinary requested-changes facts and the read boundary', () => {
     const { db, store } = fresh();
     REPO_ROW(db);
     expect(observe(store, { held: [heldRow, { ...heldRow, id: 'h2' }] })).toBe(true);
-    expect(store.githubWatches.heldCount()).toBe(1);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
     expect(store.githubWatches.byId('w1')!.readBoundaryAt).toBe(T0);
     expect(store.githubWatches.pendingEvents(10)).toEqual([]);
     // A replay (the same fact on a later observation) is ignored, not duplicated.
     observe(store, { expectedNextCheckAt: T1, held: [{ ...heldRow, id: 'h3' }] });
-    expect(store.githubWatches.heldCount()).toBe(1);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
   });
 
   it('a lost compare-and-set writes no held row', () => {
     const { db, store } = fresh();
     REPO_ROW(db);
     expect(observe(store, { expectedNextCheckAt: T3, held: [heldRow] })).toBe(false);
-    expect(store.githubWatches.heldCount()).toBe(0);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(0);
   });
 
   it('is never sent, charged an attempt, delivered or abandoned, and a cancel does not free it', () => {
@@ -339,7 +339,7 @@ describe('held ordinary requested-changes facts and the read boundary', () => {
     store.githubWatches.cancel(OWNER, 'w1', T2);
     expect(db.prepare("SELECT abandoned_at FROM github_watch_events WHERE id = 'e1'").get()).toEqual({ abandoned_at: T2 });
     expect(db.prepare("SELECT abandoned_at FROM github_watch_events WHERE id = 'h1'").get()).toEqual({ abandoned_at: null });
-    expect(store.githubWatches.heldCount()).toBe(1);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
     expect(store.githubWatches.heldReviews(10)).toMatchObject([{ publicWatchId: 'wabcde', watchState: 'cancelled', providerAt: T0 }]);
   });
 
@@ -349,7 +349,7 @@ describe('held ordinary requested-changes facts and the read boundary', () => {
     observe(store, { held: [heldRow] });
     expect(store.nativeTransitions.counts().reservedNative).toBe(0);
     store.nativeTransitions.sweepOrphans();
-    expect(store.githubWatches.heldCount()).toBe(1);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
   });
 
   it('survives retention, and a cancelled watch holding one is kept whole', () => {
@@ -360,10 +360,26 @@ describe('held ordinary requested-changes facts and the read boundary', () => {
     const far = '2027-10-01T00:00:00.000Z';
     expect(store.retention.deleteSettledWatchEvents(far, 100)).toBe(0);
     expect(store.retention.deleteCancelledWatches(far, 100)).toEqual({ watches: 0, events: 0 });
-    expect(store.githubWatches.heldCount()).toBe(1);
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
     // Without a held fact the same cancelled watch is retained away as before.
     db.prepare("DELETE FROM github_watch_events WHERE held_reason IS NOT NULL").run();
     expect(store.retention.deleteCancelledWatches(far, 100)).toEqual({ watches: 1, events: 0 });
+  });
+
+  it('counts only the owner\'s own held facts', () => {
+    const { db, store } = fresh();
+    REPO_ROW(db);
+    db.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo2','/y','acme','demo2',?)`).run(T0);
+    db.prepare(`INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key)
+                VALUES ('w2','wfghij',?, 'demo2', 15, ?, 'active', ?, ?, 'acme/demo2')`).run(OTHER_OWNER, T0, T0, T0);
+    observe(store, { held: [heldRow] });
+    store.githubWatches.observe({
+      id: 'w2', expectedNextCheckAt: T0, expectedRepoKey: 'acme/demo2', repoKey: 'acme/demo2', snapshotHash: 'h', snapshotJson: '{}',
+      nextCheckAt: T1, atIso: T0, changed: true, readBoundaryAt: T0, held: [{ ...heldRow, id: 'h9' }],
+    });
+    expect(store.githubWatches.heldCount(OWNER)).toBe(1);
+    expect(store.githubWatches.heldCount(OTHER_OWNER)).toBe(1);
+    expect(store.githubWatches.heldCount('100000000000000099')).toBe(0);
   });
 
   it('a failed read invalidates the boundary; a good one sets it', () => {
@@ -373,5 +389,45 @@ describe('held ordinary requested-changes facts and the read boundary', () => {
     expect(store.githubWatches.byId('w1')!.readBoundaryAt).toBe(T0);
     store.githubWatches.recordFailure('w1', T1, T2, 'failed', T1);
     expect(store.githubWatches.byId('w1')!.readBoundaryAt).toBeNull();
+  });
+});
+
+describe('an imported review with no exact id, against an ordinary watch bound to the repository', () => {
+  const noId = { kind: 'review_requested_changes' as const, identity: '7:review:1', occurredAt: T1, providerHash: null, attempt: null };
+  const watchRow = (db: Db, state: 'active' | 'cancelled', reason: string | null, repoKey: string | null = REPO): void => {
+    db.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('demo','/x','acme','demo',?)`).run(T0);
+    db.prepare(
+      `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key, cancel_reason, cancelled_at)
+       VALUES ('w1','wabcde',?, 'demo', 15, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(OWNER, state === 'active' ? T1 : null, state, T0, T0, repoKey, reason, state === 'active' ? null : T0);
+  };
+
+  it('is delivered only when no native path could ever tell it: no watch row, no feed row', () => {
+    const { store } = fresh();
+    expect(resolve(store, noId)).toEqual({ outcome: 'deliver' });
+  });
+
+  it.each([
+    ['an active watch', 'active', null],
+    ['a cancelled watch', 'cancelled', null],
+    ['an identity-stopped watch', 'cancelled', 'identity_mismatch'],
+  ] as const)('is withheld, never delivered, for %s', (_name, state, reason) => {
+    const { db, store } = fresh();
+    watchRow(db, state, reason);
+    expect(resolve(store, noId)).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    // The send gate reserves nothing for an event that is not delivered.
+    expect(store.nativeTransitions.reserveTarget(OWNER, REPO, noId, 'target_alert', 'e1', T1))
+      .toMatchObject({ reserved: false, resolution: { outcome: 'withhold' } });
+  });
+
+  it('does not reach another repository or an unbound legacy watch, and never widens to a run without an attempt', () => {
+    const { db, store } = fresh();
+    watchRow(db, 'active', null, null); // a legacy row: its repository was never recorded
+    expect(resolve(store, noId)).toEqual({ outcome: 'deliver' });
+    db.prepare("UPDATE github_watches SET repo_key = 'acme/other'").run();
+    expect(resolve(store, noId)).toEqual({ outcome: 'deliver' });
+    db.prepare("UPDATE github_watches SET repo_key = 'acme/demo'").run();
+    const run = { kind: 'ci_failed' as const, identity: '5:ci_failed', occurredAt: T1, providerHash: null, attempt: null };
+    expect(resolve(store, run)).toEqual({ outcome: 'deliver' });
   });
 });

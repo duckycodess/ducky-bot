@@ -276,6 +276,26 @@ describe('an import decides what it writes against the same ledger', () => {
     h.close();
   });
 
+  it('withholds the source review when an ordinary watch is bound to that repository, in ANY state: the ordinary summary tells exact reviews', () => {
+    for (const state of ['active', 'cancelled', 'identity']) {
+      const { h, clock } = bootImport();
+      h.store.db.prepare(`INSERT INTO repos (slug, absolute_path, github_owner, github_repo, created_at) VALUES ('widgets','/w','acme','widgets',?)`).run(NOW);
+      h.store.db.prepare(
+        `INSERT INTO github_watches (id, public_id, discord_user_id, repo_slug, interval_minutes, next_check_at, state, created_at, updated_at, repo_key, cancelled_at, cancel_reason)
+         VALUES ('w1','wabcde',?, 'widgets', 15, ?, ?, ?, ?, 'acme/widgets', ?, ?)`,
+      ).run(
+        OWNER, state === 'active' ? NOW : null, state === 'active' ? 'active' : 'cancelled', NOW, NOW,
+        state === 'active' ? null : NOW, state === 'identity' ? 'identity_mismatch' : null,
+      );
+      expect(apply(h, clock).ok, state).toBe(true);
+      // The document's review carries no provider hash (no source document ever does): never delivered here.
+      expect(unsettled(h), state).toEqual({ withheld_reason: 'ambiguous_evidence', settled_by: null });
+      const report = new AssistantImportService({ store: h.store, env: importEnv(), nowMs: () => clock.nowMs() }).verify(importDoc());
+      expect(report.nativeLedger, state).toMatchObject({ withheldAmbiguous: 1, clear: false });
+      h.close();
+    }
+  });
+
   it('withholds it, atomically with the import, when the feed covers that repository and the source has no exact id', () => {
     const { h, clock } = bootImport();
     h.store.githubFeed.insertRepo({ repoKey: 'acme/widgets', display: 'acme/widgets', source: 'explicit', atIso: NOW });

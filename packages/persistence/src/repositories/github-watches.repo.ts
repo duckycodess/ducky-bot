@@ -290,10 +290,15 @@ export class GitHubWatchesRepo {
       .run(atIso, maxAttempts, atIso, id);
   }
 
-  /** How many requested-changes facts are held (neither sent, abandoned nor receipted). Counts only. */
-  heldCount(): number {
+  /** How many of the owner's requested-changes facts are held (neither sent, abandoned nor receipted). Counts only. */
+  heldCount(ownerId: string): number {
     return Number(
-      (this.db.prepare('SELECT COUNT(*) AS n FROM github_watch_events WHERE held_reason IS NOT NULL').get() as { n: number }).n,
+      (this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
+            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL`,
+        )
+        .get(ownerId) as { n: number }).n,
     );
   }
 

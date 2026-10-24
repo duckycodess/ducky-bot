@@ -394,12 +394,12 @@ describe('what the imported target delivered, holds or is sending', () => {
     expect(after.snapshotJson).toBe(before.snapshotJson);
     expect(after.nextCheckAt).toBe(before.nextCheckAt);
     expect(after.readBoundaryAt).toBe(before.readBoundaryAt);
-    expect(h.store.githubWatches.heldCount()).toBe(0);
+    expect(h.store.githubWatches.heldCount(OWNER)).toBe(0);
     // Once the target settles it, the next pass proceeds.
     h.store.nativeTransitions.markTargetDelivered('target_alert', 'e1', at(9));
     await step();
     expect(summaries(h)).toEqual([]);
-    expect(h.store.githubWatches.heldCount()).toBe(0);
+    expect(h.store.githubWatches.heldCount(OWNER)).toBe(0);
     h.close();
   });
 
@@ -424,7 +424,7 @@ describe('what the imported target delivered, holds or is sending', () => {
       await step();
       expect(sent(h)).toContain('pull request update(s)'); // unrelated output proceeds
       expect(sent(h)).not.toMatch(/requested changes submitted|changes requested on/);
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       expect(h.store.githubWatches.heldReviews(10)).toMatchObject([
         { heldKey: transitionKey({ kind: 'changes_requested', item: '1', stamp: null, hash: hashOf('PRR_new'), attempt: null }), providerAt: at(1) },
       ]);
@@ -443,14 +443,14 @@ describe('what the imported target delivered, holds or is sending', () => {
       reader.setReviews(1, [rv('PRR_new', 'CHANGES_REQUESTED', at(1))]);
       await step();
       await step();
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       // A restart over the same database.
       const second = makeHarness({ clock, store: h.store, github: reader, assistantWatchReader: new FakeWatchReader() });
       clock.advance(15 * MIN);
       await second.app.githubWatches.tick();
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       second.app.githubWatches.cancel(second.owner, h.store.githubWatches.byId(wid(h))!.publicId);
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       expect(h.store.githubWatches.heldReviews(10)[0]!.watchState).toBe('cancelled');
       second.close();
     });
@@ -464,13 +464,13 @@ describe('what the imported target delivered, holds or is sending', () => {
       reader.setReviews(1, [rv('PRR_later', 'CHANGES_REQUESTED', at(1))]);
       await step();
       expect(sent(h)).toContain('requested changes submitted on #1');
-      expect(h.store.githubWatches.heldCount()).toBe(0);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(0);
       // Unknown target instant: indistinguishable, held.
       h.store.db.prepare("UPDATE native_transition_claims SET provider_at = NULL WHERE path = 'target'").run();
       reader.prs = [pr(1, { updatedAt: at(3) })];
       reader.setReviews(1, [rv('PRR_later', 'CHANGES_REQUESTED', at(1)), rv('PRR_unk', 'CHANGES_REQUESTED', at(2))]);
       await step();
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       h.close();
     });
 
@@ -480,7 +480,7 @@ describe('what the imported target delivered, holds or is sending', () => {
       reader.prs = [pr(1, { updatedAt: at(2) })];
       reader.setReviews(1, [rv('PRR_same_second', 'CHANGES_REQUESTED', at(1)), rv('PRR_other', 'CHANGES_REQUESTED', at(1, 30))]);
       await step();
-      expect(h.store.githubWatches.heldCount()).toBe(1);
+      expect(h.store.githubWatches.heldCount(OWNER)).toBe(1);
       expect(sent(h)).toContain('requested changes submitted on #1');
       expect(crClaims(h).filter((c) => c.path === 'native').map((c) => c.transition.hash)).toEqual([hashOf('PRR_other')]);
       h.close();
@@ -644,27 +644,63 @@ describe('a partial or cut-off successful answer is not an empty one', () => {
     h.close();
   });
 
-  it('a payload at the review bound is partial: it rebuilds no older field and infers no new review', async () => {
+  const many = (extra: Review[] = []): Review[] =>
+    [...Array.from({ length: 100 - extra.length }, (_, i) => rv(`PRR_${i}`, 'COMMENTED', at(1))), ...extra];
+  const proven = {
+    latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: at(0, 30) }, { state: 'APPROVED', submittedAt: at(0, 40) }],
+    comments: [{ author: { login: 'a' } }, { author: { login: 'b' } }],
+    commits: [{ oid: 'c1' }, { oid: 'c2' }],
+  };
+
+  it('a review list at the bound cuts off ONLY the exact facts: it infers no new review and invents no change', async () => {
     const { h, reader, step } = await baseline();
-    const proven = KEYS.map((k) => older(h)[k]);
-    const many = Array.from({ length: 100 }, (_, i) => rv(`PRR_${i}`, 'COMMENTED', at(1)));
-    reader.setReviews(1, many, { latestReviews: [], comments: [], commits: [] });
+    const before = KEYS.map((k) => older(h)[k]);
+    reader.setReviews(1, many(), proven); // the other lists are separate connections and carry the same facts
     await step();
-    expect(KEYS.map((k) => older(h)[k])).toEqual(proven);
+    expect(KEYS.map((k) => older(h)[k])).toEqual(before);
     expect(older(h)['rf']).toMatchObject({ s: 'truncated', known: true, cr: [{ h: hashOf('PRR_old') }] });
     expect(sent(h)).toBe('[]');
-    // Recovery: a genuinely new requested-changes review that arrived during the cut-off stretch is told, once,
-    // and the old facts are neither repeated nor erased.
-    reader.setReviews(1, [rv('PRR_old', 'CHANGES_REQUESTED', at(0, 30)), rv('PRR_gap', 'CHANGES_REQUESTED', at(2))], {
+    expect(crClaims(h).map((c) => c.transition.hash)).toEqual([hashOf('PRR_old')]); // the baseline's only
+    h.close();
+  });
+
+  it('on 100+ reviews a NEW change request and a NEW comment are still told, from their own lists', async () => {
+    const { h, reader, step } = await baseline();
+    reader.prs = [pr(1, { updatedAt: at(3) })];
+    reader.setReviews(1, many([rv('PRR_brand_new', 'CHANGES_REQUESTED', at(2))]), {
       latestReviews: [{ state: 'CHANGES_REQUESTED', submittedAt: at(2) }, { state: 'APPROVED', submittedAt: at(0, 40) }],
-      comments: [{ author: { login: 'a' } }, { author: { login: 'b' } }],
+      comments: [{ author: { login: 'a' } }, { author: { login: 'b' } }, { author: { login: 'c' } }],
       commits: [{ oid: 'c1' }, { oid: 'c2' }],
+    });
+    await step();
+    const text = summaries(h).join(' ');
+    expect(text).toContain('changes requested on #1'); // the aggregate decision, as before this change
+    expect(text).toContain('new conversation comment(s) on #1');
+    expect(text).not.toContain('requested changes submitted'); // nothing exact is inferred from a cut-off list
+    expect(older(h)['latestChangeRequestAt']).toBe(at(2));
+    expect(older(h)['reviewComments']).toBe(3);
+    expect(older(h)['rf']).toMatchObject({ s: 'truncated', cr: [{ h: hashOf('PRR_old') }] });
+    // No receipt for the new review: the aggregate line claims none.
+    expect(crClaims(h).map((c) => c.transition.hash)).toEqual([hashOf('PRR_old')]);
+    h.close();
+  });
+
+  it('an unavailable exact list carries only the exact facts: the other lists still update, and recovery tells a gap review', async () => {
+    const { h, reader, step } = await baseline();
+    // The exact list is missing from an otherwise healthy answer; a new comment arrives in its own list.
+    reader.reviews.set(1, { number: 1, ...proven, comments: [...proven.comments, { author: { login: 'c' } }] });
+    reader.prs = [pr(1, { updatedAt: at(3) })];
+    await step();
+    expect(older(h)['reviewComments']).toBe(3);
+    expect(summaries(h).join(' ')).toContain('new conversation comment(s) on #1');
+    expect(older(h)['rf']).toMatchObject({ s: 'unavailable', known: true });
+    h.transport.clear();
+    reader.setReviews(1, [rv('PRR_old', 'CHANGES_REQUESTED', at(0, 30)), rv('PRR_gap', 'CHANGES_REQUESTED', at(2))], {
+      ...proven, comments: [...proven.comments, { author: { login: 'c' } }],
     });
     await step();
     expect(summaries(h).join(' ')).toContain('requested changes submitted on #1');
     expect(summaries(h).join(' ')).not.toMatch(/conversation comment/);
-    // PRR_old was told by the baseline step; PRR_gap is the only NEW claim, and nothing is claimed twice.
-    expect(crClaims(h).map((c) => c.transition.hash).sort()).toEqual([hashOf('PRR_old'), hashOf('PRR_gap')].sort());
     h.close();
   });
 });
@@ -700,6 +736,91 @@ describe('the reconciliation loop is bounded by every candidate, not by the firs
     expect(text).toContain('#5 PR 5');
     expect(text).not.toMatch(/#[1-4] PR/);
     expect(h.store.nativeTransitions.all().filter((c) => c.via === 'watch_summary').map((c) => c.transition.item)).toEqual(['5']);
+    h.close();
+  });
+});
+
+describe('an imported review with NO exact id is not told again by the ordinary watch', () => {
+  /** What every imported-document review looks like: an id the ledger cannot compare, so no provider hash. */
+  const noId = (at_: string, n = 1) => ({
+    kind: 'review_requested_changes' as const, identity: `${n}:review:99`, occurredAt: at_, providerHash: null, attempt: null,
+  });
+  const resolveNoId = (h: Harness, at_ = at(1), repo = REPO) => h.store.nativeTransitions.resolveTarget(OWNER, repo, noId(at_));
+
+  it('withholds it while ANY ordinary watch is bound to the repository, then the ordinary watch tells the review once', async () => {
+    const { h, reader, step } = await start();
+    // The target never sends it, so the owner hears of the review exactly once, from the ordinary summary.
+    expect(resolveNoId(h)).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    reader.prs = [pr(1, { updatedAt: at(2) })];
+    reader.setReviews(1, [rv('PRR_new', 'CHANGES_REQUESTED', at(1))]);
+    await step();
+    expect(summaries(h).join(' ')).toContain('requested changes submitted on #1');
+    expect(resolveNoId(h)).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' }); // still never delivered
+    h.close();
+  });
+
+  it('is withheld for a CANCELLED watch and an IDENTITY-STOPPED one too: a tombstone counts like a feed row', async () => {
+    for (const how of ['cancelled', 'identity']) {
+      const { h } = await start();
+      if (how === 'cancelled') h.store.githubWatches.cancel(OWNER, wid(h), at(5));
+      else h.store.githubWatches.cancelForIdentity(wid(h), at(5));
+      expect(resolveNoId(h), how).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+      h.close();
+    }
+  });
+
+  it('does not reach another repository, and still delivers a review nobody native could tell', async () => {
+    const { h } = await start();
+    expect(resolveNoId(h, at(1), 'acme/other')).toEqual({ outcome: 'deliver' });
+    h.close();
+  });
+
+  it('does not widen to a run without an attempt: the ordinary watch tells no exact run', async () => {
+    const { h } = await start();
+    const run = { kind: 'ci_failed' as const, identity: '55:ci_failed', occurredAt: at(1), providerHash: null, attempt: null };
+    expect(h.store.nativeTransitions.resolveTarget(OWNER, REPO, run)).toEqual({ outcome: 'deliver' });
+    h.close();
+  });
+
+  it('reverse order: the ordinary watch told it first, so the imported event waits for no one and is withheld, not told', async () => {
+    const { h, reader, step } = await start();
+    reader.prs = [pr(1, { updatedAt: at(2) })];
+    reader.setReviews(1, [rv('PRR_new', 'CHANGES_REQUESTED', at(1))]);
+    await step();
+    expect(crClaims(h).map((c) => c.state)).toEqual(['delivered']);
+    // The imported review was submitted BEFORE that observation (the native claim could contain it).
+    expect(resolveNoId(h, at(1))).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    // One submitted AFTER the observation could not have been in it, so it is a different review.
+    expect(resolveNoId(h, '2026-09-01T09:00:00.000Z')).toEqual({ outcome: 'withhold', reason: 'ambiguous_evidence' });
+    h.close();
+  });
+});
+
+describe('a claim is made only for text that survived redaction untouched', () => {
+  it('claims nothing when a private-key block opened in one title and closed in another swallows the segments between', async () => {
+    const reader = new Reader();
+    const clock = new TestClock(START);
+    const titles = (begin: string, end: string): PrList => [
+      pr(1, { title: begin }), pr(2, { title: 'PR 2' }), pr(3, { title: end }),
+    ];
+    reader.prs = titles('one', 'three');
+    for (const n of [1, 2, 3]) reader.setReviews(n, []);
+    const h = makeHarness({ clock, github: reader, assistantWatchReader: new FakeWatchReader() });
+    h.app.githubWatches.add(h.owner, { repoSlug: 'demo', everyMinutes: 15 });
+    clock.advance(15 * MIN);
+    await h.app.githubWatches.tick();
+    h.transport.clear();
+    // Each title is harmless alone (a BEGIN marker without an END, an END without a BEGIN) ...
+    reader.prs = titles('a -----BEGIN PRIVATE KEY----- b', 'c -----END PRIVATE KEY----- d').map((p, i) => ({ ...p, updatedAt: at(2 + i) }));
+    reader.setReviews(2, [rv('PRR_new', 'CHANGES_REQUESTED', at(1))]);
+    clock.advance(15 * MIN);
+    await h.app.githubWatches.tick();
+    const text = summaries(h)[0]!;
+    // ... but together redaction swallows the update segment of PR 2 between them.
+    expect(text).toContain('[REDACTED:private-key]');
+    expect(text).not.toMatch(/#2 PR 2/);
+    // So the owner never read PR 2's update, and nothing was claimed for ANY segment of this text.
+    expect(h.store.nativeTransitions.all().filter((c) => c.path === 'native')).toEqual([]);
     h.close();
   });
 });

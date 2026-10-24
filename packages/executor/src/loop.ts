@@ -18,6 +18,12 @@ export interface LoopDeps {
   readonly intents: PauseIntentStore;
   /** Drops the dispatch journal of a job that finished cleanly. */
   readonly forgetJournal?: (jobId: string) => void;
+  /**
+   * Whether the agent runtime is reachable. When it is not, no claim is made: a
+   * job claimed into an unreachable Herdr can only fail, and a pause owed to the
+   * coordinator cannot be proved without it. Omitting it means no check.
+   */
+  readonly herdrAvailable?: () => Promise<boolean>;
   /** How long to wait before reconciling an unresolved pause again. */
   readonly pauseRetryMs?: number;
   readonly pollWaitMs: number;
@@ -152,6 +158,17 @@ export class ExecutorLoop {
 
   async runOnce(): Promise<'claimed' | 'idle' | 'held' | 'pause_held'> {
     if ((await this.reconcilePauses()) === 'held') return 'pause_held';
+    if (this.deps.herdrAvailable && !(await this.deps.herdrAvailable().catch(() => false))) {
+      if (this.#heldFor !== 'herdr') {
+        this.#heldFor = 'herdr';
+        this.deps.log?.('claim withheld: Herdr is not reachable; nothing is claimed until it answers');
+      }
+      return 'held';
+    }
+    if (this.#heldFor === 'herdr') {
+      this.#heldFor = undefined;
+      this.deps.log?.('Herdr is reachable again; claiming resumes');
+    }
     // Checked BEFORE the claim, because a claim is what starts a job. A refused
     // check leaves the job queued and the executor heartbeating, which is the
     // honest state: work is waiting, and nothing has been started that the

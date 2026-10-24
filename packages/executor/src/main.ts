@@ -1,6 +1,4 @@
-import {
-  HerdrCli, HerdrPiOrchestrator, MockPiOrchestrator, createLogger,
-} from '@ducky/adapters';
+import { HerdrCli, HerdrPiOrchestrator, createLogger } from '@ducky/adapters';
 import { loadExecutorEnv } from './config.js';
 import { CoordinatorClient } from './client.js';
 import { ExecutorLoop } from './loop.js';
@@ -49,8 +47,12 @@ async function main(): Promise<void> {
   const herdr = new HerdrCli({ bin: env.DUCKY_HERDR_BIN });
   const herdrUp = await herdr.available();
 
-  // Honest by construction: without a reachable Herdr the executor uses the
-  // mock orchestrator and says so, rather than pretending to drive Pi.
+  // The production orchestrator is ALWAYS the real one. There is no mock fallback:
+  // a mock invents results and proofs (a clean stop, a quiet agent), and with a
+  // pause owed on disk an invented proof would release the engineering slot. When
+  // Herdr is not reachable the real orchestrator fails closed by construction --
+  // `runJob` answers unavailable, `proveQuiet` and `cancel` find nothing to prove
+  // from -- and the loop below makes no claim until Herdr answers again.
   const MIB = 2 ** 20;
   // With the guard on, model work is also withheld unless the cgroup the AGENT
   // is actually in -- and every ancestor of it -- has room. This is in addition
@@ -67,22 +69,20 @@ async function main(): Promise<void> {
           },
         })
       : undefined;
-  const orchestrator = herdrUp
-    ? new HerdrPiOrchestrator({
-        herdr,
-        verified: env.DUCKY_HERDR_VERIFIED === '1',
-        journal: state.journal,
-        // The same refusal at the orchestrator, so a caller other than the loop
-        // and the runner cannot send model work while a pause is owed.
-        promptGate: () => {
-          const owed = state.intents.list();
-          return owed.intents.length > 0 || owed.blocked.length > 0
-            ? 'a pause report is still owed or unreadable on this executor'
-            : undefined;
-        },
-        ...(agentGuard ? { beforePrompt: agentGuard } : {}),
-      })
-    : new MockPiOrchestrator();
+  const orchestrator = new HerdrPiOrchestrator({
+    herdr,
+    verified: env.DUCKY_HERDR_VERIFIED === '1',
+    journal: state.journal,
+    // The same refusal at the orchestrator, so a caller other than the loop
+    // and the runner cannot send model work while a pause is owed.
+    promptGate: () => {
+      const owed = state.intents.list();
+      return owed.intents.length > 0 || owed.blocked.length > 0
+        ? 'a pause report is still owed or unreadable on this executor'
+        : undefined;
+    },
+    ...(agentGuard ? { beforePrompt: agentGuard } : {}),
+  });
 
   log.info('executor.starting', {
     orchestrator: orchestrator.name,
@@ -105,6 +105,7 @@ async function main(): Promise<void> {
   const loop = new ExecutorLoop({
     client,
     orchestrator,
+    herdrAvailable: () => herdr.available(),
     intents: state.intents,
     forgetJournal: (jobId) => state.journal.forget(jobId),
     ...(env.DUCKY_MEMORY_GUARD === 'cgroup'

@@ -5,7 +5,8 @@ import { nowIso } from '../db.js';
 export interface ScheduleRow extends ScheduleEntry {
   id: string;
   discordUserId: string;
-  sourceKind: 'text' | 'file';
+  /** `recurring` only on a computed occurrence of a weekly rule; never stored here. */
+  sourceKind: 'text' | 'file' | 'recurring';
   confirmedAt: string;
 }
 

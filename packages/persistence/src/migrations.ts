@@ -1,7 +1,17 @@
+import { captureNativeLedgerBoundary } from './native-ledger-boundary.js';
+import { captureCloseFamily } from './native-close-evidence.js';
+
 export interface Migration {
   readonly version: number;
   readonly name: string;
   readonly sql: string;
+  /**
+   * TypeScript that must run in the SAME transaction right after `sql`. It exists for the one
+   * thing SQL cannot do: apply the shared codec to rows already stored. `fresh` is true when no
+   * migration had been applied before this run began (a new database, no history), which SQL
+   * cannot know. `at` is the injected clock reading.
+   */
+  readonly after?: (db: import('./db.js').Db, ctx: { readonly fresh: boolean; readonly at: string }) => void;
 }
 
 /**
@@ -1467,4 +1477,1000 @@ CREATE INDEX ix_github_feed_digests_settled
   ON github_feed_digests(created_at) WHERE status <> 'pending';
 `,
   },
+  {
+    version: 29,
+    name: 'assistant_migration',
+    sql: `
+-- Private-assistant migration (ADR 0030). Nothing here changes an existing row.
+--
+-- A per-task reminder policy. NULL is the normal case and means exactly what it
+-- meant before this column existed: the native 24 h / 1 h / 08:00 defaults. A
+-- non-NULL value is JSON {enabled, offsetsMinutes} and exists only for a task
+-- that arrived with one; Edit re-derives its reminders from it.
+ALTER TABLE tasks ADD COLUMN reminder_policy TEXT;
+
+-- THE CORRELATION LEDGER. A permanent record that a source identity has been
+-- seen, so a repeated import adds nothing and a record the owner deleted is
+-- never resurrected.
+--
+-- While the record exists the row is 'live' and carries a content fingerprint,
+-- which is what lets a later export that CHANGED a correlated record be
+-- reported as a conflict rather than silently ignored. When the record is
+-- deleted -- by Forget, by retention, by a cascade, by anything -- a trigger
+-- below turns the row into an identity-only tombstone: no target, no
+-- fingerprint, no content. A record of a deletion that kept a digest of what it
+-- deleted would defeat the deletion.
+--
+-- Retention never touches this table (it is on RETENTION_FORBIDDEN_TABLES).
+CREATE TABLE assistant_import_identities (
+  namespace     TEXT NOT NULL,
+  category      TEXT NOT NULL CHECK (category IN
+                  ('task','reminder','capture','schedule_rule','schedule_exception',
+                   'preferences','watch_target')),
+  source_id     TEXT NOT NULL,
+  target_id     TEXT,
+  state         TEXT NOT NULL CHECK (state IN ('live','tombstone')),
+  fingerprint   TEXT,
+  created_at    TEXT NOT NULL,
+  tombstoned_at TEXT,
+  PRIMARY KEY (namespace, category, source_id),
+  CHECK (
+    (state = 'live'      AND target_id IS NOT NULL AND fingerprint IS NOT NULL AND tombstoned_at IS NULL)
+    OR
+    (state = 'tombstone' AND target_id IS NULL     AND fingerprint IS NULL     AND tombstoned_at IS NOT NULL)
+  )
+);
+CREATE INDEX ix_import_identity_target
+  ON assistant_import_identities(category, target_id) WHERE state = 'live';
+
+-- Indefinite weekly recurrence. A rule is WALL-CLOCK (like a confirmed one-off
+-- row): 09:00 means 09:00 where the owner is. Nothing is materialized and there
+-- is no horizon; occurrences are computed for the window a reader asks about.
+-- active = 0 is a replaced batch kept as inert data: it never drives behavior.
+CREATE TABLE schedule_rules (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  batch_key       TEXT NOT NULL,
+  active          INTEGER NOT NULL CHECK (active IN (0,1)),
+  weekday         INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+  start_time      TEXT NOT NULL CHECK (start_time GLOB '[0-2][0-9]:[0-5][0-9]'),
+  end_time        TEXT NOT NULL CHECK (end_time   GLOB '[0-2][0-9]:[0-5][0-9]'),
+  label           TEXT NOT NULL,
+  course_code     TEXT,
+  section         TEXT,
+  room            TEXT,
+  uncertain       TEXT NOT NULL DEFAULT '[]',
+  effective_from  TEXT,
+  effective_until TEXT,
+  created_at      TEXT NOT NULL,
+  CHECK (end_time > start_time),
+  CHECK (effective_from IS NULL OR effective_until IS NULL OR effective_from <= effective_until)
+);
+CREATE INDEX ix_schedule_rules_owner ON schedule_rules(discord_user_id, active, weekday);
+
+CREATE TABLE schedule_exceptions (
+  id              TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  local_date      TEXT NOT NULL,
+  course_code     TEXT,
+  label           TEXT,
+  kind            TEXT NOT NULL CHECK (kind IN ('cancelled')),
+  note            TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX ix_schedule_exceptions_owner ON schedule_exceptions(discord_user_id, local_date);
+
+-- Non-authoritative owner preferences. Authorization never reads this table;
+-- frozen configuration always wins. Applied only when the active profile
+-- explicitly selects imported preferences.
+CREATE TABLE owner_preferences (
+  discord_user_id TEXT PRIMARY KEY,
+  prefs_json      TEXT NOT NULL,
+  source          TEXT NOT NULL,
+  imported_at     TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+-- Notification-only watch targets. Independent of repos and allow_jobs: a row
+-- here grants no job, no model, no owner role and no allowlist entry.
+CREATE TABLE assistant_watch_targets (
+  id              TEXT PRIMARY KEY,
+  public_id       TEXT NOT NULL UNIQUE,
+  discord_user_id TEXT NOT NULL,
+  repo_key        TEXT NOT NULL,
+  display         TEXT NOT NULL,
+  default_branch  TEXT,
+  state           TEXT NOT NULL CHECK (state IN ('active','cancelled')),
+  last_observed_at TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  cancelled_at    TEXT,
+  UNIQUE (discord_user_id, repo_key),
+  CHECK ((state = 'cancelled') = (cancelled_at IS NOT NULL))
+);
+
+-- One checkpoint per target and surface. 'unbaselined' has no cursor and is an
+-- explicit state, never a NULL hash that turns into a "Started watching" burst.
+-- 'imported' carries a cursor that has not yet been reconciled across the
+-- stopped-notifier window. pending_* is durable progress through a multi-page
+-- read: the committed cursor does NOT move until every page has been read.
+CREATE TABLE assistant_watch_checkpoints (
+  target_id      TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  surface        TEXT NOT NULL CHECK (surface IN
+                   ('commits','pulls','issues','runs','releases','default_branch','ci_state')),
+  state          TEXT NOT NULL CHECK (state IN ('unbaselined','imported','ready')),
+  cursor         TEXT,
+  pending_cursor TEXT,
+  pending_page   INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  -- Whether the items sitting exactly AT the cursor are known to have been
+  -- processed by a Ducky pass (so a late event with the same timestamp can be told
+  -- from one already announced, by identity). It is false for a baseline and for
+  -- a cursor that came from the source, whose boundary items may never have been
+  -- recorded here: re-reading them would announce history.
+  boundary_known INTEGER NOT NULL DEFAULT 0 CHECK (boundary_known IN (0,1)),
+  next_due_at    TEXT NOT NULL,
+  failures       INTEGER NOT NULL DEFAULT 0,
+  last_error     TEXT,
+  blocked_reason TEXT,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (target_id, surface),
+  CHECK ((state = 'unbaselined') = (cursor IS NULL))
+);
+CREATE INDEX ix_assistant_watch_checkpoints_due ON assistant_watch_checkpoints(next_due_at);
+
+-- Typed events with a stable identity, and SEPARATE alert and digest
+-- settlement: an event can have interrupted once and, independently, been
+-- carried by a briefing.
+CREATE TABLE assistant_watch_events (
+  id              TEXT PRIMARY KEY,
+  target_id       TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL,
+  -- The surface that had to be read to see this event. A held event was found
+  -- while a surface read was still incomplete: it is real, but it is not
+  -- deliverable until the read finishes and the cursor commits, so an unfinished
+  -- page can never announce half of a window.
+  surface         TEXT NOT NULL CHECK (surface IN
+                    ('commits','pulls','issues','runs','releases','default_branch')),
+  held            INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0,1)),
+  identity        TEXT NOT NULL,
+  occurred_at     TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  origin          TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  alerted_at      TEXT,
+  alert_attempts  INTEGER NOT NULL DEFAULT 0,
+  alert_abandoned_at TEXT,
+  digested_at     TEXT,
+  created_at      TEXT NOT NULL,
+  UNIQUE (target_id, kind, identity)
+);
+CREATE INDEX ix_assistant_watch_events_digest
+  ON assistant_watch_events(created_at) WHERE digested_at IS NULL;
+CREATE INDEX ix_assistant_watch_events_alert
+  ON assistant_watch_events(created_at) WHERE alerted_at IS NULL AND alert_abandoned_at IS NULL;
+
+-- Read calls charged against the rolling-hour budget, bucketed by minute.
+CREATE TABLE assistant_watch_calls (
+  minute TEXT PRIMARY KEY,
+  calls  INTEGER NOT NULL CHECK (calls >= 0)
+);
+
+-- ONE row: who may write this database right now. A CLI flag that says "I
+-- stopped the coordinator" proves nothing; this does. The coordinator takes it
+-- at start and refreshes it; the importer takes it for the import and refuses
+-- while a live holder exists.
+CREATE TABLE runtime_lock (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  holder       TEXT NOT NULL CHECK (holder IN ('coordinator','importer')),
+  pid          INTEGER NOT NULL,
+  host         TEXT NOT NULL,
+  token        TEXT NOT NULL,
+  -- WHICH boot and WHICH process incarnation the holder was. A pid alone is not
+  -- an identity: after a reboot, or once the holder has died and its pid has been
+  -- handed to somebody else, "that pid exists" would keep a dead lock alive.
+  boot_id      TEXT,
+  proc_start   TEXT,
+  acquired_at  TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+
+-- A deleted imported record becomes an identity-only tombstone, by TRIGGER, so
+-- no deletion path (Forget, retention, a foreign-key cascade, a future one) can
+-- forget to do it and let a re-import resurrect the record.
+CREATE TRIGGER trg_tombstone_task AFTER DELETE ON tasks BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'task' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_reminder AFTER DELETE ON reminders BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'reminder' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_capture AFTER DELETE ON captures BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'capture' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_schedule_rule AFTER DELETE ON schedule_rules BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_rule' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_schedule_exception AFTER DELETE ON schedule_exceptions BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_exception' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_watch_target AFTER DELETE ON assistant_watch_targets BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'watch_target' AND target_id = OLD.id AND state = 'live';
+END;
+CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL,
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'preferences' AND target_id = OLD.discord_user_id AND state = 'live';
+END;
+`,
+  },
+  {
+    version: 30,
+    name: 'assistant_watch_reader',
+    sql: `
+-- The real typed notification reader (ADR 0031). Additive only: nothing here
+-- changes the meaning of an existing row.
+--
+-- pending_state is the durable position INSIDE a multi-request read that is not
+-- a page number: the review queue of a pulls page, the page that must be re-read
+-- to prove the window held still, a provider total. It is JSON, owned by the
+-- service, and it is cleared by every commit and every restart of a pass.
+--
+-- scan_floor is the creation time of the oldest item that was still unsettled
+-- (a running workflow, a draft release) when the last window closed. Runs and
+-- releases are listed by creation but their events carry a later time, so the
+-- next window must reach back at least that far; see windowThresholdMs.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN pending_state TEXT;
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN scan_floor TEXT;
+
+-- Facts a repository metadata read establishes about a target, and the poll
+-- cycle may filter by. Existing rows keep the defaults.
+ALTER TABLE assistant_watch_targets ADD COLUMN pushed_at TEXT;
+ALTER TABLE assistant_watch_targets ADD COLUMN relationship TEXT
+  CHECK (relationship IS NULL OR relationship IN ('owner','organization','collaborator'));
+ALTER TABLE assistant_watch_targets ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+  CHECK (archived IN (0,1));
+ALTER TABLE assistant_watch_targets ADD COLUMN fork INTEGER NOT NULL DEFAULT 0
+  CHECK (fork IN (0,1));
+-- Why a target was cancelled by the SYSTEM rather than by the owner (a repository
+-- the provider no longer shows). NULL for an owner's cancellation and for an
+-- imported cancelled state.
+ALTER TABLE assistant_watch_targets ADD COLUMN cancel_reason TEXT;
+`,
+  },
+  {
+    version: 31,
+    name: 'assistant_watch_discovery',
+    sql: `
+-- Repository discovery and the global monitoring switch (ADR 0031). Additive.
+--
+-- Where a target came from. Existing rows are imported. A discovered target is
+-- owner state exactly like an imported one: cancelled is a mute, and nothing here
+-- is engineering authorization.
+ALTER TABLE assistant_watch_targets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported'
+  CHECK (origin IN ('imported','discovered'));
+
+-- ONE row per owner: the durable position of the discovery pass. A page is one
+-- unit of work, so a pass survives a restart. 'incomplete' says the last finished
+-- pass left repositories unread (more pages than the cap); 'capacity_blocked' says
+-- a repository could not be stored because the target ceiling was reached. Neither
+-- is ever resolved by truncating or cancelling anything.
+CREATE TABLE assistant_watch_discovery (
+  discord_user_id   TEXT PRIMARY KEY,
+  pending_page      INTEGER NOT NULL DEFAULT 0 CHECK (pending_page >= 0),
+  pass_capacity_blocked INTEGER NOT NULL DEFAULT 0 CHECK (pass_capacity_blocked IN (0,1)),
+  next_due_at       TEXT NOT NULL,
+  last_completed_at TEXT,
+  incomplete        INTEGER NOT NULL DEFAULT 0 CHECK (incomplete IN (0,1)),
+  capacity_blocked  INTEGER NOT NULL DEFAULT 0 CHECK (capacity_blocked IN (0,1)),
+  failures          INTEGER NOT NULL DEFAULT 0,
+  last_error        TEXT,
+  updated_at        TEXT NOT NULL
+);
+
+-- A deleted target must not come back because discovery found the repository
+-- again. By TRIGGER, so no deletion path can forget to leave the mark. The mark is
+-- the reference alone: no content, no reason.
+CREATE TABLE assistant_watch_discovery_tombstones (
+  discord_user_id TEXT NOT NULL,
+  repo_key        TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (discord_user_id, repo_key)
+);
+CREATE TRIGGER trg_watch_target_discovery_tombstone AFTER DELETE ON assistant_watch_targets BEGIN
+  INSERT OR IGNORE INTO assistant_watch_discovery_tombstones (discord_user_id, repo_key, created_at)
+  VALUES (OLD.discord_user_id, OLD.repo_key, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+END;
+
+-- The source's global monitoring switch, per owner. Absent means on. It governs
+-- reads only: it changes no target and no checkpoint, so a paused watch keeps every
+-- cursor exactly where it was.
+CREATE TABLE assistant_watch_settings (
+  discord_user_id    TEXT PRIMARY KEY,
+  monitoring_enabled INTEGER NOT NULL DEFAULT 1 CHECK (monitoring_enabled IN (0,1)),
+  updated_at         TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 32,
+    name: 'schedule_rule_replaced_at',
+    sql: `
+-- When a schedule batch was replaced, so a rollback can restore the most recently
+-- replaced one first. NULL for an active rule, and for a replaced rule whose order
+-- is unknown: such a batch is never chosen by a rollback. A rollback only flips
+-- \`active\` and this column; it deletes no row.
+ALTER TABLE schedule_rules ADD COLUMN replaced_at TEXT;
+`,
+  },
+  {
+    version: 33,
+    name: 'task_urgent_and_category',
+    sql: `
+-- The source's \`urgent\` priority and task categories, as columns beside the
+-- existing ones. \`priority\` itself is NOT widened: its CHECK cannot be changed
+-- without rebuilding \`tasks\`, whose children (reminders, with ON DELETE CASCADE)
+-- make a drop-and-rebuild unsafe. An urgent task is stored as priority 'high' with
+-- urgent = 1, so it can never be mistaken for a native high task by anything that
+-- ignores the flag, only ranked one place lower.
+ALTER TABLE tasks ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0 CHECK (urgent IN (0,1));
+ALTER TABLE tasks ADD COLUMN category TEXT CHECK (category IS NULL OR category IN ('school','personal'));
+`,
+  },
+  {
+    version: 34,
+    name: 'rollback_delta_support',
+    sql: `
+-- What a reverse bridge needs that the ledger did not keep (ADR 0033).
+--
+-- stored_hash is the BASELINE VERSION of an imported record: a hash of the fields
+-- Ducky wrote, taken inside the import transaction. Comparing it with the record
+-- as it stands tells a later export, without the source document, whether the
+-- owner has changed it since. It is a hash, never content. NULL on a live identity
+-- means the baseline is unknown (imported before this column), which an export
+-- reports as incomplete rather than guessing.
+--
+-- tombstone_cause says WHY an imported record is gone, in one word: 'forget' (the
+-- owner asked for it to be deleted), 'owner_delete' (the owner deleted it by hand),
+-- 'retention' (it was finished and aged out), 'import_suppressed' (the import chose not
+-- to write it: deleted at the source, or superseded by what the owner did since, so it
+-- never existed here) or 'unknown'. A tombstone that said
+-- only "gone" could not tell a record a bridge must never resurrect from one that
+-- merely aged out, and a record of a deletion that quoted what it deleted would
+-- defeat the deletion, so the cause is the only thing kept. NULL on a live identity.
+ALTER TABLE assistant_import_identities ADD COLUMN stored_hash TEXT;
+ALTER TABLE assistant_import_identities ADD COLUMN tombstone_cause TEXT
+  CHECK (tombstone_cause IS NULL OR tombstone_cause IN
+    ('forget','owner_delete','retention','import_suppressed','unknown'));
+
+-- ONE row, present only while a deletion path is running, naming that path. The
+-- tombstone triggers read it. A trigger cannot see its caller, and a deletion that
+-- reaches the trigger without a path (a cascade nobody wrapped, a future path) is
+-- recorded as 'unknown' rather than mislabelled.
+CREATE TABLE deletion_context (
+  id    INTEGER PRIMARY KEY CHECK (id = 1),
+  cause TEXT NOT NULL CHECK (cause IN ('forget','owner_delete','retention'))
+);
+
+DROP TRIGGER trg_tombstone_task;
+CREATE TRIGGER trg_tombstone_task AFTER DELETE ON tasks BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'task' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_reminder;
+CREATE TRIGGER trg_tombstone_reminder AFTER DELETE ON reminders BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'reminder' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_capture;
+CREATE TRIGGER trg_tombstone_capture AFTER DELETE ON captures BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'capture' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_rule;
+CREATE TRIGGER trg_tombstone_schedule_rule AFTER DELETE ON schedule_rules BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_rule' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_schedule_exception;
+CREATE TRIGGER trg_tombstone_schedule_exception AFTER DELETE ON schedule_exceptions BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'schedule_exception' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_watch_target;
+CREATE TRIGGER trg_tombstone_watch_target AFTER DELETE ON assistant_watch_targets BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'watch_target' AND target_id = OLD.id AND state = 'live';
+END;
+DROP TRIGGER trg_tombstone_preferences;
+CREATE TRIGGER trg_tombstone_preferences AFTER DELETE ON owner_preferences BEGIN
+  UPDATE assistant_import_identities
+     SET state = 'tombstone', target_id = NULL, fingerprint = NULL, stored_hash = NULL,
+         tombstone_cause = COALESCE((SELECT cause FROM deletion_context WHERE id = 1), 'unknown'),
+         tombstoned_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+   WHERE category = 'preferences' AND target_id = OLD.discord_user_id AND state = 'live';
+END;
+`,
+  },
+  {
+    version: 35,
+    name: 'assistant_watch_lifecycle_floor',
+    sql: `
+-- Where the lifecycle times (opened, merged, closed) of the NEXT read start counting
+-- from, after a read that spanned several pages. An item that moved from an unread
+-- page to a read one (a comment bumped it) carries a lifecycle time older than the
+-- cursor the pass committed; without this floor its merge or close is never
+-- announced. It is the cursor the multi-page pass STARTED from, held for exactly one
+-- later pass and then cleared. Lifecycle identities are stable, so what it makes the
+-- next pass look at again is deduplicated.
+ALTER TABLE assistant_watch_checkpoints ADD COLUMN lifecycle_floor TEXT;
+`,
+  },
+  {
+    version: 36,
+    name: 'native_transition_ledger_and_provenance',
+    after: (db, ctx) => captureNativeLedgerBoundary(db, ctx),
+    sql: `
+-- Exact native/target reconciliation (ADR 0034). Additive only: no table is rebuilt and no
+-- column is backfilled from the allowlist mirror, which is rewritten at every boot.
+
+-- The repository an ordinary watch actually queried, as owner/repo (canonical). NULL on every
+-- row that existed before this migration: the past of a legacy watch is unknown and stays so.
+ALTER TABLE github_watches ADD COLUMN repo_key TEXT;
+-- Why a watch was cancelled by the SYSTEM (a slug that now names another repository). The
+-- owner's own cancel leaves it NULL. Pending events of such a watch are not abandoned.
+ALTER TABLE github_watches ADD COLUMN cancel_reason TEXT CHECK (cancel_reason IS NULL OR cancel_reason IN ('identity_mismatch'));
+ALTER TABLE github_watch_events ADD COLUMN repo_key TEXT;
+
+-- Whether a commit that a digest consumed was NAMED in the message or only counted under
+-- "and N more". NULL on a legacy row: unknown, and never read as named.
+ALTER TABLE github_feed_commits ADD COLUMN told_as TEXT CHECK (told_as IS NULL OR told_as IN ('named','counted'));
+
+-- The provider's own instant for a card's fact (a review's submission time), canonical, so a native card
+-- and an imported event of the same pull request can be told APART by time when their ids cannot be
+-- compared. And a durable HOLD: a pending card that cannot be told from one the target delivered. A held
+-- card holds no reservation, charges no attempt, is never sent, skipped or receipted, and is not read as
+-- pending work (so held cards cannot starve the batch); it is counted.
+ALTER TABLE github_feed_events ADD COLUMN provider_at TEXT;
+ALTER TABLE github_feed_events ADD COLUMN held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('ambiguous_review'));
+
+-- An imported event the target will not deliver, with the reason; and the receipt that settled
+-- one without a delivery of its own. provider_hash and attempt are comparison identities only.
+ALTER TABLE assistant_watch_events ADD COLUMN withheld_reason TEXT
+  CHECK (withheld_reason IS NULL OR withheld_reason IN ('legacy_unproven','ambiguous_evidence'));
+ALTER TABLE assistant_watch_events ADD COLUMN settled_by TEXT
+  CHECK (settled_by IS NULL OR settled_by IN ('native_receipt'));
+ALTER TABLE assistant_watch_events ADD COLUMN provider_hash TEXT;
+ALTER TABLE assistant_watch_events ADD COLUMN attempt TEXT;
+
+-- One row per exact transition and owner: a RESERVATION while a send is possible, a RECEIPT once
+-- it was delivered. The primary key is the whole protocol: whoever inserts it first owns the
+-- transition. Standalone on purpose (no foreign key, no cascade): an outbox row pruned or a
+-- watch deleted must not erase the memory that the owner was told. Identifiers only.
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  -- The provider's canonical instant of the fact (a review's submission time) when one is known.
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+-- Every lookup is an indexed aggregate over one item's rows (path, then stamp), never a scan of the table.
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- ONE row: where the ledger starts. A native path told the owner things before this cutoff that
+-- left no transition identity, and the rows that might have said so may already have been pruned,
+-- so on any database that is not verifiably new EVERY imported event with a native counterpart at
+-- or before the cutoff (plus a skew margin) and no exact receipt is withheld, whatever rows survive.
+-- 'fresh' is a database created by one run of every migration: it never held native history.
+CREATE TABLE native_ledger_boundary (
+  id                  INTEGER PRIMARY KEY CHECK (id = 1),
+  cutoff_at           TEXT NOT NULL,
+  fresh               INTEGER NOT NULL CHECK (fresh IN (0,1)),
+  -- Set once, by the first reader that knows the owner, after the staged rows below became claims.
+  seeded_at           TEXT,
+  seeded_receipts     INTEGER NOT NULL DEFAULT 0,
+  seeded_reservations INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL
+);
+
+-- What the feed's own surviving rows said at the cutoff, read through the shared codec in this
+-- migration's transaction (so no retention can run first) and staged WITHOUT an owner, which a
+-- migration cannot know. The first reader that knows the owner turns them into claims and empties
+-- this table. A delivered row carries its own repository, key and time; nothing is inferred.
+CREATE TABLE native_legacy_seed (
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  via            TEXT NOT NULL CHECK (via IN ('feed_event','feed_commit')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT,
+  delivered_at   TEXT,
+  PRIMARY KEY (repo_key, transition_key)
+);
+
+-- When the owner's monitoring was paused, by whom, and (when known) since when. Provenance for
+-- status, export and import only: it never suppresses or authorizes anything. A pause that was
+-- imported, or that predates this table, has no real start: started_at is NULL and
+-- start_bound_at is the latest instant by which it is known to have begun.
+CREATE TABLE assistant_watch_pause_periods (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_user_id TEXT NOT NULL,
+  started_at      TEXT,
+  started_origin  TEXT NOT NULL CHECK (started_origin IN ('owner','import','unknown')),
+  start_bound_at  TEXT NOT NULL,
+  ended_at        TEXT,
+  ended_origin    TEXT CHECK (ended_origin IS NULL OR ended_origin = 'owner'),
+  CHECK ((started_origin = 'owner') = (started_at IS NOT NULL)),
+  CHECK ((ended_at IS NULL) = (ended_origin IS NULL))
+);
+CREATE UNIQUE INDEX ux_pause_open ON assistant_watch_pause_periods(discord_user_id) WHERE ended_at IS NULL;
+
+-- A pause that already exists has no recorded origin or start.
+INSERT INTO assistant_watch_pause_periods (discord_user_id, started_at, started_origin, start_bound_at)
+  SELECT discord_user_id, NULL, 'unknown', updated_at FROM assistant_watch_settings WHERE monitoring_enabled = 0;
+`,
+  },
+  {
+    version: 37,
+    name: 'native_holders_held_ordinary_reviews_and_read_boundary',
+    // Migration 36 is published and is not revised. This one rebuilds two tables (a PRIMARY KEY cannot be
+    // altered), proves in the SAME transaction that every row and every value was copied, and only then
+    // drops the originals.
+    after: (db) => verifyNativeHolderRebuild(db),
+    sql: `
+-- Several NATIVE paths can tell the same exact transition (a feed card and an ordinary summary for one
+-- requested-changes review or one opening). With one row per transition the first holder owned it and every
+-- other holder's reservation was silently ignored, so an abandoned first holder erased the only receipt and
+-- the target told it again. Now every native holder keeps its OWN row, keyed by (path, via, ref); a delivery
+-- or a release touches only its holder's row, and the target side aggregates the holders. The target keeps
+-- exactly one claim per transition (the partial unique index).
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v36;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+   path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+         path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v36;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- What the migration staged from legacy feed rows keeps one row per HOLDER as well.
+ALTER TABLE native_legacy_seed RENAME TO native_legacy_seed_v36;
+CREATE TABLE native_legacy_seed (
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  attempt        TEXT,
+  via            TEXT NOT NULL CHECK (via IN ('feed_event','feed_commit')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT,
+  delivered_at   TEXT,
+  PRIMARY KEY (repo_key, transition_key, via, ref)
+);
+INSERT INTO native_legacy_seed
+  (repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at)
+  SELECT repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at
+    FROM native_legacy_seed_v36;
+
+-- An ordinary-summary requested-changes fact that cannot be told from a review the target already delivered
+-- (the ids cannot be compared and the provider instants are equal or unknown) is kept as its OWN held outbox
+-- row. It is never sent, never receipted, charges no attempt and holds no reservation; it is counted, it
+-- survives a restart, a cancel and retention, and it is unique per watch and exact transition. held_key is the
+-- transition key (a HASH of the review id, never the id); provider_at is the review's canonical instant.
+ALTER TABLE github_watch_events ADD COLUMN held_reason TEXT
+  CHECK (held_reason IS NULL OR held_reason IN ('ambiguous_review'));
+ALTER TABLE github_watch_events ADD COLUMN held_key TEXT;
+ALTER TABLE github_watch_events ADD COLUMN provider_at TEXT;
+CREATE UNIQUE INDEX ux_watch_events_held ON github_watch_events(watch_id, held_key) WHERE held_key IS NOT NULL;
+CREATE INDEX ix_watch_events_held ON github_watch_events(created_at) WHERE held_reason IS NOT NULL;
+
+-- The host instant BEFORE the last successful, complete pull request read of this watch STARTED. A pull
+-- request absent from that snapshot and created after it (plus the skew margin) cannot have been in it, so
+-- it is a proven opening. NULL when no such read is known: a legacy or first observation, a watch whose
+-- identity was never bound, and after any failed read (uninterrupted coverage is never assumed).
+ALTER TABLE github_watches ADD COLUMN read_boundary_at TEXT;
+`,
+  },
+  {
+    version: 38,
+    name: 'observed_state_review_families_gap_markers_and_hash_domains',
+    // Migration 37 is published and is not revised. Two tables are rebuilt here (a CHECK cannot be widened in
+    // place) and the rebuild is proved row for row, in the SAME transaction, before the originals are dropped.
+    after: (db, ctx) => verifyReviewFamilyRebuild(db, ctx.at),
+    sql: `
+-- Observed-state review families (ADR 0034). A fact is a review in an OBSERVED state: the same review can be told
+-- approved and later dismissed, and both are accepted source behaviour, so no key is shared across states. The
+-- claims ledger is rebuilt only to widen its kind CHECK and to say which identity a hash is (hash_domain) and
+-- which state a review fact names (provider_state). Every existing row is copied as a provider-domain row with
+-- no state, which is exactly what it was.
+DROP INDEX ux_native_claims_one_target;
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v37;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed',
+                    'review_approved','review_commented','review_dismissed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  -- Which identity provider_hash is. A hash of one domain is never equal to, and never proof of a different
+  -- review than, a hash of the other.
+  hash_domain    TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  -- The state a review fact names; NULL for every other kind. The last spelling is a stateless commented row.
+  provider_state TEXT CHECK (provider_state IS NULL OR provider_state IN
+                   ('APPROVED','COMMENTED','DISMISSED','COMMENTED|DISMISSED')),
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+   path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at,
+         path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v37;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- The imported event rows. Rebuilt only because the withheld reason gains \`state_conflict\` (an impossible
+-- lifecycle change, never delivered as a fact). It also stores what a review row was OBSERVED as: its state,
+-- the provider's submission instant only when the provider supplied one (NULL is unknown: the source falls back
+-- to "now", which is never a submission instant), and the domain of provider_hash. Rows observed before this
+-- migration and every imported-document row keep NULL state and NULL instant: nothing is guessed.
+DROP INDEX ix_assistant_watch_events_digest;
+DROP INDEX ix_assistant_watch_events_alert;
+ALTER TABLE assistant_watch_events RENAME TO assistant_watch_events_v37;
+CREATE TABLE assistant_watch_events (
+  id              TEXT PRIMARY KEY,
+  target_id       TEXT NOT NULL REFERENCES assistant_watch_targets(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL,
+  surface         TEXT NOT NULL CHECK (surface IN
+                    ('commits','pulls','issues','runs','releases','default_branch')),
+  held            INTEGER NOT NULL DEFAULT 0 CHECK (held IN (0,1)),
+  identity        TEXT NOT NULL,
+  occurred_at     TEXT NOT NULL,
+  payload_json    TEXT NOT NULL,
+  origin          TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  alerted_at      TEXT,
+  alert_attempts  INTEGER NOT NULL DEFAULT 0,
+  alert_abandoned_at TEXT,
+  digested_at     TEXT,
+  created_at      TEXT NOT NULL,
+  withheld_reason TEXT
+    CHECK (withheld_reason IS NULL OR withheld_reason IN ('legacy_unproven','ambiguous_evidence','state_conflict')),
+  settled_by      TEXT CHECK (settled_by IS NULL OR settled_by IN ('native_receipt')),
+  provider_hash   TEXT,
+  hash_domain     TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  provider_state  TEXT CHECK (provider_state IS NULL OR provider_state IN
+                    ('APPROVED','CHANGES_REQUESTED','COMMENTED','DISMISSED')),
+  provider_at     TEXT,
+  attempt         TEXT,
+  UNIQUE (target_id, kind, identity)
+);
+INSERT INTO assistant_watch_events
+  (id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts,
+   alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt)
+  SELECT id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts,
+         alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt
+    FROM assistant_watch_events_v37;
+CREATE INDEX ix_assistant_watch_events_digest
+  ON assistant_watch_events(created_at) WHERE digested_at IS NULL;
+CREATE INDEX ix_assistant_watch_events_alert
+  ON assistant_watch_events(created_at) WHERE alerted_at IS NULL AND alert_abandoned_at IS NULL;
+
+-- The staged legacy rows and the held ordinary facts say which identity their hash is, too. Existing rows are
+-- provider-domain rows, which is what they were.
+ALTER TABLE native_legacy_seed ADD COLUMN hash_domain TEXT NOT NULL DEFAULT 'provider'
+  CHECK (hash_domain IN ('provider','source_identity'));
+ALTER TABLE github_watch_events ADD COLUMN hash_domain TEXT NOT NULL DEFAULT 'provider'
+  CHECK (hash_domain IN ('provider','source_identity'));
+-- The per-author line segments a summary rendered while the exact review list could not identify them: PENDING
+-- evidence only, written with the outbox row. A marker is promoted to a durable one only by a successful send.
+ALTER TABLE github_watch_events ADD COLUMN gap_markers TEXT;
+
+-- Per-author review lines that were ACTUALLY DELIVERED while no exact review list could identify them. Owner
+-- scoped and independent of github_watch_events and github_watches (retention deletes both), so a delivered
+-- line outlives its outbox row and its watch. Never cleared by recovery, a cancel, a remap, a restart or
+-- retention. Identifiers and reasons only: no title, no body, no review id.
+CREATE TABLE github_watch_gap_markers (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id      TEXT NOT NULL,
+  watch_id      TEXT NOT NULL,
+  repo_key      TEXT,
+  pr_number     INTEGER NOT NULL CHECK (pr_number > 0),
+  review_class  TEXT NOT NULL CHECK (review_class IN ('approval','changes_requested')),
+  reason        TEXT NOT NULL CHECK (reason IN ('no_comparison','unavailable','truncated','not_conveyed')),
+  shown         TEXT NOT NULL CHECK (shown IN ('shown','delivered_not_provably_shown')),
+  outbox_ref    TEXT NOT NULL,
+  delivered_at  TEXT NOT NULL,
+  UNIQUE (outbox_ref, pr_number, review_class)
+);
+CREATE INDEX ix_gap_markers_owner ON github_watch_gap_markers(owner_id);
+
+-- Provenance only: when the observed-state review families began. It is exported and reported, and it is NEVER
+-- used to withhold an event that was deliverable before (these counterparts are exempt from the migration-36
+-- cutoff); earlier unidentified aggregate history stays an unresolved overlap, not a receipt.
+ALTER TABLE native_ledger_boundary ADD COLUMN review_families_at TEXT;
+`,
+  },
+  {
+    version: 39,
+    name: 'exact_pr_close_family_and_legacy_close_uncertainty',
+    // Migrations 36 to 38 are published and are not revised. The claims ledger is rebuilt ONLY to widen its kind
+    // CHECK, and the rebuild is proved column for column, in the SAME transaction, before the original is dropped.
+    // The imported event table, the staging table and the held outbox rows are left exactly as they are.
+    after: (db, ctx) => verifyCloseFamilyRebuild(db, ctx.at),
+    sql: `
+-- The exact pull request close family (ADR 0034): a close is its number AND the provider's canonical close instant,
+-- never the number alone, so a pull request that is reopened and closed again at another instant is another close.
+-- Every existing row is copied unchanged: every holder, reservation, receipt, state, domain and key.
+DROP INDEX ux_native_claims_one_target;
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v38;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed',
+                    'review_approved','review_commented','review_dismissed','pr_closed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  hash_domain    TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  provider_state TEXT CHECK (provider_state IS NULL OR provider_state IN
+                   ('APPROVED','COMMENTED','DISMISSED','COMMENTED|DISMISSED')),
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt,
+   provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt,
+         provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v38;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- Provenance for the close family: when it began and what the migration found. It is NEVER used as a cutoff: a close
+-- was deliverable before it had a counterpart, so no legacy-time withholding applies to it. Counts only.
+ALTER TABLE native_ledger_boundary ADD COLUMN close_family_at TEXT;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_uncertain_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_uncertain_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_item_scope_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_unidentifiable_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_impossible_events INTEGER NOT NULL DEFAULT 0;
+
+-- Imported closes that carried a delivery or settlement marker BEFORE this migration. NOT receipts: nothing proves what a
+-- historical digest or a source alert marker actually showed. A native exact close that matches one of these rows is held
+-- and counted (never sent, never cleared). Owner scoped and independent of the event and target rows (no foreign key,
+-- no cascade), so forgetting or deleting those never erases it. Identifiers, origin, marker class and multiplicity only:
+-- never a title or a payload. scope 'exact' names the transition key a native close would have; scope 'item' is a
+-- readable pull request number whose instant could not be read, so it matches ANY close of that pull request.
+CREATE TABLE native_close_uncertainty (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id           TEXT NOT NULL,
+  repo_key           TEXT NOT NULL,
+  scope              TEXT NOT NULL CHECK (scope IN ('exact','item')),
+  item               TEXT NOT NULL,
+  transition_key     TEXT NOT NULL,
+  origin             TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  marker             TEXT NOT NULL CHECK (marker IN ('alert_marker_only','digest_marker','alert_and_digest_markers')),
+  multiplicity       INTEGER NOT NULL CHECK (multiplicity >= 1),
+  representative_ref TEXT NOT NULL,
+  earliest_marked_at TEXT,
+  recorded_at        TEXT NOT NULL,
+  CHECK ((scope = 'exact') = (transition_key != ''))
+);
+CREATE UNIQUE INDEX ux_close_uncertainty
+  ON native_close_uncertainty(owner_id, repo_key, scope, transition_key, item, origin, marker);
+CREATE INDEX ix_close_uncertainty_item ON native_close_uncertainty(owner_id, repo_key, item);
+`,
+  },
 ];
+
+/**
+ * Migration 37's proof, in its own transaction: the rebuilt tables hold exactly the rows and values the
+ * originals held, in both directions, before the originals are dropped. A difference throws, which rolls the
+ * whole migration back. Nothing is inferred and no row is dropped or invented.
+ */
+/**
+ * Migration 38's proof, in its own transaction, for the two rebuilt tables: every row and every value of the
+ * originals is in the rebuilt tables and nothing else is, and every copied row is what it always was (a
+ * provider-domain row with no recorded state or instant). A difference throws and rolls the whole migration back.
+ */
+function verifyReviewFamilyRebuild(db: import('./db.js').Db, at: string): void {
+  const scalar = (sql: string): number => Number((db.prepare(sql).get() as { n: number }).n);
+  const same = (oldTable: string, newTable: string, columns: string, extra: string): void => {
+    const lost = (a: string, b: string): number =>
+      scalar(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`);
+    if (
+      scalar(`SELECT COUNT(*) AS n FROM ${oldTable}`) !== scalar(`SELECT COUNT(*) AS n FROM ${newTable}`) ||
+      lost(oldTable, newTable) !== 0 || lost(newTable, oldTable) !== 0 ||
+      scalar(`SELECT COUNT(*) AS n FROM ${newTable} WHERE NOT (${extra})`) !== 0
+    ) {
+      throw new Error(`migration 38: ${newTable} does not hold exactly the rows of ${oldTable}`);
+    }
+    db.exec(`DROP TABLE ${oldTable}`);
+  };
+  same(
+    'native_transition_claims_v37', 'native_transition_claims',
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at, path, state, via, ref, ' +
+      'observed_at, delivered_to, delivered_at, created_at, updated_at',
+    `hash_domain = 'provider' AND provider_state IS NULL`,
+  );
+  same(
+    'assistant_watch_events_v37', 'assistant_watch_events',
+    'id, target_id, kind, surface, held, identity, occurred_at, payload_json, origin, alerted_at, alert_attempts, ' +
+      'alert_abandoned_at, digested_at, created_at, withheld_reason, settled_by, provider_hash, attempt',
+    `hash_domain = 'provider' AND provider_state IS NULL AND provider_at IS NULL`,
+  );
+  db.prepare('UPDATE native_ledger_boundary SET review_families_at = ? WHERE id = 1 AND review_families_at IS NULL').run(at);
+}
+
+/**
+ * Migration 39's proof, in its own transaction: the rebuilt claims ledger holds exactly the rows and values of the
+ * original (every column, both directions, the same row count), and only then is the original dropped. The close
+ * family's legacy uncertainty is derived afterwards, from rows the migration does not change, and it never writes a
+ * claim: a difference here throws and rolls the whole migration back.
+ */
+function verifyCloseFamilyRebuild(db: import('./db.js').Db, at: string): void {
+  const scalar = (sql: string): number => Number((db.prepare(sql).get() as { n: number }).n);
+  const columns =
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt, ' +
+    'provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at';
+  const lost = (a: string, b: string): number =>
+    scalar(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`);
+  if (
+    scalar('SELECT COUNT(*) AS n FROM native_transition_claims_v38') !== scalar('SELECT COUNT(*) AS n FROM native_transition_claims') ||
+    lost('native_transition_claims_v38', 'native_transition_claims') !== 0 ||
+    lost('native_transition_claims', 'native_transition_claims_v38') !== 0
+  ) {
+    throw new Error('migration 39: native_transition_claims does not hold exactly the rows of native_transition_claims_v38');
+  }
+  db.exec('DROP TABLE native_transition_claims_v38');
+  captureCloseFamily(db, { at });
+}
+
+function verifyNativeHolderRebuild(db: import('./db.js').Db): void {
+  const same = (oldTable: string, newTable: string, columns: string): void => {
+    const count = (t: string): number => Number((db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);
+    const lost = (a: string, b: string): number =>
+      Number((db.prepare(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`).get() as { n: number }).n);
+    if (count(oldTable) !== count(newTable) || lost(oldTable, newTable) !== 0 || lost(newTable, oldTable) !== 0) {
+      throw new Error(`migration 37: ${newTable} does not hold exactly the rows of ${oldTable}`);
+    }
+    db.exec(`DROP TABLE ${oldTable}`);
+  };
+  same(
+    'native_transition_claims_v36', 'native_transition_claims',
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, attempt, provider_at, path, state, via, ref, ' +
+      'observed_at, delivered_to, delivered_at, created_at, updated_at',
+  );
+  same(
+    'native_legacy_seed_v36', 'native_legacy_seed',
+    'repo_key, transition_key, kind, item, stamp, provider_hash, attempt, via, ref, observed_at, delivered_to, delivered_at',
+  );
+}

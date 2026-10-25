@@ -9,6 +9,16 @@ before upgrading**, which is why step 1 is taking one.
 
 ## Upgrade
 
+> **Migration 29 and the runtime lock.** The build that adds migration 29 (the
+> private-assistant migration) introduces the shared `runtime_lock`. A coordinator
+> from any OLDER build does not know that table, so the lock cannot stop it from
+> writing: **stop the running coordinator before `pnpm migrate`, and do not start an
+> older build against a migrated database.** The lock protects only builds that take
+> it. A scratch or rehearsal database that was migrated to 29 from an EARLIER,
+> unpublished revision of this branch (before it was published) has a different
+> shape for `runtime_lock`, `assistant_watch_checkpoints` and `assistant_watch_events`
+> and must be recreated, not migrated.
+
 1. **Back up, and verify the backup.** Not "take a backup" — verify it. An
    unverified backup is the rollback plan you find out about afterwards.
    ```bash

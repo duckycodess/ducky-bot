@@ -1,15 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import {
   BRIEFING_DELIVERY_BATCH, BRIEFING_MAX_DELIVERY_ATTEMPTS, BRIEFING_STALE_AFTER_MS,
-  instantOfZonedWallClock, zonedDateKey, zonedParts,
+  instantOfZonedWallClock, weekdayOfCivilDate, zonedDateKey, zonedParts,
+  type ImportedPreferences,
 } from '@ducky/contracts';
 import type { BriefingSlotKind, Store, BriefingTarget } from '@ducky/persistence';
 import { channelTarget, dmTarget, type SendTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
+import { proveShownCloses } from '../discord/close-proof.js';
+import { sanitizeOutbound } from '../discord/sanitize-outbound.js';
 import type { OwnerClock } from './owner-clock.js';
-import type { BriefingService } from './briefing.service.js';
+import type { Briefing, BriefingService } from './briefing.service.js';
+import type { AssistantWatchService } from './assistant-watch.service.js';
+import type { OwnerPreferencesService } from './owner-preferences.service.js';
 import type { ActorContext } from '../security/authz.js';
+
+/** How many times a briefing is rebuilt when an event its digest held drops out before the send. */
+const DIGEST_RESERVE_ATTEMPTS = 3;
 
 export interface BriefingScheduleConfig {
   /** OFF unless an operator says otherwise. A briefing is pushed, not pulled. */
@@ -30,6 +38,13 @@ export interface BriefingScheduleConfig {
   readonly delivery: BriefingDelivery;
   /** The configured briefing channel, when one is. */
   readonly channelId?: string | undefined;
+  /**
+   * True when the operator SET the slot time. An imported preference may replace
+   * the documented default but never an explicit value: that disagreement is a
+   * parity conflict the importer refuses, not something resolved here silently.
+   */
+  readonly morningExplicit?: boolean | undefined;
+  readonly eveningExplicit?: boolean | undefined;
 }
 
 export interface BriefingNotifierDeps {
@@ -40,6 +55,10 @@ export interface BriefingNotifierDeps {
   readonly clock: OwnerClock;
   readonly briefing: BriefingService;
   readonly config: BriefingScheduleConfig;
+  /** Imported preferences, when the profile selected them. Never an authority. */
+  readonly prefs?: OwnerPreferencesService | undefined;
+  /** Settles the digest events a delivered briefing carried. */
+  readonly watch?: AssistantWatchService | undefined;
 }
 
 export interface BriefingTickResult {
@@ -87,9 +106,13 @@ export class BriefingNotifier {
   private readonly clock: OwnerClock;
   private readonly briefing: BriefingService;
   private readonly config: BriefingScheduleConfig;
+  private readonly prefs: OwnerPreferencesService | undefined;
+  private readonly watch: AssistantWatchService | undefined;
   private ticking: Promise<BriefingTickResult> | null = null;
 
   constructor(deps: BriefingNotifierDeps) {
+    this.prefs = deps.prefs;
+    this.watch = deps.watch;
     this.store = deps.store;
     this.transport = deps.transport;
     this.ownerId = deps.ownerId;
@@ -145,11 +168,14 @@ export class BriefingNotifier {
     const tz = this.clock.timeZone;
     const dayKey = zonedDateKey(nowMs, tz);
 
+    // Imported preferences narrow what the configuration allows, and replace a
+    // documented default time; they never turn briefings ON (that is the
+    // operator's flag) and never replace a time the operator set explicitly.
+    const prefs = this.prefs?.effective();
+    if (prefs && !prefs.weekendBriefings && weekdayOfCivilDate(dayKey) >= 5) return 0;
+
     let claimed = 0;
-    for (const [kind, at] of [
-      ['morning', this.config.morningAt],
-      ['evening', this.config.eveningAt],
-    ] as const) {
+    for (const [kind, at] of this.slots(prefs)) {
       const dueMs = slotInstantMs(dayKey, at, tz);
       if (dueMs === undefined || dueMs > nowMs) continue;
       // One row PER TARGET. Two rows for `both`, so the DM and the channel
@@ -183,9 +209,12 @@ export class BriefingNotifier {
     let failed = 0;
     let abandoned = 0;
     let skippedStale = 0;
+    const importedPrefs = this.prefs?.effective();
 
     for (const row of pending) {
       const nowIso = this.clock.nowIso();
+      // The repository digest reserved for THIS send, so a failure can release exactly it.
+      let reservedDigest: readonly string[] = [];
 
       // A row addressed to a DIFFERENT account than the configured owner is
       // never re-addressed to the new one: that would hand one person's day to
@@ -196,8 +225,7 @@ export class BriefingNotifier {
         continue;
       }
 
-      const dueMs = Date.parse(row.dueAt);
-      if (Number.isFinite(dueMs) && this.clock.nowMs() - dueMs > BRIEFING_STALE_AFTER_MS) {
+      if (this.isStale(row, importedPrefs)) {
         this.store.briefings.markSkipped(row.id, nowIso);
         skippedStale += 1;
         continue;
@@ -205,7 +233,36 @@ export class BriefingNotifier {
 
       try {
         const actor: ActorContext = { discordUserId: this.ownerId, role: 'owner' };
-        const body = this.briefing.build(actor, row.kind);
+        // Captures and the repository digest are the owner's private imported data.
+        // A copy bound for a channel never carries them: the channel's readers are
+        // not something Ducky can check, and leaving the sections out is the
+        // direction that cannot widen who sees them.
+        let body = await this.briefing.assemble(actor, row.kind, {
+          includePrivate: row.target === 'owner_dm',
+        });
+        // Only what can be told now goes into the briefing. The digest's items are reserved for this
+        // one send (a native path that delivered one in the meantime settles it instead, one it
+        // holds waits); if any item drops out the briefing is rebuilt around the rest, and what did
+        // not go is carried forward to the next briefing rather than lost or sent twice.
+        //
+        // A pull request close is held to a higher standard than the rest of the digest: it is reserved and settled only
+        // when its exact number and canonical instant are proven inside one retained line of the FINAL output (the
+        // message after the transport's own sanitization, so a cut, a dropped repository or a redaction is seen). One
+        // that is not proven is neither reserved nor settled: it stays pending, counted, for a briefing that shows it.
+        if (this.watch && body.github && body.github.eventIds.length > 0) {
+          for (let attempt = 0; attempt < DIGEST_RESERVE_ATTEMPTS; attempt += 1) {
+            const ids = this.settleable(body);
+            const kept = this.watch.reserveDigest(ids);
+            if (kept.length === ids.length) {
+              reservedDigest = kept;
+              break;
+            }
+            this.watch.releaseDigest(kept);
+            body = await this.briefing.assemble(actor, row.kind, { includePrivate: row.target === 'owner_dm' });
+            if (!body.github || body.github.eventIds.length === 0) break;
+            if (attempt === DIGEST_RESERVE_ATTEMPTS - 1) body = { ...body, github: undefined };
+          }
+        }
         const to = this.targetFor(row.target);
         if (!to) {
           // The channel was configured when this row was claimed and is not
@@ -214,18 +271,88 @@ export class BriefingNotifier {
           // goes.
           this.store.briefings.markSkipped(row.id, nowIso);
           skippedStale += 1;
+          // Nothing will be sent: the reservation made for this briefing goes, so the events are not
+          // left looking like a send in flight.
+          if (reservedDigest.length > 0) this.watch?.releaseDigest(reservedDigest);
           continue;
         }
         await this.transport.send(to, briefingMessage(body));
         this.store.briefings.markDelivered(row.id, nowIso);
         delivered += 1;
+        // Exactly what was reserved, and proven, is settled: never every event the digest happened to fetch.
+        const settle = reservedDigest;
+        reservedDigest = [];
+        // The digest is settled only now, after it was SENT. Only the DM copy ever
+        // carries it, so it is that copy's delivery that settles it; a channel copy
+        // has no digest to settle and cannot hold the events open.
+        if (settle.length > 0) this.watch?.markDigested(settle);
       } catch {
+        // Nothing was sent (or the send failed): the reservation goes and the events stay pending.
+        if (reservedDigest.length > 0) this.watch?.releaseDigest(reservedDigest);
         this.store.briefings.recordFailure(row.id, nowIso, BRIEFING_MAX_DELIVERY_ATTEMPTS);
         if (row.attempts + 1 >= BRIEFING_MAX_DELIVERY_ATTEMPTS) abandoned += 1;
         else failed += 1;
       }
     }
     return { delivered, failed, abandoned, skippedStale };
+  }
+
+  /**
+   * The digest events this briefing may reserve and settle: every one it fetched EXCEPT an exact pull request close
+   * that is not proven in the final output. The final output is `sanitizeOutbound(briefingMessage(body))` with the
+   * transport's own redactor (the default every transport uses), so what is proven is what is sent.
+   */
+  private settleable(body: Briefing): readonly string[] {
+    const g = body.github;
+    if (!g) return [];
+    const closes = g.closes ?? [];
+    if (closes.length === 0) return g.eventIds;
+    const proven = proveShownCloses(sanitizeOutbound(briefingMessage(body)), closes);
+    const unproven = new Set(closes.filter((c) => !proven.has(c.id)).map((c) => c.id));
+    return g.eventIds.filter((id) => !unproven.has(id));
+  }
+
+  /**
+   * Whether a pending briefing is too late to send.
+   *
+   * Natively a briefing is stale six hours after its slot. The source's rule, used
+   * when the profile selects imported preferences, is different: a morning briefing
+   * is due until the EVENING time has been reached (then it is recorded skipped,
+   * never sent late as a morning greeting), an evening briefing is due until the
+   * end of its day, and nothing survives into a later day.
+   */
+  private isStale(
+    row: { readonly kind: 'morning' | 'evening'; readonly dayKey: string; readonly dueAt: string },
+    prefs: ImportedPreferences | undefined,
+  ): boolean {
+    const nowMs = this.clock.nowMs();
+    if (!prefs) {
+      const dueMs = Date.parse(row.dueAt);
+      return Number.isFinite(dueMs) && nowMs - dueMs > BRIEFING_STALE_AFTER_MS;
+    }
+    const tz = this.clock.timeZone;
+    if (row.dayKey !== zonedDateKey(nowMs, tz)) return true;
+    if (row.kind !== 'morning') return false;
+    const eveningAt = !this.config.eveningExplicit ? prefs.eveningTime : this.config.eveningAt;
+    const morningAt = !this.config.morningExplicit ? prefs.morningTime : this.config.morningAt;
+    const eveningMs = slotInstantMs(row.dayKey, eveningAt, tz);
+    const morningMs = slotInstantMs(row.dayKey, morningAt, tz);
+    // "Due until the evening" only means something when the evening comes AFTER the
+    // morning. If the configured times are not in that order (or unreadable) the rule
+    // cannot be applied as the source meant it, and a morning briefing would be stale the
+    // instant it was due; it then stays due until the end of its day.
+    if (eveningMs === undefined || morningMs === undefined || eveningMs <= morningMs) return false;
+    return nowMs >= eveningMs;
+  }
+
+  /** The slots that may fire today, and when, after preferences are applied. */
+  private slots(prefs: ImportedPreferences | undefined): readonly (readonly ['morning' | 'evening', string])[] {
+    const morningAt = !this.config.morningExplicit && prefs ? prefs.morningTime : this.config.morningAt;
+    const eveningAt = !this.config.eveningExplicit && prefs ? prefs.eveningTime : this.config.eveningAt;
+    const out: (readonly ['morning' | 'evening', string])[] = [];
+    if (prefs?.morningEnabled ?? true) out.push(['morning', morningAt]);
+    if (prefs?.eveningEnabled ?? true) out.push(['evening', eveningAt]);
+    return out;
   }
 
   /** The targets a due slot is claimed for, from configuration. */

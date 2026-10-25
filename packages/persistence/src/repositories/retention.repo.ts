@@ -340,6 +340,7 @@ export class RetentionRepo {
       `DELETE FROM github_watch_events WHERE id IN (
          SELECT id FROM github_watch_events
           WHERE (delivered_at IS NOT NULL OR abandoned_at IS NOT NULL)
+            AND held_reason IS NULL
             AND created_at < ? LIMIT ?)`,
       cutoffIso,
       limit,
@@ -397,13 +398,19 @@ export class RetentionRepo {
     );
   }
 
-  /** Cancelled watches only. An active watch is never touched. */
+  /**
+   * Cancelled watches only. An active watch is never touched, and neither is a cancelled watch that still
+   * holds an undelivered requested-changes fact: that held work stays (and stays counted) until an exact,
+   * authorized resolution exists, so retention never turns it into silence.
+   */
   deleteCancelledWatches(cutoffIso: string, limit: number): { watches: number; events: number } {
     const ids = (
       this.db
         .prepare(
           `SELECT id FROM github_watches
             WHERE cancelled_at IS NOT NULL AND cancelled_at < ?
+              AND NOT EXISTS (SELECT 1 FROM github_watch_events h
+                               WHERE h.watch_id = github_watches.id AND h.held_reason IS NOT NULL)
             ORDER BY cancelled_at LIMIT ?`,
         )
         .all(cutoffIso, limit) as { id: string }[]

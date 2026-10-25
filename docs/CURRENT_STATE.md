@@ -58,6 +58,14 @@ registered.
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
 | Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
 | Repository workflow bridge (`$grill-me` / `$ticket` / `$agentize`) | **Unit-tested** | Off by default. 39 behaviour tests plus invariants drive a recording stand-in for the installed helper. **The real `workflow.py` has never been called from Ducky on this host**, because calling it creates GitHub issues |
+| Private-assistant migration: contract, atomic importer, correlation ledger (issue #9) | **Unit-tested; nothing has ever been imported** | Strict whole-document validation, one-transaction apply, repeat-import, conflict, capacity, owner-mismatch and backup/lock gating covered against real files outside the repository. No live source, live target database or production profile was touched. See *Detail: the private-assistant migration* |
+| Indefinite weekly schedules with dated exceptions | **Unit-tested** | Rules are computed for a requested window, never materialized: thirty years out, leap days, DST weeks, replaced batches, exception targeting, owner scoping, Forget and retention covered through the real briefing |
+| Imported task reminder policy and preferences | **Unit-tested** | Disabled, custom, default-deferring and deadline-fallback policies through Done, Edit and Snooze; preferences apply only when `DUCKY_IMPORTED_PREFERENCES` is set |
+| Notification-only watch targets: observation engine, budget, digest, alerts | **Unit-tested with a scripted reader** | Boundary rules, atomic checkpoint commits (fault-injected), held partial reads, resume after a restart, fair oldest-due scheduling and the 20-per-tick / 2400-per-hour budget are covered. Captures and the repository digest go only into the owner's DM copy of a briefing. **No real reader exists for this surface** (next row) |
+| Notification-only watch targets: observing a real repository | **Unit-tested; probed read-only on a public repository; live completeness unproven** | The owner approved typed GET-only reads on 2026-10-14 (ADR 0031). `GhWatchReader` reads repository, pulls, reviews, issues, runs, releases and commits through seven exact `gh api` shapes, one request per unit, with pinned schemas, identity checks, a re-read proof for multi-page windows and a `window_exceeded` blocker. It is OFF by default (`DUCKY_ASSISTANT_WATCH_READER_ENABLED`). `pnpm probe:watch-reader` showed real non-empty answers for the repository, pull request, issue and commit surfaces on the public probe repository and EMPTY answers for reviews, runs and releases (so those item schemas are documented-shape only); it exits 4 for an empty answer unless `--allow-empty` accepts shape-only evidence. That proves shape, not completeness, latency or runtime eligibility. Discovery, the 40-target recency-limited cycle and the monitoring switch are implemented and unit-tested; discovery has never been enabled or probed live. **Multi-page completeness is NOT proven (a required blocker)**; residuals are in ADR 0031 and below |
+| Private imported sections in owner-requested briefings | **Unit-tested** | `/briefing` and "brief me" put the capture inbox and repository digest in the reply only when it is a DM or a guaranteed-ephemeral command reply; in a role channel (where replies persist) and in a guild message reply they are left out, while the native tasks, schedule and reminders are unchanged |
+| Briefing weather | **Unit-tested; no live request made** | Parsing, caching, failure-to-null, the fixed host, refused redirects and a streamed size ceiling are covered with an injected `fetch`. The natural-language `brief me` includes it. No request to Open-Meteo has been made from this host |
+| Shared runtime lock (coordinator and importer) | **Unit-tested** | The lock records the boot and the process start, so a reused pid, an earlier boot, a second handle in the same process and an equal pid on another host are each judged on what they are. The coordinator takes it right after migrations, before any other write, and beats on its own fixed period. The `main.ts` wiring has not been run against a live process |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
 ## The development profile is configured and the current process loaded it
@@ -1142,10 +1150,246 @@ deployment; automatic GitHub or Azure writes; arbitrary shell; browser
 automation; container sandboxing; concurrent implementation writers; executor-
 routed production actions; issue/deploy/Azure performers.
 
+## Detail: the private-assistant migration
+
+Issue #9 retires the owner's private assistant module only after its records and
+accepted behavior work in Ducky. The owner chose **full parity** on 2026-10-13.
+The design is [ADR 0030](decisions/0030-private-assistant-migration-and-parity-capabilities.md)
+and the procedure is [runbooks/dcstro-cutover.md](runbooks/dcstro-cutover.md).
+
+**What exists and is covered by tests:** the `ducky-assistant-import/v1` contract
+and its content-free failure report; `pnpm import:assistant` (validate, `--verify`,
+`--apply` behind a matching backup and the runtime lock); the permanent correlation
+ledger with trigger-written tombstones; indefinite weekly schedules and dated
+exceptions integrated with the briefing, `/forget` and retention; a per-task
+reminder policy that survives Done, Edit and Snooze; scoped, non-authoritative
+preferences with lookahead, captures, GitHub-digest and weather briefing sections;
+notification-only watch targets with typed checkpoints, held partial reads,
+separate alert and digest settlement and a fixed call budget; the
+`/watch list targets` / `/watch remove` owner controls; and exact, delivered-only
+reconciliation between the native paths and the imported targets (ADR 0034, migrations 36 and 37):
+a ledger of native receipts and reservations by exact transition and by native HOLDER (a feed card and
+an ordinary summary can both hold one transition), a shared codec, ordinary watches that record the
+repository they queried, exact new requested-changes reviews and proven pull request openings in the
+ordinary summary, durable held facts, pause provenance, withheld-event accounting and a v4 rollback
+export. Migrate through 37 before the final export; an older build cannot honour the holders. **Operator sequencing it needs:** stop the coordinator, back up,
+migrate, and only then take the final source export, so imported cursors lie after the ledger
+cutoff; then require `pnpm import:assistant --verify` to exit 0 (it exits 5 when the data is present
+but not at parity: drift, a withheld event, a held native card, a held ordinary requested-changes fact or a cursor at or before the cutoff). Never run an older build against a migrated database.
+
+**Upgrade notes.** Migration 29 introduces the runtime lock, which a coordinator from an
+older build does not know; stop the coordinator before migrations, and never start an
+older build against a migrated database. A scratch database migrated to 29 from an
+earlier revision of this branch must be recreated, because that unpushed migration
+was revised.
+
+**What does not exist, or was not done, and is therefore still required** (see also *Required parity blockers* below):
+
+- **A real typed reader: partly done.** Release publication, closing times, reviews,
+  runs, issues and the default branch are now read by `GhWatchReader` (ADR 0031) when
+  `DUCKY_ASSISTANT_WATCH_READER_ENABLED` is set; it is off by default, so the shipped
+  default still declares nothing and an import with watch targets still fails closed.
+  Repository discovery and the source's recency-limited poll cycle are implemented and
+  unit-tested (ADR 0031) but have never run live; completeness and latency are unproven.
+- **Every operational gate in the runbook.** No fresh live source backup or
+  restoration configuration, no private source-to-target parity, no live synthetic
+  notification or Done/Edit/Snooze/non-owner check, no reverse-delta rollback
+  bridge, no cutover and no module retirement. Nothing was imported, deployed,
+  stopped or changed on any real system.
+- **A rollback-delta export: implemented; the bridge is not.** `pnpm
+  export:rollback-delta` (ADR 0033) writes one private file of what changed in Ducky
+  since an import (changed and added records, deletions by identity and cause, and
+  watch, briefing and switch state), under the runtime lock or from a verified backup,
+  exiting 5 and writing nothing when it cannot say something (an unknown baseline, a
+  deletion with no recorded cause, a table past its cap). It is unit-tested with a
+  synthetic replay against a model of the source, which proves completeness and
+  idempotence for the listed categories and nothing more. **No reverse bridge to the
+  source exists or was rehearsed**, and the export authorizes no restore of stale data;
+  the proven reverse-delta rollback stays a required operational gate.
+
+**Required parity blockers.** The owner settled full parity on 2026-10-13. Every
+item below is a behavior the source has that Ducky does not yet have. None is an
+accepted exclusion or a proposed omission: each stays a required blocker, and
+cutover and module retirement stay blocked, until it is supported and proven.
+Where Ducky refuses an input instead of carrying it, the refusal is the
+fail-closed form of the blocker, not a decision to drop it.
+
+- **Unsupported source values (refused by validation, never normalized):** AI
+  wording of briefings (the only approved provider is a session-keyed OpenClaw turn
+  whose transcript `/forget` cannot delete, so it needs a stateless-call contract, an
+  owner decision and live evidence; every briefing stays deterministic), and meals
+  (their preferences, suggestion history and the meal-in-briefing behavior; the source's
+  built-in catalog cannot be copied, so mechanics alone would not be parity). The `urgent` priority and the two task categories are
+  now carried as data (ADR 0032): urgent is stored as `high` plus a flag, ranks above
+  high in lists and the lookahead and is shown as urgent, and the category is shown
+  with the task; no native command sets either, and the task command definitions are
+  unchanged. Unit-tested only. The paused
+  global watch switch is carried over and gates reads, and the owner sets it with
+  `/watch monitoring state:on|off` (explicit, never a toggle; the same state changes no
+  row, timestamp, audit row, pause period or delta). **Resuming is no longer refused because history
+  exists** (ADR 0034, which replaced the earlier blanket guard): pause provenance (owner, import or
+  unknown, a real start only for an owner's pause), the repository an ordinary watch actually queried and the
+  exact transitions native paths delivered are recorded, and every imported event is decided against
+  that ledger. It refuses only when the ledger boundary cannot be read. **Still required, not
+  waived:** what predates the ledger cannot be placed, so on a database that is not verifiably new every
+  imported event with a native counterpart at or before the migration-36 cutoff (plus one second)
+  and no exact receipt is **withheld**, never delivered or settled, counted in `/status`, `--verify`
+  and the export, with no clearing control; counts and unnamed aggregates are never receipts (a per-author
+  review line told without exact review identity is durable, counted evidence and a required blocker, ADR
+  0034); a review is withheld or held, never told twice by an id mismatch, until REST `node_id` equality with
+  the native id is proven on a live provider. Unit and synthetic tests only; command registration with
+  Discord is not performed here.
+- **Alert content:** a requested-changes alert omits the source's "areas
+  mentioned". The review BODY is now read (and is the only approved source: file and
+  review-comment endpoints are not approved), but the private audit does not define
+  the extraction rule (what counts as an area, which file paths are sensitive), and
+  inventing one would be unsupported behavior, so this stays a **named blocker on the
+  rule**, not on access.
+- **Briefing timing:** when the profile selects imported preferences, a pending
+  morning briefing is due until the evening time and is then recorded skipped, an
+  evening briefing is due until the end of its day, and nothing survives into a later
+  day (ADR 0032). Without imported preferences the native six-hour rule is unchanged.
+  Unit-tested only.
+- **Schedule batches:** the owner flips the schedule back one batch with `/schedule
+  rollback:preview` and then `/schedule rollback:<code>` (never with text or a file; no new
+  command, subcommand or interaction kind). The active batch becomes replaced and the most
+  recently replaced one becomes active, deleting nothing and touching no exception. The
+  code digests every rule by identity, batch, flag and replacement time plus the target and
+  is rechecked in the flipping transaction, so a stale or replayed code changes nothing; any
+  replaced batch of unknown or unreadable order (even beside known ones), a tie, a split
+  batch or a non-newer stamp is refused. A successful flip is audited as
+  `schedule.batch_rolled_back` (counts only) in the same transaction; a clock that is not after the
+  newest stored stamp is refused as `clock_not_newer`, in the preview as well (ADR 0032 corrects the
+  earlier claim that this needed a table rebuild: `audit_log.event` has no CHECK).
+  Unit-tested only; the Discord command definition is not registered by this build. **Still
+  required:** the private source's repeated-rollback semantics (a fresh second preview flips
+  again here), and the source's keep-three-versions retention is not mirrored.
+- **Repository discovery and the polling cycle:** the source discovers new
+  repositories on a schedule and polls the 40 most recently pushed per cycle. With
+  the real reader enabled Ducky now does the same (ADR 0031): scoped, tombstone- and
+  mute-preserving discovery, and a 40-target recency cycle with a slow metadata
+  refresh for the rest. Unit-tested only; discovery has never been enabled, the
+  account that IS the owner is stated by configuration rather than proven, and whether
+  the timing holds under the real quota and selection is unproven.
+- **Overlap with the ordinary `github_watches` snapshot DM:** when an imported target
+  will really DELIVER the same repository's pulls or issues surface (watching on, inside
+  the poll cycle where one applies, healthy, and for digest-only kinds a briefing that
+  can carry the digest: briefings on, imported preferences with the GitHub section, a DM
+  copy; a requested change is an alert and needs no digest), the ordinary snapshot DM
+  leaves out the parts that surface already reports (pull request updates, merges, approvals, requested changes, review comments,
+  issue activity) and says nothing at all if nothing else changed. It keeps what the
+  imported side cannot see (a check flipping on a pull request head, a workflow run on
+  any branch) and the follow-up job proposal, so nothing unrelated is lost. The native
+  feed's duplicate cards are retired the same way, for the kinds an imported surface
+  sees in full, under the same conditions. Paused, outside the cycle, preferences off,
+  no GitHub section or briefings off keep the native DM and card. Unit-tested only.
+  **Superseded by ADR 0034:** that prospective trimming (and the resume refusal that went with it) was
+  replaced by exact, delivered-only reconciliation; nothing is left out on a promise of future coverage.
+  The duplicate-free observation gate stands.
+- **Equal-time late reviews:** a late event that shares the cursor's timestamp is
+  reconciled by identity for commits, pull-request-level events, reviews, issues,
+  runs and releases once Ducky has processed the boundary (a pull request touched at
+  the cursor is listed and its reviews re-read, and a review is told from an
+  announced one by its id). A cursor that came from the source or a baseline stays
+  strict (re-reading its boundary could announce history). Unit-tested only.
+- **Paging and completeness of the real reader.** Runs and releases sort on creation
+  while their events carry a later time, so the engine no longer assumes one read
+  closes them: a window closes on an item created STRICTLY before both the cursor and the
+  oldest item that was unsettled at the last close (`scan_floor`, which has no age cutoff:
+  only settlement, publication or absence releases it), pages are separate units, and a
+  window that spanned pages is committed only after its last page is re-read and held
+  still. A window past its cap is blocked as `window_exceeded`, with cursor, floor and held
+  events kept.
+- **First observation of runs and releases (ADR 0031).** A NEW baseline reads the whole
+  bounded inventory and commits a boundary frozen before its first request
+  (`floorToSecond(now) - 1ms`, written before that request so a failed first call cannot
+  re-anchor the retry; kept across a drift restart with the creation floor so far). It
+  delivers nothing; the next ordinary pass announces, once, what moved after the boundary,
+  including an older-created run or draft that settled or published while later pages were
+  being read. A run already running at the boundary announces no historical `ci_started`: the baseline's
+  commit records it as a marker in a RESERVED identity namespace (`baseline-marker:v1:...`, settled,
+  empty payload, never the real `<run>:ci_started` identity), decided everywhere by one exact classifier
+  and applied only while the pass's cursor is at or after the marker's boundary, so an import adopting
+  an earlier source cursor still announces the start once. A start is otherwise announced from an update
+  after the cursor. An id that cannot be encoded, or a marker lookup that overflows its bound, refuses
+  the surface visibly (`baseline_marker_invalid` / `baseline_marker_overflow`); the importer refuses the
+  reserved prefix; counts report markers separately; the rollback export is now schema v2 with a per-row
+  `baselineMarker` flag (a v1 document's marker status is unknown). **Required limitation:** commit
+  `b88b701` is pushed but never deployed, and a development or scratch database that ran it holds
+  canonical-identity markers that are not reinterpreted or migrated; resetting a cursor or re-baselining in that database does not delete or repair them. A release with no creation time that is a draft, or was published after the boundary,
+  is refused (`release_untrackable`, counted by reason in `/status`).
+  **Limits that remain required blockers, not claims of completeness:** a first inventory
+  of 100 or more runs or releases is REFUSED as `window_exceeded` (page cardinality cannot
+  tell a full tenth page from a longer list, so at most 99 can be proven), which leaves
+  that surface unobserved with the CI state unset and no recovery control; a first
+  observation costs up to eleven requests per surface and a deep steady-state floor costs
+  its depth plus one per 15-minute pass; imported and preexisting targets keep the floors
+  they already lost, and a source cursor carries no unsettled inventory; the boundary is
+  local time, so skew beyond the one-second floor is unproven; a run re-run long after it
+  settled is outside the floor. Synthetic tests only, no live evidence.
+- **Other named residuals, each a required blocker until accepted or closed:** multi-page
+  completeness is not proven (the last-page re-read narrows the window for a miss and
+  cannot see a deletion that left that page untouched, or a deletion paired with an
+  insertion); a pull request with over 100 reviews; release ordering and the runs/releases
+  schemas are unprobed on real data (the live answers were empty). Unit-tested and probed
+  for shape on a public repository only.
+- **Native reconciliation limits (ADR 0034), required until closed:** events that predate the
+  ledger are withheld and counted with no clearing control; counts and unnamed aggregates prove
+  no item; a review is withheld (imported side) or its native fact HELD (feed or ordinary side) when its id
+  cannot be compared, until REST `node_id` equals the native id on a live provider (a live-probe gate
+  nobody has run, and the provider lifecycle assumed here, that a submitted review never leaves the list and
+  changes state only by being dismissed, was never probed live); **REQUIRED MERGE BLOCKERS, each named, none an
+  accepted residual and none a parity claim:** a NEW submitted review in each observed state (requested changes,
+  approved, commented, first seen dismissed), a known review observed dismissed and a PROVEN opening are exact now
+  (migrations 37 and 38; a dismissal is a state observation with no dismissal time, and the target, like the
+  source, never reports a dismissal of a review its cursor has passed). Still open: a per-author approvals or
+  requested-changes line told while no exact list could identify it, or one that came back because its exact segment
+  was cut off or redacted (`not_conveyed`), kept as durable gap-marker evidence, counted in status, verify and the
+  export, never cleared; a PR-level decision is its own unclaimed line and no cause is
+  inferred from it; a pull request merely "newly listed" is not provably opened; pull requests with 100 or more
+  reviews are counted and told no new review exactly; an exact segment cut off by the clamp or inside a redacted
+  summary claims nothing and may leave a duplicate; the no-longer-listed (not a close), issue-count and
+  workflow-run lines and the follow-up are open on the same terms; summaries sent before migration 37 or 38 and
+  review rows with no recorded state or hash stay unreconciled (the new families are exempt from the migration-36
+  cutoff and migration 38 records provenance only); a start-up
+  crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
+  ledger grows by a few identifiers per delivered native transition for the life of the database.
+- **Exact pull request closes (migration 39, ADR 0034), unit-tested only:** a close is its number AND the provider's
+  canonical close instant, never the number alone. The ordinary watch tells and claims one only from the list's own explicit
+  evidence (`closedAt` joined the fixed `prListAll` selector list; raw state exactly CLOSED, a merge field explicitly null, a
+  readable instant, no contradiction from the optional per-pull-request read), as a change against a comparable snapshot
+  (snapshots are version 4; an upgrade establishes the new metadata silently and swallows no real change), never from a
+  disappearance, an update time or a missing merge field. A pull request beyond the five richest keeps minimal lifecycle
+  evidence, so its close or merge is applied with no extra read and "no longer listed" now means absent from the whole fetched
+  list. An imported close is reserved, settled and receipted only when its number and literal canonical instant are proven
+  inside one retained line of the final briefing output after the transport's own sanitization; a close that was clipped,
+  redacted or dropped stays pending, counted with the age of the oldest in `/status`, `--verify` (exit 5) and the v6 export.
+  Closes the target settled BEFORE migration 39 are permanent identifiers-only uncertainty (`native_close_uncertainty`,
+  retention-forbidden, no clearing control), never promoted to a receipt, and a native close that matches one is held and
+  counted. **Required merge blockers that remain:** that historical uncertainty (it needs a private semantic audit of the
+  historical markers), generic native updates sent before migration 39 as closes, the malformed-time merge weakness, the
+  equal-instant re-close lifecycle and the live shape of `closedAt` (no live evidence), a pull request merely newly listed
+  or whose creation is only historical (both stay unclaimed), and every other family's clipping, redaction and starvation
+  limit: the per-repository line cap and the repository cut still settle the OTHER families' events they cut.
+- **Digest throughput is bounded, not certified fair:** a briefing looks at no more than 10,000 unread
+  events, so a backlog beyond that can still starve later work. A **required throughput blocker** until a
+  fair scheme is proven.
+- **Withheld events (including one withheld as `state_conflict`, a review reporting a state change the provider
+  lifecycle does not allow), held native cards and held ordinary review facts are durable UNDELIVERED
+  work**, kept and counted (a held fact survives a cancel, an identity stop, a restart and retention), never
+  deleted and not an acceptable omission; each stays a required cutover blocker with no clearing control. So are
+  the pull requests whose exact review facts are refused and the per-author lines delivered without exact
+  identity (gap markers): counted in `/status`, `--verify` (exit 5) and the v6 export, as are the closes above.
+- **Scratch databases migrated at `819a420`, `55266b9` or `09f9463` must be recreated** from a backup taken
+  before migration 36 (it was revised in place before ever being deployed, so they lack `provider_at` and
+  `held_reason`). No live-data reset is authorized.
+- **A real typed reader, the rollback-delta export and every operational gate**
+  (above).
+
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
+The unmodified `pnpm test` command passes all **3035 tests in 170 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

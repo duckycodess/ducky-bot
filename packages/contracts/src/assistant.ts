@@ -31,6 +31,20 @@ export type TaskState = (typeof TASK_STATES)[number];
 export const TASK_PRIORITIES = ['low', 'normal', 'high'] as const;
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
+/**
+ * The source also has an `urgent` priority above `high`. It is stored as `high`
+ * plus an urgent flag, not as a fourth value of the priority column: that column's
+ * CHECK cannot be widened without rebuilding `tasks`, which `reminders` and the
+ * deletion triggers depend on. Everything that ranks or shows a priority reads the
+ * flag, so urgent sorts above high and is shown as urgent.
+ */
+export const IMPORTED_TASK_PRIORITIES = [...TASK_PRIORITIES, 'urgent'] as const;
+export type ImportedTaskPriority = (typeof IMPORTED_TASK_PRIORITIES)[number];
+
+/** The source's two task categories. Carried over as data; no native command sets one. */
+export const TASK_CATEGORIES = ['school', 'personal'] as const;
+export type TaskCategory = (typeof TASK_CATEGORIES)[number];
+
 export const TASK_STATE_LABEL = {
   open: 'Open',
   done: 'Done',

@@ -11,6 +11,7 @@
  */
 
 import { isCommitsApiArgv, isReviewSearchArgv } from './github.js';
+import { isWatchApiArgv } from './github-watch.js';
 
 export const COMMAND_CLASSES = [
   /** Reads state and changes nothing, anywhere. */
@@ -154,6 +155,15 @@ export const COMMAND_POLICY: readonly CommandPolicyEntry[] = Object.freeze([
       'ONLY `api --method GET repos/{owner}/{repo}/commits?sha=<branch>&per_page=N&page=P`, with ' +
       'every part validated. There is no `--json` selector for commits, so the whole argv is the ' +
       'contract; any other method, field, header, host, template or endpoint is unclassified.',
+  },
+  {
+    bin: 'gh', verb: ['api'], cls: 'read_only', shape: isWatchApiArgv,
+    note:
+      'ONLY `api --method GET <endpoint>` where the endpoint is one of the seven typed ' +
+      'notification-watch reads (repository, pulls, reviews, issues, runs, releases, discovery), ' +
+      'each re-parsed against its canonical form. Owner-approved 2026-10-14 (issue 9, ADR 0031). ' +
+      'No `/notifications` endpoint, no other method, field, header, host, template, filter, cache, ' +
+      'include or pagination flag; anything else is unclassified.',
   },
   {
     bin: 'gh', verb: ['pr', 'create'], cls: 'external_mutation',

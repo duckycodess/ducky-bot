@@ -19,8 +19,8 @@ export interface GitHubReader {
   prView(ref: RepoRef, number: number): Promise<PrView>;
   prChecks(ref: RepoRef, number: number): Promise<PrChecks>;
   /**
-   * Open AND recently closed pull requests, so a merge is observable as a merge
-   * rather than as a PR that vanished.
+   * Open AND recently closed pull requests (twenty, every state), so a merge or a close is observable from the list's
+   * own explicit evidence (`mergedAt`, `closedAt`, `state`) rather than inferred from a pull request that vanished.
    */
   prListAll(ref: RepoRef): Promise<PrList>;
   /** Approvals, requested changes, review comments, and commits under review. */

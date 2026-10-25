@@ -301,7 +301,7 @@ describe('the upgrade from a legacy snapshot', () => {
     expect(sent(h)).toBe('[]');
     expect(h.store.db.prepare('SELECT COUNT(*) n FROM github_watch_events').get()).toEqual(events);
     const upgraded = JSON.parse(watch(h).snapshotJson!) as { v: number; prs: { rf: { known: boolean } }[] };
-    expect(upgraded.v).toBe(3);
+    expect(upgraded.v).toBe(4);
     expect(upgraded.prs[0]!.rf.known).toBe(true);
     h.close();
   });

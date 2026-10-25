@@ -7,9 +7,9 @@ import {
   GITHUB_WATCH_MAX_ISSUES, GITHUB_WATCH_MAX_PR_CHECKS, GITHUB_WATCH_MAX_RUNS,
   GITHUB_WATCH_SUMMARY_MAX, GitHubWatchAddInputSchema, newPublicWatchId,
   PublicWatchIdSchema, NATIVE_SUMMARY_NAMED_MAX, NATIVE_LEGACY_SKEW_MS, GITHUB_WATCH_REVIEW_FACTS_MAX,
-  canonicalStamp, hashProviderRef, mergedTransition, observedReviewTransition, openedTransition,
+  canonicalStamp, closedTransition, hashProviderRef, mergedTransition, observedReviewTransition, openedTransition,
   reviewTransitionFromHash, transitionKey, transitionRepoKey, updatedTransition, type GapClass, type GapReason,
-  type GapShown, type PrChecks, type PrList, type RepoView, type Transition,
+  type GapShown, type PrChecks, type PrList, type PrReviews, type RepoView, type Transition,
 } from '@ducky/contracts';
 import { redact, type GitHubReader } from '@ducky/adapters';
 import { withTransaction, type GitHubWatchRow, type Store } from '@ducky/persistence';
@@ -38,6 +38,13 @@ interface NormalizedPr {
    */
   headRefOid?: string;
   mergedAt?: string;
+  /**
+   * The canonical close instant, written ONLY when the list's own explicit evidence proves a close (raw state exactly
+   * CLOSED, `mergedAt` present and explicitly null, a readable close instant, and no contradiction from the per-pull-
+   * request read). Never inferred from the normalized fallback strings. Version 4 snapshots; absent on an older one,
+   * which is read through its own projection and so cannot make this metadata a change.
+   */
+  cp?: string;
   reviewDecision?: string;
   approvals?: number;
   changesRequested?: number;
@@ -107,6 +114,21 @@ interface ReviewFacts {
   x?: 'left' | 'lifecycle';
 }
 
+/**
+ * A pull request in positions beyond the rich slice of the fetched list (version 4): just enough to apply a close or a
+ * merge to a pull request that is still listed, without an extra read and without inventing rich check or review data.
+ * It is comparison evidence for a pull request already known, never a lifecycle claim for one first seen here.
+ */
+interface TailPr {
+  n: number;
+  /** The raw state class: open, closed, merged, or a word this build does not know. */
+  s: 'O' | 'C' | 'M' | 'U';
+  /** The canonical close proof, by the same rule as `NormalizedPr.cp`. */
+  cp?: string;
+  /** The canonical merge instant, when the list carried a readable one. */
+  ma?: string;
+}
+
 interface NormalizedRun {
   workflow: string;
   branch: string;
@@ -123,12 +145,17 @@ interface NormalizedIssue {
 }
 
 interface NormalizedSnapshot {
-  /** 2 once exact requested-changes facts were recorded, 3 once every review state is. Absent on a legacy snapshot. */
-  v?: 2 | 3;
+  /**
+   * 2 once exact requested-changes facts were recorded, 3 once every review state is, 4 once the close proof and the
+   * rest of the fetched list are. Absent on a legacy snapshot.
+   */
+  v?: 2 | 3 | 4;
   repoName: string;
   defaultBranch: string;
   openPrCount: number;
   prs: NormalizedPr[];
+  /** Version 4: the fetched list beyond the rich slice, ordered by number (never by list position). */
+  tail?: TailPr[];
   /** Bounded workflow-run history: a failure, and the recovery after one. */
   runs?: NormalizedRun[];
   openIssues?: NormalizedIssue[];
@@ -228,6 +255,15 @@ export class GitHubWatchService {
       notes.push(
         `${held} review fact(s) HELD and NOT sent: each cannot be told from a review the notification ` +
           'target already delivered (kept through a cancel; no clearing control; a required blocker)',
+      );
+    }
+    // A native exact close that matches a close the target settled before exact close receipts existed: held, never sent.
+    const heldCloses = this.store.githubWatches.heldCloseCount(this.ownerId);
+    if (heldCloses > 0) {
+      notes.push(
+        `${heldCloses} pull request close(s) HELD and NOT sent: the notification target settled a close of that pull ` +
+          'request before exact close receipts existed and nothing proves what it showed (kept through a cancel and ' +
+          'retention; no clearing control; a required blocker)',
       );
     }
     const evidence = reviewEvidenceCounts(this.store, this.ownerId);
@@ -383,8 +419,8 @@ export class GitHubWatchService {
     // older than this, so a pull request created after it cannot have been in the previous snapshot.
     const readStartIso = new Date(this.clock.nowMs()).toISOString();
     const previous = parseSnapshot(watch.snapshotJson);
-    // `prListAll` rather than `prList`: a merge is the disappearance of an open
-    // pull request, and the open-only list could only ever report it as "gone".
+    // `prListAll` rather than `prList`: a merge or a close is told from the list's own explicit evidence
+    // (`mergedAt`, `closedAt`, the state), and the open-only list could only ever report it as "gone".
     // Runs and issues are separate bounded reads; each is allowed to fail on its
     // own, because a repository with Actions disabled must not break the watch.
     const [view, prs] = await Promise.all([
@@ -399,14 +435,18 @@ export class GitHubWatchService {
     // upgrade neither announces "changed" for an unchanged repository nor lets new metadata decide anything. A
     // version 2 snapshot is compared through its own projection AND by the review facts it already proves
     // comparable (its identities and requested-changes states), so a genuinely new review is never swallowed by
-    // the upgrade. From then on the fingerprint covers every fact a line can render.
-    const fingerprint = fingerprintOf(normalized, 'v3');
+    // the upgrade. A version 3 snapshot is compared through ITS projection, which has no close proof and none of the
+    // fetched list beyond the rich slice: gaining that metadata is no change, while a real change to any older
+    // field still is. From then on the fingerprint covers every fact a line can render.
+    const fingerprint = fingerprintOf(normalized, 'v4');
     const newFacts = previous !== undefined && previous.v === 2 ? reviewFactChanges(previous, normalized).length > 0 : false;
     const comparable = previous === undefined
       ? fingerprint
       : previous.v === undefined
         ? fingerprintOf(normalized, 'legacy')
-        : previous.v === 2 ? fingerprintOf(normalized, 'v2') : fingerprint;
+        : previous.v === 2
+          ? fingerprintOf(normalized, 'v2')
+          : previous.v === 3 ? fingerprintOf(normalized, 'v3') : fingerprint;
     const changed = watch.snapshotHash !== comparable || newFacts;
     // The read boundary is trusted only for the repository it was recorded for, and only beside a snapshot.
     const boundaryMs = previous !== undefined && watch.repoKey !== null && watch.repoKey === repoKey &&
@@ -475,13 +515,17 @@ export class GitHubWatchService {
             if (probe === 'target_delivered') {
               excluded.add(key);
               progressed = true;
-            } else if (probe === 'ambiguous') {
+            } else if (probe === 'ambiguous' || probe === 'uncertain') {
               excluded.add(key);
-              // The text is stored with the row for the record and is NEVER sent: a held row is not pending work.
+              // The text is stored with the row for the record and is NEVER sent: a held row is not pending work. A held
+              // close is counted on its own (its key is a `pr_closed:` transition key).
               held.set(key, {
                 id: randomUUID(), heldKey: key, providerAt: c.providerAt,
-                summary: `Held, not sent: a review fact on #${c.t.item} cannot be told apart from one ` +
-                  'the notification target already delivered.',
+                summary: probe === 'uncertain'
+                  ? `Held, not sent: a pull request close on #${c.t.item} may already have been told by the notification ` +
+                    'target before exact close receipts existed, and nothing proves what it showed.'
+                  : `Held, not sent: a review fact on #${c.t.item} cannot be told apart from one ` +
+                    'the notification target already delivered.',
               });
               progressed = true;
             }
@@ -610,6 +654,11 @@ export class GitHubWatchService {
       else if (old?.reviewComments !== undefined) reviewFields.reviewComments = old.reviewComments;
       if (Array.isArray(reviews?.commits)) reviewFields.commits = reviews!.commits!.length;
       else if (old?.commits !== undefined) reviewFields.commits = old.commits;
+      // A close is proven by the list's OWN explicit evidence, and a successful per-pull-request read may only
+      // confirm it. A contradiction (it supplies a merge instant, or a state that is not CLOSED) proves no close and
+      // no new merge claim either: neither source is believed over the other.
+      const proof = proveClose(pr, reviews);
+      const contradicted = pr.state === 'CLOSED' && pr.mergedAt === null && proof === undefined && reviewsContradictClose(reviews);
       return {
         number: pr.number,
         title: redact(pr.title).slice(0, 180),
@@ -619,7 +668,8 @@ export class GitHubWatchService {
         updatedAt: pr.updatedAt ?? '',
         checks,
         headRefOid: redact(pr.headRefOid ?? reviews?.headRefOid ?? '').slice(0, 64),
-        mergedAt: pr.mergedAt ?? reviews?.mergedAt ?? '',
+        mergedAt: pr.mergedAt ?? (contradicted ? '' : reviews?.mergedAt) ?? '',
+        ...(proof !== undefined ? { cp: proof } : {}),
         // A decision is a value only from a read that CARRIED it: a missing or empty field is "not read", so the
         // last proven value stays and a failed read and its recovery never produce a decision change.
         reviewDecision: redact(pr.reviewDecision ?? reviews?.reviewDecision ?? '').slice(0, 40) || (old?.reviewDecision ?? ''),
@@ -654,14 +704,28 @@ export class GitHubWatchService {
       openIssues = [];
     }
 
+    // The rest of the fetched list, for lifecycle evidence only (a close or a merge of a pull request that is still
+    // listed). Ordered by number, so list order is never evidence, and never a pull request that is already rich.
+    const richNumbers = new Set(selected.map((pr) => pr.number));
+    const tail: TailPr[] = prs.slice(GITHUB_WATCH_MAX_PR_CHECKS)
+      .filter((pr) => !richNumbers.has(pr.number) && Number.isInteger(pr.number) && pr.number > 0)
+      .map((pr): TailPr => {
+        const proof = proveClose(pr, undefined);
+        const ma = canonicalStamp(pr.mergedAt);
+        return { n: pr.number, s: stateClassOf(pr.state), ...(proof !== undefined ? { cp: proof } : {}), ...(ma !== null ? { ma } : {}) };
+      })
+      .sort((a, b) => a.n - b.n)
+      .slice(0, TAIL_MAX);
+
     return {
       snapshot: {
-        v: 3,
+        v: 4,
         repoName: redact(view.name).slice(0, 180),
         defaultBranch: redact(view.defaultBranchRef?.name ?? 'unknown').slice(0, 180),
         // Only the ones still open: `prListAll` includes closed ones now.
         openPrCount: prs.filter((pr) => /open/i.test(pr.state)).length,
         prs: normalizedPrs,
+        tail,
         runs,
         openIssues,
       },
@@ -722,14 +786,38 @@ function parseSnapshot(raw: string | null): NormalizedSnapshot | undefined {
     // 2 wrote, which is converted) is dropped (the pull request is then "never proven"), never trusted and never
     // repaired.
     const prs = candidate.prs.map((pr) => {
-      const { rf, ...rest } = pr as NormalizedPr & { rf?: unknown };
+      const { rf, cp, ...rest } = pr as NormalizedPr & { rf?: unknown; cp?: unknown };
       const clean = cleanReviewFacts(rf);
-      return clean ? { ...rest, rf: clean } : rest;
+      // A close proof is a canonical instant exactly as this build writes it; anything else is dropped (the pull
+      // request is then "not proven closed"), never trusted and never repaired.
+      const proof = typeof cp === 'string' && canonicalStamp(cp) === cp ? cp : undefined;
+      return { ...rest, ...(proof !== undefined ? { cp: proof } : {}), ...(clean ? { rf: clean } : {}) };
     });
-    return { ...(candidate as NormalizedSnapshot), prs };
+    const { tail: rawTail, ...restOfSnapshot } = candidate as Partial<NormalizedSnapshot> & { tail?: unknown };
+    const tail = cleanTail(rawTail);
+    return { ...(restOfSnapshot as NormalizedSnapshot), prs, ...(tail !== undefined ? { tail } : {}) };
   } catch {
     return undefined;
   }
+}
+
+/** The fetched list beyond the rich slice, as this build writes it; anything else is not trusted at all. */
+function cleanTail(raw: unknown): TailPr[] | undefined {
+  if (!Array.isArray(raw) || raw.length > TAIL_MAX) return undefined;
+  const seen = new Set<number>();
+  const out: TailPr[] = [];
+  for (const t of raw as Record<string, unknown>[]) {
+    if (!t || typeof t !== 'object' || !Number.isInteger(t['n']) || (t['n'] as number) < 1 || seen.has(t['n'] as number)) return undefined;
+    if (t['s'] !== 'O' && t['s'] !== 'C' && t['s'] !== 'M' && t['s'] !== 'U') return undefined;
+    if (t['cp'] !== undefined && (typeof t['cp'] !== 'string' || canonicalStamp(t['cp']) !== t['cp'])) return undefined;
+    if (t['ma'] !== undefined && (typeof t['ma'] !== 'string' || canonicalStamp(t['ma']) !== t['ma'])) return undefined;
+    seen.add(t['n'] as number);
+    out.push({
+      n: t['n'] as number, s: t['s'], ...(t['cp'] !== undefined ? { cp: t['cp'] as string } : {}),
+      ...(t['ma'] !== undefined ? { ma: t['ma'] as string } : {}),
+    });
+  }
+  return out;
 }
 
 const HEX32 = /^[0-9a-f]{32}$/;
@@ -856,25 +944,63 @@ function deriveReviewFacts(
   return { s: 'complete', known: true, pb: boundary, rv };
 }
 
+/** The most pull requests beyond the rich slice a snapshot keeps (the list is fetched at 20, the slice is 5). */
+const TAIL_MAX = 30;
+
+/** The raw state class of a pull request: open, closed, merged, or a word this build does not know. */
+function stateClassOf(raw: string): TailPr['s'] {
+  switch (raw.toUpperCase()) {
+    case 'OPEN': return 'O';
+    case 'CLOSED': return 'C';
+    case 'MERGED': return 'M';
+    default: return 'U';
+  }
+}
+
+/**
+ * The canonical close instant, or undefined, from the list row's OWN explicit evidence only: the raw state is exactly
+ * `CLOSED`, `mergedAt` is PRESENT and explicitly null (a missing, empty or non-null merge field proves nothing: a
+ * merged pull request is closed too), the number is valid and `closedAt` is a readable instant. A successful
+ * per-pull-request read may only confirm it: if it supplies a merge instant, or a state that is not CLOSED, it
+ * contradicts the list and proves no close. Nothing is inferred from a disappearance, an update time or a fallback.
+ */
+function proveClose(row: PrList[number], reviews: PrReviews | undefined): string | undefined {
+  if (row.state !== 'CLOSED' || row.mergedAt !== null) return undefined;
+  if (reviewsContradictClose(reviews)) return undefined;
+  const stamp = canonicalStamp(row.closedAt);
+  return stamp !== null && closedTransition(row.number, stamp) !== null ? stamp : undefined;
+}
+
+/** Whether a successful per-pull-request read says something a CLOSED, unmerged list row cannot be. */
+function reviewsContradictClose(reviews: PrReviews | undefined): boolean {
+  if (reviews === undefined) return false;
+  if (reviews.mergedAt !== undefined && reviews.mergedAt !== null) return true;
+  return reviews.state !== undefined && reviews.state !== 'CLOSED';
+}
+
 /**
  * The fingerprint of a snapshot. `legacy` is exactly what versions before exact review facts hashed (so an
  * unchanged repository hashes the same through an upgrade). `v2` is what version 2 hashed (the requested-changes
  * reviews); a version 2 snapshot is compared through it. `v3` adds every review state a line can now render and
  * still leaves out the comparison metadata (how the last read went, the boundary, the anomaly mark, a state word
- * this build does not know), which is not a fact the owner is told. `core` is what a line can say apart from the
- * review summaries: when only the rest moved, nothing is worth a message.
+ * this build does not know), which is not a fact the owner is told; a version 3 snapshot is compared through it, so
+ * gaining the close proof and the fetched tail is no change. `v4` adds the close proof of each pull request and the
+ * rest of the fetched list. `core` is what a line can say apart from the review summaries: when only the rest
+ * moved, nothing is worth a message.
  */
-function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2' | 'v3' | 'core'): string {
-  const { v: _version, prs, ...rest } = snapshot;
+function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2' | 'v3' | 'v4' | 'core'): string {
+  const { v: _version, prs, tail, ...rest } = snapshot;
   let projected: unknown;
+  // Every projection but `v4` leaves out the close proof and the fetched list beyond the rich slice: a version 3
+  // snapshot never held them, so gaining them is no change, and a line that cannot say them must not be moved by them.
   switch (mode) {
     case 'legacy':
-      projected = { ...rest, prs: prs.map(({ rf: _rf, ...pr }) => pr) };
+      projected = { ...rest, prs: prs.map(({ rf: _rf, cp: _cp, ...pr }) => pr) };
       break;
     case 'v2':
       projected = {
         v: 2, ...rest,
-        prs: prs.map(({ rf, ...pr }) => ({
+        prs: prs.map(({ rf, cp: _cp, ...pr }) => ({
           ...pr, cr: (rf?.rv ?? []).filter((f) => f.c === 'R').map(({ h, at }) => ({ h, at })),
         })),
       };
@@ -882,6 +1008,14 @@ function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2' | 'v3
     case 'v3':
       projected = {
         v: 3, ...rest,
+        prs: prs.map(({ rf, cp: _cp, ...pr }) => ({
+          ...pr, rv: (rf?.rv ?? []).filter((f) => f.c !== 'U').map((f) => [f.h, f.at, f.c]),
+        })),
+      };
+      break;
+    case 'v4':
+      projected = {
+        v: 4, ...rest, tail: tail ?? [],
         prs: prs.map(({ rf, ...pr }) => ({
           ...pr, rv: (rf?.rv ?? []).filter((f) => f.c !== 'U').map((f) => [f.h, f.at, f.c]),
         })),
@@ -891,7 +1025,7 @@ function fingerprintOf(snapshot: NormalizedSnapshot, mode: 'legacy' | 'v2' | 'v3
       projected = {
         ...rest,
         prs: prs.map(({
-          rf: _rf, approvals: _a, changesRequested: _c, commits: _m, latestChangeRequestAt: _l, reviewDecision: _d, ...pr
+          rf: _rf, cp: _cp, approvals: _a, changesRequested: _c, commits: _m, latestChangeRequestAt: _l, reviewDecision: _d, ...pr
         }) => pr),
       };
       break;
@@ -1048,7 +1182,12 @@ const decisionWords = (value: string): string => value.toLowerCase().replace(/_/
  * - an OPENING, only when the pull request is absent from the previous snapshot AND was created after the
  *   instant the previous read started (plus the skew margin). That is a proof against a boundary, never an
  *   inference from the capped list, its order, a maximum or an equal second. Any other pull request that
- *   enters the list is "newly listed" and carries no opening claim.
+ *   enters the list is "newly listed" and carries no opening claim;
+ * - a CLOSE, by its number and the provider's canonical close instant, only from the proof the snapshots carry (the
+ *   list row's own explicit evidence) and only as a change: the previous snapshot held the pull request not closed, or
+ *   closed with another instant. A pull request that merely gains the proof, or is first seen beyond the rich slice,
+ *   is established silently. At most three are named, the rest counted. A pull request whose only change is the
+ *   close is told by its close segment alone.
  * A changed review DECISION is its own line and is never claimed, never suppressed because a review was
  * submitted beside it, and never tied to a cause (no DTO proves one). A per-author line (approvals, changes
  * requested) names no review and claims none; it is left out only for a pull request whose complete, comparable
@@ -1106,9 +1245,67 @@ function summarizeChange(
       old.headRefOid === pr.headRefOid;
   };
 
+  // ---- the fetched list as a whole: the rich slice AND the rest of it ------------------------------------------
+  //
+  // A pull request is "listed" if it is anywhere in the fetched list, rich or not, and a pull request is "no longer
+  // listed" only when it is absent from ALL of it (list order is never evidence). A pull request that dropped out of
+  // the rich slice but is still in the list keeps its lifecycle evidence here, without an extra read.
+  const tailNow = new Map((current.tail ?? []).map((t) => [t.n, t]));
+  const tailBefore = new Map((previous.tail ?? []).map((t) => [t.n, t]));
+  const wasListed = (n: number): boolean => before.has(n) || tailBefore.has(n);
+  /** What the PREVIOUS snapshot held about a pull request's lifecycle, rich or not; undefined when it held nothing. */
+  const priorView = (n: number): { cls: TailPr['s']; cp?: string; ma?: string } | undefined => {
+    const old = before.get(n);
+    if (old !== undefined) {
+      const ma = canonicalStamp(old.mergedAt);
+      return { cls: stateClassOf(old.state), ...(old.cp !== undefined ? { cp: old.cp } : {}), ...(ma !== null ? { ma } : {}) };
+    }
+    const held = tailBefore.get(n);
+    return held === undefined
+      ? undefined
+      : { cls: held.s, ...(held.cp !== undefined ? { cp: held.cp } : {}), ...(held.ma !== undefined ? { ma: held.ma } : {}) };
+  };
+
+  // ---- exact closes ---------------------------------------------------------------------------------------------
+  //
+  // A close is told only from the proof the snapshots carry (never from a disappearance, an update time or a missing
+  // merge field), and only as a CHANGE: the previous snapshot held the pull request not closed (so this is a proven new
+  // close), or closed with a different canonical instant (a reopen and a new close). A pull request the previous
+  // snapshot already held CLOSED, which merely gains the proof, is established silently, as is one first seen beyond
+  // the rich slice. A pull request that first appears in the rich slice already closed states its known close; that is
+  // the close itself, never a claim that it happened since the last read.
+  interface CloseFact { n: number; at: string; title: string; t: Transition; rich: boolean }
+  const closeTold = (cp: string, prior: ReturnType<typeof priorView>, entrant: boolean): boolean =>
+    prior === undefined ? entrant : prior.cls === 'O' || (prior.cls === 'C' && prior.cp !== undefined && prior.cp !== cp);
+  const closeFacts: CloseFact[] = [];
+  for (const pr of current.prs) {
+    if (pr.cp === undefined || !closeTold(pr.cp, priorView(pr.number), true)) continue;
+    const t = closedTransition(pr.number, pr.cp);
+    if (t !== null) closeFacts.push({ n: pr.number, at: pr.cp, title: pr.title, t, rich: true });
+  }
+  for (const tl of current.tail ?? []) {
+    if (tl.cp === undefined || !closeTold(tl.cp, priorView(tl.n), false)) continue;
+    const t = closedTransition(tl.n, tl.cp);
+    if (t !== null) closeFacts.push({ n: tl.n, at: tl.cp, title: before.get(tl.n)?.title ?? '', t, rich: false });
+  }
+  closeFacts.sort((a, b) => a.n - b.n);
+  for (const c of closeFacts) universe.add(transitionKey(c.t));
+  const closeOf = new Map(closeFacts.map((c) => [c.n, c]));
+  /**
+   * A change of state to CLOSED and of the update instant (and the close proof itself) and nothing else: such a pull
+   * request is told only by its close segment, so it is no generic update, and removing the close (the target told it)
+   * leaves no update sentence that retells it. Any other change to an older field keeps its own update line.
+   */
+  const pureClose = (pr: NormalizedPr): boolean => {
+    const old = before.get(pr.number);
+    return closeOf.get(pr.number)?.rich === true && old !== undefined && old.title === pr.title &&
+      old.isDraft === pr.isDraft && old.headRefName === pr.headRefName && old.headRefOid === pr.headRefOid &&
+      canonicalJson(old.checks) === canonicalJson(pr.checks);
+  };
+
   // ---- proven openings: handled FIRST, because a proven opening is told once and not also as an update ----
   const openings = current.prs.filter((pr) => {
-    if (before.has(pr.number) || ctx.boundaryMs === null) return false;
+    if (wasListed(pr.number) || ctx.boundaryMs === null) return false;
     const stamp = canonicalStamp(ctx.createdAt.get(pr.number));
     return stamp !== null && Date.parse(stamp) > ctx.boundaryMs + NATIVE_LEGACY_SKEW_MS &&
       openedTransition('pr_opened', pr.number) !== null;
@@ -1134,10 +1331,17 @@ function summarizeChange(
   const newOrUpdated = current.prs.filter((pr) => {
     if (openingNumbers.has(pr.number)) return false;
     const old = before.get(pr.number);
-    const changedPr = !old || old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt ||
-      canonicalJson(old.checks) !== canonicalJson(pr.checks) ||
-      old.headRefOid !== pr.headRefOid;
+    // A pull request first seen in the rich slice that the previous read held beyond it has no rich baseline to differ from.
+    const changedPr = !old
+      ? !tailBefore.has(pr.number)
+      : old.state !== pr.state || old.title !== pr.title || old.updatedAt !== pr.updatedAt ||
+        canonicalJson(old.checks) !== canonicalJson(pr.checks) || old.headRefOid !== pr.headRefOid;
     if (!changedPr) return false;
+    if (pureClose(pr)) {
+      // Told only by its exact close segment (or, when the target already told that close, not at all).
+      if (excluded.has(transitionKey(closeOf.get(pr.number)!.t))) removed = true;
+      return false;
+    }
     const t = updateOf(pr);
     if (t !== null) universe.add(transitionKey(t));
     if (t !== null && excluded.has(transitionKey(t)) && onlyUpdatedAtMoved(pr)) {
@@ -1146,10 +1350,11 @@ function summarizeChange(
     }
     return true;
   });
-  const currentNumbers = new Set(current.prs.map((pr) => pr.number));
-  // Absent from a capped, all-state snapshot: pushed out by newer pull requests or closed, which this
-  // list cannot tell. It is "no longer listed", never "closed" and never an exact close.
-  const gone = previous.prs.filter((pr) => !currentNumbers.has(pr.number));
+  const listedNumbers = new Set([...current.prs.map((pr) => pr.number), ...tailNow.keys()]);
+  // Absent from the WHOLE fetched list (the rich slice and the rest of it), which is capped and covers every state:
+  // pushed out by newer pull requests or closed, which this list cannot tell. It is "no longer listed", never "closed"
+  // and never an exact close, and it never settles or suppresses a lifecycle fact.
+  const gone = previous.prs.filter((pr) => !listedNumbers.has(pr.number));
   const failedChecks = current.prs.filter((pr) => pr.checks.some((check) => /fail|error|cancel/i.test(check)));
   if (newOrUpdated.length > 0) {
     const shown = newOrUpdated.slice(0, NATIVE_SUMMARY_NAMED_MAX);
@@ -1158,12 +1363,14 @@ function summarizeChange(
       shown.map((pr) => ({
         claims: one(updateOf(pr)),
         // A pull request new to the snapshot that is not a PROVEN opening is only newly listed.
-        segment: `#${pr.number} ${pr.title}${before.has(pr.number) ? '' : ' (newly listed)'}`,
+        segment: `#${pr.number} ${pr.title}${wasListed(pr.number) ? '' : ' (newly listed)'}`,
       })),
     ));
   }
   if (gone.length > 0) {
-    parts.push(plain(`${gone.length} previously listed pull request(s) are no longer listed (not necessarily closed)`));
+    parts.push(plain(
+      `${gone.length} previously listed pull request(s) are no longer among the ${listedNumbers.size} listed (not necessarily closed)`,
+    ));
   }
   if (failedChecks.length > 0) parts.push(plain(`${failedChecks.length} pull request(s) have failing checks`));
 
@@ -1183,12 +1390,53 @@ function summarizeChange(
     }
     return true;
   });
-  if (merged.length > 0) {
-    const shown = merged.slice(0, NATIVE_SUMMARY_NAMED_MAX);
+  // A pull request beyond the rich slice that gained a merge instant: told only when the previous snapshot held it (one
+  // first seen there establishes silently), from the list's own canonical instant, with no extra read.
+  const mergedBeyond = (current.tail ?? []).filter((tl) => {
+    if (tl.ma === undefined) return false;
+    const prior = priorView(tl.n);
+    if (prior === undefined || prior.ma !== undefined) return false;
+    const t = mergedTransition(tl.n, tl.ma);
+    if (t === null) return false;
+    universe.add(transitionKey(t));
+    if (excluded.has(transitionKey(t))) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  const mergedEntries = [
+    ...merged.map((pr) => ({ t: mergedTransition(pr.number, pr.mergedAt), segment: `#${pr.number} ${pr.title}` })),
+    ...mergedBeyond.map((tl) => {
+      const title = before.get(tl.n)?.title ?? '';
+      return { t: mergedTransition(tl.n, tl.ma), segment: `#${tl.n}${title ? ` ${title}` : ''}` };
+    }),
+  ];
+  if (mergedEntries.length > 0) {
     parts.push(named(
       'merged: ',
-      shown.map((pr) => ({ claims: one(mergedTransition(pr.number, pr.mergedAt)), segment: `#${pr.number} ${pr.title}` })),
+      mergedEntries.slice(0, NATIVE_SUMMARY_NAMED_MAX).map((e) => ({ claims: one(e.t), segment: e.segment })),
     ));
+  }
+
+  // The exact closes, each named with its canonical instant: the number and the instant ARE the fact, and a claim is
+  // made only for a segment shown in full. More than the summary names are counted, never silently dropped.
+  const closesLeft = closeFacts.filter((c) => {
+    if (excluded.has(transitionKey(c.t))) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  if (closesLeft.length > 0) {
+    const shown = closesLeft.slice(0, NATIVE_SUMMARY_NAMED_MAX);
+    parts.push(named(
+      'closed: ',
+      shown.map((c) => ({ claims: one(c.t), segment: `#${c.n}${c.title ? ` ${c.title}` : ''} at ${c.at}` })),
+    ));
+    if (closesLeft.length > shown.length) {
+      parts.push(plain(`${closesLeft.length - shown.length} more closed pull request(s) not named here`));
+    }
   }
 
   // The PR-level DECISION. It names a decision state, not a review, and claims none. A value counts only from a

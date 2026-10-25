@@ -215,7 +215,7 @@ export class RollbackDeltaRepo {
         `SELECT w.public_id AS watch_handle, w.state AS watch_state, e.repo_key, e.held_reason, e.held_key,
                 e.hash_domain, e.provider_at, e.created_at
            FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'
+          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND (e.held_key IS NULL OR substr(e.held_key, 1, 10) != 'pr_closed:')
           ORDER BY e.created_at, e.id`,
         owner,
       ),

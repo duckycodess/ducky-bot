@@ -65,6 +65,21 @@ describe('the gh json selectors are recorded, not guessed', () => {
     }
   });
 
+  it('selects closedAt only where `gh pr list` records it, and a selector that is not recorded would fail', () => {
+    if (!data) return;
+    const argv = GH_OPERATIONS.prListAll({ owner: 'acme', repo: 'demo' });
+    const recorded = data.surfaces['pr list']!.fields;
+    expect(selectorsOf(argv)).toContain('closedAt');
+    expect(recorded).toContain('closedAt');
+    // The check is real: a misspelled selector is not in the record, so the table test above would catch it.
+    expect(recorded).not.toContain('closeAt');
+    expect(recorded).not.toContain('closedBy');
+    // No other pull request list in the table asks for it.
+    for (const [name, build] of Object.entries(GH_OPERATIONS)) {
+      if (name !== 'prListAll') expect(selectorsOf(build({ owner: 'acme', repo: 'demo' }, 1)), name).not.toContain('closedAt');
+    }
+  });
+
   it('still constructs no write verb anywhere', () => {
     // Re-asserted here because the table grew: the watch surface is wider now,
     // and wider is exactly when a write verb slips in.

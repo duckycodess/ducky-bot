@@ -269,9 +269,10 @@ describe('historical closes with a marker become permanent uncertainty, never a 
     expect(() => ins.run(OWNER, REPO, 'item', '9', '', 'imported', 'digest_marker', 0, 'x', T3)).toThrow(/CHECK/);
   });
 
-  it('rolls the whole migration back if its copy proof fails (nothing half-applied)', () => {
+  it('rolls the whole migration back when its transactional hook cannot finish (nothing half-applied)', () => {
     const db = at38(populate);
-    // A claim the rebuilt table cannot hold: the proof compares both directions, so the migration must not complete.
+    // The hook that follows the copy proof cannot write its provenance: the migration must not complete, and neither
+    // the rebuilt claims table nor the uncertainty table may survive it.
     db.exec('DROP TABLE native_ledger_boundary');
     expect(() => runMigrations(db, { now: () => T3 })).toThrow();
     expect(db.prepare('SELECT COUNT(*) n FROM schema_migrations WHERE version = 39').get()).toEqual({ n: 0 });

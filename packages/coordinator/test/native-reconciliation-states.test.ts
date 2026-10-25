@@ -264,13 +264,13 @@ describe('a version 2 snapshot already proves comparable facts, and the upgrade 
     return ctx;
   };
 
-  it('sends nothing for an unchanged repository, and the snapshot becomes version 3 with every review recorded', async () => {
+  it('sends nothing for an unchanged repository, and the snapshot becomes version 4 with every review recorded', async () => {
     const { h, step } = await base([rv('PRR_old', 'CHANGES_REQUESTED', at(0, 30)), rv('PRR_ok', 'APPROVED', at(0, 40))]);
     const events = h.store.db.prepare('SELECT COUNT(*) n FROM github_watch_events').get();
     await step();
     expect(sent(h)).toBe('[]');
     expect(h.store.db.prepare('SELECT COUNT(*) n FROM github_watch_events').get()).toEqual(events);
-    expect(JSON.parse(watch(h).snapshotJson!).v).toBe(3);
+    expect(JSON.parse(watch(h).snapshotJson!).v).toBe(4);
     // The requested change keeps the state version 2 proved; the approval is known by identity alone.
     expect(rfOf(h).rv.map((f) => [f.h === hashOf('PRR_old') ? 'old' : 'ok', f.f, f.c])).toEqual(expect.arrayContaining([['old', 'R', 'R'], ['ok', null, 'A']]));
     h.close();

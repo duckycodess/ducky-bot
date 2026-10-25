@@ -394,7 +394,7 @@ export class GitHubWatchesRepo {
       (this.db
         .prepare(
           `SELECT COUNT(*) AS n FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'`,
+            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND (e.held_key IS NULL OR substr(e.held_key, 1, 10) != 'pr_closed:')`,
         )
         .get(ownerId) as { n: number }).n,
     );
@@ -422,7 +422,7 @@ export class GitHubWatchesRepo {
       .prepare(
         `SELECT e.id, e.watch_id, w.public_id, e.repo_key, e.held_key, e.provider_at, e.created_at, w.state
            FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-          WHERE e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'
+          WHERE e.held_reason IS NOT NULL AND (e.held_key IS NULL OR substr(e.held_key, 1, 10) != 'pr_closed:')
           ORDER BY e.created_at ASC, e.id ASC LIMIT ?`,
       )
       .all(limit)

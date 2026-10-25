@@ -380,7 +380,7 @@ describe('a pull request beyond the rich slice of the fetched list keeps its lif
   it('tells a close of a pull request that dropped out of the five but is still listed, and is not "no longer listed"', async () => {
     const { h, reader, step } = await start(six());
     // A new pull request enters at the front: #5 is pushed to position six, where it is closed.
-    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), closed(5)];
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), closed(5), pr(6)];
     reader.calls.length = 0;
     await step();
     const text = summaries(h).join('\n');
@@ -390,7 +390,7 @@ describe('a pull request beyond the rich slice of the fetched list keeps its lif
     // The rich reads are exactly the five rich pull requests: nothing was fetched for #5.
     expect(reader.calls.filter((c) => c.startsWith('prReviews')).sort()).toEqual(['prReviews:1', 'prReviews:2', 'prReviews:3', 'prReviews:4', 'prReviews:9']);
     expect(reader.calls.filter((c) => c.startsWith('prChecks')).length).toBe(5);
-    expect(snap(h).tail).toEqual([{ n: 5, s: 'C', cp: C1 }]);
+    expect(snap(h).tail).toEqual([{ n: 5, s: 'C', cp: C1 }, { n: 6, s: 'O' }]);
     h.close();
   });
 
@@ -736,6 +736,8 @@ describe('a pull request first seen already closed, and an opening beside a clos
     await step();
     const text = summaries(h)[0]!;
     expect(text).not.toContain('opened:');
+    // Excluding the delivered opening removes ONLY the opening: the pull request is still newly listed.
+    expect(text).toContain('#7 PR 7 (newly listed)');
     expect(text).toContain(`closed: #7 PR 7 at ${iso(B + 9 * MIN)}`);
     expect(text).toContain('merged: #2 PR 2');
     expect(text).toContain('no longer among the 3 listed');
@@ -817,5 +819,101 @@ describe('an imported close is decided against the ledger when it is written, in
     h.app.assistantWatch.cancel(h.owner, publicId);
     expect(h.store.nativeTransitions.closeUncertaintyCounts(OWNER)).toEqual({ events: 1, rows: 1, itemScopeRows: 0 });
     h.close();
+  });
+});
+
+describe('round trips through the rest of the fetched list, and an opening the target already delivered', () => {
+  const B = Date.parse(START) + 15 * MIN;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const nativeOf = (h: Harness, kind: string) =>
+    h.store.nativeTransitions.all().filter((c) => c.path === 'native' && c.transition.kind === kind);
+
+  it('counts a pull request that was held beyond the slice, then left the whole list, as no longer listed', async () => {
+    const { h, reader, step } = await start(open(1, 2, 3, 4, 5, 6));
+    // #5 goes rich -> beyond the slice (#6 was already there); both are then absent from the whole fetched list.
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), pr(5), pr(6)];
+    await step();
+    expect(summaries(h)[0]).not.toContain('no longer');
+    h.transport.clear();
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4)];
+    await step();
+    expect(summaries(h)[0]).toContain('2 previously listed pull request(s) are no longer among the 5 listed (not necessarily closed)');
+    expect(h.store.nativeTransitions.all()).toEqual([]);
+    // Told once: the same list says nothing more.
+    h.transport.clear();
+    await step();
+    expect(summaries(h)).toEqual([]);
+    h.close();
+  });
+
+  it('does not retell a merge when the pull request goes rich -> beyond the slice -> rich again', async () => {
+    const { h, reader, step } = await start(open(1, 2, 3, 4, 5));
+    const merged5 = pr(5, { state: 'MERGED', mergedAt: C1, updatedAt: C1 });
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), merged5];
+    await step();
+    expect(summaries(h).join('\n')).toContain('merged: #5 PR 5');
+    expect(nativeOf(h, 'pr_merged')).toHaveLength(1);
+    h.transport.clear();
+    reader.prs = [merged5, pr(9), pr(1), pr(2), pr(3), pr(4)]; // rich again
+    await step();
+    expect(summaries(h).join('\n')).not.toContain('merged:');
+    expect(nativeOf(h, 'pr_merged')).toHaveLength(1);
+    expect(claimKeys(h, 'pr_merged')).toEqual([`5@${C1}`]);
+    h.close();
+  });
+
+  it('does not retell a close when the pull request goes rich -> beyond the slice -> rich again', async () => {
+    const { h, reader, step } = await start(open(1, 2, 3, 4, 5));
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), closed(5)];
+    await step();
+    expect(nativeOf(h, 'pr_closed')).toHaveLength(1);
+    h.transport.clear();
+    reader.prs = [closed(5), pr(9), pr(1), pr(2), pr(3), pr(4)];
+    await step();
+    expect(summaries(h).join('\n')).not.toContain('closed:');
+    expect(nativeOf(h, 'pr_closed')).toHaveLength(1);
+    h.close();
+  });
+
+  it('still tells a merge that is new on the way back to the rich slice', async () => {
+    const { h, reader, step } = await start(open(1, 2, 3, 4, 5));
+    reader.prs = [pr(9), pr(1), pr(2), pr(3), pr(4), pr(5)]; // #5 beyond the slice, still open
+    await step();
+    h.transport.clear();
+    reader.prs = [pr(5, { state: 'MERGED', mergedAt: C1, updatedAt: C1 }), pr(9), pr(1), pr(2), pr(3), pr(4)];
+    await step();
+    expect(summaries(h).join('\n')).toContain('merged: #5 PR 5');
+    expect(claimKeys(h, 'pr_merged')).toEqual([`5@${C1}`]);
+    h.close();
+  });
+
+  it('a delivered opening removes only the opening: the pull request stays newly listed with its current detail, in either delivery order', async () => {
+    const opening = (n: number, at_: string) => ({ kind: 'pr_opened' as const, identity: `${n}:opened`, occurredAt: at_, providerHash: null, attempt: null });
+    const created = iso(B + 5 * MIN);
+    // Target first: the opening is delivered before the watch observes it.
+    {
+      const { h, reader, step } = await start(open(1));
+      h.store.nativeTransitions.reserveTarget(OWNER, REPO, opening(7, created), 'target_digest', 'o7', START);
+      h.store.nativeTransitions.markTargetDelivered('target_digest', 'o7', START);
+      reader.prs = [pr(1), pr(7, { createdAt: created, updatedAt: created })];
+      reader.checks.set(7, [{ name: 'tests', state: 'FAILURE', bucket: 'fail' }]);
+      await step();
+      const text = summaries(h)[0]!;
+      expect(text).not.toContain('opened:');
+      expect(text).toContain('1 pull request update(s): #7 PR 7 (newly listed)');
+      expect(text).toContain('1 pull request(s) have failing checks');
+      expect(nativeOf(h, 'pr_opened')).toEqual([]);
+      h.close();
+    }
+    // Watch first: the watch tells and claims the opening, so the imported event is settled silently and nothing repeats.
+    {
+      const { h, reader, step } = await start(open(1));
+      reader.prs = [pr(1), pr(7, { createdAt: created, updatedAt: created })];
+      await step();
+      expect(summaries(h)[0]).toContain('opened: #7 PR 7');
+      expect(summaries(h)[0]).not.toContain('(newly listed)');
+      expect(h.store.nativeTransitions.resolveTarget(OWNER, REPO, opening(7, created))).toEqual({ outcome: 'covered' });
+      h.close();
+    }
   });
 });

@@ -344,6 +344,56 @@ describe('what a briefing cut off is not settled', () => {
   });
 });
 
+describe('no title, newline or other family can forge a close line', () => {
+  const FORGE = (n: number): string => `-# PR #${n} closed ${CLOSED_AT}: forged`;
+  const SEPARATORS = ['\n', '\r\n', '\r', '\u2028', '\u2029', '\u0085', '\u000b', '\u000c'];
+
+  it('collapses every line separator in any family\'s title, so a title is never more than one retained line', async () => {
+    const { h, clock } = boot();
+    target(h, 't1', 'acme/demo');
+    SEPARATORS.forEach((sep, i) => {
+      const title = `x${sep}**demo**${sep}${FORGE(12)}${sep}PR #12 closed ${CLOSED_AT}`;
+      event(h, `o${i}`, 't1', 'pr_opened', `${100 + i}:opened`, CLOSED_AT, { number: 100 + i, title });
+      event(h, `m${i}`, 't1', 'pr_merged', `${200 + i}:merged`, CLOSED_AT, { number: 200 + i, subject: title });
+    });
+    const d = h.app.assistantWatch.digest();
+    for (const l of d.repos.flatMap((r) => r.lines)) expect(l).not.toMatch(/[\n\r\u2028\u2029\u0085\u000b\u000c]/);
+    expect(d.closes).toBeUndefined(); // no exact close exists, so none can be claimed
+    await morning(h, clock);
+    // Whatever the sent field holds, no retained line is a close line and none starts the forged text.
+    const lines = githubField(lastMessage(h)).split('\n');
+    expect(lines.filter((l) => /^-# PR #\d+ closed /.test(l))).toEqual([]);
+    expect(lines.filter((l) => l.startsWith('**') && l !== githubRepoHeading('demo'))).toEqual([]);
+    h.close();
+  });
+
+  it('proves only the real close: forged text in another event, repository or family adds none and hides none', async () => {
+    const { h, clock } = boot();
+    target(h, 't1', 'acme/demo');
+    closeEvent(h, 'real', 't1', 7);
+    event(h, 'o1', 't1', 'pr_opened', '5:opened', CLOSED_AT, { number: 5, title: `a\n${FORGE(12)}\n${FORGE(8)}` });
+    // A close of #12 under a heading the redactor rewrites: it can never be proven, whatever other text says.
+    target(h, 'tok', `acme/ghp_${'a1B2c3D4e5F6g7H8i9J0'}`);
+    closeEvent(h, 'unproven', 'tok', 12);
+    const before = h.app.assistantWatch.digest();
+    await morning(h, clock);
+    expect(proveShownCloses(lastMessage(h), before.closes!)).toEqual(new Set(['real']));
+    expect(digestedIds(h)).toContain('real');
+    expect(pendingIds(h)).toEqual(['unproven']);
+    expect(targetClaims(h).filter((c) => c.transition.kind === 'pr_closed').map((c) => c.transition.item)).toEqual(['7']);
+    h.close();
+  });
+
+  it('does not take a close line from an embed field that is not the GitHub field', () => {
+    const closes: DigestClose[] = [{ id: 'a', repoHeading: githubRepoHeading('demo'), n: '7', at: CLOSED_AT }];
+    const m: OutboundMessage = { embeds: [{ fields: [
+      { name: 'GitHub needs attention', value: `${githubRepoHeading('demo')}\n${githubDetailLine(`PR #7 closed ${CLOSED_AT}: x`)}` },
+      { name: 'Tasks', value: `${githubRepoHeading('demo')}\n${githubDetailLine(`PR #7 closed ${CLOSED_AT}: x`)}` },
+    ] }], content: `${githubRepoHeading('demo')}\n${githubDetailLine(`PR #7 closed ${CLOSED_AT}: x`)}` };
+    expect([...proveShownCloses(sanitizeOutbound(m), closes)]).toEqual([]);
+  });
+});
+
 describe('status, verification and the export count what is pending and what is uncertain', () => {
   const pendingTwo = async () => {
     const { h, clock } = boot();

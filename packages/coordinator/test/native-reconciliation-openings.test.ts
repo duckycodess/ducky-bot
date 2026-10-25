@@ -194,13 +194,15 @@ describe('anything not proven is only "newly listed", with no opening claim', ()
 describe('what the target and the feed did about the same opening', () => {
   const fresh = (): PrList => [pr(1), pr(2, { createdAt: iso(B + 5 * MIN), updatedAt: iso(B + 5 * MIN) })];
 
-  it('does not tell, and does not repeat in the update line, an opening the target delivered', async () => {
+  it('does not tell an opening the target delivered, and keeps the pull request\'s membership as its own unclaimed fact', async () => {
     const { h, reader, step } = await start();
     h.store.nativeTransitions.reserveTarget(OWNER, REPO, openedFacts(2), 'target_alert', 'e1', iso(B));
     h.store.nativeTransitions.markTargetDelivered('target_alert', 'e1', iso(B));
     reader.prs = fresh();
     await step();
-    expect(summaries(h)).toEqual([]);
+    // The opening is the target's: not told again as one. The pull request is still newly listed (membership), which
+    // claims nothing, so nothing native is reserved.
+    expect(summaries(h)).toEqual(['Update for `demo`: 1 pull request update(s): #2 PR 2 (newly listed).']);
     expect(h.store.nativeTransitions.all().filter((c) => c.path === 'native')).toEqual([]);
     h.close();
   });

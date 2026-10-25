@@ -1310,7 +1310,6 @@ function summarizeChange(
     return stamp !== null && Date.parse(stamp) > ctx.boundaryMs + NATIVE_LEGACY_SKEW_MS &&
       openedTransition('pr_opened', pr.number) !== null;
   });
-  const openingNumbers = new Set(openings.map((pr) => pr.number));
   for (const pr of openings) universe.add(transitionKey(openedTransition('pr_opened', pr.number)!));
   const shownOpenings = openings.filter((pr) => {
     if (excluded.has(transitionKey(openedTransition('pr_opened', pr.number)!))) {
@@ -1319,6 +1318,9 @@ function summarizeChange(
     }
     return true;
   });
+  // Only an opening that is actually SHOWN covers its pull request. One the target already delivered removes only the
+  // opening: the pull request is still newly listed and its current detail, close and merge are still told.
+  const openingNumbers = new Set(shownOpenings.map((pr) => pr.number));
   if (shownOpenings.length > 0) {
     parts.push(named(
       'opened: ',
@@ -1354,7 +1356,10 @@ function summarizeChange(
   // Absent from the WHOLE fetched list (the rich slice and the rest of it), which is capped and covers every state:
   // pushed out by newer pull requests or closed, which this list cannot tell. It is "no longer listed", never "closed"
   // and never an exact close, and it never settles or suppresses a lifecycle fact.
-  const gone = previous.prs.filter((pr) => !listedNumbers.has(pr.number));
+  // Every pull request the previous snapshot held, rich or beyond the slice (one that went rich, then beyond it, then out
+  // of the list entirely is no less "previously listed").
+  const goneNumbers = new Set([...before.keys(), ...tailBefore.keys()].filter((n) => !listedNumbers.has(n)));
+  const gone = [...goneNumbers];
   const failedChecks = current.prs.filter((pr) => pr.checks.some((check) => /fail|error|cancel/i.test(check)));
   if (newOrUpdated.length > 0) {
     const shown = newOrUpdated.slice(0, NATIVE_SUMMARY_NAMED_MAX);
@@ -1381,7 +1386,10 @@ function summarizeChange(
   // moved. Nothing here fetches anything.
   const merged = current.prs.filter((pr) => {
     const old = before.get(pr.number);
-    if (!(isSet(pr.mergedAt) && (!old || !isSet(old.mergedAt)))) return false;
+    // Already told as merged, whether the previous snapshot held it rich or beyond the slice (a round trip through the
+    // tail must not retell the same merge).
+    const knownMerged = old !== undefined ? isSet(old.mergedAt) : tailBefore.get(pr.number)?.ma !== undefined;
+    if (!(isSet(pr.mergedAt) && !knownMerged)) return false;
     const t = mergedTransition(pr.number, pr.mergedAt);
     if (t !== null) universe.add(transitionKey(t));
     if (t !== null && excluded.has(transitionKey(t))) {

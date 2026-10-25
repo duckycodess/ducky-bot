@@ -399,7 +399,10 @@ its source identity (`<n>:closed`) and uniqueness; the number comes from that id
   positions keeps only `{number, state class, close proof, canonical merge instant}` (ordered by number, never by
   position), so a close or a merge of a pull request that dropped out of the five but is still listed is applied with no extra
   read and no invented check or review data. One first seen there establishes silently with no lifecycle claim. "No longer
-  listed" now means absent from ALL of the fetched list and says how many were listed; it never claims a lifecycle fact.
+  listed" now means absent from ALL of the fetched list and says how many were listed; it never claims a lifecycle fact. It counts
+  every pull request the previous snapshot held, rich or beyond the slice, so one that left the whole list after a stay beyond
+  the five is counted too (an intentional limit: ordinary rotation of the twenty can therefore produce this line). A merge or
+  close already told is not retold when a pull request goes rich, beyond the slice and rich again.
 - **The target side.** A close is exempt from the migration-36 legacy cutoff (it was deliverable before it had a counterpart).
   A readable number with an unreadable instant is AMBIGUOUS: it is withheld and counted only when THIS owner has an
   ordinary watch bound to that canonical repository in any state (no feed test, no time cutoff; with none no native path

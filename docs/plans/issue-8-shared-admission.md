@@ -43,3 +43,46 @@ Implement meaningful batches: shared protocol/core and cross-process tests, then
 Then run lint, typecheck, default full tests, build, diff checks and scratch backup/verify for the resulting schema. No HOME override or hidden baseline failures. Fresh real checksum-verified Gitleaks must scan the final committed tree and history, including merge diffs; adjudicate raw findings explicitly with no suppression or zero-finding claim when raw exit is nonzero. Manager checks final diff and exact pushed head; independent review remains owner-waived/unverified. Audit commit messages, ordinary push, update existing draft PR 15 and Bead in_progress. Record source evidence separately from actual runtime.
 
 All prior fourteen required runtime/closure gate groups remain merge blockers until truly proved. This source unit can narrow the admission implementation gap, never waive integration, owned stop/recovery, provider eligibility/quota/no-billed-API, dedicated Ducky session, safe periodic cleanup/active-temp, notifications during quota pause, private Tailscale/phone, restart/logout/disconnect, development paths/private parity/real backup/rollback/cutover/retirement or full acceptance before Closes #8. Keep ready_to_merge=false and dispatcher must withhold merge.
+
+
+## Implementation notes (JG, 2026-10-25)
+
+Source delivered in the commits after 6cce2b9: the ledger and operator CLI
+(`packages/persistence/src/shared-admission/`, `scripts/shared-admission.ts`), then
+Ducky's claim/slot/outbox/gate/config integration and migration 30, then the private
+companion's parity and these documents. Decisions: [ADR 0031](../decisions/0031-shared-engineering-admission.md).
+
+Adaptations where the source proved a dependency, all conservative:
+
+- **Acquire/confirm sit inside the claim transaction, before COMMIT,** after the
+  early returns and before any accounting changes, rather than in a separate step
+  before the transaction, because the claim's chosen job, its deferred lease expiry
+  and its exhaustion branch are decided inside it. Confirm still precedes the
+  returned or cached response and any launch.
+- **Policy cap is structural at 2** (schema CHECK 1..2, `init` and every open
+  validate), per the manager's correction; a ledger can never admit more than the
+  authorized maximum.
+- **A prior fence with no hold behind it is refused** (`resume_fence_missing`)
+  instead of allocating, and an adopted hold still requires a valid, sufficient
+  memory reading. The prompt-time actual-agent and ancestor guards are in the
+  executor and are untouched by a reclaim, replay or adoption.
+- **`drain` is enforced to run only outside a transaction,** the cached claim is
+  checked against the current lease/executor/job/fence, and stuck release debt is
+  detected over the whole outbox, per the manager's three checks.
+- **Ledger identity and policy are pinned from configuration AND in the database
+  (`shared_admission_binding`, immutable by trigger).** There is no re-pin command;
+  a changed ledger is a stop, and the way out is a person.
+- **The Agent Flow candidate** lives in
+  `/home/profile2/.local/share/agent-flow/operator-reviews/ducky-shared-admission-ca06/candidate`
+  (not installed, not committed here). It gates the dispatcher's single launch path
+  (its recover and resume commands only mark a job ready), a launch marker written before the first
+  managed-writer side effect, release only on a proven-closed workspace or a hold that
+  never reached the marker, and a stop on any ledger drift. Installing it would stop
+  Agent Flow launching until a ledger and pins exist, by design.
+
+Required and NOT done: installing the companion; creating the live ledger and pins;
+setting eligibility; a controlled second admission refused on the host; source/target
+parity of the candidate with the installed dispatcher beyond the baseline hash
+recorded in the candidate; cgroup membership of a real agent; the other thirteen
+blocker groups. Independent review was waived by the owner and is unverified, not
+passed. `ready_to_merge` stays false.

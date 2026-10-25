@@ -16,6 +16,7 @@ pnpm probe:gh         # records which --json fields this gh supports; local, rep
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
+pnpm shared-admission init|inspect|release --path <ledger> ...   # the host-local shared admission ledger (ADR 0031); `init` creates a NEW ledger and refuses to overwrite one, `release` needs the exact holder and an attestation
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
 pnpm phone:passcode                # prints a scrypt verifier for the phone page; reads stdin, contacts nothing
 ```
@@ -57,11 +58,20 @@ Report contradictions rather than picking whichever reads best.
   `Authorizer.mayConverse` is the one question every model-reaching path asks,
   including Branch and Compact. The whitelist names who may be offered chat; it
   never authorizes it.
-- **The engineering slot is local to one coordinator database.** Never describe
-  it as cross-program or cross-profile safety: agent-flow has no supported
-  shared-admission protocol and the profiles share no state. Engineering is off
-  unless `DUCKY_ENGINEERING_ENABLED` says otherwise, and a slot with an
-  unconfirmed stop is released only by quiescence or an owner's `/job cleanup`.
+- **The engineering slot is local to one coordinator database; the shared
+  ledger is the cross-program fence above it, and it is source, not installed
+  proof.** The slot still covers one database. The host-local shared admission
+  ledger (ADR 0031) is what makes Ducky's two profiles and the Agent Flow
+  dispatcher exclude each other, and only once its companion is installed in the
+  live dispatcher, a ledger exists and a controlled second admission was
+  refused -- none of which has happened. Never describe the slot alone as
+  cross-program safety, and never describe the ledger as live. Engineering is off
+  unless `DUCKY_ENGINEERING_ENABLED` AND the separate, default-off
+  `DUCKY_SHARED_ADMISSION_ELIGIBLE` say otherwise; a ledger file, a participant
+  row or a candidate patch is not eligibility. A confirmed shared hold never
+  expires by time, PID or an absent local record, a release needs the exact
+  ledger, fence and holder after a local commit, and a slot with an unconfirmed
+  stop is released only by quiescence or an owner's `/job cleanup`.
 - **Shared visibility is never authorization.** A configured shared channel
   says where information may be shown, never who may act. Non-owner output
   goes through `SharedJobsService` and `shared-presenters.ts`, which accept

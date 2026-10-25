@@ -267,8 +267,13 @@ DUCKY_DB_PATH=/tmp/rehearsal.db pnpm migrate
 ## Engineering and additional-user AI are off by default
 
 `DUCKY_ENGINEERING_ENABLED` and `DUCKY_ADDITIONAL_USER_AI_ENABLED` both default to
-off (see `.env.example`). A development setup that submits jobs or lets the
-whitelist chat sets them to 1. The coordinator and executor also refuse to start
+off (see `.env.example`). Letting the whitelist chat is the second one. Engineering
+needs the first AND the separate `DUCKY_SHARED_ADMISSION_ELIGIBLE` with a real
+ledger and its pins ([ADR 0031](decisions/0031-shared-engineering-admission.md)):
+the enabled flag alone is held off and logged, so a development setup that used to
+submit jobs with only `DUCKY_ENGINEERING_ENABLED=1` now stops claiming until the
+shared integration is deliberately set up. Tests inject a ledger or use the
+test-only local-slot fixture; nothing in a normal environment does. The coordinator and executor also refuse to start
 when any `*_API_KEY` environment variable is set, which can bite a developer
 shell that exports one; unset it for these processes. For the remote Linux
 runtime see [runbooks/remote-linux-runtime.md](runbooks/remote-linux-runtime.md).

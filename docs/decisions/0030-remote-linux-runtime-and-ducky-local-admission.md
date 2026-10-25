@@ -2,6 +2,16 @@
 
 **Status:** Accepted as preparation, with open merge blockers listed below (all required)
 
+> **Update, 2026-10-25:** [0031](0031-shared-engineering-admission.md) adds the
+> SOURCE for the cross-program fence this decision said did not exist: a
+> host-local shared ledger, Ducky's claim and release paths standing on it, and a
+> private Agent Flow companion candidate. The slot described here is unchanged and
+> still local to one database. Nothing in 0031 is installed or proved on the host,
+> engineering needs a second explicit switch, and blocker 1 below stays open until
+> the integration is installed and a controlled second admission is refused. Read
+> the "not shared with the agent-flow dispatcher" sentences below as describing
+> the SLOT, not the whole system once 0031's integration is installed.
+
 ## Context
 
 Issue 8 moves Ducky onto an existing remote Linux account that already provides
@@ -337,7 +347,9 @@ is kept in full, with the reason for each, in
 [CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and the
 [runbook](../runbooks/remote-linux-runtime.md#6-what-is-not-implemented-and-what-blocks-merge-and-deployment):
 
-1. Atomic cross-program and cross-profile admission with agent-flow.
+1. Atomic cross-program and cross-profile admission with agent-flow. Source for
+   the ledger and Ducky's side exists (0031); the dispatcher companion is a private,
+   unapplied candidate, and no ledger, pin or installation exists on the host.
 2. Effective, ancestor-aware memory headroom. Implemented in source and
    unit-tested (the agent's own cgroup chain, checked before every prompt), but
    not observed with a real Ducky agent, and still a check rather than a
@@ -374,4 +386,6 @@ clear any item above.
 ## Follow-up
 
 When the dispatcher owner provides an atomic shared admission protocol, replace
-the local table's authority with it rather than adding a second slot.
+the local table's authority with it rather than adding a second slot. (0031 does
+not replace the slot: it stands above it, and the slot records the exact shared
+fence it stands on.)

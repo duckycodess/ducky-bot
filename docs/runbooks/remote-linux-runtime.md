@@ -7,13 +7,17 @@ of them is executed by this repository.
 
 Read first, because it shapes everything after it:
 
-- **Engineering stays OFF.** `DUCKY_ENGINEERING_ENABLED` defaults to off. The
-  single engineering slot lives in ONE coordinator database. It is global across
-  that database's repositories and executors and nowhere else: not across the
-  development and production profiles (separate databases), and not with the
-  separate agent-flow dispatcher, which has its own slots and no supported
-  shared-admission protocol. Turning engineering on before that protocol exists
-  means two programs can each start an agent against the one shared account. See
+- **Engineering stays OFF.** It needs TWO switches: `DUCKY_ENGINEERING_ENABLED`
+  (default off) and, in addition, `DUCKY_SHARED_ADMISSION_ELIGIBLE` (default off,
+  with the ledger path, pins and co-located executor ids). The engineering SLOT
+  lives in ONE coordinator database. What makes the two Ducky profiles and the
+  separate agent-flow dispatcher exclude each other is the host-local shared
+  admission ledger of [decision 0031](../decisions/0031-shared-engineering-admission.md),
+  and that is **source only here**: no ledger has been created, no pin set, and the
+  Agent Flow companion is a private, unapplied candidate. Until the integration is
+  installed and a controlled second admission is refused on this host, turning
+  engineering on means two programs can each start an agent against the one shared
+  account, so the second switch stays off. See also
   [decision 0030](../decisions/0030-remote-linux-runtime-and-ducky-local-admission.md).
 - **Additional-user AI stays OFF** (`DUCKY_ADDITIONAL_USER_AI_ENABLED`).
 - Reminders, tasks, briefings and GitHub watches do not depend on the model and
@@ -240,6 +244,45 @@ its orphan records, so its reclaiming of processes is **not** evidence that
 Ducky's orphans are handled. Automatic reaping of stale Ducky workspaces is also
 not wired: `Reconciler.reapableWorkspaces` only reports candidates.
 
+## 5b. The shared admission ledger (source; nothing here has been run on the host)
+
+What each command does, so the steps are reviewable before anybody runs them.
+None of this is performed by this repository, and none of it turns engineering on.
+
+```bash
+# 1. Create the ledger ONCE, in a private directory outside any temp or cleanup
+#    root. It refuses to overwrite anything. The policy is immutable afterwards.
+pnpm shared-admission init --path ~/.local/state/shared-engineering-admission/ledger.sqlite3
+#    prints ledger_id and policy_digest: every participant pins BOTH.
+# 2. Read-only view of the identity, the policy digest and every hold.
+pnpm shared-admission inspect --path <ledger> --ledger-id <id>
+# 3. The owner's explicit recovery for a hold nothing else will clear (a crash
+#    between confirm and the local commit, a lost local database, a worker whose
+#    workspace never proved closed). Exact holder, and an attestation that no
+#    worker is running. It frees ONE fence and nothing else.
+pnpm shared-admission release --path <ledger> --ledger-id <id> --program <ducky|agent-flow> \
+  --instance <instance id> --job <job ref> --fence <n> --i-verified-no-worker-is-running
+```
+
+Pins in the coordinator environment: `DUCKY_SHARED_ADMISSION_PATH`,
+`_LEDGER_ID`, `_POLICY_DIGEST`, `_EXECUTORS` (this host's executor ids only), and
+the two reserve estimates. `DUCKY_SHARED_ADMISSION_ELIGIBLE=1` is a separate act
+that is NOT part of installing anything: set it only after the Agent Flow companion
+is installed in the live dispatcher (a deliberate, separately authorized change)
+and a controlled second admission was refused. A coordinator that is told it is
+eligible and cannot open the ledger does not run engineering and says why in its
+log and audit trail; it never creates a ledger.
+
+What stops engineering on its own (each is logged as a reason word): a missing,
+replaced or re-policied ledger; a pin that differs; a local slot whose fence the
+ledger does not confirm; a surviving shared hold after a database restore; a
+release the ledger refused or that failed 100 times. The way out of each is a
+person looking, then `release` or `/job cleanup` -- not a retry.
+
+Upgrading to schema 30 adds two tables and two columns and backfills nothing. A
+database that set only `DUCKY_ENGINEERING_ENABLED` stops claiming until the second
+switch is set deliberately.
+
 ## 6. What is not implemented, and what blocks merge and deployment
 
 Do not call the bot deployed, and do not close issue 8, while any of these is
@@ -247,8 +290,12 @@ open. All fourteen are required, and the list matches
 [CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and
 [decision 0030](../decisions/0030-remote-linux-runtime-and-ducky-local-admission.md):
 
-1. **Cross-program and cross-profile admission.** No supported protocol exists
-   with agent-flow. The Ducky slot is local to one coordinator database.
+1. **Cross-program and cross-profile admission.** Source exists (decision 0031):
+   a host-local shared ledger, Ducky's claim, slot, outbox and gates standing on it,
+   and a private Agent Flow companion candidate. **Not installed, not proved:** no
+   ledger exists on the host, no pin is set, the dispatcher is unchanged, and no
+   controlled second admission has been refused. The Ducky slot itself is still
+   local to one coordinator database.
 2. **Effective, ancestor-aware headroom.** Implemented in source and unit-tested:
    before every prompt the executor reads the cgroup of the owned agent's own
    foreground processes (found through `herdr pane process-info`) and every

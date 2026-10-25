@@ -395,6 +395,18 @@ describe('status, verification and the export count what is pending and what is 
     h.close();
   });
 
+  it('counts a historical close it could not key, or that could not have existed, on its own, in status and verification', async () => {
+    const { h, clock } = boot();
+    target(h, 't1', 'acme/demo');
+    h.store.db.prepare('UPDATE native_ledger_boundary SET close_unidentifiable_events = 3, close_impossible_events = 2 WHERE id = 1').run();
+    expect(h.app.assistantWatch.statusLine()).toMatch(/3 historical close\(s\) with no readable number or repository, and 2 in a state that could not have existed/);
+    const report = new AssistantImportService({ store: h.store, env: importEnv(), nowMs: () => clock.nowMs() }).verify(importDoc());
+    expect(report.nativeLedger).toMatchObject({ closeUnidentifiableLegacy: 3, closeImpossibleLegacy: 2, clear: false });
+    const delta = buildRollbackDelta({ store: h.store, ownerId: OWNER, profile: 'development', nowIso: NOW });
+    expect(delta.state.nativeLedger.boundary).toMatchObject({ closeUnidentifiableEvents: 3, closeImpossibleEvents: 2 });
+    h.close();
+  });
+
   it('puts the pending closes, their age and the held closes in the versioned export', async () => {
     const { h } = await pendingTwo();
     const delta = buildRollbackDelta({ store: h.store, ownerId: OWNER, profile: 'development', nowIso: '2026-10-14T00:00:00.000Z' });

@@ -1354,6 +1354,23 @@ fail-closed form of the blocker, not a decision to drop it.
   cutoff and migration 38 records provenance only); a start-up
   crash between a Discord send and its SQLite write may repeat one message (at-least-once); the
   ledger grows by a few identifiers per delivered native transition for the life of the database.
+- **Exact pull request closes (migration 39, ADR 0034), unit-tested only:** a close is its number AND the provider's
+  canonical close instant, never the number alone. The ordinary watch tells and claims one only from the list's own explicit
+  evidence (`closedAt` joined the fixed `prListAll` selector list; raw state exactly CLOSED, a merge field explicitly null, a
+  readable instant, no contradiction from the optional per-pull-request read), as a change against a comparable snapshot
+  (snapshots are version 4; an upgrade establishes the new metadata silently and swallows no real change), never from a
+  disappearance, an update time or a missing merge field. A pull request beyond the five richest keeps minimal lifecycle
+  evidence, so its close or merge is applied with no extra read and "no longer listed" now means absent from the whole fetched
+  list. An imported close is reserved, settled and receipted only when its number and literal canonical instant are proven
+  inside one retained line of the final briefing output after the transport's own sanitization; a close that was clipped,
+  redacted or dropped stays pending, counted with the age of the oldest in `/status`, `--verify` (exit 5) and the v6 export.
+  Closes the target settled BEFORE migration 39 are permanent identifiers-only uncertainty (`native_close_uncertainty`,
+  retention-forbidden, no clearing control), never promoted to a receipt, and a native close that matches one is held and
+  counted. **Required merge blockers that remain:** that historical uncertainty (it needs a private semantic audit of the
+  historical markers), generic native updates sent before migration 39 as closes, the malformed-time merge weakness, the
+  equal-instant re-close lifecycle and the live shape of `closedAt` (no live evidence), a pull request merely newly listed
+  or whose creation is only historical (both stay unclaimed), and every other family's clipping, redaction and starvation
+  limit: the per-repository line cap and the repository cut still settle the OTHER families' events they cut.
 - **Digest throughput is bounded, not certified fair:** a briefing looks at no more than 10,000 unread
   events, so a backlog beyond that can still starve later work. A **required throughput blocker** until a
   fair scheme is proven.
@@ -1362,7 +1379,7 @@ fail-closed form of the blocker, not a decision to drop it.
   work**, kept and counted (a held fact survives a cancel, an identity stop, a restart and retention), never
   deleted and not an acceptable omission; each stays a required cutover blocker with no clearing control. So are
   the pull requests whose exact review facts are refused and the per-author lines delivered without exact
-  identity (gap markers): counted in `/status`, `--verify` (exit 5) and the v5 export.
+  identity (gap markers): counted in `/status`, `--verify` (exit 5) and the v6 export, as are the closes above.
 - **Scratch databases migrated at `819a420`, `55266b9` or `09f9463` must be recreated** from a backup taken
   before migration 36 (it was revised in place before ever being deployed, so they lack `provider_at` and
   `held_reason`). No live-data reset is authorized.
@@ -1372,7 +1389,7 @@ fail-closed form of the blocker, not a decision to drop it.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **2705 tests in 161 files**.
+The unmodified `pnpm test` command passes all **3011 tests in 169 files**.
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

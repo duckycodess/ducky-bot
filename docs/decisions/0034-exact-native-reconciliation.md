@@ -261,8 +261,8 @@ and reviews without a submission instant are neither. No raw id, login or body i
   Anything else that enters the list is `(newly listed)` with no claim, whatever the list order, the cap, a
   previous maximum, an equal second or a reopen. The skew margin is unproven live.
 - **Honest adjacent lines.** `comments` is the conversation-comment count, not a submitted review, and is
-  labelled so with no claim. A pull request absent from the capped, all-state top five is `no longer
-  listed (not necessarily closed)`, never a close.
+  labelled so with no claim. A pull request absent from the capped, all-state list is `no longer
+  listed (not necessarily closed)`, never a close (migration 39 narrows "absent" to the whole fetched list, below).
 - **No new cutoff is claimed.** The exact families here (requested-changes reviews, openings) existed as
   imported counterparts before; summaries sent before migration 37 told the PR-level lines with no identity,
   and no historical window is called safe: those pre-37 facts stay UNRECONCILED required blockers and the
@@ -362,6 +362,97 @@ identity discriminator, null is unknown) and it is never presented as a dismissa
   new review told exactly); a per-author line delivered during a gap (its overlap is a counted blocker, a gap marker
   is the evidence); the clipping and redaction loss of an exact segment; summaries sent before migration 38.
 
+### The exact pull request close family (migration 39)
+
+A close is a fact **by its number and the provider's canonical close instant**, never the number alone: a pull
+request that is reopened and closed again at a different instant is a different close, and an old receipt can never
+collapse it. The transition kind is `pr_closed`, keyed `pr_closed:<n>:<canonical instant>`. The imported close keeps
+its source identity (`<n>:closed`) and uniqueness; the number comes from that identity ONLY, never from a payload.
+
+- **Selector, proof and snapshot.** `closedAt` joins the fixed `prListAll` selector list (a name `gh pr list --json`
+  already lists and `pnpm probe:gh` records; no verb, flag, endpoint or policy entry changed, no other list asks for it,
+  pinned by tests). A close is PROVEN only by the list row's own explicit evidence: raw state exactly `CLOSED`, a
+  merge field that is present and explicitly null (a missing, empty or non-null merge field proves nothing, and a merged
+  pull request is closed too), a valid number and a readable close instant. The optional per-pull-request read can only
+  confirm it: if it supplies a merge instant or a state that is not `CLOSED`, it contradicts the list, so there is no
+  close and no new merge claim either. Only the derived canonical proof is stored (`cp`), never inferred from a fallback
+  string. Snapshots are version 4: the fingerprint covers the proof and the rest of the fetched list, and every older
+  projection (legacy, version 2, version 3, the core) omits both, so an upgrade read neither announces a change for gaining
+  them nor swallows a real change to an older field.
+- **A close is a change, told once.** It is told when the previous snapshot held the pull request not closed (a proven new
+  close) or closed with a different canonical instant (a reopen and a new close). A pull request the previous snapshot
+  already held CLOSED that merely gains the proof is established silently. A pull request that first appears in the rich
+  slice already closed states its known close (`closed: #n title at <instant>`), which is the close itself and no claim
+  that it happened since the last read; its creation stays unclaimed (an opening is claimed only with the existing strict
+  boundary proof). A re-close at an EQUAL instant shares the provider's `(number, instant)` identity: the approved data
+  cannot tell two such closes apart, so none is claimed to be distinguishable. Live lifecycle and provider proof of that
+  stays a required unresolved item.
+- **Rendering and claims.** The `closed:` line names at most three closes with their instants and counts the rest ("N
+  more closed pull request(s) not named here"); a claim is written only for a segment shown in full, and, as for every
+  other line, redaction that changes the summary at all means no claim. A pull request whose only change is its state to
+  CLOSED, its update instant and the proof is told by its close segment alone: it is no generic update, and when the
+  target already told the close nothing is left that retells it. Any other change to an older field (title, draft, head,
+  checks) keeps its own update line, worded as the current detail and never restating the close. Membership is separate:
+  "newly listed" and "no longer listed" claim nothing and are never removed by a close or merge exclusion, and an opening
+  excluded because the target delivered it removes only that opening.
+- **The rest of the fetched list.** The list is fetched at 20 and the rich slice is five. A pull request in the other
+  positions keeps only `{number, state class, close proof, canonical merge instant}` (ordered by number, never by
+  position), so a close or a merge of a pull request that dropped out of the five but is still listed is applied with no extra
+  read and no invented check or review data. One first seen there establishes silently with no lifecycle claim. "No longer
+  listed" now means absent from ALL of the fetched list and says how many were listed; it never claims a lifecycle fact.
+- **The target side.** A close is exempt from the migration-36 legacy cutoff (it was deliverable before it had a counterpart).
+  A readable number with an unreadable instant is AMBIGUOUS: it is withheld and counted only when THIS owner has an
+  ordinary watch bound to that canonical repository in any state (no feed test, no time cutoff; with none no native path
+  could tell it, so it is delivered). Re-closes at distinct instants are delivered once each.
+- **Historical closes are uncertainty, not receipts.** A pre-39 close with a delivery or settlement marker is NOT promoted to a
+  delivered claim: a digest settlement does not prove an individual close was shown (a line or a repository can be cut and the
+  old line carried no instant), and a close alert marker can only be a source marker. Migration 39 reads each such row through
+  the runtime codec, in its own transaction, into `native_close_uncertainty`: owner scoped, no foreign key and no cascade (the
+  event and target rows can be deleted without erasing it), retention-forbidden, identifiers, origin, marker class and
+  multiplicity only (never a title or a payload), grouped by owner, repository, key or pull request, origin and marker with a
+  deterministic representative (earliest `digested_at`, then event id). A readable number with an unreadable instant is a
+  same-pull-request fallback that matches any close of it; unreadable numbers or repositories, and states that could not exist
+  before 39 (a withheld or native-receipt-settled close), are counted separately on the boundary row and never given a key.
+  Pending closes with no marker proceed through the new protocol. There is no clearing control and the table is not written
+  again. A native exact close that matches the uncertainty is decided inside the observation's own transaction in this order:
+  exact delivered target receipt (covered), exact reserved target receipt (wait), matching uncertainty (HELD: a durable,
+  counted, close-specific held row, not sent), else told. A marker-only legacy close that is LATER digested with proof leaves a
+  real target receipt that covers the native close despite the retained uncertainty. Only a separate private semantic audit
+  of the historical markers could prove more, and it has not been done: this is a **required merge blocker**.
+- **A close is a receipt only when it was shown.** The digest line of an exact close is built from the validated
+  identity and instant (`PR #12 closed 2026-10-12T10:00:00.000Z: title`) and put before every other line of its repository (a
+  repository with one also weighs more against the repository cut, which claims no fairness). The briefing assembles, renders
+  and runs `sanitizeOutbound` with the transport's own redactor, and proves each close's number and literal canonical instant
+  byte-exact inside one retained close line under its own repository heading of THAT message; the last line of a clamped
+  field is treated as cut, and two repositories sharing a bare name are told apart only by count. Only the proven closes
+  and every other family's ids are reserved; if the reservation drops any, the briefing is rebuilt and the proof run again;
+  after a successful send exactly the reserved set is settled (never every id fetched); on the final fallback with no GitHub
+  section everything is released. A failed, queued, in-flight or abandoned send is never a receipt. A close that was clipped,
+  redacted, dropped by the field, field-count or total-size budget, or whose repository heading the redactor rewrites stays
+  pending: it is counted with the age of the oldest in `/status`, `--verify` (exit 5) and the v6 export, and a permanent
+  regression pins that such a close is reported and never silently settled. **Not solved by this:** the per-repository line cap and the
+  repository cut still settle the OTHER families' events they cut (unchanged, required blocker), a backlog beyond 10,000
+  unread events can still starve later work, and nothing here proves fairness across repositories.
+- **Status, verification and the export.** `/status` (owner only) says how many closes are pending and the age of the oldest,
+  how many historical closes are permanent uncertainty and how many native closes are held; `--verify` reports
+  `closeUncertaintyEvents/Keys`, `closeUnidentifiableLegacy`, `closeImpossibleLegacy`, `heldCloses`, `pendingClosesUnshown` and the
+  oldest pending instant and age, all of which clear `clear`; the export is `ducky-rollback-delta/v6`, which adds the
+  claims of kind `pr_closed` and `state.nativeLedger.closeEvidence` (`uncertainty`, `heldCloses`, `pendingUnshown`) and the
+  boundary row's migration counts. A v1 to v5 document has none of these: unknown, never inferred, and no older file is rewritten.
+- **Required merge blockers that remain (named, none an accepted residual, no parity claim).** Historical close markers
+  stay permanent uncertainty (above); generic native updates told before migration 39 cannot be retroactively claimed as closes,
+  so their overlap with an imported close stays unreconciled; the malformed-time MERGE weakness (a merge with an unreadable
+  instant) is unchanged; the real provider shape of `closedAt`, equality with the imported instant, the equal-instant lifecycle
+  and the clock are unproven live; a pull request merely newly listed (not provably opened) and a creation segment stay
+  unclaimed; and every other family's clipping, redaction and starvation limit stands.
+
+### Rollback export v6 (v5 described below)
+
+Migration 39 changes what the ledger can say, so the export is `ducky-rollback-delta/v6`: it adds `claims` of kind
+`pr_closed` (keyed by number AND canonical instant, `stamp`), `state.nativeLedger.closeEvidence` (`uncertainty`,
+`heldCloses`, `pendingUnshown`) and the boundary row's close-family counts. A v1 to v5 document has none of these: that
+is UNKNOWN there, never inferred, and no older file is rewritten.
+
 ### Rollback export v5 (v4 described below)
 
 Migration 38 changes what the ledger and the event rows carry, so the export is `ducky-rollback-delta/v5`: claims
@@ -447,8 +538,10 @@ identifiers per delivered native transition and is accepted.
   or changed at the source, and **5** when the data is present but NOT at parity (a drifted record, a
   withheld event including one withheld as `state_conflict`, a held native card, a held ordinary review fact, a
   pull request with exact review facts refused, a per-author review line delivered without exact identity, a
-  cursor at or before the cutoff, an unreadable boundary). The report is counts only.
-- **Older code is incompatible.** Stop coordinators before migrating, migrate through 38 before the final
+  cursor at or before the cutoff, an unreadable boundary, a historical close the target settled before exact
+  close receipts existed, a held native close, an unprovable or impossible historical close, a close still
+  pending because no briefing showed it in a proven final output). The report is counts only.
+- **Older code is incompatible.** Stop coordinators before migrating, migrate through 39 before the final
   export, and never run an older build against a migrated database: it would not know the reservations or
   the holders, so it could not honour them.
 - A repeated import, a restart and a retry can neither lose nor duplicate a deterministic transition,

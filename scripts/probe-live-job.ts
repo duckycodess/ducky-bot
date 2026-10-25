@@ -277,6 +277,22 @@ async function run(live: Live): Promise<ProbeOutcome> {
   const app = createApp({ ...process.env, DUCKY_ENGINEERING_ENABLED: '1' }, { transport });
   live.app = app;
 
+  // A claim is answered only through the shared admission ledger (ADR 0031), and
+  // this probe never turns that on: DUCKY_SHARED_ADMISSION_ELIGIBLE and its pins
+  // are the operator's explicit act after the integration is installed and
+  // proved. Without them the run would measure a held-off runtime, so refuse.
+  if (!app.sharedAdmission) {
+    throw new Error(
+      'shared engineering admission is not eligible in this environment ' +
+        '(DUCKY_SHARED_ADMISSION_ELIGIBLE and its ledger pins). This probe will not enable it and ' +
+        'will not run against the coordinator-local slot alone.',
+    );
+  }
+  const sharedGate = app.sharedAdmission.gate();
+  if (!sharedGate.ok) {
+    throw new Error(`shared engineering admission is stopped (${sharedGate.reason}); nothing would be claimed.`);
+  }
+
   const ownerId = app.authz.ownerId;
   const repo = app.allowlist.list().find((r) => r.slug === SLUG);
   if (!repo) throw new Error(`slug "${SLUG}" is not allowlisted`);
@@ -324,6 +340,9 @@ async function run(live: Live): Promise<ProbeOutcome> {
   // The engineering slot is the same kind of blocker as a reservation: while
   // any job holds it, nothing else can be claimed, so the run would wait for a
   // job that can never start.
+  if (app.store.jobs.outboxPending(1).length > 0) {
+    throw new Error('a shared release is still owed to the ledger; let the coordinator deliver it first.');
+  }
   const slot = app.store.jobs.admission();
   if (slot) {
     throw new Error(

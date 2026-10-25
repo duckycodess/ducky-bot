@@ -28,6 +28,14 @@ export const RETENTION_FORBIDDEN_TABLES = [
   'repo_reservations',
   /** The engineering slot. A held slot means an attempt, or an unconfirmed stop of one, is live. */
   'engineering_admission',
+  /**
+   * The pinned shared-ledger identity and the durable shared-release outbox. A
+   * pending release is what keeps the shared capacity honest after a crash, and
+   * the pin is what stops a replaced ledger being adopted; neither is a record
+   * that may age out.
+   */
+  'shared_admission_binding',
+  'shared_release_outbox',
   /** Migration bookkeeping. */
   'schema_migrations',
   /**

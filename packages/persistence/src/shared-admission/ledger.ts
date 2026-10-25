@@ -5,7 +5,7 @@ import {
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  ADMISSION_PROGRAMS, SHARED_ADMISSION_DEFAULT_POLICY, SHARED_ADMISSION_PROTOCOL,
+  ADMISSION_PROGRAMS, SHARED_ADMISSION_DEFAULT_POLICY, validateSharedAdmissionPolicy, SHARED_ADMISSION_PROTOCOL,
   SHARED_ADMISSION_SCHEMA_VERSION, canonicalAdmissionRepoKey, isSafeReserve,
   type AdmissionAcquire, type AdmissionConfirm, type AdmissionHolder, type AdmissionReleaseOutcome,
   type AdmissionRefusal, type AdmissionRequest, type AdmissionVerifyOutcome,
@@ -48,7 +48,7 @@ CREATE TABLE meta (
 
 CREATE TABLE policy (
   id                         INTEGER PRIMARY KEY CHECK (id = 1),
-  global_cap                 INTEGER NOT NULL CHECK (global_cap BETWEEN 1 AND 4),
+  global_cap                 INTEGER NOT NULL CHECK (global_cap BETWEEN 1 AND 2),
   repo_cap                   INTEGER NOT NULL CHECK (repo_cap = 1),
   ducky_exclusive            INTEGER NOT NULL CHECK (ducky_exclusive = 1),
   ceiling_bytes              INTEGER NOT NULL CHECK (ceiling_bytes > 0),
@@ -211,6 +211,8 @@ export function initLedger(opts: InitLedgerOptions): { ledgerId: string; policyD
     ...SHARED_ADMISSION_DEFAULT_POLICY,
     ...opts.policy,
   } as SharedAdmissionPolicy;
+  const bad = validateSharedAdmissionPolicy(policy);
+  if (bad) throw new LedgerPathError(`invalid policy: ${bad}`);
   const dir = path.dirname(opts.path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   assertTrustedPath(opts, false);
@@ -367,6 +369,9 @@ export class SharedLedger implements SharedAdmissionLedgerPort {
       notificationReserveBytes: Number(row['notification_reserve_bytes']),
       pendingTtlSeconds: Number(row['pending_ttl_seconds']),
     };
+    if (validateSharedAdmissionPolicy(policy)) {
+      return { ok: false, reason: 'policy_mismatch', detail: 'policy is outside the authorized bounds' };
+    }
     const digest = policyDigest(policy);
     if (digest !== meta.get('policy_digest')) {
       return { ok: false, reason: 'policy_mismatch', detail: 'policy row differs from its recorded digest' };
@@ -444,19 +449,29 @@ export class SharedLedger implements SharedAdmissionLedgerPort {
         // confirm, so this frees capacity no process is using.
         this.reap(db);
 
-        const existing = db
-          .prepare('SELECT * FROM entries WHERE program = ? AND instance_id = ? AND job_ref = ?')
-          .get(req.holder.program, req.holder.instanceId, req.holder.jobRef) as EntryRow | undefined;
+        const all = db.prepare('SELECT * FROM entries').all() as unknown as EntryRow[];
+        const existing = all.find((e) => SharedLedger.sameHolder(e, req.holder));
         if (existing) {
           if (existing.repo_key !== req.repoKey || Number(existing.reserve_bytes) !== req.reserveBytes) {
             return { ok: false, reason: 'identity_conflict' };
           }
           // A name alone never adopts a hold: the caller must present the fence.
           if (req.resumeFence !== Number(existing.fence)) return { ok: false, reason: 'identity_held' };
+          // Adopting is not a free pass: the reading must still be valid and the
+          // outstanding reservations (this one included, already counted) must
+          // still be covered. It never ADDS a reservation and never frees one.
+          const seen = this.opts.observe();
+          if (!seen.ok) return { ok: false, reason: 'observation_failed', detail: seen.detail };
+          const room = Math.max(0, Math.min(seen.limitBytes, chk.policy.ceilingBytes) - seen.currentBytes);
+          const held = all.reduce((sum, e) => sum + Number(e.reserve_bytes), 0) + chk.policy.notificationReserveBytes;
+          if (!Number.isSafeInteger(held) || room < held) return { ok: false, reason: 'insufficient_memory' };
           return { ok: true, fence: Number(existing.fence), state: existing.state, adopted: true };
         }
+        // The holder named a fence but nothing stands on it: released, reaped,
+        // never issued, or lost with a restored ledger. That is a STOP. It is
+        // never answered with a fresh hold over work that may still be running.
+        if (req.resumeFence !== undefined) return { ok: false, reason: 'resume_fence_missing' };
 
-        const all = db.prepare('SELECT * FROM entries').all() as unknown as EntryRow[];
         if (all.some((e) => e.repo_key === req.repoKey)) return { ok: false, reason: 'repo_held' };
         if (req.holder.program === 'ducky') {
           if (all.length > 0) return { ok: false, reason: 'ducky_exclusive' };

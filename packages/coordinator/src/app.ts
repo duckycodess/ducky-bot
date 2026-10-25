@@ -17,9 +17,13 @@ import { ConversationMemoryService } from './domain/conversation-memory.service.
 import {
   ConversationThreadPolicy, ConversationThreadService,
 } from './domain/conversation-threads.js';
-import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
 import {
-  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveEngineering, resolveGitHubFeed, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
+  SharedLedger, createStore, defaultAccountCgroupDir, observeAccountMemory, openDatabase, runMigrations,
+  type Store,
+} from '@ducky/persistence';
+import type { SharedAdmissionLedgerPort } from '@ducky/contracts';
+import {
+  cdnHosts, loadEnv, readReposFile, resolveApprovedActionsEnabled, resolveBriefingSchedule, resolveChannelRoles, resolveConversationMemory, resolveConversationProvider, resolveEngineering, resolveSharedAdmission, resolveGitHubFeed, resolveOwnerTimeZone, resolvePaths, resolvePhoneCapture, resolveProfileSecrets, resolveSharedChannelIds, resolveSkillBridge, resolveThreadParentChannelIds, type Env, type ProfileSecrets, type ResolvedPaths,
 } from './config.js';
 import { parsePhoneVerifier, phoneSessionKey } from './http/phone-auth.js';
 import type { PhoneCaptureConfig } from './http/phone.js';
@@ -31,6 +35,7 @@ import { CapturesService } from './domain/captures.service.js';
 import { PendingScheduleStore } from './domain/pending-schedules.js';
 import { SchedulesService } from './domain/schedules.service.js';
 import { JobsService } from './domain/jobs.service.js';
+import { SharedAdmissionService } from './domain/shared-admission.service.js';
 import { ApprovalsService } from './domain/approvals.service.js';
 import { type ActionPerformer } from './domain/action-performer.js';
 import { GitActionPerformer } from './domain/git-action-performer.js';
@@ -102,6 +107,19 @@ export interface AppOverrides {
    * not happen.
    */
   readonly dependencyChecker?: DependencyChecker;
+  /**
+   * TEST ONLY. A ledger over a scratch file, used instead of opening the
+   * configured path (which production refuses under a temporary root). The
+   * pins and executor list are still required from the environment.
+   */
+  readonly sharedAdmissionLedger?: SharedAdmissionLedgerPort;
+  /**
+   * TEST ONLY: runs engineering with the coordinator-local slot alone, the way
+   * every test did before the shared ledger existed. `main.ts` never sets it and
+   * a source scan asserts that, so production cannot fall back to local-only
+   * admission.
+   */
+  readonly localOnlyAdmissionForTests?: true;
 }
 
 export interface App {
@@ -115,6 +133,10 @@ export interface App {
   readonly captures: CapturesService;
   readonly schedules: SchedulesService;
   readonly jobs: JobsService;
+  /** Ducky's side of the shared engineering admission, or undefined when it is not eligible. */
+  readonly sharedAdmission: SharedAdmissionService | undefined;
+  /** Why engineering is configured on but cannot run, or undefined. For the boot report. */
+  readonly engineeringHeldOff: string | undefined;
   readonly approvals: ApprovalsService;
   readonly github: GitHubService;
   readonly githubWatches: GitHubWatchService;
@@ -313,7 +335,54 @@ export function createApp(
   const pending = new PendingScheduleStore();
   const captures = new CapturesService(store, authz);
   const schedules = new SchedulesService({ store, authz, pending, extractor });
-  const jobs = new JobsService({ store, authz, allowlist, engineering: resolveEngineering(env) });
+  // Engineering reaches an executor only when it is enabled AND the shared
+  // admission integration is explicitly eligible (ADR 0031). Enabled alone is
+  // held off, loudly, rather than falling back to the local-only slot: that slot
+  // does not cover the other profile or Agent Flow. `localOnlyAdmissionForTests`
+  // exists for isolated fixtures and is never set by `main.ts`.
+  const engineering = resolveEngineering(env);
+  const sharedConfig = resolveSharedAdmission(env);
+  const sharedAdmission = sharedConfig
+    ? new SharedAdmissionService({
+        store,
+        ledger: overrides.sharedAdmissionLedger ?? new SharedLedger({
+          path: sharedConfig.path,
+          expectedLedgerId: sharedConfig.ledgerId,
+          expectedPolicyDigest: sharedConfig.policyDigest,
+          observe: () => observeAccountMemory(
+            sharedConfig.cgroupDir ?? defaultAccountCgroupDir(process.getuid?.() ?? 0),
+          ),
+        }),
+        expectedLedgerId: sharedConfig.ledgerId,
+        expectedPolicyDigest: sharedConfig.policyDigest,
+        executors: sharedConfig.executors,
+        reserveBytes: sharedConfig.reserveBytes,
+        onStatus: ({ ok, reason }) => {
+          try {
+            store.auditLog.record({
+              event: 'engineering.shared_admission',
+              actorKind: 'system', actorRef: 'shared-admission',
+              subjectKind: 'config', subjectRef: 'shared_admission',
+              outcome: ok ? 'ok' : 'refused',
+              detail: ok ? 'engineering may admit' : `engineering stopped: ${reason}`,
+            });
+          } catch {
+            /* a record is never worth failing a claim */
+          }
+        },
+      })
+    : undefined;
+  const localOnly = overrides.localOnlyAdmissionForTests === true;
+  const engineeringRuns = engineering.enabled && (sharedAdmission !== undefined || localOnly);
+  const engineeringHeldOff =
+    engineering.enabled && !engineeringRuns
+      ? 'DUCKY_ENGINEERING_ENABLED is set but DUCKY_SHARED_ADMISSION_ELIGIBLE is not; no job is submitted and no claim is answered'
+      : undefined;
+  const jobs = new JobsService({
+    store, authz, allowlist,
+    engineering: { enabled: engineeringRuns, attemptBudgetMs: engineering.attemptBudgetMs },
+    ...(sharedAdmission ? { shared: sharedAdmission } : {}),
+  });
   const actionPerformer = overrides.actionPerformer ?? new GitActionPerformer({
     allowlist,
     enabled: resolveApprovedActionsEnabled(env),
@@ -662,6 +731,7 @@ export function createApp(
 
   return {
     env, paths, discordProfile, store, authz, signer, allowlist, captures, schedules, jobs,
+    sharedAdmission, engineeringHeldOff,
     approvals, github, githubWatches, githubFeed, reconciler, notifier, sharedPolicy, channelRoles, sharedJobs, router, transport, phone,
     credentials, conversation, status,
     clock, tasks, taskCapture, reminders, briefing, reminderNotifier, briefingNotifier,

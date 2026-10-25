@@ -6,7 +6,7 @@ import {
 import type { Db } from '../db.js';
 import { isoPlus, nowIso } from '../db.js';
 import {
-  fromBool, toBool, type AdmissionRow, type ExpiryChargeState, type ExpiryDisposition,
+  fromBool, toBool, type AdmissionRow, type SharedAdmissionBindingRow, type SharedReleaseOutboxRow, type ExpiryChargeState, type ExpiryDisposition,
   type JobRow, type LeaseExpiryRow, type OwnerInputRow, type PauseReceiptRow, type ReservationRow,
 } from './types.js';
 
@@ -90,6 +90,9 @@ const mapAdmission = (r: Record<string, unknown>): AdmissionRow => ({
   repoSlug: String(r['repo_slug']),
   acquiredAt: String(r['acquired_at']),
   reason: String(r['reason']) as AdmissionRow['reason'],
+  ...(r['shared_fence'] == null
+    ? {}
+    : { sharedLedgerId: String(r['shared_ledger_id']), sharedFence: Number(r['shared_fence']) }),
 });
 
 const mapReservation = (r: Record<string, unknown>): ReservationRow => ({
@@ -530,22 +533,141 @@ export class JobsRepo {
    * Takes the single engineering slot for a job, or re-takes it for the job
    * that already holds it (a reclaim after lease expiry). Returns false when a
    * DIFFERENT job holds it, and changes nothing.
+   *
+   * `shared` is the exact ledger hold the slot stands on. A re-take must present
+   * the SAME fence (`IS` so that two slots taken without a ledger still match):
+   * a slot is never re-pointed at another generation by taking it again.
    */
-  acquireAdmission(jobId: string, repoSlug: string): boolean {
+  acquireAdmission(
+    jobId: string,
+    repoSlug: string,
+    shared?: { readonly ledgerId: string; readonly fence: number },
+  ): boolean {
     const res = this.db
       .prepare(
-        `INSERT INTO engineering_admission (slot, job_id, repo_slug, acquired_at, reason)
-         VALUES (1, ?, ?, ?, 'active_attempt')
+        `INSERT INTO engineering_admission
+           (slot, job_id, repo_slug, acquired_at, reason, shared_ledger_id, shared_fence)
+         VALUES (1, ?, ?, ?, 'active_attempt', ?, ?)
          ON CONFLICT(slot) DO UPDATE SET reason = 'active_attempt', acquired_at = excluded.acquired_at
-         WHERE engineering_admission.job_id = excluded.job_id`,
+         WHERE engineering_admission.job_id = excluded.job_id
+           AND engineering_admission.shared_fence IS excluded.shared_fence
+           AND engineering_admission.shared_ledger_id IS excluded.shared_ledger_id`,
       )
-      .run(jobId, repoSlug, nowIso());
+      .run(jobId, repoSlug, nowIso(), shared?.ledgerId ?? null, shared?.fence ?? null);
     return Number(res.changes) > 0;
   }
 
-  /** Called only on proof of quiescence. Idempotent. */
+  /**
+   * Called only on proof of quiescence. Idempotent.
+   *
+   * The local slot and the exact shared release are written in ONE transaction;
+   * the shared release is delivered only after it commits. A crash after the
+   * local release but before the delivery therefore leaves the shared hold in
+   * place (conservative), and the outbox row names the generation that was
+   * released and no other.
+   */
   releaseAdmission(jobId: string): void {
-    this.db.prepare('DELETE FROM engineering_admission WHERE job_id = ?').run(jobId);
+    const apply = (): void => {
+      const row = this.db
+        .prepare('SELECT shared_ledger_id, shared_fence FROM engineering_admission WHERE job_id = ?')
+        .get(jobId) as { shared_ledger_id: string | null; shared_fence: number | null } | undefined;
+      if (!row) return;
+      this.db.prepare('DELETE FROM engineering_admission WHERE job_id = ?').run(jobId);
+      if (row.shared_fence !== null && row.shared_ledger_id !== null) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO shared_release_outbox (ledger_id, fence, job_id, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(row.shared_ledger_id, Number(row.shared_fence), jobId, nowIso());
+      }
+    };
+    if (this.db.isTransaction) {
+      apply();
+      return;
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      apply();
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* the first error is the interesting one */ }
+      throw err;
+    }
+  }
+
+  // ----------------------------------------- shared admission (ADR 0031) ----
+
+  sharedBinding(): SharedAdmissionBindingRow | undefined {
+    const r = this.db.prepare('SELECT * FROM shared_admission_binding WHERE id = 1').get() as
+      Record<string, unknown> | undefined;
+    return r
+      ? {
+          instanceId: String(r['instance_id']), ledgerId: String(r['ledger_id']),
+          policyDigest: String(r['policy_digest']), boundAt: String(r['bound_at']),
+        }
+      : undefined;
+  }
+
+  /** First use only. The row is immutable afterwards (the schema refuses an edit). */
+  bindShared(instanceId: string, ledgerId: string, policyDigest: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO shared_admission_binding (id, instance_id, ledger_id, policy_digest, bound_at)
+         VALUES (1, ?, ?, ?, ?)`,
+      )
+      .run(instanceId, ledgerId, policyDigest, nowIso());
+  }
+
+  outboxPending(limit: number): SharedReleaseOutboxRow[] {
+    return (this.db
+      .prepare('SELECT * FROM shared_release_outbox ORDER BY id LIMIT ?')
+      .all(limit) as Record<string, unknown>[])
+      .map((r) => ({
+        id: Number(r['id']), ledgerId: String(r['ledger_id']), fence: Number(r['fence']),
+        jobId: String(r['job_id']), createdAt: String(r['created_at']),
+        attempts: Number(r['attempts']),
+        lastOutcome: r['last_outcome'] == null ? null : String(r['last_outcome']),
+      }));
+  }
+
+  outboxSettle(id: number): void {
+    this.db.prepare('DELETE FROM shared_release_outbox WHERE id = ?').run(id);
+  }
+
+  outboxAttempted(id: number, outcome: string): void {
+    this.db
+      .prepare('UPDATE shared_release_outbox SET attempts = attempts + 1, last_outcome = ? WHERE id = ?')
+      .run(outcome, id);
+  }
+
+  /**
+   * Whether ANY owed release is stuck, over the WHOLE outbox and not a page of
+   * it: another ledger's row, a refusal the ledger gave, or a row that has been
+   * retried past `maxAttempts`. A debt hidden behind a page limit would be a
+   * shared hold nobody is looking at.
+   */
+  outboxStuck(ledgerId: string, fatalOutcomes: readonly string[], maxAttempts: number): boolean {
+    const marks = fatalOutcomes.map(() => '?').join(',');
+    return this.db
+      .prepare(
+        `SELECT 1 FROM shared_release_outbox
+          WHERE ledger_id <> ? OR attempts >= ?
+             OR last_outcome IN (${marks || "''"}) LIMIT 1`,
+      )
+      .get(ledgerId, maxAttempts, ...fatalOutcomes) !== undefined;
+  }
+
+  /** The job's release is still owed to the ledger. */
+  outboxOwes(jobId: string): boolean {
+    return this.db.prepare('SELECT 1 FROM shared_release_outbox WHERE job_id = ? LIMIT 1').get(jobId) !== undefined;
+  }
+
+  /** Whether this database's own slot currently stands on that exact shared fence. */
+  localHoldsFence(ledgerId: string, fence: number): boolean {
+    return this.db
+      .prepare('SELECT 1 FROM engineering_admission WHERE shared_ledger_id = ? AND shared_fence = ?')
+      .get(ledgerId, fence) !== undefined;
   }
 
   /** The stop of this job's attempt could not be confirmed; the slot stays held. */

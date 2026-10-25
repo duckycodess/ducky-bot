@@ -1564,4 +1564,51 @@ CREATE TABLE job_pause_receipts (
 CREATE INDEX idx_job_pause_receipts_job ON job_pause_receipts(job_id);
 `,
   },
+  {
+    version: 30,
+    name: 'shared_admission',
+    sql: `
+-- Shared engineering admission (ADR 0031). The host-local ledger is the
+-- cross-program fence; these are the coordinator's durable halves of it.
+--
+-- The exact identity of the shared hold this job's local slot stands on. Both
+-- NULL for a slot taken without a ledger (isolated fixtures only: a runtime
+-- refuses to claim without one). The fence is never reused, which is what lets a
+-- delayed release of an old generation be harmless.
+ALTER TABLE engineering_admission ADD COLUMN shared_ledger_id TEXT;
+ALTER TABLE engineering_admission ADD COLUMN shared_fence INTEGER;
+
+-- What this database pinned about the ledger on first use, and the durable
+-- identity it presents as a holder. Written once; a ledger that later differs
+-- (replaced, restored, re-policied) stops engineering. It is never silently
+-- re-pinned, and nothing here is a secret.
+CREATE TABLE shared_admission_binding (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  instance_id TEXT NOT NULL CHECK (length(instance_id) BETWEEN 8 AND 80),
+  ledger_id   TEXT NOT NULL,
+  policy_digest TEXT NOT NULL,
+  bound_at    TEXT NOT NULL
+);
+CREATE TRIGGER shared_admission_binding_fixed_u BEFORE UPDATE ON shared_admission_binding
+BEGIN SELECT RAISE(ABORT, 'binding_fixed'); END;
+CREATE TRIGGER shared_admission_binding_fixed_d BEFORE DELETE ON shared_admission_binding
+BEGIN SELECT RAISE(ABORT, 'binding_fixed'); END;
+
+-- Written in the SAME transaction that deletes a local slot, delivered only
+-- after that commit, and retried after a restart. A crash between the two leaves
+-- the shared hold in place (conservative: capacity is never created by a crash).
+-- Keyed by the exact ledger and fence, so a delayed delivery can only ever name
+-- the generation that was released locally, never a newer one.
+CREATE TABLE shared_release_outbox (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ledger_id    TEXT NOT NULL,
+  fence        INTEGER NOT NULL,
+  job_id       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_outcome TEXT,
+  UNIQUE (ledger_id, fence)
+);
+`,
+  },
 ];

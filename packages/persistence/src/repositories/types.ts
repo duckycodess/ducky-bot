@@ -188,6 +188,26 @@ export interface AdmissionRow {
   repoSlug: string;
   acquiredAt: string;
   reason: 'active_attempt' | 'unconfirmed_stop';
+  /** The shared ledger hold this slot stands on; absent only for a slot taken without a ledger. */
+  sharedLedgerId?: string;
+  sharedFence?: number;
+}
+
+export interface SharedAdmissionBindingRow {
+  instanceId: string;
+  ledgerId: string;
+  policyDigest: string;
+  boundAt: string;
+}
+
+export interface SharedReleaseOutboxRow {
+  id: number;
+  ledgerId: string;
+  fence: number;
+  jobId: string;
+  createdAt: string;
+  attempts: number;
+  lastOutcome: string | null;
 }
 
 export interface ReservationRow {

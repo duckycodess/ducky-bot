@@ -152,6 +152,13 @@ export const AUDIT_EVENTS = [
    * covers a Discord surface.
    */
   'workflow.requested',
+  /**
+   * Shared engineering admission changed between running and stopped (ADR 0031).
+   * The detail is a fixed reason word (`ledger_unavailable`, `slot_fence_gone`,
+   * `release_refused_by_ledger`...) and never a path, a fence or a job: it says
+   * THAT engineering stopped and why, so an owner can find it.
+   */
+  'engineering.shared_admission',
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 

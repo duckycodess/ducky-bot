@@ -150,7 +150,7 @@ describe('ledger lifecycle and invariants', () => {
     expect(() => raw.exec(`UPDATE entries SET repo_key = 'o/z'`)).toThrow(/identity_fixed/);
     raw.exec(`UPDATE entries SET state = 'confirmed', confirmed_at = 3, pending_expires_at = NULL`);
     expect(() => raw.exec(`UPDATE entries SET state = 'pending', pending_expires_at = 9, confirmed_at = NULL`)).toThrow(/state_forward_only/);
-    expect(() => raw.exec('UPDATE policy SET global_cap = 4')).toThrow(/policy_fixed/);
+    expect(() => raw.exec('UPDATE policy SET global_cap = 1')).toThrow(/policy_fixed/);
     expect(() => raw.exec(`UPDATE meta SET value = 'x' WHERE key = 'ledger_id'`)).toThrow(/meta_fixed/);
     expect(() => raw.exec('DELETE FROM meta')).toThrow(/meta_fixed/);
     raw.close();
@@ -160,12 +160,51 @@ describe('ledger lifecycle and invariants', () => {
     }));
   });
 
+  it('bounds the policy structurally and at the API: the global cap can never exceed 2', () => {
+    for (const bad of [
+      { globalCap: 3 }, { globalCap: 4 }, { globalCap: 0 }, { globalCap: 1.5 }, { globalCap: Number.NaN },
+      { globalCap: Number.MAX_SAFE_INTEGER + 2 }, { ceilingBytes: 0 }, { ceilingBytes: -1 },
+      { ceilingBytes: 1.5 }, { notificationReserveBytes: -1 }, { notificationReserveBytes: 15 * 1024 * MIB },
+      { pendingTtlSeconds: 4 }, { pendingTtlSeconds: 3601 }, { pendingTtlSeconds: 1.5 },
+      { repoCap: 2 }, { duckyExclusive: false },
+    ]) {
+      const s = scratch();
+      expect(() => initLedger({ path: s.file, forbiddenRoots: [], policy: bad as never }), JSON.stringify(bad))
+        .toThrow(/invalid policy/);
+      expect(existsSync(s.file)).toBe(false);
+    }
+    // The schema itself refuses a cap above 2 for a writer that skips the API.
+    const s = scratch();
+    initLedger({ path: s.file, forbiddenRoots: [] });
+    const raw = new DatabaseSync(s.file);
+    expect(() => raw.exec('DROP TABLE policy')).not.toThrow(); // DDL is not guarded; the digest and checks catch it
+    raw.exec(`CREATE TABLE policy (id INTEGER PRIMARY KEY CHECK (id = 1),
+      global_cap INTEGER NOT NULL CHECK (global_cap BETWEEN 1 AND 2), repo_cap INTEGER, ducky_exclusive INTEGER,
+      ceiling_bytes INTEGER, notification_reserve_bytes INTEGER, pending_ttl_seconds INTEGER)`);
+    expect(() => raw.exec('INSERT INTO policy VALUES (1, 4, 1, 1, 1000, 0, 120)')).toThrow(/CHECK/);
+    raw.close();
+  });
+
+  it('refuses to open a ledger whose policy row sits outside the authorized bounds', () => {
+    const s = scratch();
+    const made = initLedger({ path: s.file, forbiddenRoots: [] });
+    const raw = new DatabaseSync(s.file);
+    raw.exec('DROP TABLE policy');
+    raw.exec(`CREATE TABLE policy (id INTEGER PRIMARY KEY, global_cap INTEGER, repo_cap INTEGER, ducky_exclusive INTEGER,
+      ceiling_bytes INTEGER, notification_reserve_bytes INTEGER, pending_ttl_seconds INTEGER)`);
+    raw.exec(`INSERT INTO policy VALUES (1, 4, 1, 1, ${14 * 1024 * MIB}, ${512 * MIB}, 120)`);
+    raw.exec('CREATE TRIGGER policy_fixed_u BEFORE UPDATE ON policy BEGIN SELECT RAISE(ABORT, \'policy_fixed\'); END');
+    raw.exec('CREATE TRIGGER policy_fixed_d BEFORE DELETE ON policy BEGIN SELECT RAISE(ABORT, \'policy_fixed\'); END');
+    raw.close();
+    expect(open(s, made.ledgerId).check()).toMatchObject({ ok: false, reason: 'policy_mismatch' });
+  });
+
   it('a tampered policy row no longer matches its recorded digest', () => {
     const s = scratch();
     const made = initLedger({ path: s.file, forbiddenRoots: [] });
     const raw = new DatabaseSync(s.file);
     raw.exec('DROP TRIGGER policy_fixed_u');
-    raw.exec('UPDATE policy SET global_cap = 4');
+    raw.exec('UPDATE policy SET global_cap = 1');
     raw.close();
     expect(open(s, made.ledgerId).check()).toMatchObject({ ok: false, reason: 'ledger_mismatch' });
   });

@@ -28,6 +28,7 @@ import { AUDIT_OWNER_REF } from '@ducky/contracts';
 import { isoPlus, nowIso, withTransaction, type JobRow, type Store } from '@ducky/persistence';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import type { RepoAllowlist } from './allowlist.js';
+import type { SharedAdmissionService, SharedGrant } from './shared-admission.service.js';
 import { intakeResult, type IntakeVerdict } from './result-intake.js';
 import { activeSystemPause } from './system-pause.js';
 
@@ -42,6 +43,13 @@ export interface JobsServiceDeps {
    * which is the fail-closed reading of "nobody said engineering is on".
    */
   readonly engineering?: { readonly enabled: boolean; readonly attemptBudgetMs: number };
+  /**
+   * The shared admission ledger (ADR 0031). With it, a claim is answered only
+   * after the host-wide hold is taken AND confirmed, and every release goes
+   * through the local outbox. Production composition always supplies it when
+   * engineering is on; only isolated test fixtures omit it.
+   */
+  readonly shared?: SharedAdmissionService;
 }
 
 export interface JobDetail {
@@ -72,8 +80,10 @@ export class JobsService {
   private readonly now: () => Date;
   private readonly engineeringEnabled: boolean;
   private readonly attemptBudgetMs: number;
+  private readonly shared: SharedAdmissionService | undefined;
 
   constructor(deps: JobsServiceDeps) {
+    this.shared = deps.shared;
     this.engineeringEnabled = deps.engineering?.enabled ?? false;
     this.attemptBudgetMs =
       deps.engineering?.attemptBudgetMs ?? ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS;
@@ -484,11 +494,69 @@ export class JobsService {
     // idempotency cache so a response cached while it was enabled is not
     // replayed after the operator switched it off.
     if (!this.engineeringEnabled) return undefined;
+
+    // Shared admission, BEFORE the idempotency cache and before anything is
+    // chosen: a stopped ledger, a pin that no longer matches or a local slot the
+    // ledger does not confirm answers no claim, and a response cached while all
+    // of that was fine is not replayed past it. A shared-mode claim goes only to
+    // an executor on the ledger's own host.
+    let instanceId: string | undefined;
+    if (this.shared) {
+      if (!this.shared.executorAllowed(executorId)) return undefined;
+      const gate = this.shared.gate();
+      if (!gate.ok) return undefined;
+      instanceId = gate.instanceId;
+      // Owed releases first, so a job resumed before its old release was
+      // delivered finds the old generation gone rather than refused. A delivery
+      // the ledger refused is a stop, so the gate is read again if any is kept.
+      if (this.shared.drain().kept > 0) {
+        const after = this.shared.gate();
+        if (!after.ok) return undefined;
+      }
+    }
+
     const cached = this.store.db
       .prepare('SELECT response_json FROM idempotency_keys WHERE key = ?')
       .get(`claim:${executorId}:${idempotencyKey}`) as { response_json: string } | undefined;
-    if (cached) return JSON.parse(cached.response_json) as ClaimResponse;
+    if (cached) {
+      const replay = JSON.parse(cached.response_json) as ClaimResponse;
+      // A cached claim is a CLAIM, not a ticket: it is served only while it is
+      // still exactly the current one -- the same job running under the same
+      // lease for this executor, and (in shared mode) standing on a fence the
+      // ledger confirms. After a pause, a resume, an expiry or a newer claim the
+      // cache is obsolete and must never launch work.
+      const live = this.store.jobs.byId(replay.jobId);
+      if (!live || live.state !== 'running' || live.executorId !== executorId || live.leaseId !== replay.leaseId) {
+        return undefined;
+      }
+      if (this.shared && !this.shared.slotConfirmed(replay.jobId)) return undefined;
+      return replay;
+    }
 
+    // A fence this call minted, so a LOCAL failure can give back exactly it.
+    let minted: { job: JobRow; grant: Extract<SharedGrant, { ok: true }> } | undefined;
+    try {
+      return this.claimTransaction(executorId, idempotencyKey, capabilities, instanceId, (m) => {
+        minted = m;
+      });
+    } catch (err) {
+      if (minted && this.shared && instanceId) {
+        // Only a fence minted by this call, and only if the local slot does not
+        // stand on it. A failure at COMMIT leaves the slot visible and the hold
+        // in place; any doubt is an extra held reservation, never a freed one.
+        try { this.shared.giveBackCreated(minted.job, instanceId, minted.grant); } catch { /* held is safe */ }
+      }
+      throw err;
+    }
+  }
+
+  private claimTransaction(
+    executorId: string,
+    idempotencyKey: string,
+    capabilities: readonly string[],
+    instanceId: string | undefined,
+    onMinted: (m: { job: JobRow; grant: Extract<SharedGrant, { ok: true }> }) => void,
+  ): ClaimResponse | undefined {
     return withTransaction(this.store.db, () => {
       // Executor-aware from here on. Before placements existed, any executor
       // could be handed any queued job because there was only ever one path
@@ -520,9 +588,29 @@ export class JobsService {
           this.exhaustDeferredExpiry(job, deferred.id, charged);
           return undefined;
         }
-        this.store.jobs.settleExpiry(deferred.id, 'charged', 'charged');
         chargedAttempts = charged;
       }
+
+      // The host-wide hold, taken and CONFIRMED before this claim can commit or
+      // be returned, and before any accounting below changes: contention leaves
+      // the job queued with its attempts, deadline and deferred expiry exactly
+      // as they were. The fence this slot already stands on (a reclaim of the
+      // same attempt) is the only one ever adopted.
+      let grant: Extract<SharedGrant, { ok: true }> | undefined;
+      if (this.shared && instanceId !== undefined) {
+        const held = this.store.jobs.admission();
+        const repoCfg = this.allowlist.resolve(job.repoSlug);
+        const got = this.shared.acquire(
+          job,
+          repoCfg.github ? `${repoCfg.github.owner}/${repoCfg.github.repo}` : undefined,
+          instanceId,
+          held && held.jobId === job.id ? held.sharedFence : undefined,
+        );
+        if (!got.ok) return undefined;
+        grant = got;
+        if (got.created) onMinted({ job, grant: got });
+      }
+      if (deferred) this.store.jobs.settleExpiry(deferred.id, 'charged', 'charged');
 
       const acquired = this.store.jobs.acquireReservation(
         job.repoSlug,
@@ -534,7 +622,9 @@ export class JobsService {
       // The Ducky-wide slot. `nextClaimable` already excluded a job while a
       // different one holds it, so a refusal here is a race lost inside this
       // transaction and aborts it with no change, exactly like the reservation.
-      if (!this.store.jobs.acquireAdmission(job.id, job.repoSlug)) {
+      if (!this.store.jobs.acquireAdmission(
+        job.id, job.repoSlug, grant ? { ledgerId: grant.ledgerId, fence: grant.fence } : undefined,
+      )) {
         throw new DuckyError('rate_limited', 'Another engineering job holds the slot.');
       }
 

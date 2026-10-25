@@ -416,8 +416,15 @@ its source identity (`<n>:closed`) and uniqueness; the number comes from that id
   deterministic representative (earliest `digested_at`, then event id). A readable number with an unreadable instant is a
   same-pull-request fallback that matches any close of it; unreadable numbers or repositories, and states that could not exist
   before 39 (a withheld or native-receipt-settled close), are counted separately on the boundary row and never given a key.
-  Pending closes with no marker proceed through the new protocol. There is no clearing control and the table is not written
-  again. A native exact close that matches the uncertainty is decided inside the observation's own transaction in this order:
+  Pending closes with no marker proceed through the new protocol. **The same capture runs at the import boundary after 39**:
+  when the SOURCE supplies an alert or digest marker on a close (a new row, or a row that had none, including an observed row
+  an adopted target already held), `insertImportedEvent` and `insertImportedEventIfNew` record it in the import's own
+  transaction through the same helper, so a dry run or a failed import records nothing. It is idempotent (it fires only when a
+  marker FIRST appears on a row, so a repeat import adds nothing and a marker Ducky wrote itself after a proven send is never
+  history), collisions merge into one row with a multiplicity and an order-independent representative (earliest marker
+  instant, then event id), the boundary counts move with it, and it writes no receipt and no cutoff. The document validator
+  refuses an unreadable event time, so the same-pull-request fallback arises only from rows written before 39. There is no
+  clearing control and the table is never rewritten or cleared. A native exact close that matches the uncertainty is decided inside the observation's own transaction in this order:
   exact delivered target receipt (covered), exact reserved target receipt (wait), matching uncertainty (HELD: a durable,
   counted, close-specific held row, not sent), else told. A marker-only legacy close that is LATER digested with proof leaves a
   real target receipt that covers the native close despite the retained uncertainty. Only a separate private semantic audit

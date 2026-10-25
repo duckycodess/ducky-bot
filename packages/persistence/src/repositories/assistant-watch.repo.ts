@@ -4,6 +4,7 @@ import {
   isReviewProviderState, type MarkerCandidate, type ReviewProviderState, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import type { Db } from '../db.js';
+import { recordCloseUncertainty } from '../native-close-evidence.js';
 import { atomically } from '../db.js';
 import { NativeTransitionsRepo } from './native-transitions.repo.js';
 
@@ -1111,6 +1112,11 @@ export class AssistantWatchRepo {
         row.id, row.targetId, row.kind, WATCH_EVENT_SURFACE[row.kind], row.identity, row.occurredAt,
         row.payloadJson, row.alertedAt, row.digestedAt, row.createdAt,
       );
+    // A close the SOURCE already marked (alerted or digested) is historical evidence of exactly the kind migration 39
+    // captured, recorded through this same supported boundary, in this transaction.
+    if (row.kind === 'pr_closed') {
+      this.captureSourceCloseMarker(row.id, row.targetId, row.identity, row.occurredAt, 'imported', row.alertedAt, row.digestedAt, row.createdAt);
+    }
     // An imported event the source had not settled is decided against the ledger now, inside the
     // import's own transaction: a native path may already have told it, or nothing can place it.
     if (row.digestedAt === null) {
@@ -1122,6 +1128,23 @@ export class AssistantWatchRepo {
         this.applyResolution(String(t.discord_user_id), String(t.repo_key), raw, row.createdAt);
       }
     }
+  }
+
+  /**
+   * Records a source marker on a close as permanent uncertainty (never a receipt), with the owner and repository of the
+   * row's target. Called only when a marker FIRST appears on the row, so a repeat import adds nothing.
+   */
+  private captureSourceCloseMarker(
+    id: string, targetId: string, identity: string, occurredAt: string, origin: 'imported' | 'observed',
+    alertedAt: string | null, digestedAt: string | null, at: string,
+  ): void {
+    if (alertedAt === null && digestedAt === null) return;
+    const t = this.db.prepare('SELECT discord_user_id, repo_key FROM assistant_watch_targets WHERE id = ?').get(targetId) as
+      { discord_user_id: string; repo_key: string } | undefined;
+    recordCloseUncertainty(this.db, {
+      id, ownerId: t === undefined ? null : String(t.discord_user_id), targetRepoKey: t === undefined ? null : String(t.repo_key),
+      identity, occurredAt, origin, alertedAt, digestedAt,
+    }, at);
   }
 
   /**
@@ -1208,6 +1231,9 @@ export class AssistantWatchRepo {
   /** An imported event, unless the target already knows that identity. */
   insertImportedEventIfNew(row: Parameters<AssistantWatchRepo['insertImportedEvent']>[0]): boolean {
     if (this.eventExists(row.targetId, row.kind, row.identity)) {
+      const known = this.db
+        .prepare('SELECT id, origin, occurred_at, alerted_at, digested_at FROM assistant_watch_events WHERE target_id = ? AND kind = ? AND identity = ?')
+        .get(row.targetId, row.kind, row.identity) as Record<string, unknown>;
       // Known on both sides: the source's settlement fills what Ducky has not settled, and
       // never clears one Ducky has. An event the source already alerted or digested is
       // therefore never told again.
@@ -1218,6 +1244,14 @@ export class AssistantWatchRepo {
             WHERE target_id = ? AND kind = ? AND identity = ?`,
         )
         .run(row.alertedAt, row.digestedAt, row.targetId, row.kind, row.identity);
+      // A close that had NO marker and now has one the source supplied: history, recorded once. A row that already carried
+      // a marker (the source's, or Ducky's own after a proven send, which is a real receipt) records nothing.
+      if (row.kind === 'pr_closed' && known['alerted_at'] == null && known['digested_at'] == null) {
+        this.captureSourceCloseMarker(
+          String(known['id']), row.targetId, row.identity, String(known['occurred_at']),
+          String(known['origin']) === 'observed' ? 'observed' : 'imported', row.alertedAt, row.digestedAt, row.createdAt,
+        );
+      }
       return false;
     }
     this.insertImportedEvent(row);

@@ -146,6 +146,10 @@ A pull request close SHALL be an exact transition: the pull request number AND t
 - **WHEN** a native exact close matches an imported close that carried a delivery or settlement marker before migration 39
 - **THEN** it is held durably and counted, not sent, unless a real target receipt for that very close exists (checked first), and the uncertainty survives deleting the event or target and is never cleared
 
+#### Scenario: A source marker imported after migration 39
+- **WHEN** an import supplies an alert or digest marker on a close, for a new row or for a row that had none
+- **THEN** the same identifiers-only uncertainty is recorded in the import's own transaction, once (a repeat import, a dry run and a failed import add nothing), with no receipt and no cutoff, and a close with no source marker is delivered by the normal protocol
+
 ### Requirement: Owner monitoring control with exact pause provenance
 The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp, open no pause period and write no audit row. A change SHALL write the switch, its pause period and its audit row in one transaction at the injected time. An owner pause SHALL record its real start; an imported pause, or one recorded before provenance existed, SHALL record no real start, only the latest instant it is known to have begun. A pause period is provenance only and SHALL NOT suppress or authorize any delivery. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget, and pausing applies at the next tick. Resuming SHALL NOT be refused because native history exists: what native paths delivered SHALL be reconciled per exact transition as targets observe, and only an unreadable ledger boundary SHALL refuse. A resume SHALL NOT reset a checkpoint, and a repeated import SHALL NOT override the owner's choice (verification reports the difference).
 

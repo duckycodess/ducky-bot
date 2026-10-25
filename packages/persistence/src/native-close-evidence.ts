@@ -26,46 +26,83 @@ export interface CloseFamilyCapture {
   readonly impossible: number;
 }
 
-type Marker = 'alert_marker_only' | 'digest_marker' | 'alert_and_digest_markers';
+export type CloseMarker = 'alert_marker_only' | 'digest_marker' | 'alert_and_digest_markers';
 
-interface Group {
-  ownerId: string;
-  repoKey: string;
-  scope: 'exact' | 'item';
-  item: string;
-  transitionKey: string;
-  origin: 'imported' | 'observed';
-  marker: Marker;
-  multiplicity: number;
-  representative: { digestedAt: string | null; id: string };
-  earliest: string | null;
+/** The instant text stored for a marker: canonical when it can be, else exactly what the source wrote. */
+const markText = (raw: string): string => canonicalStamp(raw) ?? raw;
+
+/** What one stored or imported close row says about itself. Identifiers and timestamps only. */
+export interface CloseEvidenceRow {
+  readonly id: string;
+  /** The owner and repository of the row's TARGET; null when it has none (then the row can only be counted). */
+  readonly ownerId: string | null;
+  readonly targetRepoKey: string | null;
+  readonly identity: string;
+  readonly occurredAt: string;
+  readonly origin: 'imported' | 'observed';
+  readonly alertedAt: string | null;
+  readonly digestedAt: string | null;
 }
 
-const ms = (iso: string | null): number => (iso === null ? Number.NaN : Date.parse(iso));
-
-/** Whether `a` is strictly earlier than `b`, by instant when both read and by text otherwise. */
-const earlier = (a: string, b: string): boolean => {
-  const x = ms(a);
-  const y = ms(b);
-  return Number.isFinite(x) && Number.isFinite(y) ? x < y : a < b;
-};
+export type CloseEvidenceOutcome = 'none' | 'recorded' | 'item' | 'unidentifiable';
 
 /**
- * The deterministic representative of a group of colliding rows: the earliest `digested_at` (a row that was never
- * digested sorts after every one that was), then the smallest event id. Multiplicity and provenance are kept in the
- * group row, so the choice never hides evidence.
+ * Records ONE close row's historical uncertainty, idempotently per row IF the caller calls it once per row: it is called
+ * (a) by migration 39 for every pre-39 row with a marker, and (b) by the supported import boundary the moment a source
+ * marker first appears on a row (a new row carrying one, or a row that had none gaining its first). A row that already
+ * carried a marker never calls it again, so a repeat import adds nothing; a later marker on an already-marked row adds no
+ * second row (the first class stands: any marker holds identically). A marker Ducky wrote itself after a proven send is
+ * never passed here: that is a real receipt, checked first, and it is not history.
+ *
+ * Rows of one key, origin and marker class collapse into one row with a multiplicity and a representative that does not
+ * depend on the order they arrive in: the earliest marker instant, then the smallest event id. The boundary row's counts
+ * move with it.
  */
-const betterRepresentative = (
-  a: { digestedAt: string | null; id: string }, b: { digestedAt: string | null; id: string },
-): boolean => {
-  if (a.digestedAt !== b.digestedAt) {
-    if (a.digestedAt === null) return false;
-    if (b.digestedAt === null) return true;
-    return earlier(a.digestedAt, b.digestedAt);
+export function recordCloseUncertainty(db: Db, e: CloseEvidenceRow, at: string): CloseEvidenceOutcome {
+  if (e.alertedAt === null && e.digestedAt === null) return 'none';
+  const marker: CloseMarker = e.alertedAt !== null && e.digestedAt !== null
+    ? 'alert_and_digest_markers'
+    : e.digestedAt !== null ? 'digest_marker' : 'alert_marker_only';
+  const evidence = e.ownerId === null || e.targetRepoKey === null
+    ? ({ kind: 'unidentifiable' } as const)
+    : classifyCloseEvidence(e.targetRepoKey, e.identity, e.occurredAt);
+  if (e.ownerId === null || evidence.kind === 'unidentifiable') {
+    db.prepare('UPDATE native_ledger_boundary SET close_unidentifiable_events = close_unidentifiable_events + 1 WHERE id = 1').run();
+    return 'unidentifiable';
   }
-  return a.id < b.id;
-};
+  const exact = evidence.kind === 'exact';
+  const marked = markText((e.digestedAt ?? e.alertedAt)!);
+  db.prepare(
+    `INSERT INTO native_close_uncertainty
+       (owner_id, repo_key, scope, item, transition_key, origin, marker, multiplicity, representative_ref,
+        earliest_marked_at, recorded_at)
+     VALUES (?,?,?,?,?,?,?,1,?,?,?)
+     ON CONFLICT (owner_id, repo_key, scope, transition_key, item, origin, marker) DO UPDATE SET
+       multiplicity = multiplicity + 1,
+       representative_ref = CASE
+         WHEN excluded.earliest_marked_at < earliest_marked_at
+           OR (excluded.earliest_marked_at = earliest_marked_at AND excluded.representative_ref < representative_ref)
+         THEN excluded.representative_ref ELSE representative_ref END,
+       earliest_marked_at = MIN(earliest_marked_at, excluded.earliest_marked_at)`,
+  ).run(
+    e.ownerId, evidence.repoKey, exact ? 'exact' : 'item', evidence.item, exact ? evidence.transitionKey : '', e.origin, marker,
+    e.id, marked, at,
+  );
+  db.prepare(
+    `UPDATE native_ledger_boundary
+        SET close_uncertain_events = close_uncertain_events + 1,
+            close_item_scope_events = close_item_scope_events + ?,
+            close_uncertain_rows = (SELECT COUNT(*) FROM native_close_uncertainty)
+      WHERE id = 1`,
+  ).run(exact ? 0 : 1);
+  return exact ? 'recorded' : 'item';
+}
 
+/**
+ * Migration 39's reading of every pre-39 close row (see above for why none is a receipt). A pre-39 close that is withheld
+ * or settled by a native receipt is a state that could not have existed (close had no native counterpart): counted on its
+ * own and, when it carries a marker, still treated as evidence, which can only hold more.
+ */
 export function captureCloseFamily(db: Db, ctx: { readonly at: string }): CloseFamilyCapture {
   const rows = db
     .prepare(
@@ -77,71 +114,28 @@ export function captureCloseFamily(db: Db, ctx: { readonly at: string }): CloseF
         ORDER BY e.id`,
     )
     .all() as Record<string, unknown>[];
-
-  const groups = new Map<string, Group>();
-  let events = 0;
-  let itemScopeEvents = 0;
-  let unidentifiable = 0;
-  let impossible = 0;
-
-  for (const r of rows) {
-    const alerted = r['alerted_at'] == null ? null : String(r['alerted_at']);
-    const digested = r['digested_at'] == null ? null : String(r['digested_at']);
-    if (r['withheld_reason'] != null || r['settled_by'] != null) impossible += 1;
-    // No marker, no evidence: a pending close proceeds through the prospective reservation protocol.
-    if (alerted === null && digested === null) continue;
-    const marker: Marker = alerted !== null && digested !== null
-      ? 'alert_and_digest_markers'
-      : digested !== null ? 'digest_marker' : 'alert_marker_only';
-    const owner = r['owner_id'] == null ? null : String(r['owner_id']);
-    const evidence = owner === null || r['target_repo_key'] == null
-      ? ({ kind: 'unidentifiable' } as const)
-      : classifyCloseEvidence(String(r['target_repo_key']), String(r['identity']), String(r['occurred_at']));
-    if (owner === null || evidence.kind === 'unidentifiable') {
-      unidentifiable += 1;
-      continue;
-    }
-    const exact = evidence.kind === 'exact';
-    const transitionKey = exact ? evidence.transitionKey : '';
-    const origin = String(r['origin']) === 'observed' ? 'observed' : 'imported';
-    const key = [owner, evidence.repoKey, exact ? 'exact' : 'item', transitionKey, evidence.item, origin, marker].join('\u0000');
-    const rep = { digestedAt: digested, id: String(r['id']) };
-    const marked = digested ?? alerted!;
-    const g = groups.get(key);
-    events += 1;
-    if (!exact) itemScopeEvents += 1;
-    if (!g) {
-      groups.set(key, {
-        ownerId: owner, repoKey: evidence.repoKey, scope: exact ? 'exact' : 'item', item: evidence.item, transitionKey,
-        origin, marker, multiplicity: 1, representative: rep, earliest: marked,
-      });
-      continue;
-    }
-    g.multiplicity += 1;
-    if (betterRepresentative(rep, g.representative)) g.representative = rep;
-    if (g.earliest === null || earlier(marked, g.earliest)) g.earliest = marked;
-  }
-
-  const insert = db.prepare(
-    `INSERT INTO native_close_uncertainty
-       (owner_id, repo_key, scope, item, transition_key, origin, marker, multiplicity, representative_ref,
-        earliest_marked_at, recorded_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-  );
-  for (const g of [...groups.values()].sort((a, b) =>
-    `${a.ownerId}|${a.repoKey}|${a.scope}|${a.transitionKey}|${a.item}|${a.origin}|${a.marker}`
-      .localeCompare(`${b.ownerId}|${b.repoKey}|${b.scope}|${b.transitionKey}|${b.item}|${b.origin}|${b.marker}`))) {
-    insert.run(
-      g.ownerId, g.repoKey, g.scope, g.item, g.transitionKey, g.origin, g.marker, g.multiplicity, g.representative.id,
-      g.earliest !== null && canonicalStamp(g.earliest) !== null ? canonicalStamp(g.earliest) : g.earliest, ctx.at,
-    );
-  }
-
   db.prepare(
     `UPDATE native_ledger_boundary
-        SET close_family_at = ?, close_uncertain_events = ?, close_uncertain_rows = ?, close_item_scope_events = ?,
-            close_unidentifiable_events = ?, close_impossible_events = ?
+        SET close_family_at = ?, close_uncertain_events = 0, close_uncertain_rows = 0, close_item_scope_events = 0,
+            close_unidentifiable_events = 0, close_impossible_events = 0
       WHERE id = 1`,
-  ).run(ctx.at, events, groups.size, itemScopeEvents, unidentifiable, impossible);
-  return { events, rows: groups.size, itemScopeEvents, unidentifiable, impossible };
+  ).run(ctx.at);
+  let impossible = 0;
+  for (const r of rows) {
+    if (r['withheld_reason'] != null || r['settled_by'] != null) impossible += 1;
+    recordCloseUncertainty(db, {
+      id: String(r['id']), ownerId: r['owner_id'] == null ? null : String(r['owner_id']),
+      targetRepoKey: r['target_repo_key'] == null ? null : String(r['target_repo_key']),
+      identity: String(r['identity']), occurredAt: String(r['occurred_at']),
+      origin: String(r['origin']) === 'observed' ? 'observed' : 'imported',
+      alertedAt: r['alerted_at'] == null ? null : String(r['alerted_at']),
+      digestedAt: r['digested_at'] == null ? null : String(r['digested_at']),
+    }, ctx.at);
+  }
+  db.prepare('UPDATE native_ledger_boundary SET close_impossible_events = ? WHERE id = 1').run(impossible);
+  const b = db.prepare('SELECT * FROM native_ledger_boundary WHERE id = 1').get() as Record<string, unknown>;
+  return {
+    events: Number(b['close_uncertain_events']), rows: Number(b['close_uncertain_rows']),
+    itemScopeEvents: Number(b['close_item_scope_events']), unidentifiable: Number(b['close_unidentifiable_events']), impossible,
+  };
 }

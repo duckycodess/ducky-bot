@@ -7,7 +7,7 @@ import {
   ASSISTANT_WATCH_CYCLE_TARGETS, ASSISTANT_WATCH_DISCOVERY_INTERVAL_HOURS, ASSISTANT_WATCH_MAX_TARGETS,
   ASSISTANT_WATCH_METADATA_INTERVAL_HOURS, GH_OWNER_RE, GH_REPO_RE, isPlainRepoName, WATCH_API_DISCOVERY_MAX_PAGES,
   WATCH_API_REVIEWS_MAX_PAGES, WATCH_EVENT_KINDS, newPublicWatchId, WATCH_EVENT_SURFACE, WATCH_RELEASES_MAX_PAGES,
-  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, encodeBaselineMarker, type WatchEventKind, type WatchSurface,
+  WATCH_RUNS_MAX_PAGES, AUDIT_OWNER_REF, encodeBaselineMarker, targetTransition, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
 import {
   withTransaction, type DueCheckpoint, type ObservedEventWrite, type PollCycle, type Store,
@@ -15,7 +15,7 @@ import {
 } from '@ducky/persistence';
 import { dmTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
-import { assistantWatchAlert } from '../discord/assistant-presenters.js';
+import { assistantWatchAlert, githubRepoHeading } from '../discord/assistant-presenters.js';
 import type { ActorContext, Authorizer } from '../security/authz.js';
 import {
   UnreadableTimestamp, bareRepoName, deriveCommits,
@@ -87,6 +87,19 @@ export interface AssistantWatchTickResult {
   readonly alertsFailed: number;
 }
 
+/**
+ * An exact pull request close the digest means to show: the event, the repository heading its line sits under, and the
+ * validated number and canonical close instant its line was built from (never a payload number). It earns a receipt only
+ * when a briefing is sent AND its line is proven in the final output (`proveShownCloses`).
+ */
+export interface DigestClose {
+  readonly id: string;
+  /** The exact heading text of the repository block (`**name**`), as the presenter will write it. */
+  readonly repoHeading: string;
+  readonly n: string;
+  readonly at: string;
+}
+
 /** A digest of unread events, and the ids a briefing must settle once it is sent. */
 export interface WatchDigest {
   readonly repos: readonly { readonly name: string; readonly lines: readonly string[] }[];
@@ -94,6 +107,11 @@ export interface WatchDigest {
   readonly eventIds: readonly string[];
   readonly truncatedRepos: number;
   readonly empty: boolean;
+  /**
+   * The exact closes among `eventIds`. A close whose line is not proven in the final output is NOT settled with the
+   * briefing: it stays pending (and counted, with its age) until a briefing really shows it. Absent: none.
+   */
+  readonly closes?: readonly DigestClose[];
 }
 
 const MINUTE = 60_000;
@@ -1211,6 +1229,33 @@ export class AssistantWatchService {
       );
     }
     if (held.settledByReceipt > 0) parts.push(`${held.settledByReceipt} settled by an exact native receipt`);
+    // The exact pull request close (ADR 0034). A close settles only once a briefing showed its number and canonical instant
+    // in a proven final output, so one that was clipped, redacted or dropped stays pending, counted, with the age of the
+    // oldest; a historical close settled before exact receipts existed can never be proven and holds any matching native close.
+    const pending = repo.pendingCloses(this.ownerId);
+    if (pending.count > 0) {
+      const ms = pending.oldestCreatedAt === null ? Number.NaN : Date.parse(pending.oldestCreatedAt);
+      parts.push(
+        `${pending.count} pull request close(s) still pending, not yet shown in a proven briefing` +
+          (Number.isFinite(ms) ? ` (oldest ${ageWords(this.clock.nowMs() - ms)})` : '') + ' (a required blocker)',
+      );
+    }
+    const uncertain = this.store.nativeTransitions.closeUncertaintyCounts(this.ownerId);
+    const legacy = this.store.nativeTransitions.closeFamilyProvenance();
+    if (legacy !== null && legacy.unidentifiableEvents + legacy.impossibleEvents > 0) {
+      parts.push(
+        `${legacy.unidentifiableEvents} historical close(s) with no readable number or repository, and ` +
+          `${legacy.impossibleEvents} in a state that could not have existed before exact close receipts: counted, never ` +
+          'given a key (a required blocker)',
+      );
+    }
+    if (uncertain.events > 0) {
+      parts.push(
+        `${uncertain.events} historical close(s) settled before exact close receipts existed and never provable ` +
+          `(${uncertain.rows} key(s), ${uncertain.itemScopeRows} matching any close of their pull request): each holds a ` +
+          'matching native close, kept through retention, no clearing control (a required blocker)',
+      );
+    }
     // Counts only: ordinary watches the system stopped because their slug now names another repository.
     const stopped = this.store.githubWatches.identityStoppedCount(this.ownerId);
     if (stopped > 0) {
@@ -1248,6 +1293,16 @@ export class AssistantWatchService {
     }
     return parts.join('; ');
   }
+}
+
+/** How long, in words a person can read: the largest whole unit, never a timestamp. */
+export function ageWords(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'}`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h} hour${h === 1 ? '' : 's'}`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d === 1 ? '' : 's'}`;
 }
 
 /** Everything one unit needs, assembled once. */
@@ -1340,12 +1395,29 @@ export function buildWatchDigest(events: readonly WatchEventWithTarget[]): Watch
 
   const attention: string[] = [];
   const rendered: { name: string; lines: string[]; weight: number }[] = [];
+  const closes: DigestClose[] = [];
   for (const [display, list] of byRepo) {
     const name = bareRepoName(display);
     const lines: string[] = [];
+    // An exact close FIRST, before any per-repository cut: its line names the validated number and the canonical
+    // instant (built from the event's identity and time, never a payload number), because that is what a receipt is
+    // proven against. Closes are not the only thing that can be cut, and putting them first proves no fairness.
+    const exactCloses = new Set<string>();
+    for (const e of list) {
+      if (e.kind !== 'pr_closed') continue;
+      const x = targetTransition({
+        kind: e.kind, identity: e.identity, occurredAt: e.occurredAt, providerHash: null, attempt: null,
+      });
+      if (x.status !== 'exact' || x.transition.stamp === null) continue;
+      const title = titleOf(e).title;
+      lines.push(`PR #${x.transition.item} closed ${x.transition.stamp}${title ? `: ${title}` : ''}`.replace(/\s+/g, ' ').trim());
+      closes.push({ id: e.id, repoHeading: githubRepoHeading(name), n: x.transition.item, at: x.transition.stamp });
+      exactCloses.add(e.id);
+    }
     const commits = list.filter((e) => e.kind === 'commit').length;
     if (commits > 0) lines.push(`${commits} new commit${commits === 1 ? '' : 's'}`);
     for (const e of list) {
+      if (exactCloses.has(e.id)) continue;
       const fact = FACT[e.kind];
       if (!fact) continue;
       const t = titleOf(e);
@@ -1363,7 +1435,7 @@ export function buildWatchDigest(events: readonly WatchEventWithTarget[]): Watch
     if (lines.length === 0) continue;
     const shown = lines.slice(0, ASSISTANT_DIGEST_MAX_LINES_PER_REPO);
     if (lines.length > shown.length) shown.push(`and ${lines.length - shown.length} more`);
-    rendered.push({ name, lines: shown, weight: list.length + (failed > 0 ? 100 : 0) });
+    rendered.push({ name, lines: shown, weight: list.length + (failed > 0 ? 100 : 0) + (exactCloses.size > 0 ? 50 : 0) });
   }
 
   rendered.sort((a, b) => b.weight - a.weight || a.name.localeCompare(b.name));
@@ -1374,5 +1446,6 @@ export function buildWatchDigest(events: readonly WatchEventWithTarget[]): Watch
     eventIds: events.map((e) => e.id),
     truncatedRepos: rendered.length - kept.length,
     empty: rendered.length === 0,
+    ...(closes.length > 0 ? { closes } : {}),
   };
 }

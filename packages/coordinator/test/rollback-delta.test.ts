@@ -344,7 +344,7 @@ describe('the v4 export says what exact native reconciliation recorded', () => {
     claim(h);
     const d = exportDelta(h);
     expect(d.schema).toBe(ROLLBACK_DELTA_SCHEMA);
-    expect(d.schema).toBe('ducky-rollback-delta/v5');
+    expect(d.schema).toBe('ducky-rollback-delta/v6');
     expect(d.complete).toBe(true);
     expect(d.state.pausePeriods).toEqual([
       expect.objectContaining({ startedAt: null, startedOrigin: 'import', startBoundAt: NOW, endedAt: null }),
@@ -478,7 +478,7 @@ describe('the v5 export says what the observed-state review families recorded', 
     const { h, apply } = boot();
     expect(apply().ok).toBe(true);
     const d = exportDelta(h);
-    expect(d.schema).toBe('ducky-rollback-delta/v5');
+    expect(d.schema).toBe('ducky-rollback-delta/v6');
     const rules = d.replay.join(' ');
     expect(rules).toMatch(/OBSERVED STATE/);
     expect(rules).toMatch(/never a dismissal time/);

@@ -31,6 +31,15 @@ import type { OutboundEmbed, OutboundEmbedField, OutboundMessage, OutboundRow } 
 
 const short = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 
+/**
+ * The briefing field that carries the watched repositories, and the exact shape of its two kinds of line. They are
+ * shared with the proof that a pull request close was actually shown (`proveShownCloses`), so the presenter and the
+ * proof cannot drift apart.
+ */
+export const GITHUB_BRIEFING_FIELD = 'GitHub';
+export const githubRepoHeading = (name: string): string => `**${short(name, 60)}**`;
+export const githubDetailLine = (line: string): string => `-# ${short(line, 120)}`;
+
 /** An urgent task, ranked above `high`. */
 const URGENT_MARK = '!!!';
 const PRIORITY_MARK = {
@@ -500,18 +509,18 @@ export function briefingMessage(b: Briefing): OutboundMessage {
     const g = b.github;
     if (!g) return;
     if (g.empty) {
-      fields.push({ name: 'GitHub', value: 'Nothing new since the last digest.' });
+      fields.push({ name: GITHUB_BRIEFING_FIELD, value: 'Nothing new since the last digest.' });
       return;
     }
     const lines: string[] = [];
     for (const r of g.repos) {
-      lines.push(`**${short(r.name, 60)}**`);
-      for (const l of r.lines) lines.push(`-# ${short(l, 120)}`);
+      lines.push(githubRepoHeading(r.name));
+      for (const l of r.lines) lines.push(githubDetailLine(l));
     }
     if (g.truncatedRepos > 0) {
       lines.push(`-# ${g.truncatedRepos} quieter repositor${g.truncatedRepos === 1 ? 'y' : 'ies'} not shown`);
     }
-    fields.push({ name: 'GitHub', value: fit(lines.join('\n'), 1000) });
+    fields.push({ name: GITHUB_BRIEFING_FIELD, value: fit(lines.join('\n'), 1000) });
     if (g.attention.length > 0) {
       fields.push({ name: 'GitHub needs attention', value: fit(bullets(g.attention), 1000) });
     }

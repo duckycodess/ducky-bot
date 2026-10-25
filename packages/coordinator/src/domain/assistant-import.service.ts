@@ -791,6 +791,15 @@ export class AssistantImportService {
     // overlap a review the target tells, no receipt can settle it, and nothing clears it.
     const refused = reviewEvidenceCounts(this.store, owner).refused;
     const gaps = this.store.githubWatches.gapMarkerCounts(owner);
+    // The exact pull request close (migration 39). A historical close the target settled before exact receipts existed is
+    // permanent uncertainty (never a receipt, never cleared), a native close held because of it is undelivered work, and a
+    // close that was not proven shown in a briefing is still pending: each is a required merge blocker, counted, with the
+    // age of the oldest pending one. Counts and one instant only.
+    const closeUncertainty = this.store.nativeTransitions.closeUncertaintyCounts(owner);
+    const closeProvenance = this.store.nativeTransitions.closeFamilyProvenance();
+    const heldCloses = this.store.githubWatches.heldCloseCount(owner);
+    const pendingCloses = this.store.assistantWatch.pendingCloses(owner);
+    const oldestPendingMs = pendingCloses.oldestCreatedAt === null ? Number.NaN : Date.parse(pendingCloses.oldestCreatedAt);
     const nativeLedger: NativeLedgerReport = {
       readable: boundary !== undefined,
       fresh: boundary?.fresh ?? false,
@@ -803,9 +812,18 @@ export class AssistantImportService {
       refusedReviewPullRequests: refused,
       gapMarkersShown: gaps.shown,
       gapMarkersNotProvablyShown: gaps.notProvablyShown,
+      closeUncertaintyEvents: closeUncertainty.events,
+      closeUncertaintyKeys: closeUncertainty.rows,
+      closeUnidentifiableLegacy: closeProvenance?.unidentifiableEvents ?? 0,
+      closeImpossibleLegacy: closeProvenance?.impossibleEvents ?? 0,
+      heldCloses,
+      pendingClosesUnshown: pendingCloses.count,
+      oldestPendingCloseAt: pendingCloses.oldestCreatedAt,
+      oldestPendingCloseAgeMs: Number.isFinite(oldestPendingMs) ? Math.max(0, Date.parse(this.nowIso()) - oldestPendingMs) : null,
       clear: boundary !== undefined &&
         held.legacyUnproven + held.ambiguousEvidence + held.stateConflict + cursorsBelow + heldCards + heldOrdinary +
-          refused + gaps.shown + gaps.notProvablyShown === 0,
+          refused + gaps.shown + gaps.notProvablyShown + closeUncertainty.events + (closeProvenance?.unidentifiableEvents ?? 0) +
+          (closeProvenance?.impossibleEvents ?? 0) + heldCloses + pendingCloses.count === 0,
     };
     const totals = Object.values(cats);
     const ok = totals.every((c) => c.missing === 0 && c.changedAtSource === 0);
@@ -841,7 +859,23 @@ export interface NativeLedgerReport {
   /** Per-author review lines delivered without exact review identity, and how provably each was shown. */
   readonly gapMarkersShown: number;
   readonly gapMarkersNotProvablyShown: number;
-  /** Nothing withheld, held, refused or delivered without identity, no cursor below the cutoff, and the boundary readable. */
+  /**
+   * Imported closes the target settled BEFORE exact close receipts existed (migration 39): permanent uncertainty, never a
+   * receipt, never cleared. A native exact close matching one is held. Events behind the keys, and the keys themselves.
+   */
+  readonly closeUncertaintyEvents: number;
+  readonly closeUncertaintyKeys: number;
+  /** Marked historical closes whose number, repository or owner could not be read: counted, never given a key. */
+  readonly closeUnidentifiableLegacy: number;
+  /** Historical closes in a state that could not have existed before migration 39: counted on their own. */
+  readonly closeImpossibleLegacy: number;
+  /** Native exact closes held because of that uncertainty (never sent, never cleared). */
+  readonly heldCloses: number;
+  /** Closes still pending: not settled, because no briefing yet showed them in a proven final output. */
+  readonly pendingClosesUnshown: number;
+  readonly oldestPendingCloseAt: string | null;
+  readonly oldestPendingCloseAgeMs: number | null;
+  /** Nothing withheld, held, refused, pending or delivered without identity, no cursor below the cutoff, and the boundary readable. */
   readonly clear: boolean;
 }
 

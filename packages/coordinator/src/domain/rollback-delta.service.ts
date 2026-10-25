@@ -28,7 +28,7 @@ import { reviewEvidenceCounts } from './github-watches.service.js';
  * test proves the export is complete and idempotent; it does not prove a source
  * bridge exists, and it never authorizes restoring stale data.
  */
-export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v5';
+export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v6';
 /*
  * v2 adds `state.watchEvents[].baselineMarker`, decided by the one shared classifier
  * (`classifyBaselineMarker`). A v1 document has no such field, so its marker status is
@@ -61,6 +61,17 @@ export const ROLLBACK_DELTA_SCHEMA = 'ducky-rollback-delta/v5';
  * without exact review identity, and `reviewEvidence` counts the pull requests for which exact review facts are
  * refused. A v1 to v4 document has none of these: that is UNKNOWN there, never inferred, and no older file is
  * rewritten.
+ */
+/*
+ * v6 adds the exact pull request close family (migration 39). `claims` rows of kind `pr_closed` are keyed by the pull
+ * request number AND the provider's canonical close instant (`stamp`); a close receipt exists only for a close that was
+ * actually shown, proven in the final briefing output, or told natively with its instant. `state.nativeLedger.closeEvidence`
+ * lists what the migration read from imported closes that carried a delivery or settlement marker BEFORE exact close
+ * receipts existed (`uncertainty`: permanent, never a receipt, never cleared; identifiers, origin, marker class and
+ * multiplicity only), the native closes held because of it (`heldCloses`) and the closes still pending because no
+ * briefing yet showed them in a proven final output (`pendingUnshown`: a count and the oldest creation). The boundary
+ * row carries the migration's own counts. A v1 to v5 document has none of these: that is UNKNOWN there, never
+ * inferred, and no older file is rewritten.
  */
 /** The most rows of any one table an export reads before it calls itself incomplete. */
 export const ROLLBACK_DELTA_ROW_CAP = 20_000;
@@ -156,6 +167,16 @@ export interface RollbackDelta {
        * the review-list bound. Counts only, never a pull request number.
        */
       readonly reviewEvidence: { readonly refusedPullRequests: number; readonly truncatedPullRequests: number };
+      /**
+       * The exact pull request close family (migration 39): imported closes that carried a delivery or settlement
+       * marker BEFORE exact receipts existed (permanent uncertainty, never a receipt), the native closes held because of
+       * it, and the closes still pending because no briefing showed them in a proven final output.
+       */
+      readonly closeEvidence: {
+        readonly uncertainty: readonly Record<string, unknown>[];
+        readonly heldCloses: readonly Record<string, unknown>[];
+        readonly pendingUnshown: { readonly count: number; readonly oldestCreatedAt: string | null };
+      };
     };
   };
 }
@@ -170,7 +191,7 @@ export const REPLAY_RULES: readonly string[] = [
   '`deleted` with cause unknown: STOP. The export is incomplete; history already lost is not reconstructible.',
   '`state`: one latest value per key, applied idempotently; applying it twice changes nothing.',
   '`state.watchEvents[].withheldReason` set (`legacy_unproven`, `ambiguous_evidence`, or `state_conflict`, a review reporting a state change the provider lifecycle does not allow): the target never delivered it and never settled it (nothing could place it exactly). Do NOT treat it as told, and do not announce it from here: it is a counted, required cutover blocker. An event whose `settledBy` is `native_receipt` was told by a native path, not by the target: settle it, tell nothing. A v1 or v2 document has neither field: unknown, never inferred.',
-  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened; `staged` rows are the same kind of fact read from legacy feed rows before any reader knew the owner. `heldNativeCards` counts requested-changes cards, and `heldOrdinary` lists ordinary-summary review facts (by hash, hash domain, watch handle and provider instant), neither sent nor skipped because they cannot be told from a review the target delivered: never treat one as told. In a v4 or v5 document one transition may have several `claims` rows, one per native holder (a feed card and a summary); any delivered native holder is a receipt. In a v5 document a review fact is a review in an OBSERVED STATE: `review_approved`, `review_commented` and `review_dismissed` claims are different tellings of a review, each with its `providerState` and the `hashDomain` of its `providerHash` (a hash of one domain is never equal to, and never proof of a different review than, a hash of the other); `review_dismissed` means only that the review was observed DISMISSED, `providerAt` is the review\'s ORIGINAL submission instant (an identity discriminator, never a dismissal time; null is unknown). `gapMarkers` are per-author review lines that WERE delivered without exact review identity: blocking evidence, never a receipt and never cleared; `reviewEvidence` counts pull requests whose exact review facts are refused. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
+  '`state.nativeLedger`: receipts (`delivered`) are things the owner WAS told; reservations (`reserved`) are sends that had not happened; `staged` rows are the same kind of fact read from legacy feed rows before any reader knew the owner. `heldNativeCards` counts requested-changes cards, and `heldOrdinary` lists ordinary-summary review facts (by hash, hash domain, watch handle and provider instant), neither sent nor skipped because they cannot be told from a review the target delivered: never treat one as told. In a v4 or v5 document one transition may have several `claims` rows, one per native holder (a feed card and a summary); any delivered native holder is a receipt. In a v5 document a review fact is a review in an OBSERVED STATE: `review_approved`, `review_commented` and `review_dismissed` claims are different tellings of a review, each with its `providerState` and the `hashDomain` of its `providerHash` (a hash of one domain is never equal to, and never proof of a different review than, a hash of the other); `review_dismissed` means only that the review was observed DISMISSED, `providerAt` is the review\'s ORIGINAL submission instant (an identity discriminator, never a dismissal time; null is unknown). `gapMarkers` are per-author review lines that WERE delivered without exact review identity: blocking evidence, never a receipt and never cleared; `reviewEvidence` counts pull requests whose exact review facts are refused. In a v6 document a `pr_closed` claim is a close keyed by its number AND its canonical close instant (`stamp`), a receipt only for a close that was actually shown (proven in the final briefing output, or told natively with its instant); `closeEvidence.uncertainty` is what the migration read from imported closes that carried a delivery or settlement marker BEFORE exact close receipts existed (permanent, never a receipt, never cleared: do not treat any as told or as not told), `heldCloses` are native closes held because of it, and `pendingUnshown` counts the closes still waiting for a briefing that shows them. Replay none of it as a notification. `state.pausePeriods`: provenance only; a null `startedAt` means the real start is unknown.',
   '`state.watchEvents[].baselineMarker` true: a first-observation suppression marker. It means this start is KNOWN, never that anything was delivered; announce nothing and settle nothing from it. A document whose schema is v1 has no such flag: its marker status is unknown and must not be inferred.',
   'This export is not a bridge and authorizes no restore of stale data.',
 ];
@@ -382,6 +403,11 @@ function assemble(snap: OwnerStateSnapshot, input: RollbackDeltaInput): Rollback
         heldOrdinary: snap.heldOrdinaryReviews.map((r) => rec(r)),
         gapMarkers: snap.gapMarkers.map((r) => rec(r)),
         reviewEvidence: { refusedPullRequests: evidence.refused, truncatedPullRequests: evidence.truncated },
+        closeEvidence: {
+          uncertainty: snap.closeUncertainty.map((r) => rec(r, ['id'])),
+          heldCloses: snap.heldCloses.map((r) => rec(r)),
+          pendingUnshown: snap.pendingCloses,
+        },
       },
     },
   };
@@ -415,6 +441,12 @@ export function deltaCounts(d: RollbackDelta): Record<string, unknown> {
       gapMarkers: d.state.nativeLedger.gapMarkers.length,
       gapMarkersNotProvablyShown: d.state.nativeLedger.gapMarkers.filter((m) => m['shown'] === 'delivered_not_provably_shown').length,
       refusedReviewPullRequests: d.state.nativeLedger.reviewEvidence.refusedPullRequests,
+      closeUncertaintyRows: d.state.nativeLedger.closeEvidence.uncertainty.length,
+      closeUncertaintyEvents: d.state.nativeLedger.closeEvidence.uncertainty.reduce((n, r) => n + Number(r['multiplicity'] ?? 0), 0),
+      heldCloses: d.state.nativeLedger.closeEvidence.heldCloses.length,
+      pendingClosesUnshown: d.state.nativeLedger.closeEvidence.pendingUnshown.count,
+      // An instant, never an id: how long the oldest close has been waiting for a briefing that shows it.
+      oldestPendingCloseCreatedAt: d.state.nativeLedger.closeEvidence.pendingUnshown.oldestCreatedAt,
       watchEventsStateConflict: d.state.watchEvents.filter((e) => e['withheldReason'] === 'state_conflict').length,
       watchEventsWithheld: d.state.watchEvents.filter((e) => e['withheldReason'] != null).length,
       watchEventsSettledByNativeReceipt: d.state.watchEvents.filter((e) => e['settledBy'] != null).length,

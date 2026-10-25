@@ -8,8 +8,10 @@ import type { BriefingSlotKind, Store, BriefingTarget } from '@ducky/persistence
 import { channelTarget, dmTarget, type SendTarget } from '../discord/message.js';
 import type { DiscordTransport } from '../discord/transport.js';
 import { briefingMessage } from '../discord/assistant-presenters.js';
+import { proveShownCloses } from '../discord/close-proof.js';
+import { sanitizeOutbound } from '../discord/sanitize-outbound.js';
 import type { OwnerClock } from './owner-clock.js';
-import type { BriefingService } from './briefing.service.js';
+import type { Briefing, BriefingService } from './briefing.service.js';
 import type { AssistantWatchService } from './assistant-watch.service.js';
 import type { OwnerPreferencesService } from './owner-preferences.service.js';
 import type { ActorContext } from '../security/authz.js';
@@ -242,9 +244,14 @@ export class BriefingNotifier {
         // one send (a native path that delivered one in the meantime settles it instead, one it
         // holds waits); if any item drops out the briefing is rebuilt around the rest, and what did
         // not go is carried forward to the next briefing rather than lost or sent twice.
+        //
+        // A pull request close is held to a higher standard than the rest of the digest: it is reserved and settled only
+        // when its exact number and canonical instant are proven inside one retained line of the FINAL output (the
+        // message after the transport's own sanitization, so a cut, a dropped repository or a redaction is seen). One
+        // that is not proven is neither reserved nor settled: it stays pending, counted, for a briefing that shows it.
         if (this.watch && body.github && body.github.eventIds.length > 0) {
           for (let attempt = 0; attempt < DIGEST_RESERVE_ATTEMPTS; attempt += 1) {
-            const ids = body.github?.eventIds ?? [];
+            const ids = this.settleable(body);
             const kept = this.watch.reserveDigest(ids);
             if (kept.length === ids.length) {
               reservedDigest = kept;
@@ -272,13 +279,13 @@ export class BriefingNotifier {
         await this.transport.send(to, briefingMessage(body));
         this.store.briefings.markDelivered(row.id, nowIso);
         delivered += 1;
+        // Exactly what was reserved, and proven, is settled: never every event the digest happened to fetch.
+        const settle = reservedDigest;
         reservedDigest = [];
         // The digest is settled only now, after it was SENT. Only the DM copy ever
         // carries it, so it is that copy's delivery that settles it; a channel copy
         // has no digest to settle and cannot hold the events open.
-        if (body.github && body.github.eventIds.length > 0) {
-          this.watch?.markDigested(body.github.eventIds);
-        }
+        if (settle.length > 0) this.watch?.markDigested(settle);
       } catch {
         // Nothing was sent (or the send failed): the reservation goes and the events stay pending.
         if (reservedDigest.length > 0) this.watch?.releaseDigest(reservedDigest);
@@ -288,6 +295,21 @@ export class BriefingNotifier {
       }
     }
     return { delivered, failed, abandoned, skippedStale };
+  }
+
+  /**
+   * The digest events this briefing may reserve and settle: every one it fetched EXCEPT an exact pull request close
+   * that is not proven in the final output. The final output is `sanitizeOutbound(briefingMessage(body))` with the
+   * transport's own redactor (the default every transport uses), so what is proven is what is sent.
+   */
+  private settleable(body: Briefing): readonly string[] {
+    const g = body.github;
+    if (!g) return [];
+    const closes = g.closes ?? [];
+    if (closes.length === 0) return g.eventIds;
+    const proven = proveShownCloses(sanitizeOutbound(briefingMessage(body)), closes);
+    const unproven = new Set(closes.filter((c) => !proven.has(c.id)).map((c) => c.id));
+    return g.eventIds.filter((id) => !unproven.has(id));
   }
 
   /**

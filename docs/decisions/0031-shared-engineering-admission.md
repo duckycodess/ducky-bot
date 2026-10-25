@@ -70,9 +70,44 @@ nothing launched. A confirmed hold NEVER expires: not by time, a missing PID, a
 dead manager, an expired lease or an absent local record. Silence is not
 quiescence.
 
-**Pins.** A runtime pins the ledger identity and policy digest from its own
-configuration; a missing, replaced, restored or re-policied ledger is refused and
-never initialised. The ledger path must be absolute, symlink-free, owned by this
+**Pins identify a ledger; they do not detect a stale copy of it.** A runtime pins
+the ledger identity and policy digest from its own configuration; a missing, a
+DIFFERENT or a re-policied ledger is refused and never initialised. A stale COPY of
+the same ledger carries the same identity and the same policy digest, so a pin
+cannot tell it from the live file. It is therefore not claimed that an arbitrary
+restore is rejected by the pins.
+
+**Rollback fence (what is and is not covered).** Every change to a hold advances a
+generation counter in the ledger by trigger, and a small separate WITNESS file
+records the ledger id, the highest committed generation and the ledger file's
+physical identity (device and inode). A writer advances the witness after its commit
+UNDER THE LEDGER WRITE LOCK: it re-takes the lock, re-reads the generation that is
+committed at that moment and writes that, never a value it captured earlier. An
+unlocked read-then-rename would let a slower writer put an older generation over a
+newer one, so it is not used. The witness therefore does not decrease and does not
+run ahead of the database; a crash between a commit and the witness write leaves it
+LAGGING (detects less, never falsely). A reader reads the witness before it opens its
+snapshot, and the witness is read through an open descriptor (a path lookup racing a
+writer's atomic rename can briefly report a link count of zero). Every operation, from every
+participant, refuses with `ledger_mismatch` when the witness is missing or
+malformed, belongs to another ledger, records a different file, or is AHEAD of the
+database, and a process also refuses if the file goes below a generation it already
+saw. So a stale copy put back over the live file, in place or by rename, is refused
+by a participant that never saw the lost hold, instead of that participant being
+admitted from the now-empty file. Proven in scratch for Node and Python processes,
+and the owner's way back is the explicit `pnpm shared-admission rewitness`, which
+accepts the file as it stands, recovers nothing, and needs the attestation that no
+worker is running.
+
+NOT covered, and not claimed: a restore that puts back BOTH the ledger and its
+witness together (a directory, volume or VM snapshot); a witness that lags the
+database by operations in flight at a crash (it detects less, never falsely); and a
+participant that does not implement the check. A rollback of that kind is an
+unprevented runtime/restore blocker: ledger, coordinator databases and Agent Flow
+state would all be older than the running workers, and no file-level check can see
+that. The mitigation is operational (do not restore the host's state from a
+snapshot while workers run; if you must, stop everything and release holds by hand),
+not a guarantee. The ledger path must be absolute, symlink-free, owned by this
 user, mode 0700/0600, a single link, and outside `/tmp`, `/var/tmp`, `/dev/shm`,
 `/run`, `TMPDIR` and `XDG_RUNTIME_DIR`.
 
@@ -135,7 +170,8 @@ init|inspect|release`), the backup verifier's schema-30 checks, and a private Ag
 Flow companion candidate (a Python protocol client, an unapplied integration patch
 and cross-language tests) that is NOT part of this repository.
 
-NOT done, and each remains required: installing the companion into the live
+NOT done, and each remains required: a defence against a snapshot restore of both
+ledger files (see above); installing the companion into the live
 dispatcher; creating the live ledger and setting the pins; a controlled second
 admission attempt on the host that is refused; observing the cgroup membership of a
 real agent; the other thirteen blocker groups in ADR 0030.
@@ -163,7 +199,8 @@ the exact holder and an explicit attestation that no worker is running. After
 upgrading, an existing setup that set only `DUCKY_ENGINEERING_ENABLED` stops claiming
 until the second switch is deliberately set.
 
-**Residual limits, not waived:** reservations are admission accounting, not kernel
+**Residual limits, not waived:** a ledger restored together with its witness (a
+snapshot) is not detected; reservations are admission accounting, not kernel
 enforcement or continuous protection; tasks and PID ceilings are not covered; the
 companion is a candidate and its source/target parity with the installed dispatcher
 is unverified; a crash after a confirm and before the local commit leaves a hold

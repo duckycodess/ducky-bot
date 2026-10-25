@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
-  closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, unlinkSync,
+  closeSync, constants as fsConstants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync,
+  readFileSync, renameSync, unlinkSync, writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -102,6 +103,22 @@ BEFORE UPDATE OF state ON entries
 WHEN NOT (OLD.state = 'pending' AND NEW.state = 'confirmed')
 BEGIN SELECT RAISE(ABORT, 'state_forward_only'); END;
 
+-- A generation counter that EVERY change to a hold advances by exactly one, by
+-- trigger, so no writer (however buggy) can forget it. Together with the witness
+-- file (see the witness note in this module) it is what lets a participant notice that the file
+-- was rolled back to an older copy of itself.
+CREATE TABLE epoch (
+  id  INTEGER PRIMARY KEY CHECK (id = 1),
+  gen INTEGER NOT NULL CHECK (gen >= 0)
+);
+INSERT INTO epoch (id, gen) VALUES (1, 0);
+CREATE TRIGGER epoch_step BEFORE UPDATE ON epoch
+WHEN NEW.gen <> OLD.gen + 1 BEGIN SELECT RAISE(ABORT, 'epoch_step'); END;
+CREATE TRIGGER epoch_keep BEFORE DELETE ON epoch BEGIN SELECT RAISE(ABORT, 'epoch_keep'); END;
+CREATE TRIGGER entries_gen_i AFTER INSERT ON entries BEGIN UPDATE epoch SET gen = gen + 1 WHERE id = 1; END;
+CREATE TRIGGER entries_gen_u AFTER UPDATE ON entries BEGIN UPDATE epoch SET gen = gen + 1 WHERE id = 1; END;
+CREATE TRIGGER entries_gen_d AFTER DELETE ON entries BEGIN UPDATE epoch SET gen = gen + 1 WHERE id = 1; END;
+
 -- Policy and identity are written once, at init. Changing either is a NEW ledger.
 CREATE TRIGGER policy_fixed_u BEFORE UPDATE ON policy BEGIN SELECT RAISE(ABORT, 'policy_fixed'); END;
 CREATE TRIGGER policy_fixed_d BEFORE DELETE ON policy BEGIN SELECT RAISE(ABORT, 'policy_fixed'); END;
@@ -113,6 +130,7 @@ CREATE TRIGGER meta_fixed_d BEFORE DELETE ON meta BEGIN SELECT RAISE(ABORT, 'met
 export const LEDGER_REQUIRED_OBJECTS = [
   'meta', 'policy', 'entries', 'entries_admit', 'entries_identity_fixed',
   'entries_state_forward', 'policy_fixed_u', 'policy_fixed_d', 'meta_fixed_u', 'meta_fixed_d',
+  'epoch', 'epoch_step', 'epoch_keep', 'entries_gen_i', 'entries_gen_u', 'entries_gen_d',
 ] as const;
 
 export const policyDigest = (p: SharedAdmissionPolicy): string =>
@@ -193,6 +211,84 @@ function assertTrustedPath(loc: LedgerLocation, expectFile: boolean): void {
 const sqlErr = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const isBusy = (err: unknown): boolean => /locked|busy/i.test(sqlErr(err));
 
+/**
+ * The WITNESS: a small separate file next to the ledger holding the ledger id, the
+ * highest generation any writer has committed, and the ledger file's physical
+ * identity (device and inode). A writer advances it AFTER its commit and UNDER THE
+ * LEDGER WRITE LOCK: it re-takes `BEGIN IMMEDIATE`, re-reads the CURRENT committed
+ * generation and writes that, never a value it captured earlier, so two writers can
+ * never reorder witness writes. The witness therefore never decreases and never runs
+ * ahead of the database (an unlocked read-then-rename would let a slower writer put an
+ * older generation over a newer one). Readers read it BEFORE they open their snapshot,
+ * so they cannot see it ahead of their own view. A database whose generation is
+ * BELOW it, whose inode is not the one recorded, or whose witness is missing or
+ * unreadable is refused as `ledger_mismatch`. A stale copy of the same ledger
+ * carries the same identity and policy digest, so this is the only thing that
+ * tells a participant the file went backwards.
+ *
+ * What it does NOT cover, and is not claimed to: a restore that puts back BOTH
+ * files together (a directory or filesystem snapshot), and a witness lagging the
+ * database by the operations in flight when something crashed. Those are an
+ * unprevented restore/rollback limit, not an ID pin.
+ */
+export const witnessPath = (ledgerPath: string): string => `${ledgerPath}.witness`;
+
+interface Witness { v: 1; ledger_id: string; gen: number; dev: string; ino: string }
+
+const fileIdentity = (file: string): { dev: string; ino: string } => {
+  const st = lstatSync(file, { bigint: true });
+  return { dev: String(st.dev), ino: String(st.ino) };
+};
+
+function writeWitness(ledgerPath: string, w: Witness): void {
+  const target = witnessPath(ledgerPath);
+  const tmp = `${target}.tmp-${randomBytes(6).toString('hex')}`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(w)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, target);
+  const dfd = openSync(path.dirname(target), 'r');
+  try { fsyncSync(dfd); } finally { closeSync(dfd); }
+}
+
+type WitnessRead = { ok: true; w: Witness } | { ok: false; detail: string };
+
+function readWitness(loc: LedgerLocation): WitnessRead {
+  const file = witnessPath(loc.path);
+  const uid = loc.uid ?? process.getuid?.() ?? -1;
+  // Open, then `fstat` the DESCRIPTOR: a path lookup racing a writer's atomic rename
+  // can briefly report a link count of zero, and a check on the path would call a
+  // healthy witness corrupt. The descriptor is one consistent inode: either the
+  // witness before the rename or the one after it, both of which never run ahead of
+  // the database.
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    return { ok: false, detail: 'the witness file is missing' };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.uid !== uid || (st.mode & 0o077) !== 0) {
+      return { ok: false, detail: 'the witness file is not a private regular file' };
+    }
+    const w = JSON.parse(readFileSync(fd, 'utf8')) as Witness;
+    if (w.v !== 1 || typeof w.ledger_id !== 'string' || !Number.isSafeInteger(w.gen) || w.gen < 0
+        || typeof w.dev !== 'string' || typeof w.ino !== 'string') {
+      return { ok: false, detail: 'the witness file is malformed' };
+    }
+    return { ok: true, w };
+  } catch {
+    return { ok: false, detail: 'the witness file is unreadable' };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export interface InitLedgerOptions extends LedgerLocation {
   readonly policy?: Partial<SharedAdmissionPolicy>;
   readonly ledgerId?: string;
@@ -258,7 +354,29 @@ export function initLedger(opts: InitLedgerOptions): { ledgerId: string; policyD
   }
   const dfd = openSync(dir, 'r');
   try { fsyncSync(dfd); } finally { closeSync(dfd); }
+  writeWitness(opts.path, { v: 1, ledger_id: ledgerId, gen: 0, ...fileIdentity(opts.path) });
   return { ledgerId, policyDigest: policyDigest(policy) };
+}
+
+/**
+ * The owner's explicit acceptance of the CURRENT file as the truth: it rewrites the
+ * witness from the file as it stands. Used only after a genuine, deliberate move or
+ * restore, and only with every worker proven gone, because it removes exactly the
+ * protection the witness gives. Never called by a runtime.
+ */
+export function rewitnessLedger(opts: LedgerLocation & { expectedLedgerId: string }): { gen: number } {
+  assertTrustedPath(opts, true);
+  const db = new DatabaseSync(opts.path);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${LEDGER_BUSY_TIMEOUT_MS}`);
+    const id = db.prepare(`SELECT value FROM meta WHERE key = 'ledger_id'`).get() as { value: string } | undefined;
+    if (id?.value !== opts.expectedLedgerId) throw new LedgerPathError('the ledger identity differs from the one given');
+    const gen = Number((db.prepare('SELECT gen FROM epoch WHERE id = 1').get() as { gen: number }).gen);
+    writeWitness(opts.path, { v: 1, ledger_id: opts.expectedLedgerId, gen, ...fileIdentity(opts.path) });
+    return { gen };
+  } finally {
+    db.close();
+  }
 }
 
 export interface SharedLedgerOptions extends LedgerLocation {
@@ -269,6 +387,11 @@ export interface SharedLedgerOptions extends LedgerLocation {
   /** Takes one account-memory reading; called ONLY while the admission lock is held. */
   readonly observe: MemoryObserver;
   readonly now?: () => number;
+  /**
+   * TEST ONLY: deterministic pause points for the witness-ordering regression. A
+   * runtime never sets these, and a source scan asserts that.
+   */
+  readonly hooks?: { readonly afterCommit?: () => void; readonly beforeWitnessWrite?: () => void };
 }
 
 interface EntryRow {
@@ -305,6 +428,8 @@ class Refuse extends Error {
 
 export class SharedLedger implements SharedAdmissionLedgerPort {
   private readonly now: () => number;
+  /** Highest generation THIS process has seen; the file going below it is a rollback. */
+  private highestGen = 0;
 
   constructor(private readonly opts: SharedLedgerOptions) {
     this.now = opts.now ?? Date.now;
@@ -382,15 +507,78 @@ export class SharedLedger implements SharedAdmissionLedgerPort {
     return { ok: true, ledgerId, digest, policy };
   }
 
+  private readGen(db: DatabaseSync): number {
+    return Number((db.prepare('SELECT gen FROM epoch WHERE id = 1').get() as { gen: number }).gen);
+  }
+
+  /**
+   * The file must be the one the witness recorded, at or ahead of the last generation
+   * committed. `w` was read BEFORE this transaction's snapshot was taken: the witness
+   * never runs ahead of the database, so the snapshot cannot be older than it unless
+   * the file really went backwards.
+   */
+  private checkRollback(db: DatabaseSync, ledgerId: string, w: WitnessRead): number {
+    const gen = this.readGen(db);
+    if (!w.ok) throw new Refuse('ledger_mismatch', w.detail);
+    if (w.w.ledger_id !== ledgerId) throw new Refuse('ledger_mismatch', 'the witness belongs to a different ledger');
+    const id = fileIdentity(this.opts.path);
+    if (w.w.dev !== id.dev || w.w.ino !== id.ino) {
+      throw new Refuse('ledger_mismatch', 'the ledger file is not the one the witness recorded');
+    }
+    if (gen < w.w.gen) throw new Refuse('ledger_mismatch', 'the ledger is older than its witness: it was rolled back');
+    if (gen < this.highestGen) throw new Refuse('ledger_mismatch', 'the ledger went backwards while this process watched it');
+    return gen;
+  }
+
+  /**
+   * After the commit, UNDER THE WRITE LOCK: re-take it, re-read the generation that is
+   * committed NOW, and write it if the witness is behind. Never writes a generation
+   * captured before the lock, so concurrent writers cannot move it backwards. A failure
+   * here (or a crash before it) is lag, never a false rollback: the next writer catches up.
+   */
+  private advanceWitness(db: DatabaseSync, ledgerId: string): void {
+    try {
+      db.exec('BEGIN IMMEDIATE');
+    } catch {
+      return; // the lock is busy: whoever holds it will catch the witness up
+    }
+    try {
+      const gen = this.readGen(db);
+      this.highestGen = Math.max(this.highestGen, gen);
+      const w = readWitness(this.opts);
+      if (w.ok && w.w.ledger_id === ledgerId && w.w.gen < gen) {
+        this.opts.hooks?.beforeWitnessWrite?.();
+        writeWitness(this.opts.path, { ...w.w, gen });
+      }
+    } catch {
+      /* the witness lags; the next writer advances it */
+    } finally {
+      try { db.exec('COMMIT'); } catch { /* nothing was written to the database */ }
+    }
+  }
+
   private run<T>(write: boolean, fn: (db: DatabaseSync, chk: Extract<Checked, { ok: true }>) => T): T {
     const db = this.open();
     try {
+      let endGen = 0;
+      let ledgerId = '';
+      // Read BEFORE the snapshot (see checkRollback).
+      const witness = readWitness(this.opts);
       db.exec(write ? 'BEGIN IMMEDIATE' : 'BEGIN');
       try {
         const chk = this.verifyIdentity(db);
         if (!chk.ok) throw new Refuse(chk.reason, chk.detail);
+        ledgerId = chk.ledgerId;
+        this.checkRollback(db, chk.ledgerId, witness);
         const out = fn(db, chk);
+        endGen = this.readGen(db);
         db.exec('COMMIT');
+        if (write) {
+          this.opts.hooks?.afterCommit?.();
+          this.advanceWitness(db, ledgerId);
+        } else {
+          this.highestGen = Math.max(this.highestGen, endGen);
+        }
         return out;
       } catch (err) {
         try { db.exec('ROLLBACK'); } catch { /* the first error is the interesting one */ }

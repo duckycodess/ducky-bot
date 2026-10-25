@@ -256,6 +256,10 @@ pnpm shared-admission init --path ~/.local/state/shared-engineering-admission/le
 #    prints ledger_id and policy_digest: every participant pins BOTH.
 # 2. Read-only view of the identity, the policy digest and every hold.
 pnpm shared-admission inspect --path <ledger> --ledger-id <id>
+# 2b. After a DELIBERATE move or restore of the ledger file, and only then, with
+#    every worker proven gone: accept the file as it stands. It recovers nothing
+#    and removes the rollback protection, so it needs the same attestation.
+pnpm shared-admission rewitness --path <ledger> --ledger-id <id> --i-verified-no-worker-is-running
 # 3. The owner's explicit recovery for a hold nothing else will clear (a crash
 #    between confirm and the local commit, a lost local database, a worker whose
 #    workspace never proved closed). Exact holder, and an attestation that no
@@ -274,7 +278,9 @@ eligible and cannot open the ledger does not run engineering and says why in its
 log and audit trail; it never creates a ledger.
 
 What stops engineering on its own (each is logged as a reason word): a missing,
-replaced or re-policied ledger; a pin that differs; a local slot whose fence the
+replaced or re-policied ledger; a stale copy of the ledger put back over the live
+one (its witness file records a newer generation and a different file); a pin that
+differs; a local slot whose fence the
 ledger does not confirm; a surviving shared hold after a database restore; a
 release the ledger refused or that failed 100 times. The way out of each is a
 person looking, then `release` or `/job cleanup` -- not a retry.

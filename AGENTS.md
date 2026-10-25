@@ -68,7 +68,10 @@ Report contradictions rather than picking whichever reads best.
   cross-program safety, and never describe the ledger as live. Engineering is off
   unless `DUCKY_ENGINEERING_ENABLED` AND the separate, default-off
   `DUCKY_SHARED_ADMISSION_ELIGIBLE` say otherwise; a ledger file, a participant
-  row or a candidate patch is not eligibility. A confirmed shared hold never
+  row or a candidate patch is not eligibility. The ledger pins identify a ledger and
+  do not detect a stale copy of it; a rollback fence refuses a stale copy put back
+  where the witness survives, and a snapshot restore of both is NOT covered. A
+  confirmed shared hold never
   expires by time, PID or an absent local record, a release needs the exact
   ledger, fence and holder after a local commit, and a slot with an unconfirmed
   stop is released only by quiescence or an owner's `/job cleanup`.

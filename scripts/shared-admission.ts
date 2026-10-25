@@ -5,6 +5,9 @@
  *   init     creates a NEW ledger (refuses if anything exists at the path) and
  *            prints its identity and policy digest, which every participant pins.
  *   inspect  read-only: the identity, the policy digest and every hold.
+ *   rewitness  the owner's explicit acceptance of the CURRENT file as the truth,
+ *            after a deliberate move or restore. Removes the rollback protection
+ *            the witness gives, so it needs the same attestation as `release`.
  *   release  frees ONE hold by exact ledger, fence and holder. It is the owner's
  *            explicit recovery for a hold that nothing else will ever clear, and
  *            it refuses unless the caller attests the worker is gone.
@@ -17,7 +20,7 @@ import {
   SHARED_ADMISSION_DEFAULT_POLICY, ADMISSION_PROGRAMS, type AdmissionProgram,
 } from '../packages/contracts/src/index.js';
 import {
-  SharedLedger, defaultAccountCgroupDir, initLedger, observeAccountMemory,
+  SharedLedger, defaultAccountCgroupDir, initLedger, observeAccountMemory, rewitnessLedger,
 } from '../packages/persistence/src/index.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -56,6 +59,12 @@ try {
     });
     process.stdout.write(`ledger created at ${file}\nledger_id=${made.ledgerId}\npolicy_digest=${made.policyDigest}\n`);
     process.stdout.write('Pin both in every participant. This creates no authority by itself: engineering stays off until the explicit eligibility gate is set.\n');
+  } else if (command === 'rewitness') {
+    if (flags.get('i-verified-no-worker-is-running') !== 'true') {
+      throw new Error('refusing: pass --i-verified-no-worker-is-running once no agent holds any reservation on this ledger');
+    }
+    const out = rewitnessLedger({ path: file, expectedLedgerId: need('ledger-id') });
+    process.stdout.write(`witness rewritten from the file as it stands (generation ${out.gen}). Any hold lost to an earlier rollback is NOT recovered by this.\n`);
   } else if (command === 'inspect' || command === 'release') {
     const ledger = new SharedLedger({
       path: file,
@@ -77,7 +86,7 @@ try {
       if (out !== 'released' && out !== 'gone') process.exitCode = 3;
     }
   } else {
-    throw new Error('usage: shared-admission <init|inspect|release> --path <file> [...]');
+    throw new Error('usage: shared-admission <init|inspect|release|rewitness> --path <file> [...]');
   }
 } catch (err) {
   process.stderr.write(`shared-admission: ${err instanceof Error ? err.message : String(err)}\n`);

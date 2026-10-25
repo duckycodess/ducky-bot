@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -735,6 +735,29 @@ describe('a missing prior fence is a stop at the Ducky layer too', () => {
     expect(h.app.sharedAdmission!.acquire(row, 'acme/demo', gate.instanceId, 999))
       .toEqual({ ok: false, reason: 'resume_fence_missing' });
     expect(r.ledger.inspect().entries).toHaveLength(0);
+    h.close();
+  });
+});
+
+describe('a stale copy of the same ledger does not admit Ducky past a live Agent Flow hold', () => {
+  it('stops engineering when the ledger file went backwards, and admits nothing', () => {
+    const r = rig();
+    const h = shared(r);
+    const job = submit(h, 'demo');
+    const stale = path.join(r.dir, 'stale.sqlite3');
+    copyFileSync(r.file, stale); // the empty ledger: same identity, same policy digest
+    // Agent Flow takes and confirms a hold; its worker is alive.
+    expect(r.ledger.acquire(af('dotph/elsewhere'))).toMatchObject({ ok: true });
+    const live = r.ledger.inspect().entries[0]!;
+    r.ledger.confirm(live.fence, AF);
+    expect(r.ledger.verify(live.fence, AF)).toBe('confirmed');
+    // The stale copy is put back over the live file.
+    writeFileSync(r.file, readFileSync(stale));
+
+    expect(h.app.jobs.claim(h.executorId, 'k1')).toBeUndefined();
+    expect(h.app.sharedAdmission?.stoppedBecause()).toBe('ledger_ledger_mismatch');
+    expect(h.store.jobs.byId(job.id)?.state).toBe('queued');
+    expect(h.store.jobs.admission()).toBeUndefined();
     h.close();
   });
 });

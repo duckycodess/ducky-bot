@@ -80,6 +80,22 @@ Adaptations where the source proved a dependency, all conservative:
   never reached the marker, and a stop on any ledger drift. Installing it would stop
   Agent Flow launching until a ledger and pins exist, by design.
 
+- **Rollback fence (manager check, 2026-10-25).** A stale copy of the same ledger keeps
+  its id and policy digest, so the pins cannot reject it; before this change a different
+  participant WAS admitted from the rolled-back file (proved in scratch). The ledger now
+  carries a trigger-advanced generation and a separate witness file (id, generation,
+  device/inode); every operation refuses a missing, foreign, newer or different-file
+  witness. A snapshot restore of both files together is NOT detected and is an unprevented
+  blocker. Manager concurrency correction: the witness is advanced after the commit under
+  the ledger write lock from a freshly re-read generation (not an unlocked captured value),
+  and read through a descriptor before the reader's snapshot; a cross-process reader found
+  the path-`nlink` race (a transient zero during a rename) and a barrier-controlled
+  regression pins the out-of-order writer, the held lock and the reader. Failure-before/success-after mutations (scratch copies, tests run against each):
+  Ducky exclusivity, global cap, repository uniqueness, reservation enforcement,
+  outstanding-reservation counting, confirmed-hold expiry, missing-prior-fence, rollback
+  fence, drain-in-transaction guard, no-outbox-row release, unconfirmed claim and obsolete
+  cached replay were each caught.
+
 Required and NOT done: installing the companion; creating the live ledger and pins;
 setting eligibility; a controlled second admission refused on the host; source/target
 parity of the candidate with the installed dispatcher beyond the baseline hash

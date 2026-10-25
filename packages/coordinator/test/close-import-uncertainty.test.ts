@@ -219,3 +219,81 @@ describe('a source close with a marker, imported after migration 39, is permanen
     h.close();
   });
 });
+
+describe('one close identity cannot stand for two different instants', () => {
+  const adopted = (h: Harness, rows: { id: string; n: number; at: string; settle?: 'proven' | 'pending' }[]): void => {
+    h.store.assistantWatch.insertTarget({
+      id: 'disc', publicId: 'wdisca', discordUserId: OWNER, repoKey: REPO, display: 'acme/widgets', defaultBranch: 'main',
+      state: 'active', lastObservedAt: null, createdAt: NOW, cancelledAt: null, origin: 'discovered',
+    });
+    for (const r of rows) {
+      h.store.db.prepare(
+        `INSERT INTO assistant_watch_events (id, target_id, kind, surface, identity, occurred_at, payload_json, origin, digested_at, created_at)
+         VALUES (?, 'disc', 'pr_closed', 'pulls', ?, ?, '{}', 'observed', ?, ?)`,
+      ).run(r.id, `${r.n}:closed`, r.at, r.settle === 'proven' ? NOW : null, NOW);
+      if (r.settle === 'proven') {
+        h.store.nativeTransitions.reserveTarget(OWNER, REPO, { kind: 'pr_closed', identity: `${r.n}:closed`, occurredAt: r.at, providerHash: null, attempt: null }, 'target_digest', r.id, NOW);
+        h.store.nativeTransitions.markTargetDelivered('target_digest', r.id, NOW);
+      }
+    }
+  };
+  const row = (h: Harness, id: string) => h.store.db.prepare('SELECT occurred_at, alerted_at, digested_at FROM assistant_watch_events WHERE id = ?').get(id);
+
+  for (const settle of ['pending', 'proven'] as const) {
+    it(`refuses a source close at C1 beside an adopted ${settle} close at C2, counted, with nothing written or mis-keyed`, () => {
+      const { h, apply } = boot();
+      adopted(h, [{ id: 'obs', n: 21, at: C2, settle }]);
+      const before = { counts: rowCounts(h.store), row: row(h, 'obs'), claims: h.store.nativeTransitions.all() };
+      const out = apply(docWith([close(21, { occurredAt: C1, digestedAt: '2026-10-12T00:00:00Z' })]));
+      expect(out.ok).toBe(false);
+      expect(out.issues).toEqual([{ category: 'watch', rule: 'close_instant_differs', count: 1 }]);
+      // Nothing was written: no uncertainty for either instant, the row is unchanged, the target is not adopted, the
+      // proven receipt (if any) is exactly what it was.
+      expect(uncertainty(h)).toEqual([]);
+      expect({ counts: rowCounts(h.store), row: row(h, 'obs'), claims: h.store.nativeTransitions.all() }).toEqual(before);
+      expect(probe(h, 21, C1)).toBe('free');
+      expect(probe(h, 21, C2)).toBe(settle === 'proven' ? 'target_delivered' : 'free');
+      // Refusal is deterministic: repeating it changes nothing.
+      expect(apply(docWith([close(21, { occurredAt: C1, digestedAt: '2026-10-12T00:00:00Z' })])).ok).toBe(false);
+      expect(uncertainty(h)).toEqual([]);
+      h.close();
+    });
+  }
+
+  it('counts every conflicting close, refuses even an unmarked one (it cannot be represented), and not the rest of the import', () => {
+    const { h, apply } = boot();
+    adopted(h, [{ id: 'a', n: 21, at: C2 }, { id: 'b', n: 22, at: C2 }, { id: 'c', n: 23, at: C1 }]);
+    const out = apply(docWith([close(21, { occurredAt: C1 }), close(22, { occurredAt: C1, alertedAt: '2026-10-12T00:00:00Z' }), close(23, { occurredAt: C1, digestedAt: '2026-10-12T00:00:00Z' })]));
+    expect(out.issues).toEqual([{ category: 'watch', rule: 'close_instant_differs', count: 2 }]);
+    // The same document minus the two conflicts imports: only #23 (an equal instant) is left.
+    expect(apply(docWith([close(23, { occurredAt: C1, digestedAt: '2026-10-12T00:00:00Z' })])).ok).toBe(true);
+    expect(uncertainty(h)).toMatchObject([{ item: '23' }]);
+    h.close();
+  });
+
+  it('still merges an equivalent spelling of the same instant, and a repeat import is then idempotent', () => {
+    const { h, apply } = boot();
+    adopted(h, [{ id: 'obs', n: 21, at: C1 }]);
+    const doc = docWith([close(21, { occurredAt: '2026-10-11T09:00:00Z', digestedAt: '2026-10-12T00:00:00Z' })]);
+    expect(apply(doc).issues).toEqual([]);
+    expect(uncertainty(h)).toMatchObject([{ item: '21', transition_key: transitionKey(closedTransition(21, C1)!), origin: 'observed', multiplicity: 1 }]);
+    const after = uncertainty(h);
+    expect(apply(doc).ok).toBe(true);
+    expect(uncertainty(h)).toEqual(after);
+    expect(probe(h, 21, C1)).toBe('uncertain');
+    expect(probe(h, 21, C2)).toBe('free');
+    h.close();
+  });
+
+  it('has the same guard at the write itself: the repository refuses to fill a marker onto a close of another instant', () => {
+    const { h } = boot();
+    adopted(h, [{ id: 'obs', n: 21, at: C2 }]);
+    expect(() => h.store.assistantWatch.insertImportedEventIfNew({
+      id: 'x', targetId: 'disc', kind: 'pr_closed', identity: '21:closed', occurredAt: C1, payloadJson: '{}',
+      alertedAt: null, digestedAt: '2026-10-12T00:00:00Z', createdAt: NOW,
+    })).toThrow(/close instant conflict/);
+    expect(uncertainty(h)).toEqual([]);
+    expect(row(h, 'obs')).toMatchObject({ occurred_at: C2, digested_at: null });
+    h.close();
+  });
+});

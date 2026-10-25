@@ -150,6 +150,10 @@ A pull request close SHALL be an exact transition: the pull request number AND t
 - **WHEN** an import supplies an alert or digest marker on a close, for a new row or for a row that had none
 - **THEN** the same identifiers-only uncertainty is recorded in the import's own transaction, once (a repeat import, a dry run and a failed import add nothing), with no receipt and no cutoff, and a close with no source marker is delivered by the normal protocol
 
+#### Scenario: A source close of another instant than the adopted row's
+- **WHEN** an import supplies a close whose pull request identity already exists on an adopted target at a different canonical instant
+- **THEN** the import is refused before any write with a counted `close_instant_differs` conflict, no marker is filled or mis-keyed, an existing proven receipt is unchanged, and an equivalent spelling of the same instant imports normally
+
 ### Requirement: Owner monitoring control with exact pause provenance
 The owner SHALL set the global notification-monitoring switch explicitly on or off through the existing owner-only watch command. Setting the state it already has SHALL create no row, change no timestamp, open no pause period and write no audit row. A change SHALL write the switch, its pause period and its audit row in one transaction at the injected time. An owner pause SHALL record its real start; an imported pause, or one recorded before provenance existed, SHALL record no real start, only the latest instant it is known to have begun. A pause period is provenance only and SHALL NOT suppress or authorize any delivery. Neither direction SHALL change a target, checkpoint, pending event, failure count or call budget, and pausing applies at the next tick. Resuming SHALL NOT be refused because native history exists: what native paths delivered SHALL be reconciled per exact transition as targets observe, and only an unreadable ledger boundary SHALL refuse. A resume SHALL NOT reset a checkpoint, and a repeated import SHALL NOT override the owner's choice (verification reports the difference).
 

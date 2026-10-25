@@ -1,5 +1,5 @@
 import {
-  BASELINE_MARKER_CANDIDATE_LIMIT, BASELINE_MARKER_PREFIX, TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS,
+  BASELINE_MARKER_CANDIDATE_LIMIT, BASELINE_MARKER_PREFIX, canonicalStamp, TIME_CURSOR_SURFACES, WATCH_ALERT_KINDS,
   WATCH_EVENT_SURFACE, classifyBaselineMarker, isImpossibleReviewChange, isReservedMarkerIdentity,
   isReviewProviderState, type MarkerCandidate, type ReviewProviderState, type WatchEventKind, type WatchSurface,
 } from '@ducky/contracts';
@@ -7,6 +7,13 @@ import type { Db } from '../db.js';
 import { recordCloseUncertainty } from '../native-close-evidence.js';
 import { atomically } from '../db.js';
 import { NativeTransitionsRepo } from './native-transitions.repo.js';
+
+/** Whether two close instants are both readable and are DIFFERENT instants (equivalent spellings are the same one). */
+export function closeInstantsDiffer(a: string, b: string): boolean {
+  const x = canonicalStamp(a);
+  const y = canonicalStamp(b);
+  return x !== null && y !== null && x !== y;
+}
 
 export type WatchCheckpointState = 'unbaselined' | 'imported' | 'ready';
 
@@ -1234,6 +1241,12 @@ export class AssistantWatchRepo {
       const known = this.db
         .prepare('SELECT id, origin, occurred_at, alerted_at, digested_at FROM assistant_watch_events WHERE target_id = ? AND kind = ? AND identity = ?')
         .get(row.targetId, row.kind, row.identity) as Record<string, unknown>;
+      // A close's identity (`<n>:closed`) does not carry its instant, so one row cannot stand for two different instants.
+      // The importer refuses that before any write (`close_instant_differs`); this is the same rule at the write itself, so
+      // a source marker can never be filled onto a close of another instant and mis-keyed.
+      if (row.kind === 'pr_closed' && closeInstantsDiffer(String(known['occurred_at']), row.occurredAt)) {
+        throw new Error('close instant conflict');
+      }
       // Known on both sides: the source's settlement fills what Ducky has not settled, and
       // never clears one Ducky has. An event the source already alerted or digested is
       // therefore never told again.
@@ -1280,6 +1293,14 @@ export class AssistantWatchRepo {
       if (m && (markers.get(m.runId) ?? -1) < m.boundaryMs) markers.set(m.runId, m.boundaryMs);
     }
     return { markers, overflow: rows.length > BASELINE_MARKER_CANDIDATE_LIMIT };
+  }
+
+  /** The stored event time of a known event, or undefined when the target has no such event. */
+  eventOccurredAt(targetId: string, kind: WatchEventKind, identity: string): string | undefined {
+    const r = this.db
+      .prepare('SELECT occurred_at FROM assistant_watch_events WHERE target_id = ? AND kind = ? AND identity = ?')
+      .get(targetId, kind, identity) as { occurred_at: string } | undefined;
+    return r === undefined ? undefined : String(r.occurred_at);
   }
 
   eventExists(targetId: string, kind: WatchEventKind, identity: string): boolean {

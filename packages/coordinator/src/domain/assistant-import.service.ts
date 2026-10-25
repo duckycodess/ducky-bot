@@ -8,7 +8,7 @@ import {
   type ImportedScheduleException, type ImportedScheduleRule,
   type ImportedTask, type ImportedWatchTarget, type WatchReaderCapabilities, type WatchSurface,
 } from '@ducky/contracts';
-import type { RuntimeLockHandle, Store } from '@ducky/persistence';
+import { closeInstantsDiffer, type RuntimeLockHandle, type Store } from '@ducky/persistence';
 import type { IdentityCategory } from '@ducky/persistence';
 import type { BriefingDelivery } from './briefing-notifications.service.js';
 import { reviewEvidenceCounts } from './github-watches.service.js';
@@ -294,6 +294,14 @@ export class AssistantImportService {
         // never block the import or override a source mute. Anything else is a collision.
         if (present.origin === 'discovered' && !this.store.assistantImport.hasLiveTarget('watch_target', present.id)) {
           plan.adopt.set(t.sourceId, present.id);
+          // A close's identity does not carry its instant, so the adopted target's row for that pull request cannot also
+          // stand for a source close of ANOTHER instant (two distinct closes, one unique identity). Refuse precisely, counted
+          // per event, before any write; equivalent spellings of one instant are not a conflict.
+          for (const e of t.events) {
+            if (e.kind !== 'pr_closed') continue;
+            const known = this.store.assistantWatch.eventOccurredAt(present.id, e.kind, e.identity);
+            if (known !== undefined && closeInstantsDiffer(known, e.occurredAt)) conflict('watch', 'close_instant_differs');
+          }
         } else {
           conflict('watch', 'reference_already_present');
         }

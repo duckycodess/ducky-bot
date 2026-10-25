@@ -423,7 +423,13 @@ its source identity (`<n>:closed`) and uniqueness; the number comes from that id
   marker FIRST appears on a row, so a repeat import adds nothing and a marker Ducky wrote itself after a proven send is never
   history), collisions merge into one row with a multiplicity and an order-independent representative (earliest marker
   instant, then event id), the boundary counts move with it, and it writes no receipt and no cutoff. The document validator
-  refuses an unreadable event time, so the same-pull-request fallback arises only from rows written before 39. There is no
+  refuses an unreadable event time, so the same-pull-request fallback arises only from rows written before 39. **A known limit,
+  stated as a conflict, not a protocol:** a close's source identity (`<n>:closed`) is unique per target and does not carry its
+  instant, so an adopted target's observed row for a pull request cannot also stand for a source close of a DIFFERENT instant.
+  The importer refuses that before any write, counted per event as `watch/close_instant_differs` (the whole import rolls back,
+  nothing is filled or mis-keyed, an existing proven receipt is untouched), and the write itself refuses the same case; an
+  equivalent spelling of the same instant is not a conflict and merges. Resolving it needs a source identity that carries the
+  instant, which is not invented here. There is no
   clearing control and the table is never rewritten or cleared. A native exact close that matches the uncertainty is decided inside the observation's own transaction in this order:
   exact delivered target receipt (covered), exact reserved target receipt (wait), matching uncertainty (HELD: a durable,
   counted, close-specific held row, not sent), else told. A marker-only legacy close that is LATER digested with proof leaves a

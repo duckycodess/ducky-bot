@@ -323,6 +323,105 @@ describe('migration 20: the dead column', () => {
   });
 });
 
+describe('migration 28: engineering admission', () => {
+  const seedJob = (db: ReturnType<typeof fresh>, id: string, slug: string): void => {
+    const store = createStore(db);
+    store.repos.upsert({
+      slug, localPath: `/tmp/${slug}`, allowJobs: true, defaultBranch: 'main',
+      githubOwner: null, githubRepo: null, allowWorktree: true, allowBootstrap: false,
+      bootstrapAllowedEntries: ['.git'], enabled: true,
+    });
+    store.jobs.create({
+      id, publicId: `p${id}`, discordUserId: '1', repoSlug: slug, task: 't', context: null,
+      bootstrap: false, maxAttempts: 1, maxOwnerInputRounds: 3, state: 'queued',
+    });
+  };
+
+  it('is a single structural slot, not a convention', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'two');
+    const store = createStore(db);
+
+    expect(store.jobs.acquireAdmission('a', 'one')).toBe(true);
+    // Re-taking it for the holder is allowed; a different job is refused.
+    expect(store.jobs.acquireAdmission('a', 'one')).toBe(true);
+    expect(store.jobs.acquireAdmission('b', 'two')).toBe(false);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO engineering_admission (slot, job_id, repo_slug, acquired_at, reason)
+           VALUES (2, 'b', 'two', 'now', 'active_attempt')`,
+        )
+        .run(),
+    ).toThrow();
+    expect(() =>
+      db.prepare(`UPDATE engineering_admission SET reason = 'maybe'`).run(),
+    ).toThrow();
+    db.close();
+  });
+
+  it('is never released by releasing somebody else’s reservation, and follows its own', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'two');
+    const store = createStore(db);
+    store.jobs.acquireReservation('one', 'a', null);
+    store.jobs.acquireReservation('two', 'b', null);
+    store.jobs.acquireAdmission('a', 'one');
+
+    expect(store.jobs.releaseReservation('two', 'b')).toBe(true);
+    expect(store.jobs.admission()?.jobId).toBe('a');
+
+    store.jobs.markReservationOrphan('one');
+    expect(store.jobs.admission()?.reason).toBe('unconfirmed_stop');
+    expect(store.jobs.releaseReservation('one', 'a')).toBe(true);
+    expect(store.jobs.admission()).toBeUndefined();
+    db.close();
+  });
+
+  it('releases a reservation only for the job that owns it, and its slot only after that delete', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    seedJob(db, 'b', 'one');
+    const store = createStore(db);
+    store.jobs.acquireReservation('one', 'a', null);
+    store.jobs.acquireAdmission('a', 'one');
+
+    // Another job's release of the SAME repository touches neither the
+    // reservation nor the slot of the job that holds them.
+    expect(store.jobs.releaseReservation('one', 'b')).toBe(false);
+    expect(store.jobs.reservation('one')?.jobId).toBe('a');
+    expect(store.jobs.admission()?.jobId).toBe('a');
+    // A release naming no job that holds anything changes nothing either.
+    expect(store.jobs.releaseReservation('one', 'nobody')).toBe(false);
+    expect(store.jobs.releaseReservation('absent-repo', 'a')).toBe(false);
+    expect(store.jobs.admission()?.jobId).toBe('a');
+
+    expect(store.jobs.releaseReservation('one', 'a')).toBe(true);
+    expect(store.jobs.reservation('one')).toBeUndefined();
+    expect(store.jobs.admission()).toBeUndefined();
+    db.close();
+  });
+
+  it('is refused by the retention guard while held, and named as forbidden', () => {
+    const db = fresh();
+    seedJob(db, 'a', 'one');
+    const store = createStore(db);
+    db.prepare("UPDATE jobs SET state = 'failed', finished_at = ? WHERE id = 'a'").run('2020-01-01T00:00:00.000Z');
+    store.jobs.acquireAdmission('a', 'one');
+    expect(store.retention.guardJobUnit('a')).toEqual({ ok: false, refusal: 'reservation_held' });
+    db.close();
+  });
+
+  it('carries the attempt deadline column', () => {
+    const db = fresh();
+    const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain('attempt_deadline_at');
+    db.close();
+  });
+});
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -392,3 +491,74 @@ describe('migration 21: briefing delivery targets', () => {
 function fresh0() {
   return openDatabase({ location: ':memory:' });
 }
+
+describe('migration 29: pause delivery', () => {
+  const seed = (db: ReturnType<typeof fresh>) => {
+    const store = createStore(db);
+    store.repos.upsert({
+      slug: 'one', localPath: '/tmp/one', allowJobs: true, defaultBranch: 'main',
+      githubOwner: null, githubRepo: null, allowWorktree: true, allowBootstrap: false,
+      bootstrapAllowedEntries: ['.git'], enabled: true,
+    });
+    store.jobs.create({
+      id: 'a', publicId: 'pa', discordUserId: '1', repoSlug: 'one', task: 't', context: null,
+      bootstrap: false, maxAttempts: 1, maxOwnerInputRounds: 3, state: 'queued',
+    });
+    return store;
+  };
+  const expiry = {
+    jobId: 'a', leaseDigest: '0123456789abcdef', executorId: 'exec-a', workspaceId: 'w',
+    agentName: 'ducky-pi-x', attemptsBefore: 0, deliveryProtocol: 1 as const,
+    chargeState: 'deferred' as const, disposition: 'pending' as const,
+  };
+
+  it('defaults every existing job to the ordinary path and constrains the column', () => {
+    const db = fresh();
+    const store = seed(db);
+    expect(store.jobs.byId('a')?.deliveryProtocol).toBe(0);
+    expect(() => db.prepare('UPDATE jobs SET delivery_protocol = 2').run()).toThrow();
+    db.close();
+  });
+
+  it('keeps one structured row per expired lease, and settles it exactly once', () => {
+    const db = fresh();
+    const store = seed(db);
+    store.jobs.recordLeaseExpiry(expiry);
+    // The same lease cannot be recorded twice (a repeated expiry pass is a no-op).
+    store.jobs.recordLeaseExpiry({ ...expiry, attemptsBefore: 5 });
+    expect(store.jobs.expiriesFor('a')).toHaveLength(1);
+    expect(store.jobs.pendingExpiry('a')).toMatchObject({ attemptsBefore: 0, chargeState: 'deferred' });
+
+    const id = store.jobs.pendingExpiry('a')!.id;
+    expect(store.jobs.settleExpiry(id, 'paused', 'not_charged')).toBe(true);
+    expect(store.jobs.settleExpiry(id, 'charged', 'charged')).toBe(false);
+    expect(store.jobs.expiryFor('a', expiry.leaseDigest)).toMatchObject({
+      disposition: 'paused', chargeState: 'not_charged',
+    });
+    expect(store.jobs.pendingExpiry('a')).toBeUndefined();
+
+    expect(() =>
+      db.prepare(`UPDATE job_lease_expiries SET disposition = 'maybe'`).run(),
+    ).toThrow();
+    expect(() =>
+      db.prepare(`UPDATE job_lease_expiries SET charge_state = 'maybe'`).run(),
+    ).toThrow();
+    db.close();
+  });
+
+  it('keys a receipt on its report id, so a report can be committed once', () => {
+    const db = fresh();
+    const store = seed(db);
+    const row = {
+      reportId: '11111111-1111-4111-8111-111111111111', jobId: 'a', executorId: 'exec-a',
+      leaseDigest: '0123456789abcdef', workspaceId: 'w', agentName: 'ducky-pi-x',
+      cause: 'agent_idle_no_result', disposition: 'paused' as const,
+    };
+    store.jobs.insertReceipt(row);
+    expect(store.jobs.receiptById(row.reportId)).toMatchObject(row);
+    expect(() => store.jobs.insertReceipt(row)).toThrow();
+    expect(() => store.jobs.insertReceipt({ ...row, reportId: 'x', jobId: 'missing' })).toThrow();
+    expect(() => store.jobs.insertReceipt({ ...row, reportId: 'y', disposition: 'superseded' as never })).toThrow();
+    db.close();
+  });
+});

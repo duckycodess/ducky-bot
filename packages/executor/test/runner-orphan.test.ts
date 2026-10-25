@@ -6,6 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ClaimResponse } from '@ducky/contracts';
 import type { OrchestrationOutcome, PiOrchestrator } from '@ducky/adapters';
 import { runClaimedJob } from '../src/runner.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 /**
  * The host-side half of the single-writer guarantee, on the orphan path.
@@ -83,6 +84,7 @@ const orchestratorReturning = (outcome: OrchestrationOutcome): PiOrchestrator =>
   runJob: async () => outcome,
   cancel: async () => ({ terminated: true, agentStatus: 'idle', detail: 'x' }),
   cleanup: async () => ({ closed: true, detail: 'closed' }),
+  proveQuiet: async () => ({ quiet: true, observed: 'idle' }),
 });
 
 describe('writer lock on an orphan outcome', () => {
@@ -92,6 +94,7 @@ describe('writer lock on an orphan outcome', () => {
       await runClaimedJob(
         {
           client: c as never,
+          intents: new MemoryPauseIntentStore(),
           orchestrator: orchestratorReturning({
             kind: 'orphan', reason, workspaceId: 'wZ', agentName: 'ducky-pi-demo',
           }),
@@ -111,6 +114,7 @@ describe('writer lock on an orphan outcome', () => {
     await runClaimedJob(
       {
         client: c as never,
+        intents: new MemoryPauseIntentStore(),
         orchestrator: orchestratorReturning({
           kind: 'no_result', workspaceId: 'wZ', agentName: 'ducky-pi-demo', workspacePath: repoPath,
         }),
@@ -126,6 +130,7 @@ describe('writer lock on an orphan outcome', () => {
     await runClaimedJob(
       {
         client: c as never,
+        intents: new MemoryPauseIntentStore(),
         orchestrator: orchestratorReturning({ kind: 'unavailable' }),
         heartbeatMs: 50_000,
       },

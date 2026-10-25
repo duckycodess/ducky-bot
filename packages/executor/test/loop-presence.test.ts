@@ -6,6 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { MockPiOrchestrator, exampleImplementedResult } from '@ducky/adapters';
 import type { ClaimResponse } from '@ducky/contracts';
 import { ExecutorLoop } from '../src/loop.js';
+import { MemoryPauseIntentStore } from '../src/pause-intents.js';
 
 /** A real empty repo so workspace resolution succeeds and the turn starts. */
 let repoPath = '';
@@ -92,7 +93,7 @@ describe('structured executor state stays useful while a job runs', () => {
     });
 
     const loop = new ExecutorLoop({
-      client: client as never,
+      client: client as never, intents: new MemoryPauseIntentStore(),
       orchestrator,
       pollWaitMs: 0,
       version: '0.1.0',
@@ -111,7 +112,7 @@ describe('structured executor state stays useful while a job runs', () => {
 
   it('reports nothing active once no job is running', () => {
     const loop = new ExecutorLoop({
-      client: {} as never,
+      client: {} as never, intents: new MemoryPauseIntentStore(),
       orchestrator: new MockPiOrchestrator(),
       pollWaitMs: 0,
       version: '0.1.0',

@@ -34,6 +34,7 @@ import { MockDiscordTransport } from '../packages/coordinator/src/discord/mock.t
 import type { Incoming } from '../packages/coordinator/src/discord/transport.js';
 import { CoordinatorClient } from '../packages/executor/src/client.js';
 import { ExecutorLoop } from '../packages/executor/src/loop.js';
+import { openExecutorState } from '../packages/executor/src/executor-state.js';
 import { HerdrCli, HerdrPiOrchestrator, redact } from '../packages/adapters/src/index.js';
 import { JOB_MAX_WALL_CLOCK_MS } from '../packages/contracts/src/index.js';
 
@@ -269,8 +270,28 @@ async function run(live: Live): Promise<ProbeOutcome> {
   // certification run must never open a Discord gateway.
   const transport = new MockDiscordTransport();
   live.transport = transport;
-  const app = createApp(process.env, { transport });
+  // Engineering is OFF by default (DUCKY_ENGINEERING_ENABLED), so a claim would
+  // never be answered. This run is the deliberate, marker-guarded certification
+  // of one executor against a disposable repository, so it turns the switch on
+  // for ITS OWN process only; nothing here changes any stored configuration.
+  const app = createApp({ ...process.env, DUCKY_ENGINEERING_ENABLED: '1' }, { transport });
   live.app = app;
+
+  // A claim is answered only through the shared admission ledger (ADR 0031), and
+  // this probe never turns that on: DUCKY_SHARED_ADMISSION_ELIGIBLE and its pins
+  // are the operator's explicit act after the integration is installed and
+  // proved. Without them the run would measure a held-off runtime, so refuse.
+  if (!app.sharedAdmission) {
+    throw new Error(
+      'shared engineering admission is not eligible in this environment ' +
+        '(DUCKY_SHARED_ADMISSION_ELIGIBLE and its ledger pins). This probe will not enable it and ' +
+        'will not run against the coordinator-local slot alone.',
+    );
+  }
+  const sharedGate = app.sharedAdmission.gate();
+  if (!sharedGate.ok) {
+    throw new Error(`shared engineering admission is stopped (${sharedGate.reason}); nothing would be claimed.`);
+  }
 
   const ownerId = app.authz.ownerId;
   const repo = app.allowlist.list().find((r) => r.slug === SLUG);
@@ -316,6 +337,20 @@ async function run(live: Live): Promise<ProbeOutcome> {
     );
   }
 
+  // The engineering slot is the same kind of blocker as a reservation: while
+  // any job holds it, nothing else can be claimed, so the run would wait for a
+  // job that can never start.
+  if (app.store.jobs.outboxPending(1).length > 0) {
+    throw new Error('a shared release is still owed to the ledger; let the coordinator deliver it first.');
+  }
+  const slot = app.store.jobs.admission();
+  if (slot) {
+    throw new Error(
+      `the engineering slot is held by ${slot.repoSlug} (${slot.reason}). ` +
+        'Clear that job first (/job cleanup), so this run measures itself.',
+    );
+  }
+
   /**
    * Another executor is already polling this database.
    *
@@ -357,7 +392,12 @@ async function run(live: Live): Promise<ProbeOutcome> {
     },
   });
   if (!(await herdr.available())) throw new Error('herdr is not reachable; nothing to certify');
-  const orchestrator = new HerdrPiOrchestrator({ herdr, verified: false });
+  // The production orchestrator will not exist without its durable journal, so the
+  // probe gives it one: an explicit directory of its own, outside any temp root.
+  const state = openExecutorState(path.join(os.homedir(), '.local', 'state', 'ducky-probe-live-job'), {
+    uid: process.getuid?.() ?? -1,
+  });
+  const orchestrator = new HerdrPiOrchestrator({ herdr, verified: false, journal: state.journal });
   out(`EVIDENCE 1  orchestrator=${orchestrator.name} verified=${orchestrator.verified}`);
   if (orchestrator.name !== 'herdr-pi') throw new Error('not the production orchestrator');
 
@@ -395,7 +435,8 @@ async function run(live: Live): Promise<ProbeOutcome> {
   out(`job ${row.publicId} created (${row.state})`);
 
   const loop = new ExecutorLoop({
-    client, orchestrator, pollWaitMs: 1_000, version: 'probe-b',
+    client, orchestrator, intents: state.intents, forgetJournal: (id) => state.journal.forget(id),
+    pollWaitMs: 1_000, version: 'probe-b',
     log: (line) => out(`executor: ${line}`),
   });
   live.loop = loop;

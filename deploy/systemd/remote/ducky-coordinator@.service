@@ -1,0 +1,44 @@
+# TEMPLATE for the EXISTING remote Linux account. Not installed, not enabled,
+# not started by anything in this repository (issue 8 is preparation only).
+#
+# A USER service, per profile, so it runs as the account that owns the slice
+# whose limits it lives under, and survives logout only because the account has
+# lingering enabled (read it back: `loginctl show-user "$USER" -p Linger`).
+#
+# This unit does NOT set MemoryMax and does not claim to bound anything. The
+# account-wide ceiling is the user slice's. A user unit can only tighten its own
+# cgroup if controllers are delegated to the user manager, and no limit set here
+# reaches Herdr's agents, which are children of the Herdr server rather than of
+# any Ducky unit (see the runbook for what is verified about the server's own
+# cgroup).
+#
+# Engineering stays OFF. DUCKY_ENGINEERING_ENABLED is deliberately absent from
+# the env example; see docs/runbooks/remote-linux-runtime.md before it is set.
+[Unit]
+Description=Ducky coordinator (%i profile, loopback listener)
+Documentation=file:///home/%u/projects/ducky/docs/runbooks/remote-linux-runtime.md
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/ducky
+
+# One env file per profile, mode 0600, never in the repository. A production
+# unit reads none of the development variables, and the two share no secret.
+EnvironmentFile=%h/.config/ducky/coordinator-%i.env
+
+# A Ducky-specific TMPDIR, kept OUTSIDE ~/.cache/devwork and every agent-flow
+# root so no other cleanup job can reap it and Ducky's own sweep (which removes
+# only real directories this user owns, with Ducky's prefixes) never walks a
+# directory it shares with other tools.
+Environment=TMPDIR=%h/.local/state/ducky/%i/tmp
+ExecStartPre=/usr/bin/install -d -m 0700 %h/.local/state/ducky/%i %h/.local/state/ducky/%i/tmp
+
+ExecStart=/usr/bin/env node %h/projects/ducky/packages/coordinator/dist/main.js
+Restart=always
+RestartSec=10s
+StartLimitIntervalSec=0
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

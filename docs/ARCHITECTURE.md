@@ -96,7 +96,8 @@ Every transition writes a `job_transitions` row with a reason and an actor
 
 ## Single-writer guarantees and their lifetimes
 
-Four guards, each with a deliberately different span:
+Four guards, each with a deliberately different span, plus one engineering slot
+above them (decision 0030):
 
 | Guard | Scope | Held from | Released on |
 |---|---|---|---|
@@ -104,6 +105,8 @@ Four guards, each with a deliberately different span:
 | Lease (`lease_id`, `lease_expires_at`) | per job | claim | result, cancel-ack, requeue, or expiry |
 | Filesystem lock (`O_EXCL`) | per repo, executor host | just before a Pi turn | when that turn ends, **including before reporting `needs_owner_input`** |
 | Herdr agent-name uniqueness | per host | `agent start` | agent exit |
+| `engineering_admission` row (key pinned to 1) | **one per coordinator database**, across repos and executors; the row records the exact shared-ledger fence it stands on (migration 30) | successful claim, after the shared hold is taken AND confirmed | confirmed quiescence: a pause, a terminal release, an owner `/job cleanup`. Kept as `unconfirmed_stop` on lease expiry or an orphan. The shared release is a committed outbox row delivered after the commit |
+| shared admission ledger (a separate host-local SQLite file, ADR 0031) | **across both Ducky profiles and Agent Flow on one host**; Ducky exclusive with every other hold, Agent Flow global 2 / per-repo 1 without it. **Source only: not installed, not proved** | `acquire` then `confirm`, BEFORE any launch | the exact ledger, fence and holder, after the local release commits. A confirmed hold never expires by time, PID or an absent local record |
 
 The **reservation** — not `state = 'running'` — is the claim predicate, so it
 spans `running`, `needs_owner_input` and `needs_approval`. A paused job keeps

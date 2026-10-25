@@ -61,6 +61,9 @@ export class RetentionRepo {
     if (this.exists('SELECT 1 FROM repo_reservations WHERE job_id = ?', jobId)) {
       return { ok: false, refusal: 'reservation_held' };
     }
+    if (this.exists('SELECT 1 FROM engineering_admission WHERE job_id = ?', jobId)) {
+      return { ok: false, refusal: 'reservation_held' };
+    }
     if (this.exists('SELECT 1 FROM herdr_workspaces WHERE job_id = ? AND closed_at IS NULL', jobId)) {
       return { ok: false, refusal: 'workspace_open' };
     }
@@ -109,6 +112,10 @@ export class RetentionRepo {
     del('DELETE FROM job_events WHERE job_id = ?');
     del('DELETE FROM job_owner_inputs WHERE job_id = ?');
     del('DELETE FROM job_results WHERE job_id = ?');
+    // The pause-delivery ledgers only ever describe a job that has already
+    // ended (the guard above refused anything else), so they go with it.
+    del('DELETE FROM job_pause_receipts WHERE job_id = ?');
+    del('DELETE FROM job_lease_expiries WHERE job_id = ?');
     del('DELETE FROM job_dependencies WHERE job_id = ?');
     // No foreign key, but the guard has proved every row is closed.
     del('DELETE FROM herdr_workspaces WHERE job_id = ?');

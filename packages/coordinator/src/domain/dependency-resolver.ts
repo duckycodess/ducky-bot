@@ -245,7 +245,7 @@ export class DependencyResolver {
           job.id, 'dependency_failed',
           clamp(`${labelFor(dep)} will not be satisfied.${detail ? ` ${detail}` : ''}`, 400),
         );
-        this.releaseUnlessOrphan(job.repoSlug);
+        this.releaseUnlessOrphan(job.repoSlug, job.id);
         this.store.auditLog.record({
           event: 'dependency.resolved', actorKind: 'system', actorRef: this.checker.name,
           subjectKind: 'dependency', subjectRef: dep.id, outcome: 'failed',
@@ -322,10 +322,11 @@ export class DependencyResolver {
     return ttl == null ? null : new Date(this.now().getTime() + ttl).toISOString();
   }
 
-  private releaseUnlessOrphan(repoSlug: string): void {
+  private releaseUnlessOrphan(repoSlug: string, jobId: string): void {
     const r = this.store.jobs.reservation(repoSlug);
-    if (r && r.reason === 'orphan_agent') return;
-    this.store.jobs.releaseReservation(repoSlug);
+    // Only the owning job's own, non-orphan reservation is ever released here.
+    if (!r || r.jobId !== jobId || r.reason === 'orphan_agent') return;
+    this.store.jobs.releaseReservation(repoSlug, jobId);
   }
 }
 

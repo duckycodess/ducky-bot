@@ -3,7 +3,8 @@ import path from 'node:path';
 import type { JobResultFile } from '@ducky/contracts';
 import { RESULT_RELATIVE_PATH } from './result-file.js';
 import type {
-  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
+  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator, QuietProof,
+  QuietProofTarget,
 } from './pi-orchestrator.port.js';
 
 export const exampleImplementedResult = (summary = 'Mock implementation completed.'): JobResultFile => ({
@@ -17,14 +18,23 @@ export const exampleImplementedResult = (summary = 'Mock implementation complete
 });
 
 /**
- * Deterministic orchestrator used by tests and by a token-less local run.
- * It writes a real result file so the whole intake path is exercised.
+ * Deterministic orchestrator for TESTS ONLY. It writes a real result file so the
+ * whole intake path is exercised, and it invents outcomes -- a result, a clean
+ * stop -- that a real agent would have to earn. It is never wired into a
+ * production process: the executor's `main.ts` always builds the real
+ * orchestrator and fails closed when Herdr is unreachable, and a source scan in
+ * the executor tests refuses any production reference to this class.
  */
 export interface MockPiOptions {
   /** Simulates a turn that keeps running until it is aborted. */
   readonly runUntilAborted?: boolean;
   /** What `cancel()` reports; defaults to a clean termination. */
   readonly cancelOutcome?: CancelOutcome;
+  /**
+   * What `proveQuiet()` reports. Defaults to NOT quiet: a mock that vouched for an
+   * agent it never looked at is how an invented proof releases a real hold.
+   */
+  readonly quietProof?: QuietProof;
   readonly writeFileToDisk?: boolean;
 }
 
@@ -55,6 +65,13 @@ export class MockPiOrchestrator implements PiOrchestrator {
   ): Promise<{ closed: boolean; detail: string }> {
     this.cleanups.push({ spec, workspaceId });
     return { closed: true, detail: 'Mock workspace closed.' };
+  }
+
+  readonly proofs: QuietProofTarget[] = [];
+
+  async proveQuiet(target: QuietProofTarget): Promise<QuietProof> {
+    this.proofs.push(target);
+    return this.options.quietProof ?? { quiet: false, detail: 'The mock orchestrator proves nothing.' };
   }
 
   async cancel(spec: OrchestrationSpec): Promise<CancelOutcome> {

@@ -10,6 +10,12 @@ export interface ActorContext {
 export interface AuthzConfig {
   readonly ownerId: string;
   readonly chatWhitelist: readonly string[];
+  /**
+   * Whether a whitelisted (non-owner) user may reach the model at all: plain
+   * conversation and the Branch and Compact controls alike. Frozen at boot like
+   * everything else here, and OFF unless configuration says otherwise.
+   */
+  readonly additionalUserAi: boolean;
 }
 
 /**
@@ -23,6 +29,7 @@ export interface AuthzConfig {
 export function loadAuthzConfig(env: {
   OWNER_DISCORD_USER_ID?: string | undefined;
   CHAT_WHITELIST_USER_IDS?: string | undefined;
+  DUCKY_ADDITIONAL_USER_AI_ENABLED?: boolean | undefined;
 }): AuthzConfig {
   const owner = (env.OWNER_DISCORD_USER_ID ?? '').trim();
   if (owner === '') {
@@ -51,7 +58,13 @@ export function loadAuthzConfig(env: {
     }
   }
 
-  return Object.freeze({ ownerId: owner, chatWhitelist: Object.freeze([...new Set(raw)]) });
+  return Object.freeze({
+    ownerId: owner,
+    chatWhitelist: Object.freeze([...new Set(raw)]),
+    // Absent means off. Being on the whitelist says who MAY be offered chat
+    // once it is authorized; it is not itself that authorization.
+    additionalUserAi: env.DUCKY_ADDITIONAL_USER_AI_ENABLED === true,
+  });
 }
 
 /**
@@ -107,9 +120,27 @@ export class Authorizer {
     }
   }
 
-  /** Conversation is the only surface a whitelist user can reach. */
+  /**
+   * Whether this person may reach the model: the owner always, a whitelisted
+   * user only while additional-user AI is enabled, anybody else never.
+   *
+   * The ONE question every model-reaching path asks -- a plain message, a reply
+   * anchor, a thread, and the Branch and Compact controls -- so there is no
+   * second place that could keep treating the whitelist as permission after the
+   * switch is off.
+   */
+  mayConverse(discordUserId: string): boolean {
+    const role = this.roleOf(discordUserId);
+    return role === 'owner' || (role === 'chat' && this.config.additionalUserAi);
+  }
+
+  /**
+   * Conversation is the only surface a whitelist user can reach, and for them
+   * it is itself disabled by default. A refusal is audited by role like any
+   * other, and reaches no provider.
+   */
   requireConversational(actor: ActorContext): void {
-    if (actor.role === 'none') {
+    if (!this.mayConverse(actor.discordUserId) || actor.role === 'none') {
       this.#notifyRefused(actor);
       throw unauthorized();
     }

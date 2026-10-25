@@ -144,6 +144,70 @@ export interface JobRow {
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** When the current claimed attempt must stop; null outside an attempt. */
+  attemptDeadlineAt: string | null;
+  /** 1 when the claim that is (or was last) running negotiated durable pause delivery. */
+  deliveryProtocol: 0 | 1;
+}
+
+export type ExpiryChargeState = 'deferred' | 'charged' | 'not_charged';
+export type ExpiryDisposition =
+  | 'pending' | 'charged' | 'exhausted' | 'cancelled' | 'failed' | 'paused'
+  | 'overtaken_cancelled' | 'overtaken_timed_out';
+
+/** The identity and accounting of one expired lease. */
+export interface LeaseExpiryRow {
+  id: number;
+  jobId: string;
+  leaseDigest: string;
+  executorId: string;
+  workspaceId: string | null;
+  agentName: string | null;
+  attemptsBefore: number;
+  deliveryProtocol: 0 | 1;
+  chargeState: ExpiryChargeState;
+  disposition: ExpiryDisposition;
+  createdAt: string;
+  settledAt: string | null;
+}
+
+export interface PauseReceiptRow {
+  reportId: string;
+  jobId: string;
+  executorId: string;
+  leaseDigest: string;
+  workspaceId: string;
+  agentName: string;
+  cause: string;
+  disposition: 'paused' | 'overtaken_cancelled' | 'overtaken_timed_out';
+  createdAt: string;
+}
+
+export interface AdmissionRow {
+  jobId: string;
+  repoSlug: string;
+  acquiredAt: string;
+  reason: 'active_attempt' | 'unconfirmed_stop';
+  /** The shared ledger hold this slot stands on; absent only for a slot taken without a ledger. */
+  sharedLedgerId?: string;
+  sharedFence?: number;
+}
+
+export interface SharedAdmissionBindingRow {
+  instanceId: string;
+  ledgerId: string;
+  policyDigest: string;
+  boundAt: string;
+}
+
+export interface SharedReleaseOutboxRow {
+  id: number;
+  ledgerId: string;
+  fence: number;
+  jobId: string;
+  createdAt: string;
+  attempts: number;
+  lastOutcome: string | null;
 }
 
 export interface ReservationRow {

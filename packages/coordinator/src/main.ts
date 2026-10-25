@@ -3,6 +3,7 @@ import { buildServer } from './http/server.js';
 import { formatDiagnostics, runStartupDiagnostics } from './diagnostics.js';
 import { sweepStaleTempDirs } from './discord/attachments.js';
 import { createLogger } from '@ducky/adapters';
+import { assertSubscriptionOnlyEnvironment } from '@ducky/contracts';
 
 /**
  * A logger that exists BEFORE configuration is read.
@@ -19,6 +20,10 @@ const bootLog = createLogger({
 });
 
 async function main(): Promise<void> {
+  // Before anything reads configuration or opens a store: a process that could
+  // reach a separately billed API key does not start. Names only, partial
+  // evidence -- see the function for exactly what it does not prove.
+  assertSubscriptionOnlyEnvironment(process.env, 'The coordinator');
   const app = createApp();
   // Every line from here goes through the redactor. Interpolating a raw
   // `(err as Error).message` into stderr -- which is what these sites used to
@@ -62,9 +67,19 @@ async function main(): Promise<void> {
   await server.listen({ host: app.env.DUCKY_HTTP_HOST, port: app.paths.httpPort });
   log.info('http.listening', { host: app.env.DUCKY_HTTP_HOST, port: app.paths.httpPort });
 
+  if (app.engineeringHeldOff) log.warn('engineering.held_off', { reason: app.engineeringHeldOff });
+  if (app.sharedAdmission) {
+    // Opens nothing new and creates nothing: a missing or changed ledger stops
+    // engineering (and says why), it does not stop reminders or the rest.
+    const gate = app.sharedAdmission.gate();
+    log.info('shared_admission.gate', gate.ok ? { ok: true } : { ok: false, reason: gate.reason });
+  }
+
   const timer = setInterval(() => {
     try {
       app.reconciler.run();
+      // Owed shared releases are retried every tick and after every restart.
+      app.sharedAdmission?.drain();
       if (app.credentials.reloadIfChanged()) {
         // A reload changes which credentials authenticate, so it is a security
         // event. Records only that it happened -- never a key id's material.

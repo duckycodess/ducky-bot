@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { createStore, openDatabase, runMigrations, type Store } from '@ducky/persistence';
+import type { SharedAdmissionLedgerPort } from '@ducky/contracts';
 import {
   MockConversationProvider, MockGitHubReader, keyFingerprint, sha256Hex,
   type ConversationProvider, type DependencyChecker, type FrontDoorPort, type GitHubReader,
@@ -103,6 +104,19 @@ export interface HarnessOptions {
    * the property durable state is for.
    */
   readonly store?: Store;
+  /**
+   * Runs the app in SHARED admission mode over this ledger: the eligibility gate
+   * is on, the pins are the ledger's own, and the local-only fallback is NOT
+   * enabled. Without it the harness uses the coordinator-local slot alone, the
+   * way every test did before the shared ledger existed.
+   */
+  readonly shared?: {
+    readonly ledger: SharedAdmissionLedgerPort;
+    readonly ledgerId: string;
+    readonly policyDigest: string;
+    readonly executors?: string;
+    readonly env?: Record<string, string | undefined>;
+  };
 }
 
 /**
@@ -153,14 +167,31 @@ export function makeHarness(opts: HarnessOptions = {}, realTransport = false): H
       DUCKY_PROFILE: 'development',
       OWNER_DISCORD_USER_ID: OWNER,
       CHAT_WHITELIST_USER_IDS: CHAT,
+      // Both are OFF by default in production configuration; the suite exercises
+      // the enabled behaviour and the dedicated tests exercise the defaults.
+      DUCKY_ENGINEERING_ENABLED: '1',
+      DUCKY_ADDITIONAL_USER_AI_ENABLED: '1',
       DUCKY_DEV_COMPONENT_SIGNING_KEY: secret(),
       DUCKY_EXECUTOR_CREDENTIALS: credentialsJson,
       DUCKY_DB_PATH: ':memory:',
       DUCKY_REPOS_FILE: 'unused-in-tests',
+      ...(opts.shared
+        ? {
+            DUCKY_SHARED_ADMISSION_ELIGIBLE: '1',
+            DUCKY_SHARED_ADMISSION_PATH: '/unused/in/tests/ledger.sqlite3',
+            DUCKY_SHARED_ADMISSION_LEDGER_ID: opts.shared.ledgerId,
+            DUCKY_SHARED_ADMISSION_POLICY_DIGEST: opts.shared.policyDigest,
+            DUCKY_SHARED_ADMISSION_EXECUTORS: opts.shared.executors ?? executorId,
+            ...opts.shared.env,
+          }
+        : {}),
       ...opts.env,
     } as NodeJS.ProcessEnv,
     {
       store,
+      ...(opts.shared
+        ? { sharedAdmissionLedger: opts.shared.ledger }
+        : { localOnlyAdmissionForTests: true as const }),
       // Omitting the override exercises the real selection path in app.ts.
       ...(realTransport ? {} : { transport }),
       allowlistJson: opts.allowlistJson ?? REPOS_JSON,

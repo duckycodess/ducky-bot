@@ -13,10 +13,12 @@ import {
   CONVERSATION_CONTEXT_BUDGET_BYTES_DEFAULT, CONVERSATION_CONTEXT_BUDGET_BYTES_MAX,
   CONVERSATION_CONTEXT_BUDGET_BYTES_MIN,
   CONVERSATION_MEMORY_TURNS_DEFAULT, CONVERSATION_MEMORY_TURNS_MAX, DEFAULT_OWNER_TIMEZONE,
+  DUCKY_ENGINEERING_RESERVE_DEFAULT_MIB, DUCKY_PROVIDER_RESERVE_DEFAULT_MIB,
+  ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS, ENGINEERING_ATTEMPT_BUDGET_MAX_MS,
   SCHEDULE_ATTACHMENTS_PER_HOUR, SCHEDULE_MAX_ATTACHMENT_BYTES, assertValidTimeZone,
   GITHUB_FEED_INTERVAL_DEFAULT_MINUTES, GITHUB_FEED_INTERVAL_MAX_MINUTES,
   GITHUB_FEED_INTERVAL_MIN_MINUTES, GITHUB_FEED_MAX_SELECTED, canonicalRepoKey, parseRepoKey,
-  blankToUndefined, isPrivateBindHost, resolveConversationMode, resolveDuckyProfile,
+  blankToUndefined, isPrivateBindHost, mibToBytes, resolveConversationMode, resolveDuckyProfile,
   type ConversationProviderMode, type DuckyProfile,
 } from '@ducky/contracts';
 
@@ -449,6 +451,71 @@ export const EnvSchema = z.object({
   DUCKY_PHONE_PASSCODE_VERIFIER: z.string().optional(),
   DUCKY_DEV_PHONE_PASSCODE_VERIFIER: z.string().optional(),
   DUCKY_PROD_PHONE_PASSCODE_VERIFIER: z.string().optional(),
+
+  /**
+   * Whether this coordinator hands engineering jobs to an executor at all.
+   * Default OFF, and failing closed: while it is off, `/job submit` is refused
+   * and no claim is ever answered.
+   *
+   * The reason is scope. The engineering slot (migration 28) is global within
+   * THIS database only; it does not coordinate with another profile or with the
+   * separate agent-flow dispatcher, and no supported protocol for that exists
+   * yet. A remote runtime that can start a real agent must not be reachable by
+   * accident, so enabling it is an explicit act of the operator.
+   */
+  DUCKY_ENGINEERING_ENABLED: bool(false),
+  /**
+   * EXPLICIT shared-integration eligibility, default OFF, and in addition to
+   * DUCKY_ENGINEERING_ENABLED (ADR 0031).
+   *
+   * Engineering reaches an executor only when BOTH are set, and this one is set
+   * only after the shared admission integration has actually been installed and
+   * proved on the host: the ledger exists, the Agent Flow companion is applied
+   * to the live dispatcher, and a controlled second-admission attempt was
+   * refused. A ledger file, a participant row or a candidate patch existing is
+   * NOT that proof and never turns this on. Nothing sets it by default or as a
+   * side effect of installing anything.
+   */
+  DUCKY_SHARED_ADMISSION_ELIGIBLE: bool(false),
+  /** The host-local ledger. Required (with the two pins) when eligibility is on. */
+  DUCKY_SHARED_ADMISSION_PATH: z.string().optional(),
+  /** The ledger identity this profile pins, copied from `pnpm shared-admission init`. */
+  DUCKY_SHARED_ADMISSION_LEDGER_ID: z.string().optional(),
+  /** The policy digest this profile pins. A re-policied ledger is refused. */
+  DUCKY_SHARED_ADMISSION_POLICY_DIGEST: z.string().optional(),
+  /**
+   * Executor ids on THIS host. A ledger on the coordinator's host protects only
+   * that host, so a claim in shared mode goes only to a listed executor and
+   * never to a remote one.
+   */
+  DUCKY_SHARED_ADMISSION_EXECUTORS: z.string().optional(),
+  /** The account slice the ledger reads under its lock. Default: this user's slice. */
+  DUCKY_SHARED_ADMISSION_CGROUP_DIR: z.string().optional(),
+  /**
+   * What one Ducky hold reserves: the engineering estimate plus the provider
+   * estimate (the executor's own defaults). Conservative estimates, not
+   * measurements; the notification reserve is global, in the ledger policy.
+   */
+  DUCKY_SHARED_ADMISSION_RESERVE_ENGINEERING_MIB: z.coerce.number().int().min(1).default(DUCKY_ENGINEERING_RESERVE_DEFAULT_MIB),
+  DUCKY_SHARED_ADMISSION_RESERVE_PROVIDER_MIB: z.coerce.number().int().min(0).default(DUCKY_PROVIDER_RESERVE_DEFAULT_MIB),
+  /**
+   * The budget for one claimed executor attempt, in minutes. Default 60.
+   * Bounded above by ENGINEERING_ATTEMPT_BUDGET_MAX_MS so a typo cannot turn it
+   * into an unbounded run.
+   */
+  DUCKY_ENGINEERING_ATTEMPT_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(ENGINEERING_ATTEMPT_BUDGET_MAX_MS / 60_000)
+    .default(ENGINEERING_ATTEMPT_BUDGET_DEFAULT_MS / 60_000),
+  /**
+   * Whether the configured additional (chat whitelist) users may reach the
+   * model, including its Branch and Compact controls. Default OFF: friend-facing
+   * AI stays disabled until a supported provider and a hosted-use access path
+   * are established, and the whitelist alone grants nothing.
+   */
+  DUCKY_ADDITIONAL_USER_AI_ENABLED: bool(false),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -576,6 +643,60 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
  * Ids are validated as snowflakes at boot rather than trusted, so a typo
  * fails loudly instead of silently never matching.
  */
+/** The engineering switch and attempt budget for this instance. */
+export const resolveEngineering = (env: Env): { enabled: boolean; attemptBudgetMs: number } => ({
+  enabled: env.DUCKY_ENGINEERING_ENABLED,
+  attemptBudgetMs: env.DUCKY_ENGINEERING_ATTEMPT_MINUTES * 60_000,
+});
+
+export interface SharedAdmissionConfig {
+  readonly path: string;
+  readonly ledgerId: string;
+  readonly policyDigest: string;
+  readonly executors: ReadonlySet<string>;
+  readonly cgroupDir: string | undefined;
+  readonly reserveBytes: number;
+}
+
+/**
+ * The shared admission settings, or undefined when eligibility is not set.
+ *
+ * Eligibility on with anything missing or malformed THROWS at boot: a runtime
+ * that was told to use the ledger must never quietly run without one.
+ */
+export function resolveSharedAdmission(env: Env): SharedAdmissionConfig | undefined {
+  if (!env.DUCKY_SHARED_ADMISSION_ELIGIBLE) return undefined;
+  const need = (name: string, value: string | undefined): string => {
+    if (!value) throw new Error(`${name} is required when DUCKY_SHARED_ADMISSION_ELIGIBLE is set`);
+    return value;
+  };
+  const file = need('DUCKY_SHARED_ADMISSION_PATH', env.DUCKY_SHARED_ADMISSION_PATH);
+  if (!file.startsWith('/')) throw new Error('DUCKY_SHARED_ADMISSION_PATH must be an absolute path');
+  const ledgerId = need('DUCKY_SHARED_ADMISSION_LEDGER_ID', env.DUCKY_SHARED_ADMISSION_LEDGER_ID);
+  if (!/^[0-9a-fA-F-]{8,64}$/.test(ledgerId)) throw new Error('DUCKY_SHARED_ADMISSION_LEDGER_ID is not a ledger id');
+  const policyDigest = need('DUCKY_SHARED_ADMISSION_POLICY_DIGEST', env.DUCKY_SHARED_ADMISSION_POLICY_DIGEST);
+  if (!/^[0-9a-f]{64}$/.test(policyDigest)) throw new Error('DUCKY_SHARED_ADMISSION_POLICY_DIGEST is not a sha256 digest');
+  const ids = need('DUCKY_SHARED_ADMISSION_EXECUTORS', env.DUCKY_SHARED_ADMISSION_EXECUTORS)
+    .split(',').map((x) => x.trim()).filter(Boolean);
+  if (ids.length === 0 || ids.some((id) => !/^[A-Za-z0-9_.-]{1,64}$/.test(id))) {
+    throw new Error('DUCKY_SHARED_ADMISSION_EXECUTORS must list co-located executor ids');
+  }
+  const cgroupDir = env.DUCKY_SHARED_ADMISSION_CGROUP_DIR;
+  if (cgroupDir !== undefined && !cgroupDir.startsWith('/')) {
+    throw new Error('DUCKY_SHARED_ADMISSION_CGROUP_DIR must be an absolute path');
+  }
+  return {
+    path: file,
+    ledgerId,
+    policyDigest,
+    executors: new Set(ids),
+    cgroupDir,
+    reserveBytes: mibToBytes(
+      env.DUCKY_SHARED_ADMISSION_RESERVE_ENGINEERING_MIB + env.DUCKY_SHARED_ADMISSION_RESERVE_PROVIDER_MIB,
+    ),
+  };
+}
+
 export const resolveApprovedActionsEnabled = (env: Env): boolean =>
   env.DUCKY_PROFILE === 'production'
     ? env.DUCKY_PROD_APPROVED_ACTIONS_ENABLED

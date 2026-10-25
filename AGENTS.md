@@ -11,11 +11,12 @@ pnpm migrate --dry    # list pending migrations
 pnpm probe:herdr      # record live Herdr responses (creates and cleans up a temp repo)
 pnpm probe:herdr --with-agent   # ALSO starts a real Pi agent; opt-in, costs model capacity
 pnpm probe:live-job   # production-path live job against the allowlisted disposable repo
-pnpm probe:openclaw   # records the real OpenClaw surface; exits 2 while the reply half is unrecorded
+pnpm probe:openclaw   # records the OpenClaw surface; exit 0 only when the whole contract incl. a reply is recorded, 2 when any half is unrecorded or the binary is absent (it exited 0 on the original dev host; not run on the remote account, where openclaw is absent)
 pnpm probe:gh         # records which --json fields this gh supports; local, repo-less, no network
 pnpm probe:github-feed   # drives the GitHub feed against a real allowlisted repo, read-only, mock Discord, in-memory DB
 pnpm backup           # consistent SQLite snapshot, no downtime; never includes the credential file
 pnpm backup:verify --file <path>   # proves a backup is restorable, without restoring it
+pnpm shared-admission init|inspect|release --path <ledger> ...   # the host-local shared admission ledger (ADR 0031); `init` creates a NEW ledger and refuses to overwrite one, `release` needs the exact holder and an attestation
 pnpm register-commands --list      # the commands this build DEFINES; contacts nothing
 pnpm phone:passcode                # prints a scrypt verifier for the phone page; reads stdin, contacts nothing
 ```
@@ -52,6 +53,28 @@ Report contradictions rather than picking whichever reads best.
   two shared-channel reads in `SHARED_READABLE_ROUTES`. Conversational and
   owner-only control manifests remain disjoint; shared reads stay narrowed
   views of commands already on the owner manifest.
+- **Model access for anyone but the owner is off by default.**
+  `DUCKY_ADDITIONAL_USER_AI_ENABLED` is frozen into the `Authorizer`, and
+  `Authorizer.mayConverse` is the one question every model-reaching path asks,
+  including Branch and Compact. The whitelist names who may be offered chat; it
+  never authorizes it.
+- **The engineering slot is local to one coordinator database; the shared
+  ledger is the cross-program fence above it, and it is source, not installed
+  proof.** The slot still covers one database. The host-local shared admission
+  ledger (ADR 0031) is what makes Ducky's two profiles and the Agent Flow
+  dispatcher exclude each other, and only once its companion is installed in the
+  live dispatcher, a ledger exists and a controlled second admission was
+  refused -- none of which has happened. Never describe the slot alone as
+  cross-program safety, and never describe the ledger as live. Engineering is off
+  unless `DUCKY_ENGINEERING_ENABLED` AND the separate, default-off
+  `DUCKY_SHARED_ADMISSION_ELIGIBLE` say otherwise; a ledger file, a participant
+  row or a candidate patch is not eligibility. The ledger pins identify a ledger and
+  do not detect a stale copy of it; a rollback fence refuses a stale copy put back
+  where the witness survives, and a snapshot restore of both is NOT covered. A
+  confirmed shared hold never
+  expires by time, PID or an absent local record, a release needs the exact
+  ledger, fence and holder after a local commit, and a slot with an unconfirmed
+  stop is released only by quiescence or an owner's `/job cleanup`.
 - **Shared visibility is never authorization.** A configured shared channel
   says where information may be shown, never who may act. Non-owner output
   goes through `SharedJobsService` and `shared-presenters.ts`, which accept

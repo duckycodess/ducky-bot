@@ -1,5 +1,6 @@
 import {
-  AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS,
+  LEASE_EXPIRED_DEFERRED_REASON, AUDIT_PRUNE_BATCH, AUDIT_RETENTION_MS, ENGINEERING_ATTEMPT_GRACE_MS,
+  EXECUTOR_OFFLINE_AFTER_MS, HERDR_WORKSPACE_TTL_MS, leaseDigest,
   TASK_PREVIEW_SETTLED_TTL_MS, TASK_PREVIEW_SWEEP_BATCH,
   isTerminal,
 } from '@ducky/contracts';
@@ -8,6 +9,8 @@ import type { ApprovalsService } from './approvals.service.js';
 import type { PendingScheduleStore } from './pending-schedules.js';
 
 export interface ReconcileReport {
+  /** Attempts past their deadline that the coordinator itself asked to stop. */
+  attemptsOverdue: number;
   leasesExpired: number;
   reservationsExpired: number;
   approvalsExpired: number;
@@ -53,6 +56,7 @@ export class Reconciler {
 
   run(): ReconcileReport {
     return {
+      attemptsOverdue: this.stopOverdueAttempts(),
       leasesExpired: this.expireLeases(),
       reservationsExpired: this.expireReservations(),
       approvalsExpired: this.expireApprovals(),
@@ -75,6 +79,38 @@ export class Reconciler {
   }
 
   /**
+   * The coordinator-side backstop for the attempt budget.
+   *
+   * The executor times its own attempt out, supervised, at the persisted
+   * deadline. An attempt still running `ENGINEERING_ATTEMPT_GRACE_MS` past it
+   * has an executor that did not, so the coordinator raises the ordinary
+   * cancellation flag. That reuses the one supervised stop path -- the executor
+   * sees it on its next heartbeat and acknowledges only what it can confirm --
+   * rather than adding a second way to end a turn. Nothing is killed from here.
+   */
+  stopOverdueAttempts(): number {
+    const overdue = this.store.jobs.overdueAttempts(
+      isoPlus(-ENGINEERING_ATTEMPT_GRACE_MS, this.now()),
+    );
+    for (const job of overdue) {
+      withTransaction(this.store.db, () => {
+        this.store.jobs.setCancelRequested(job.id);
+        this.store.jobs.appendEvent(
+          job.id,
+          'attempt_deadline_exceeded',
+          'The attempt budget ran out; cancellation was requested and the executor must confirm the stop.',
+        );
+        this.store.auditLog.record({
+          event: 'job.cancel_requested', actorKind: 'reconciler', actorRef: 'reconciler',
+          subjectKind: 'job', subjectRef: job.publicId,
+          detail: 'attempt deadline exceeded; waiting for the executor to stop',
+        });
+      });
+    }
+    return overdue.length;
+  }
+
+  /**
    * An expired lease does NOT hand the repository to another job. The
    * reservation is kept and the job is flagged for recovery, so the executor
    * reattaches to the workspace it already owns rather than starting a second
@@ -87,9 +123,32 @@ export class Reconciler {
       withTransaction(this.store.db, () => {
         const attempts = job.attempts + 1;
 
+        // The identity and accounting of THIS lease, written in the expiry
+        // transaction so a later bound report can find exactly the attempt it
+        // describes. A lease that negotiated durable pause delivery is not
+        // charged here: the coordinator cannot tell silence from a pause the
+        // executor holds durably, so the charge (and any exhaustion) waits for
+        // the next claim of this job -- or never happens, if a bound report
+        // reconciles it first. Every hold is kept meanwhile. An older peer's
+        // lease takes the ordinary path below, unchanged.
+        const recorded = this.store.herdrWorkspaces.openForJob(job.id);
+        const expiry = {
+          jobId: job.id,
+          leaseDigest: leaseDigest(job.leaseId ?? ''),
+          executorId: job.executorId ?? '',
+          workspaceId: recorded?.workspaceId ?? null,
+          agentName: recorded?.agentName ?? null,
+          attemptsBefore: job.attempts,
+          deliveryProtocol: job.deliveryProtocol,
+        } as const;
+        const deferrable =
+          job.deliveryProtocol === 1 && !job.cancelRequested && job.leaseId !== null &&
+          job.executorId !== null && recorded !== undefined;
+
         // The owner asked for this job to stop. Requeueing it would run the
         // work again after a cancellation, so expiry is the terminal outcome.
         if (job.cancelRequested) {
+          this.recordExpiry(expiry, 'charged', 'cancelled');
           this.store.jobs.transition(
             job.id,
             'cancelled',
@@ -117,12 +176,30 @@ export class Reconciler {
               `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
             );
           } else {
-            this.releaseUnlessOrphan(job.repoSlug);
+            this.releaseUnlessOrphan(job.repoSlug, job.id);
           }
           return;
         }
 
+        if (deferrable) {
+          this.recordExpiry(expiry, 'deferred', 'pending');
+          this.store.jobs.transition(job.id, 'waiting_for_executor', LEASE_EXPIRED_DEFERRED_REASON, 'system:reconciler', {
+            recoveryRequired: true,
+            leaseId: null,
+            leaseExpiresAt: null,
+          });
+          this.store.jobs.markAdmissionUnconfirmed(job.id);
+          this.store.jobs.appendEvent(
+            job.id,
+            'lease_expired_deferred',
+            'The executor stopped reporting. Nothing was charged yet: its pause report, if it holds ' +
+              'one, can still reconcile this attempt, and every hold is kept until then.',
+          );
+          return;
+        }
+
         if (attempts > job.maxAttempts) {
+          this.recordExpiry(expiry, 'charged', 'exhausted');
           this.store.jobs.transition(job.id, 'failed', 'lease_expired_exhausted', 'system:reconciler', {
             attempts,
             finishedAt: this.now().toISOString(),
@@ -134,15 +211,34 @@ export class Reconciler {
             'lease_expired_exhausted',
             'The executor stopped reporting and no attempts remain. Workspace retained.',
           );
-          this.releaseUnlessOrphan(job.repoSlug);
+          // Same rule as the cancelled branch above: a recorded workspace may
+          // still hold a live agent, so the repository AND the engineering slot
+          // stay blocked for the owner instead of being released on silence.
+          if (this.store.herdrWorkspaces.openForJob(job.id)) {
+            this.store.jobs.markReservationOrphan(job.repoSlug);
+            this.store.jobs.appendEvent(
+              job.id,
+              'reservation_orphaned',
+              `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+            );
+          } else {
+            this.releaseUnlessOrphan(job.repoSlug, job.id);
+          }
           return;
         }
+        this.recordExpiry(expiry, 'charged', 'charged');
         this.store.jobs.transition(job.id, 'waiting_for_executor', 'lease_expired', 'system:reconciler', {
           attempts,
           recoveryRequired: true,
           leaseId: null,
           leaseExpiresAt: null,
         });
+        // The executor stopped reporting, which is not evidence that its agent
+        // stopped. The engineering slot stays with this job -- no other job can
+        // start beside a possibly-live writer -- and is marked as an
+        // unconfirmed stop until the same job reclaims it and recovery proves
+        // the agent quiet, or the owner clears it.
+        this.store.jobs.markAdmissionUnconfirmed(job.id);
         this.store.jobs.appendEvent(
           job.id,
           'lease_expired',
@@ -152,6 +248,19 @@ export class Reconciler {
       n += 1;
     }
     return n;
+  }
+
+  private recordExpiry(
+    base: {
+      jobId: string; leaseDigest: string; executorId: string; workspaceId: string | null;
+      agentName: string | null; attemptsBefore: number; deliveryProtocol: 0 | 1;
+    },
+    chargeState: 'deferred' | 'charged',
+    disposition: 'pending' | 'charged' | 'exhausted' | 'cancelled',
+  ): void {
+    // A lease that was never issued cannot be digested into an identity.
+    if (base.executorId === '' || base.leaseDigest === leaseDigest('')) return;
+    this.store.jobs.recordLeaseExpiry({ ...base, chargeState, disposition });
   }
 
   /**
@@ -164,15 +273,22 @@ export class Reconciler {
     for (const reservation of expired) {
       const job = this.store.jobs.byId(reservation.jobId);
       if (!job) {
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
         n += 1;
         continue;
       }
       if (isTerminal(job.state)) {
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
         n += 1;
         continue;
       }
+
+      // A lease whose charge was deferred is waiting for its own executor's
+      // durable pause report or attested recovery claim. Silence is not the
+      // absence of that report, so a timer must not fail, orphan or supersede
+      // it: every hold stays until the executor reports, recovers it, or the
+      // owner cancels (which orphans, and /job cleanup clears).
+      if (job.state === 'waiting_for_executor' && this.store.jobs.pendingExpiry(job.id)) continue;
 
       // Recorded after the transaction commits, so bookkeeping can never roll
       // back the expiry -- and counted here because the branch below runs
@@ -231,7 +347,25 @@ export class Reconciler {
             'The repository reservation expired while the job was still open.',
           );
         }
-        this.store.jobs.releaseReservation(reservation.repoSlug);
+        // A job that lost its executor mid-attempt holds the engineering slot
+        // as an unconfirmed stop. If its workspace is still open, an agent may
+        // still be writing, so expiry converts the reservation into an orphan
+        // (which keeps the slot) instead of releasing both on a timer.
+        const held = this.store.jobs.admission();
+        if (
+          held?.jobId === job.id &&
+          held.reason === 'unconfirmed_stop' &&
+          this.store.herdrWorkspaces.openForJob(job.id)
+        ) {
+          this.store.jobs.markReservationOrphan(reservation.repoSlug);
+          this.store.jobs.appendEvent(
+            job.id,
+            'reservation_orphaned',
+            `\`${job.repoSlug}\` stays reserved until /job cleanup ${job.publicId}.`,
+          );
+        } else {
+          this.store.jobs.releaseReservation(reservation.repoSlug, reservation.jobId);
+        }
       });
 
       // The SAME event `expireApprovals()` records. An approval that lapsed on
@@ -334,9 +468,10 @@ export class Reconciler {
       .map((w) => ({ workspaceId: w.workspaceId, repoSlug: w.repoSlug }));
   }
 
-  private releaseUnlessOrphan(repoSlug: string): void {
+  private releaseUnlessOrphan(repoSlug: string, jobId: string): void {
     const r = this.store.jobs.reservation(repoSlug);
-    if (r && r.reason === 'orphan_agent') return;
-    this.store.jobs.releaseReservation(repoSlug);
+    // Only the owning job's own, non-orphan reservation is ever released here.
+    if (!r || r.jobId !== jobId || r.reason === 'orphan_agent') return;
+    this.store.jobs.releaseReservation(repoSlug, jobId);
   }
 }

@@ -1,0 +1,391 @@
+# 0030. The remote Linux runtime, and a Ducky-local engineering slot
+
+**Status:** Accepted as preparation, with open merge blockers listed below (all required)
+
+> **Update, 2026-10-25:** [0031](0031-shared-engineering-admission.md) adds the
+> SOURCE for the cross-program fence this decision said did not exist: a
+> host-local shared ledger, Ducky's claim and release paths standing on it, and a
+> private Agent Flow companion candidate. The slot described here is unchanged and
+> still local to one database. Nothing in 0031 is installed or proved on the host,
+> engineering needs a second explicit switch, and blocker 1 below stays open until
+> the integration is installed and a controlled second admission is refused. Read
+> the "not shared with the agent-flow dispatcher" sentences below as describing
+> the SLOT, not the whole system once 0031's integration is installed.
+
+## Context
+
+Issue 8 moves Ducky onto an existing remote Linux account that already provides
+Tailscale, the tools, a registered clone, an account-wide 8 GiB `MemoryMax`
+(7 GiB `MemoryHigh`, no swap, `TasksMax` 1536) as read on 2026-10-13, lingering and
+a periodic cleanup timer. **Correction, 2026-10-19:** the account slice now reads
+16 GiB `MemoryMax` / 14 GiB `MemoryHigh` (swap 0, `TasksMax` 1536), and the owner
+explicitly authorized that envelope; it is no longer an open requirement. The
+dispatcher's separate worker service `agent-flow-herdr.service` carries its own
+7 GiB high / 8 GiB max / `TasksMax` 512 and is not the account cap. The earlier
+figures are kept as the history this decision was written against. This
+supersedes the Azure coordinator and WSL executor placement in
+[`docs/DEPLOYMENT.md`](../DEPLOYMENT.md) for this host; those templates are kept
+for history and are not deleted. ADR 0010 assumed one writer per repository and
+nothing global.
+
+The shared account cap is hit by everything running as that user. Ducky's
+per-repository reservations let two repositories run agents at once, and a
+timed-out or lost attempt could free its repository while an agent was still
+writing.
+
+## Decision
+
+**A single engineering slot, local to one coordinator database.** Migration 28
+adds `engineering_admission`, one row with its key pinned to 1. Claim takes it
+in the same transaction as the repository reservation. A held slot returns no
+claim, and the job stays `queued`: no failure, no attempt consumed, no backoff.
+The slot follows the reservation of the job that holds it:
+
+- a pause (`needs_owner_input`, `needs_approval`, `waiting_on_dependency`)
+  releases it, because those states are quiescent by ADR 0010's contract, and
+  the answered job reacquires it at its next claim;
+- a terminal release frees it;
+- lease expiry, an orphaned agent, or a reservation timer on a job whose
+  workspace is still open **keeps** it as `unconfirmed_stop`, until the same job
+  reclaims it and recovery proves the agent quiet, or the owner runs
+  `/job cleanup`.
+
+This extends ADR 0010 rather than replacing its spans: the reservation (whole
+job), the lease (one executor turn), the writer lock (one Pi turn) and Herdr's
+agent names (one host) are unchanged, and the slot sits above them.
+
+**Scope, stated exactly.** The slot is global across the repositories and
+executors one coordinator serves, and nowhere else. It is not shared between the
+development and production profiles (separate databases, by design: profiles
+share no state), and it is **not** shared with the agent-flow dispatcher, which
+exposes only internal SQLite worker slots and a singleton lock, with no
+supported external admission protocol. Writing its state or configuration is out
+of bounds. This ADR therefore does not deliver the issue's cross-program single
+job, and no document may say it does.
+
+**Engineering is off by default.** `DUCKY_ENGINEERING_ENABLED` defaults to off
+and fails closed (no submission, no claim). Because the slot does not cover
+agent-flow, a remote runtime able to start an agent must be switched on
+explicitly, and not as a side effect of installing it. This changes the default
+for existing development setups, which now set it.
+
+**A persisted attempt budget.** A claimed attempt (claim to a pause or terminal
+state, not owner, approval or dependency waits) has a deadline stored on the job
+(default 60 minutes via `DUCKY_ENGINEERING_ATTEMPT_MINUTES`, capped at the
+existing two hour ceiling). A reclaim after lease expiry keeps the same deadline,
+so a restart cannot reset it. The claim carries it as an optional field; a new
+executor facing a claim without it applies a bounded local default. The claim and
+failure schemas are strict, so this is NOT bidirectional rolling compatibility:
+upgrade by stopping the coordinator and executor together, with engineering off. The executor
+times itself out through the supervised cancellation path. The coordinator
+requests ordinary cancellation after a grace period as a backstop.
+
+**An honest timeout.** On timeout the executor asks `orchestrator.cancel`, which
+only observes the agent through Herdr `agent get`. `terminated: true`, and with
+it `wall_clock_exceeded` with `quiescent` and the release of the repository and
+slot, needs a POSITIVE proof: a fresh look that matches the recorded agent name
+and workspace id, the pane pinned at the start (or at the owned agent's first
+observation), and a Ducky-managed workspace, with the agent `idle` or `done`.
+Absent, unknown, working, blocked or a same-name agent that is not provably the
+recorded one is an orphan that keeps both; a started agent that has vanished is
+not proof it stopped (only a job that never started an agent, with nothing
+recorded, is released on absence). Because the runner abandons `runJob` rather
+than stopping it, `cancel` also refuses to call anything quiet while `runJob` may
+still dispatch (after a bounded wait for it to wind down) and while a prompt has
+been handed over whose turn was never observed to settle: an idle reading right
+after delivery may only mean the agent has not picked the work up yet. The
+recorded adapter has no supported way to interrupt a working agent and sending
+keystrokes into a live pane is deliberately not done, so a working agent that
+outlives its budget is an orphan, never a fabricated stop.
+
+**Memory headroom, fail closed.** With `DUCKY_MEMORY_GUARD=cgroup` the executor
+refuses to claim unless the lower of `memory.max` and `memory.high` minus
+`memory.current` of the user slice covers an engineering reserve plus a
+notification reserve. Unreadable, non-numeric or unlimited readings refuse. The
+reserves are operator estimates. The guard reads the account slice that contains
+Herdr's agents; a Ducky unit's own limit does not bound them. On 2026-10-19 the
+current Herdr server was read as running inside `agent-flow-herdr.service`, whose
+limits apply to descendants that remain in its cgroup, but membership of any
+individual agent, tool or provider process is unverified.
+
+**The agent's own cgroup, before every prompt.** The account check above runs
+before a claim and says nothing about where the agent actually is. So, before
+EVERY prompt attempt (including the retries after `agent_not_ready` and a
+resumed agent's), the executor asks Herdr for the owned pane's live foreground
+processes (`herdr pane process-info`, read-only, with argv, cmdline and cwd
+dropped at the schema), reads each process's own unified cgroup from `/proc`,
+and evaluates `memory.current` against both `memory.high` and `memory.max` at
+that cgroup and every ancestor up to the cgroup-v2 mount. The tightest
+remaining free bytes governs, siblings count through their common ancestor's
+usage, and the engineering, provider (512 MiB default) and notification
+reserves are required at every level, which is deliberately conservative.
+Every foreground process must itself be bounded by a finite limit somewhere in
+its own chain: a tightly bounded sibling cannot vouch for an unbounded one.
+Identity is proved, not assumed: same UID, foreground process-group
+membership, a stable start time and cgroup across the reads, `cgroup.procs`
+membership, a verified cgroup-v2 mount, no links, and a second look at the
+pane and the agent after the reads. The agent itself must be the recorded name
+and workspace in the pane pinned at the start (the root pane a fresh start used,
+or the pane of the owned agent first observed on a resume), and freshly `idle`
+or `done` and not `interactive_ready: false` both before and after the reads, so
+the guard never permits a prompt into a working, blocked, unknown or not-ready
+target. The pre-claim account check applies the same rule to its own parsing: a
+literal `max` is the only non-numeric value that means unlimited, and an invalid
+or unsafe number, or an unsafe reserve sum, refuses. Malformed, unsafe, overflowing, missing or
+moved data refuses; a missing memory file is skipped only where the parent
+proves the controller is off; no finite ancestor means no proof. There is no
+fallback to the executor's, the account's or any service's cgroup. A refusal
+withholds the prompt and pauses the job (below) once the agent is freshly
+proved quiet. This is a check at one instant, not an atomic reservation shared
+with another program and not continuous enforcement.
+
+**A quiet agent with no result pauses; it does not fail.** An agent whose turn
+was observed to settle `idle` or `done` without a valid result, and a prompt
+withheld by the guard above before anything was sent, end the attempt with a
+lease-checked pause on the existing `needs_owner_input` state, but only after a
+fresh look positively matches the recorded agent name, workspace id and pane and
+a Ducky-managed workspace, and reports `idle` or `done`. Working and blocked keep
+their orphan outcomes; absent, unknown, unreadable or mismatched keep the
+unchanged `no_result` failure, which keeps the repository reserved.
+
+**A submitted prompt that was never seen to settle does NOT pause.** If a prompt
+was handed to the agent and no settled turn was observed -- a stalled prompt whose
+pickup was not seen inside the grace, or an idle reading with no settle behind
+it -- the agent may simply start later, so releasing the slot or the writer lock
+would let a second job begin beside it. That ends as the orphan
+`orphan_prompt_unsettled`: the repository, the slot and the host writer lock are
+retained for the owner, and the wording says only that submitted work was not
+observed to settle. It claims neither that the agent is working nor any cause,
+and nothing about quota or sign-in is inferred. A late pickup after the grace
+therefore finds everything still held. A turn that WAS observed to settle (work
+seen, then idle or done, with no result) still pauses as above. The
+coordinator decides in one transaction: a repeated report for the same lease is
+answered identically, the workspace, agent and repository reservation must be the
+recorded ones, and an owner cancellation then an elapsed deadline win. A pause
+spends no attempt and no owner-input round, keeps the workspace and reservation,
+clears the lease, phase and deadline, and releases the Ducky-local slot only on
+that proof; resuming reacquires it and starts a fresh bounded attempt. A pause
+whose report is lost is retried within bounds, and a repeat for the same lease
+(including one that had lost to a cancellation or the deadline) is answered
+identically.
+
+**Durable pause delivery (protocol 1).** A pause the executor could not deliver
+used to be silence: lease expiry spent an attempt, and with the default budget of
+one a second expiry failed the job and orphaned the repository and the slot. The
+coordinator cannot tell silence from a pause an executor holds durably, so a
+negotiated lease is treated differently, and everything else is unchanged.
+
+*What an executor does.* A quiet pause on a claim that negotiated the protocol is
+first written to the executor's own durable state (see below), then the host
+writer lock is released, then it is reported on a NEW route bound to the report's
+full identity (executor, job, original lease, workspace, agent, cause, report id)
+while a keepalive keeps the lease alive. If the intent cannot be written, nothing
+is released or reported and the lease lapses with its charge deferred. The intent
+is forgotten only on a 2xx whose body validates, echoes that whole identity, and
+carries a terminal disposition: `paused`, `overtaken_cancelled` or
+`overtaken_timed_out` (a cancellation or the deadline won on the coordinator's
+clock), or `superseded` (the coordinator had moved past that attempt and no hold
+was released by it). A transport failure, a 5xx, an unknown route, an unknown job,
+a mismatch, a refusal, a malformed 2xx, a mismatched identity and `pending` without
+a fresh proof all KEEP it. While one is owed, or any record cannot be read, the
+loop makes no claim, the runner starts no turn and the orchestrator sends no
+prompt. At startup and on every tick it first asks the coordinator what became of
+the report, because a committed report (a lost response, an owner resume) needs no
+proof; only a `pending` answer asks the executor for a FRESH positive proof --
+the exact recorded agent, an owned workspace, a fresh `idle` or `done`, and a
+durable journal entry saying its last turn settled -- before it reports. Historical
+quiet is never proof after a restart.
+
+*What the coordinator does.* A claim that advertises `pause-delivery-v1` is
+negotiated (an executor advertises it only when it holds no unresolved intent, so
+on a claim it is also the attestation "I hold none"). When such a lease expires
+with a recorded workspace, expiry writes a structured row (`job_lease_expiries`:
+lease digest, executor, workspace and agent snapshot, attempts before, charge
+state) and charges NOTHING: the job waits in `waiting_for_executor` holding its
+repository, its slot as an unconfirmed stop, its workspace and its original
+attempt deadline. That deferred attempt belongs to the executor that held the
+lease: only that executor, on an attested claim, can take the job again (any other
+executor or host, and the same one without the attestation, gets no claim and
+cannot charge, exhaust or supersede it), and that claim is the ordinary recovery it
+always was, charging once, with an exhausted budget ending the job and orphaning
+the holds exactly as before. The reservation timer skips such a job rather than
+failing it, so no fixed grace ever exhausts a durable pause; the owner's cancel,
+which orphans the holds for `/job cleanup`, is the other exit. Because the hold has
+no timer, the expiry DMs the owner (durable, retried through the ordinary
+notification ledger, dropped if the wait is already over by the time it is sent,
+never posted to a shared channel): what is held, why nothing was charged or
+released, and `/job cancel` then `/job cleanup` as the way out. It cannot finish if
+the original executor's host is gone or if a preferred executor other than the
+original is online (placement preference hides the repository from it); the owner's
+cancel is the exit then, and the DM says so. A report for the
+expired lease is a lease-free reconcile on the edge `waiting_for_executor ->
+needs_owner_input`, in one transaction: the executor, the original lease's open
+expiry row, the recorded workspace and agent, the repository and the slot (the
+job's unconfirmed stop) must all match; then an owner cancellation wins, then the
+persisted deadline on the coordinator's clock, and otherwise the job pauses with
+no charge and no owner-input round. The same slot rule guards a report on a live
+lease (the job's attempt slot), so a foreign, missing or unrelated slot is never
+released. Receipts (`job_pause_receipts`, keyed by report id) make delivery
+idempotent across a lost response, a resume and a restart, and refuse a reused id.
+A report for an attempt already charged, resumed, cancelled or terminal is
+`superseded` and changes nothing, so a terminal orphan is never released by a late
+proof. Peers that do not negotiate (an older executor, or an older coordinator,
+which answers the new routes with 404) keep the ordinary accounting: the older
+coordinator is a coordinated-upgrade limit, and the executor then holds claims
+rather than downgrading a durable pause to a failure.
+
+*Dispatch provenance.* Whether an idle agent is quiet is a fact about the past, so
+a durable journal records `dispatching` BEFORE every prompt (the prompt is not sent
+if it cannot be recorded) and `settled` only after a settle was observed (a started
+agent, given nothing, is recorded settled before any prompt can exist). Recovery,
+cancel and timeout, an owner resume's prompt, and the fresh proof all read it: an
+entry that is absent, unreadable, about another agent or still `dispatching` is an
+orphan (`orphan_prompt_unsettled`), never a pause, a release or a prompt. This
+closes the earlier gap where, after a restart or a recovery claim replaced the
+in-memory turn, an idle reading looked like a finished agent. A job in flight when
+this was deployed has no record and therefore orphans, deliberately. An agent that
+VANISHES is never recorded as settled (absence is not a settle, and a fresh
+same-name agent could later appear). The journal is bounded (1024 records), and the
+bound is a managed resource: entries are dropped on the COORDINATOR's word through a
+read-only, executor-bound status route (completed, failed, cancelled, awaiting
+approval or unknown; never running, queued, waiting, paused, owed, unreadable or
+unanswered, and never by age), at startup, periodically and whenever it is full (a
+routine sweep is bounded and resumes where the last one stopped, so finished records
+behind a run of live ones are reached; a full journal scans its whole capacity and
+stops the moment there is room; only removals that actually happened are counted); a
+full journal makes no claim, so no agent is started that cannot be journaled; and a
+refusal by the executor's own durable state is reported as
+`executor_state_unavailable`, not `no_result`.
+
+*No mock in production.* The executor always builds the real orchestrator. With Herdr
+down it fails closed (no claim, no proof, no stop) until Herdr answers; the mock is
+tests-only, proves nothing by default, and a source scan refuses any production
+reference to it. (An earlier fallback ran a mock when Herdr was down at boot, which
+would have vouched for a quiet agent it never looked at.)
+
+*The executor's state is new persistence.* It lives at an explicit
+`DUCKY_EXECUTOR_STATE_DIR` per profile with no default and no executor-id fallback,
+refused under `/tmp`, `/var/tmp`, `/dev/shm`, `/run`, `TMPDIR` or
+`XDG_RUNTIME_DIR`; directories are real, owned and 0700 with no symlink in the
+path, files are 0600 and at most 8 KiB, written by temp file, fsync, rename and
+directory fsync, with a bounded count. A corrupt, oversized, foreign or
+wrong-shaped record fails closed (no claim, no prompt) and is never deleted,
+repaired or aged out. It holds ids and enums only.
+
+*Crash windows.* Before the intent is durable: nothing was released, the lease
+lapses deferred and the attested recovery charges once (a residual limit, not a
+retry-preserving pause). After the write, before the request: restart reconciles
+with a fresh proof and no charge. After the coordinator commits, before the
+response: the receipt answers and no proof is needed. After the response, before
+local removal: the same. After removal: nothing is pending. Owner resume or cancel
+before the replay: superseded or the receipt, and a newer attempt is never paused.
+Limits that remain: an executor that loses its state directory, or a host that is
+gone, falls back to ordinary recovery with the ordinary charge; a delivered answer
+is not Discord delivery (the owner's notification has its own retry); and none of
+this has been observed with a real Ducky agent. A coordinator restart's first
+reconcile tick expires leases at once, which is exactly why a negotiated expiry is
+deferred rather than charged.
+
+**A hold belongs to one job.** A repository reservation and the engineering slot
+that goes with it are released only by the job that holds them: the delete is
+scoped to the owning job and its slot goes only after that delete happened. Every
+release path (cancel, terminal result, expiry, dependency and approval endings,
+owner cleanup) is a no-op for a job that does not hold the repository, so
+cancelling a queued second job on a repository never removes the running job's
+reservation or slot. An orphaned or unconfirmed-stop hold is never released by
+another job.
+
+**No friend-facing model by default.** `DUCKY_ADDITIONAL_USER_AI_ENABLED`
+(default off) is frozen into the Authorizer. `Authorizer.mayConverse` is the one
+question every model-reaching path asks, including Branch and Compact, native
+thread entry and reply anchors. The whitelist names who may be offered chat
+later and authorizes nothing. Owner-only commands and the narrow shared reads
+are unchanged.
+
+**Subscription-only environment guard, labelled partial.** The coordinator and
+executor refuse to start when any billed API key name is set in their own
+environment. It reads names and never displays or logs a value. It cannot see
+the provider's private configuration or the Herdr server's environment, so it
+does not establish that the provider is on a subscription and no quota is
+claimed. Those places are checked by hand in the runbook.
+
+**Private listener.** The coordinator routes and the phone page share one Fastify
+listener. It binds loopback; tailnet-only `tailscale serve` is the way in, and
+Funnel is never used.
+
+## Alternatives considered
+
+- **Raise the per-repo cap with a counter.** Rejected: the cap of one is
+  structural (the key is pinned), not a predicate to get right.
+- **Release the slot when a lease expires.** Rejected: a silent executor is not
+  evidence its agent stopped.
+- **Kill the agent on timeout.** Rejected: no stop is recorded as safe; this needs
+  an authorized real-agent stop probe.
+- **Write agent-flow's state to coordinate.** Rejected: not a supported protocol,
+  and not ours to change.
+- **A provider quota state and counters.** Not built: no real quota or sign-in
+  response is recorded to design against.
+
+## Consequences
+
+One engineering job at a time per Ducky database, with an uncertain stop holding
+everything until an owner decides. The cost is availability: an orphan blocks all
+engineering, not one repository.
+
+**Upgrade preconditions.** Migration 28 is not a data migration. It backfills
+neither a slot nor an attempt deadline for a job that is already running, so the
+database must hold no non-terminal job and no open agent workspace when it is
+applied. The branch first numbered this table 27 before merging published main,
+whose 27 is `github_feed`. The migrator compares version numbers only, so any
+non-scratch database that applied the branch-only 27 would skip `github_feed` and
+then fail migration 28; that must be ruled out by reading `schema_migrations`
+before upgrading. The exact checks are in the
+[runbook](../runbooks/remote-linux-runtime.md#4-start-restart-logout-recovery-backup).
+
+**Open blockers (acceptance and merge), all required.** The same numbered list
+is kept in full, with the reason for each, in
+[CURRENT_STATE](../CURRENT_STATE.md#remote-runtime-preparation-issue-8) and the
+[runbook](../runbooks/remote-linux-runtime.md#6-what-is-not-implemented-and-what-blocks-merge-and-deployment):
+
+1. Atomic cross-program and cross-profile admission with agent-flow. Source for
+   the ledger and Ducky's side exists (0031); the dispatcher companion is a private,
+   unapplied candidate, and no ledger, pin or installation exists on the host.
+2. Effective, ancestor-aware memory headroom. Implemented in source and
+   unit-tested (the agent's own cgroup chain, checked before every prompt), but
+   not observed with a real Ducky agent, and still a check rather than a
+   reservation another program respects.
+3. An authorized stop probe for a working agent, and with it confirmed
+   owned-descendant cancel and timeout.
+4. The retry-preserving pause. Implemented in source and unit-tested for a
+   confirmed quiet agent without a result, including delivery lost to an outage,
+   an executor crash, lease expiry and a coordinator restart (durable pause
+   delivery, above); never observed live, and no provider quota or sign-in state
+   exists to distinguish. Still not retry-preserving: a crash before the intent is
+   durable, a lost executor state directory or host, an older coordinator (held,
+   not downgraded) and an older executor (ordinary accounting).
+5. A recorded, supported subscription route, sign-in and quota on this host.
+6. Herdr session pinning, separate from the dispatcher's.
+7. Safe periodic orphan, workspace and temp reclamation that preserves active
+   work (the reconciler only lists candidates).
+8. Active-job temp-artifact protection for long-lived artifacts.
+9. Deterministic reminders and GitHub events observed continuing through a quota
+   pause.
+10. Tailscale Serve, private listener, no Funnel.
+11. Remote restart, logout and laptop or app-disconnect continuity.
+12. No-billed-API fallback across provider and Herdr environments (the
+    environment-key refusal is partial evidence).
+13. Real development evidence: provider, Discord, a controlled job with a second
+    admission attempt, cancel, timeout, notification, logout, phone and recovery.
+14. Closure policy: the dispatcher requires `Closes #8` in the PR body, so an
+    early merge would close the issue with the criteria unmet. Draft status and
+    `ready_to_merge=false` are not a technical guard against a manual merge.
+
+This ADR is accepted as the design of the preparation code. Accepting it does not
+clear any item above.
+
+## Follow-up
+
+When the dispatcher owner provides an atomic shared admission protocol, replace
+the local table's authority with it rather than adding a second slot. (0031 does
+not replace the slot: it stands above it, and the slot records the exact shared
+fence it stands on.)

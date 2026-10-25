@@ -56,7 +56,12 @@ registered.
 | Provider session deletion | **Blocked** | `RECORDED_SESSION_DELETION` is null. `pnpm probe:openclaw` exits 2 here because the pinned binary is not installed, so the deletion-capable command surface is unrecorded and `/forget` reports provider deletion as PARTIAL and rotates the session epoch instead |
 | Image / PDF schedule extraction | **Blocked** | `probe:extraction`: all six decoders absent; no provider reports `supportsBinary` |
 | Retention and deletion | **Unit-tested** | Ships disabled; enabling is an operator decision |
-| Azure / Tailscale deployment | **Templates only** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision |
+| Engineering slot, attempt deadline, memory guard (issue #8) | **Unit-tested** | One Ducky-wide slot in ONE coordinator database, a persisted 60 minute attempt deadline, a supervised timeout and a fail-closed cgroup headroom check. The slot alone is **not cross-program**. Engineering is off by default and needs a second explicit switch. See [Remote runtime preparation](#remote-runtime-preparation-issue-8) |
+| Shared engineering admission ledger (issue #8, ADR 0031) | **Source and scratch-tested; NOT installed, NOT proved** | A host-local ledger (Ducky exclusive with every other hold; Agent Flow global 2 / per-repo 1 without it; canonical GitHub repo key; full reservations plus a notification reserve against the real account memory under the lock), Ducky's claim, slot, committed release outbox and stop gates standing on it, a private Agent Flow companion candidate with Python/Node parity and race tests on scratch ledgers. No ledger exists on the host, the dispatcher is unchanged, no pin or eligibility is set, no real agent or live dispatcher was involved |
+| Additional-user AI | **Unit-tested, off by default** | `DUCKY_ADDITIONAL_USER_AI_ENABLED` gates plain chat and Branch and Compact for the whitelist; a whitelisted user reaches no provider |
+| Subscription-only environment guard | **Unit-tested, partial evidence** | Refuses a set `*_API_KEY` name in the coordinator or executor environment. Cannot see the provider's profile store or the Herdr server environment, and proves nothing about quota |
+| Remote Linux runtime | **Templates and runbook only** | `deploy/systemd/remote/` and `docs/runbooks/remote-linux-runtime.md`. Nothing installed, enabled or started; no deployment claim |
+| Azure / Tailscale deployment | **Templates only, superseded for the remote host** | Nothing provisioned; `deploy/azure/APPROVAL_PROPOSAL.md` awaits a decision, and decision 0030 selects the existing remote account instead |
 | Repository workflow bridge (`$grill-me` / `$ticket` / `$agentize`) | **Unit-tested** | Off by default. 39 behaviour tests plus invariants drive a recording stand-in for the installed helper. **The real `workflow.py` has never been called from Ducky on this host**, because calling it creates GitHub issues |
 | Production profile | **Never run** | No credentials on this host, no instance, no registration |
 
@@ -857,6 +862,143 @@ Both `/forget` and the scheduled pass use the SAME deletion implementation, so
 there is one child-first order and one set of guards rather than two that could
 drift apart.
 
+## Remote runtime preparation (issue #8)
+
+Preparation for the existing remote Linux account. **Not a deployment and not
+evidence of one.** Nothing was installed, enabled, started, probed against a real
+agent or changed on the host.
+
+**Host readbacks** (read-only, taken from this account while preparing this
+change; re-read before relying on them). The first table is the **2026-10-13**
+reading and stays as history; the correction below it is current:
+
+| Readback | Value seen (2026-10-13, historical) |
+|---|---|
+| user slice `MemoryMax` / `MemoryHigh` / `MemorySwapMax` / `TasksMax` | 8589934592 / 7516192768 / 0 / 1536 |
+| cgroup `memory.current` at that moment | about 4.3 GB, with nothing of Ducky running |
+| `Linger` | yes |
+| `devwork-cleanup.timer` | active as a user timer; the system-scope unit of that name was inactive |
+| Tailscale | up on the tailnet; `tailscale serve status` reported no serve config |
+| `herdr`, `pi` | present on `PATH` |
+| `openclaw` | **absent** from `PATH`; no `~/.openclaw-dev` store |
+
+**Correction, 2026-10-19 (current).** The account slice now reads, from the same
+`systemctl show user-1003.slice` command, `MemoryMax` 17179869184 (16 GiB),
+`MemoryHigh` 15032385536 (14 GiB), `MemorySwapMax` 0 and `TasksMax` 1536, with
+linger `yes` and `devwork-cleanup.timer` `active`. The owner explicitly
+authorized the 16 GiB / 14 GiB account envelope, so it is the accepted
+requirement and **not** an open product blocker; the 8 GiB / 7 GiB figures above
+describe the earlier host state only. Two different ceilings must not be
+conflated:
+
+- the **account slice** (`user-1003.slice`, 16 GiB / 14 GiB), which bounds
+  everything running as that user, including Herdr and its agents, and is the
+  ceiling Ducky's executor memory guard reads;
+- the dispatcher's **worker service** `agent-flow-herdr.service`
+  (`MemoryHigh` 7516192768, `MemoryMax` 8589934592, `TasksMax` 512), a separate
+  unit under the account. The dispatcher's own `agent-flow.service` is a
+  lightweight unit (512 MiB high, 768 MiB max, `TasksMax` 256) and is not that
+  worker. No unit was changed by this work.
+
+**What is and is not verified about Herdr membership (2026-10-19).** A read-only
+readback by the manager of the current Herdr server's cgroup membership and of
+`agent-flow-herdr.service` agree that the **current Herdr server runs inside
+`agent-flow-herdr.service`**. Descendants that remain in that cgroup inherit its
+limits (7 GiB high, 8 GiB max, `TasksMax` 512), and every process of the account
+shares the 16 GiB / 14 GiB slice. **Not verified:** that any individual agent,
+tool, scope or provider process is such a descendant. The manager's own tool
+process runs in a separate `devwork-job` scope, so membership must not be
+inferred for all tools or providers. Ducky's executor unit limits alone do not
+bound a separate Herdr server. None of this establishes a dedicated Ducky Herdr
+session, Ducky's runtime headroom, or cross-program admission; the dispatcher's
+configured concurrency (global 2, per repository 1) is its own authorized
+setting and is no evidence of them either. They stay open blockers below.
+
+**What the code now does** (all unit-tested, none run live):
+
+- one engineering slot in one coordinator database, kept as an unconfirmed stop
+  across lease expiry and an orphaned agent until the same job reclaims it or the
+  owner runs `/job cleanup`; a pause releases it;
+- a persisted 60 minute claimed-attempt deadline that a reclaim cannot reset, a
+  supervised timeout that reports the phase reached, and a coordinator backstop;
+- an opt-in fail-closed memory headroom check before every claim;
+- engineering and additional-user AI both off by default;
+- a names-only `*_API_KEY` refusal at startup;
+- the stale-temp sweep limited to real directories owned by the running user.
+
+**Reconciling the provider evidence, not overwriting it.** Earlier rows record
+two things that read as opposites: the OpenClaw conversation as **Verified**
+(an owner sign-in with a ChatGPT/Codex subscription, `oauth=1, api_key=0`,
+`probe:openclaw` exiting 0) and provider session deletion as **Blocked** because
+`probe:openclaw` exited 2 with the pinned binary not installed. They were
+observed on different hosts at different times, and both stand as history. Neither
+describes THIS account: `openclaw` is not installed here and no provider profile
+exists, so on this host the provider route, subscription eligibility, quota and
+sign-in are all **unverified**, and the memory-and-environment guard above is not
+a substitute for recording them.
+
+**Shared engineering admission (source; ADR 0031).** The coordinator's claim now
+takes AND confirms a host-wide hold before the claim can commit or be returned,
+records the exact fence in the local slot (migration 30), and every release path
+writes the exact shared release to a committed outbox that is delivered only after
+the local commit. The shared hold is taken before the local one and given back
+after it, so a crash can leak a hold and cannot create capacity. A cached claim is
+served only while it is still the current claim. Engineering is stopped, with a
+reason word, by a missing, replaced or re-policied ledger, a pin that differs, a
+local fence the ledger does not confirm, a surviving hold after a restore, or a
+stuck release. It needs `DUCKY_ENGINEERING_ENABLED` and, separately,
+`DUCKY_SHARED_ADMISSION_ELIGIBLE` (default off); neither is set by anything here.
+The Agent Flow side is a private candidate outside the installed runtime, not
+published and not applied. This narrows the admission gap in source. It does not
+install, enable or prove anything on the host, and reservations are admission
+accounting, not kernel enforcement; tasks and PID ceilings are not covered. The
+identity and policy pins reject a DIFFERENT ledger, not a stale copy of the same
+one: a rollback fence (a generation counter plus a witness file with the file's
+physical identity) refuses a stale copy put back in place or by rename, proven in
+scratch for Node and Python. A restore of the ledger AND its witness together (a
+snapshot) is not detected and remains an unprevented runtime blocker.
+
+**Upgrade preconditions (not yet exercised on any live database).** Migration 28
+creates an empty `engineering_admission` table and a nullable
+`jobs.attempt_deadline_at`; it backfills nothing, so a job running at upgrade
+would hold no slot and have no deadline. The upgrade therefore requires no
+non-terminal job and no open agent workspace. The branch's engineering table was
+first numbered 27 and published main's 27 is `github_feed`; the migrator compares
+version numbers only, so a non-scratch database that applied the branch-only 27
+must be ruled out (`schema_migrations`, version 27 named `github_feed` or
+absent) before upgrading. Details and queries:
+[runbook](runbooks/remote-linux-runtime.md#4-start-restart-logout-recovery-backup).
+
+**Unresolved, and blocking acceptance and merge of issue #8.** This is the
+complete required list. [ADR 0030](decisions/0030-remote-linux-runtime-and-ducky-local-admission.md)
+and the [runbook](runbooks/remote-linux-runtime.md) carry the same numbered
+items; none was waived, and a later edit may add to it but not drop one without
+recorded evidence.
+
+| # | Open | Why |
+|---|---|---|
+| 1 | Cross-program, cross-profile atomic admission | **Source implemented (ADR 0031); installation and proof are still required.** The shared ledger, Ducky's side and a private Agent Flow companion candidate exist and are tested against scratch ledgers, including real concurrent Node and Python processes. Still missing and required: the companion installed in the live dispatcher (a separately authorized change; its state and configuration were not touched), a ledger and pins on the host, the explicit eligibility switch, a controlled second admission refused on the host, source/target parity of the candidate with the installed dispatcher, and observation of a real agent's cgroup. Unprevented: a snapshot restore that rolls back the ledger and its witness together. The slot alone is local to one database |
+| 2 | Effective, ancestor-aware memory headroom | **Source implemented and unit-tested; not live-verified.** Before every prompt the executor identifies the owned pane's live foreground processes (`herdr pane process-info`), reads each process's own cgroup, and evaluates `memory.current` against `memory.high` and `memory.max` at that cgroup and every ancestor; the tightest remaining free bytes must cover the engineering, provider (512 MiB) and notification reserves. Still unproven: behaviour with a real Ducky Pi agent (the one recorded response is a manager role pane), a dedicated Ducky Herdr session (item 6), and atomic or continuous protection, since this is a check at one instant that another claimer can race. The account-level check before a claim is kept |
+| 3 | Stopping a working agent | the recorded Herdr adapter has no supported interruption, so a working agent that outlives its budget is an orphan. Confirmed owned-descendant cancel and timeout need an authorized real-agent stop probe |
+| 4 | Retry-preserving quota pause | **Pause source implemented and unit-tested; the quota criterion is not met.** A confirmed `idle`/`done` agent (fresh positive name, workspace and pane match) whose turn was observed to settle without a valid result, or a prompt withheld by the memory guard before anything was sent, now pauses the job on the existing owner-input state: no attempt or question round is spent, the workspace and repository are kept, and the Ducky-local slot is released only on that proof. A submitted prompt never seen to settle (a stalled no-pickup) does NOT pause: it is the orphan `orphan_prompt_unsettled`, retaining the repository, slot and writer lock, because the agent may still start. Ducky does not know why the agent stopped and says so; no quota or sign-in state is inferred from the screen. **Durable pause delivery (unit- and on-disk-tested, not live):** a quiet pause on a negotiated claim is written to the executor's own durable state (explicit `DUCKY_EXECUTOR_STATE_DIR`, atomic, 0700/0600, never under a temp or runtime path) before the writer lock is released or anything is sent, and is forgotten only on a matched, validated terminal answer. A lease that expires with the report undelivered is NOT charged and NOT exhausted: the coordinator records a structured expiry row and keeps the repository, the slot (as an unconfirmed stop), the workspace and the original deadline; only the original executor, on an attested claim, can take the job again, and its exact report then reconciles it to the owner pause with the budget intact. Cancellation and the persisted deadline win in the same transaction; a late proof never releases a terminal orphan. Idle is quiet only against a durable dispatch journal that says the last turn settled (recovery, cancel, timeout and an owner resume all read it), so a restart or a recovery claim can no longer turn an unobserved prompt into a pause. The hold has no timer, so the expiry DMs the owner what is held and that `/job cancel` then `/job cleanup` is the exit (it cannot finish if the original executor's host is gone or a preferred executor other than the original is online). The executor never runs a mock orchestrator (with Herdr down it fails closed), an absent agent is never journaled as settled, and the dispatch journal is bounded and pruned only on the coordinator's word (a full one makes no claim). Residual: a crash before the intent is durable, a lost executor state directory or host, an older coordinator (the executor holds, not downgrades) and an older executor (ordinary accounting) are not retry-preserving; jobs in flight at deployment have no journal and orphan. No real pause has been observed and no provider quota state exists until a real response is recorded (item 5) |
+| 5 | Supported live subscription eligibility, auth and quota on this host | unverified: `openclaw` is absent here and no provider profile exists. OpenClaw's absence is not a passed integration |
+| 6 | Herdr session pinned to Ducky, separate from the dispatcher | no setting is recorded in this repository |
+| 7 | Safe periodic orphan, workspace and temp reclamation that preserves active work | not wired. `Reconciler.reapableWorkspaces` only lists candidates, nothing reaps on a schedule, and `devwork-cleanup.timer` understands neither Ducky's activity nor its orphan records |
+| 8 | Active-job temp-artifact protection | the owned-temp sweep is hardened (real directories, owned by the running user) but removes by staleness. It does not establish that an arbitrarily long-lived temp artifact of a live job is safe |
+| 9 | Deterministic reminders and GitHub events continuing during a quota pause | unit-level independence from the model only; never observed during a real pause, because no real pause has been observed (item 4) |
+| 10 | Tailscale Serve, private listener, no Funnel | the shared loopback listener and phone page are templates and tests only; `tailscale serve status` reported no serve config on 2026-10-13 and none has been configured since |
+| 11 | Remote restart, logout, and laptop or app-disconnect continuity | `Linger=yes` was read; no logout, restart or disconnect cycle was run |
+| 12 | No-billed-API fallback across provider and Herdr environments | the names-only `*_API_KEY` refusal covers the coordinator's and executor's own environment only. The provider's private configuration and the Herdr server's environment are checked by hand in the runbook and were not checked here. Partial evidence, not a pass |
+| 13 | Real development evidence: provider, Discord, a controlled job with a second admission attempt, cancel, timeout, notification, logout, phone, and recovery | none run |
+| 14 | Closure policy | The dispatcher requires the PR body to carry `Closes #8`. Merging this PR before items 1 to 13 are cleared would close #8 with the acceptance criteria unmet. Draft status and `ready_to_merge=false` are signals the dispatcher honours; they do not technically prevent a manual merge. Unresolved, and not waived, until full issue acceptance |
+
+Items 1 to 14 are all **required**. The unit tests, backup and verification
+runs, scans and host readbacks recorded here do not clear any of them.
+Separately, the unbounded default `pnpm test` failure recorded in the
+[plan](plans/issue-8-remote-runtime.md#resume-verification-evidence-2026-10-19)
+is unexplained and tracked as `ducky-xdy`; the suite passes under an explicit
+two-worker bound, which is not a diagnosis.
+
 ## Detail: what the smoke-test evidence actually shows
 
 The owner confirmed one development smoke test: after a controlled restart,
@@ -1145,7 +1287,17 @@ routed production actions; issue/deploy/Azure performers.
 ## Verification
 
 `pnpm typecheck` and `pnpm build` pass on the remote Linux host.
-The unmodified `pnpm test` command passes all **1785 tests in 121 files**.
+The unmodified `pnpm test` command passes all **1855 tests in 127 files** on the merged
+tree of published main (the GitHub feed, migration 27) and the issue #8
+preparation (engineering admission, migration 28). `pnpm lint`
+(`tsc -p tsconfig.test.json`) and `git diff --check` are clean. `pnpm backup` and
+`pnpm backup:verify` were run, before the merge with main, only against a
+throwaway seeded database in a scratch directory, never the active runtime; that
+copy verified with the `engineering_admission` table present (then schema 27 of
+the pre-merge numbering, now schema 28). That proves state is
+recoverable and nothing about the provider, the network or admission. The
+issue #8 live checks are all unrun: see
+[Remote runtime preparation](#remote-runtime-preparation-issue-8).
 Coordinator redaction checks use the current home directory, and placement
 checks validate both shipped example configurations instead of depending on
 a private, gitignored development file. No HOME override or synthetic

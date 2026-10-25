@@ -5,6 +5,7 @@ import {
 } from '@ducky/contracts';
 import type { JobRow, Store } from '@ducky/persistence';
 import type { RepoAllowlist } from './allowlist.js';
+import { activeSystemPause } from './system-pause.js';
 
 export interface SharedJobsServiceDeps {
   readonly store: Store;
@@ -95,7 +96,9 @@ export class SharedJobsService {
    */
   project(job: JobRow, atState?: JobState): SharedJobProjection {
     const phase = phaseOf(atState ?? job.state);
-    const result = this.store.results.byJobId(job.id);
+    // A system pause has no question and no current result: an earlier round's
+    // summary is not offered as if it described the pause.
+    const result = activeSystemPause(this.store, job) ? undefined : this.store.results.byJobId(job.id);
     return {
       publicId: job.publicId,
       repoSlug: this.shareableSlug(job.repoSlug),

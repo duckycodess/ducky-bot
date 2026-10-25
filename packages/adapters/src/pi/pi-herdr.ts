@@ -10,8 +10,64 @@ import { FileBriefWriter, briefPointerPrompt, type BriefWriter } from './brief-f
 import { FilePhaseReader, type PhaseReader } from './phase-file.js';
 import { PI_READY_CONSECUTIVE_OBSERVATIONS, observePiPromptReady } from './pi-ready.js';
 import type {
-  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator,
+  CancelOutcome, OrchestrationOutcome, OrchestrationSpec, PiOrchestrator, PromptGuard,
+  PromptGuardTarget, QuietProof, QuietProofTarget,
 } from './pi-orchestrator.port.js';
+import {
+  DispatchJournalError, type DispatchEntry, type DispatchJournal, type DispatchState,
+} from './dispatch-journal.js';
+import type { JobPauseCause } from '@ducky/contracts';
+
+/**
+ * What this process knows about one job's turn, kept so `cancel()` can tell a
+ * quiet agent from one whose turn is merely not yet visible.
+ *
+ * The runner races `runJob` against cancellation and then abandons it, so when
+ * `cancel()` looks, `runJob` may still be about to dispatch, or a prompt may have
+ * been delivered a moment before the agent flips to `working`. An idle reading
+ * in either window is not quiet proof, and releasing on it would let a writer
+ * start with no lock and no slot.
+ */
+interface TurnState {
+  readonly agentName: string;
+  workspaceId: string | undefined;
+  /** The pane this turn pinned: the root pane of a fresh start, or the owned agent's first pane. */
+  paneId: string | undefined;
+  /** `runJob` has not yet returned or thrown, so it may still dispatch. */
+  runActive: boolean;
+  /** A prompt has been handed to Herdr and was not refused as not-ready. */
+  promptSent: boolean;
+  /** After the last prompt, the turn was OBSERVED to settle (not merely seen idle). */
+  settled: boolean;
+  readonly finished: Promise<void>;
+  finish(): void;
+}
+
+const MAX_TRACKED_TURNS = 64;
+
+/**
+ * Said when a prompt went to the agent and no settled turn was observed. It
+ * claims neither that the agent is working nor any cause for its quiet.
+ */
+const UNSETTLED_DETAIL =
+  'A prompt was submitted but the agent was not observed to pick it up or to finish a turn. ' +
+  'It may still start, so nothing was released and the repository stays reserved until you clear it.';
+
+/**
+ * Said when there is no trustworthy durable record that the last submitted turn
+ * settled (nothing written, unreadable, or about a different agent). Absence of
+ * a record is not evidence that nothing was submitted.
+ */
+const UNTRUSTED_DETAIL =
+  'Ducky has no trustworthy record that the last prompt it submitted to this agent finished, so ' +
+  'a quiet reading proves nothing. The repository stays reserved until you clear it.';
+
+/** Raised inside this module when the pre-prompt guard declines; never leaves it. */
+class PromptWithheld extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
 
 export { RESULT_RELATIVE_PATH };
 
@@ -83,6 +139,28 @@ export interface HerdrPiOptions {
   readonly readyMarkerWaitMs?: number;
   /** Bounded retries of a prompt refused with `agent_not_ready`. */
   readonly readyRetries?: number;
+  /**
+   * Checked immediately before every prompt attempt. Omitted means no check,
+   * which is how the guard stays off by default. See `PromptGuard`.
+   */
+  readonly beforePrompt?: PromptGuard;
+  /**
+   * The durable record of what was submitted to each job's agent. REQUIRED: a
+   * quiet reading is only ever trusted against it, so an orchestrator without one
+   * cannot exist. Tests that want no durability pass a `MemoryDispatchJournal`.
+   */
+  readonly journal: DispatchJournal;
+  /**
+   * Consulted before EVERY prompt attempt; a returned reason withholds the prompt.
+   * The executor uses it to refuse model work while a pause report is owed, so the
+   * rule holds for any caller and not only for the claim loop and the runner.
+   */
+  readonly promptGate?: () => string | undefined;
+  /**
+   * How long `cancel()` waits for an abandoned `runJob` to finish before it
+   * declines to call anything stopped. Real time, not `sleep`.
+   */
+  readonly cancelDrainMs?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -116,6 +194,11 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   private readonly readyWaitMs: number;
   private readonly readyMarkerWaitMs: number;
   private readonly readyRetries: number;
+  private readonly beforePrompt: PromptGuard | undefined;
+  private readonly cancelDrainMs: number;
+  private readonly journal: DispatchJournal;
+  private readonly promptGate: (() => string | undefined) | undefined;
+  private readonly turns = new Map<string, TurnState>();
 
   constructor(opts: HerdrPiOptions) {
     this.herdr = opts.herdr;
@@ -133,6 +216,10 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     this.readyWaitMs = opts.readyWaitMs ?? 120_000;
     this.readyMarkerWaitMs = opts.readyMarkerWaitMs ?? HERDR_READY_MARKER_WAIT_MS;
     this.readyRetries = opts.readyRetries ?? 3;
+    this.beforePrompt = opts.beforePrompt;
+    this.cancelDrainMs = opts.cancelDrainMs ?? 5_000;
+    this.journal = opts.journal;
+    this.promptGate = opts.promptGate;
   }
 
   /**
@@ -140,54 +227,216 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    *
    * Herdr exposes no verified way to interrupt a Pi turn without risking a
    * half-written edit, so this deliberately does NOT send keystrokes into a
-   * live pane. If the agent is still working we say so and let the caller fail
-   * closed into an orphan reservation, which keeps the repository blocked for
-   * the owner instead of pretending the work stopped.
+   * live pane. `terminated: true` therefore means ONE thing: a positive proof
+   * that the recorded agent is quiet. Everything else -- working, blocked,
+   * unknown, absent, an agent that is not provably ours, a turn that may still be
+   * dispatching, a prompt that was never seen to settle -- is `terminated:
+   * false`, and the caller fails closed into an orphan reservation that keeps the
+   * repository and the slot blocked for the owner. An owned-descendant stop
+   * remains unsupported and unverified.
    */
   async cancel(spec: OrchestrationSpec): Promise<CancelOutcome> {
     const agentName = agentNameFor(spec.slugKey);
-    const workspaceId = spec.recorded?.workspaceId;
+    const turn = this.turns.get(spec.jobId);
+    const workspaceId = turn?.workspaceId ?? spec.recorded?.workspaceId;
+    const keep = (agentStatus: CancelOutcome['agentStatus'], detail: string): CancelOutcome => ({
+      terminated: false, agentStatus, detail, workspaceId, agentName,
+    });
+
+    // `runJob` was abandoned, not stopped. Give it a bounded moment to wind down
+    // (the abort signal has already been raised), and never call anything quiet
+    // while it might still dispatch a prompt.
+    if (turn?.runActive) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        turn.finished,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.cancelDrainMs);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+    }
+    if (turn?.runActive) {
+      return keep(
+        'unknown',
+        'The turn may still be dispatching work to the agent, so nothing was called stopped; ' +
+          'the repository stays reserved until you clear it.',
+      );
+    }
+    if (turn?.promptSent && !turn.settled) {
+      return keep(
+        'unknown',
+        'A prompt was handed to the agent and its turn was never observed to settle, so an idle ' +
+          'reading may only mean it has not picked the work up yet; the repository stays reserved ' +
+          'until you clear it.',
+      );
+    }
 
     let agent;
     try {
       agent = await this.herdr.agentGet(agentName);
     } catch {
-      return {
-        terminated: false,
-        agentStatus: 'unknown',
-        detail: 'Herdr could not be reached to confirm whether the agent stopped.',
-        workspaceId,
-        agentName,
-      };
+      return keep('unknown', 'Herdr could not be reached to confirm whether the agent stopped.');
     }
 
     if (!agent) {
-      return {
-        terminated: true,
-        agentStatus: 'absent',
-        detail: 'The agent is gone, so nothing is still running.',
-        workspaceId,
-        agentName,
-      };
+      // Nothing was ever started or recorded for this job, so there is nothing
+      // of ours that could be running. Anything that WAS started and is now
+      // absent is not proof it stopped: a vanished pane says nothing about a
+      // process it may have outlived.
+      if (!turn && !spec.recorded) {
+        // ...and nothing durable says one was either: a journal entry for this
+        // job means an agent existed, whatever the live lookup says now.
+        if ((await this.journal.read(spec.jobId)).kind === 'absent') {
+          return {
+            terminated: true, agentStatus: 'absent', workspaceId, agentName,
+            detail: 'No agent was ever started for this job, so nothing is running.',
+          };
+        }
+        return keep('absent', UNTRUSTED_DETAIL);
+      }
+      return keep(
+        'absent',
+        'The agent could not be found, which is not proof that it stopped; the repository stays ' +
+          'reserved until you clear it.',
+      );
+    }
+
+    // Positive identity first: the recorded name AND workspace, the pane this
+    // turn pinned, and a Ducky-managed workspace. A same-name agent anywhere else
+    // is not "the agent" whatever its status says.
+    const ours =
+      workspaceId !== undefined &&
+      this.isRecordedAgent(agent, { workspaceId, agentName, ...(turn?.paneId ? { paneId: turn.paneId } : {}) }) &&
+      (await this.workspaceIsOurs(workspaceId));
+    if (!ours) {
+      return keep(
+        agent.agent_status,
+        'An agent with that name was found but is not provably the recorded Ducky agent, so it was ' +
+          'left untouched and nothing was called stopped.',
+      );
     }
     if (agent.agent_status === 'idle' || agent.agent_status === 'done') {
+      // An idle reading is quiet only against a durable record that the last
+      // submitted turn settled. With no in-memory turn (a restart, or a recovery
+      // claim that replaced it) the record is the only evidence there is.
+      const provenance = await this.provenance(spec, { workspaceId, agentName });
+      if (provenance !== 'settled') {
+        return keep(
+          agent.agent_status,
+          provenance === 'unsettled' ? UNSETTLED_DETAIL : UNTRUSTED_DETAIL,
+        );
+      }
       return {
-        terminated: true,
-        agentStatus: agent.agent_status,
+        terminated: true, agentStatus: agent.agent_status, workspaceId, agentName,
         detail: 'The agent finished its turn and is idle.',
-        workspaceId,
-        agentName,
       };
     }
-    return {
-      terminated: false,
-      agentStatus: agent.agent_status,
-      detail:
-        `The Pi agent is still ${agent.agent_status}. It was left untouched rather than ` +
+    return keep(
+      agent.agent_status,
+      `The Pi agent is still ${agent.agent_status}. It was left untouched rather than ` +
         'interrupted mid-edit; the repository stays reserved until you clear it.',
-      workspaceId,
-      agentName,
+    );
+  }
+
+  private async record(
+    spec: OrchestrationSpec,
+    at: { workspaceId: string; agentName: string },
+    state: DispatchState,
+  ): Promise<void> {
+    const entry: DispatchEntry = {
+      jobId: spec.jobId, leaseId: spec.leaseId, workspaceId: at.workspaceId,
+      agentName: at.agentName, state,
     };
+    try {
+      await this.journal.record(entry);
+    } catch (err) {
+      throw err instanceof DispatchJournalError ? err : new DispatchJournalError();
+    }
+  }
+
+  /**
+   * A settle was OBSERVED. Written after the fact it records, and a lost write
+   * is swallowed on purpose: the entry then stays `dispatching`, so a later quiet
+   * reading is refused rather than trusted.
+   */
+  private async markSettled(
+    spec: OrchestrationSpec,
+    at: { workspaceId: string; agentName: string },
+  ): Promise<void> {
+    const turn = this.turns.get(spec.jobId);
+    if (turn) turn.settled = true;
+    await this.record(spec, at, 'settled').catch(() => undefined);
+  }
+
+  /**
+   * Whether the last prompt submitted to this job's agent is KNOWN to have
+   * settled. The in-memory turn can only add doubt (a prompt sent in this very
+   * run that has not settled); it can never supply the proof, because it does not
+   * survive a restart and is replaced by every recovery claim. The proof is a
+   * readable durable entry about the same job, workspace and agent, saying
+   * `settled`. Everything else is not quiet:
+   *
+   * - `unsettled`: a prompt was dispatched and no settle was recorded;
+   * - `untrusted`: nothing recorded, unreadable, or about a different agent.
+   */
+  private async provenance(
+    spec: OrchestrationSpec,
+    at: { workspaceId: string | undefined; agentName: string },
+  ): Promise<'settled' | 'unsettled' | 'untrusted'> {
+    const turn = this.turns.get(spec.jobId);
+    if (turn?.promptSent && !turn.settled) return 'unsettled';
+    let read;
+    try {
+      read = await this.journal.read(spec.jobId);
+    } catch {
+      return 'untrusted';
+    }
+    if (read.kind !== 'entry') return 'untrusted';
+    const { entry } = read;
+    if (entry.jobId !== spec.jobId || entry.agentName !== at.agentName || entry.workspaceId !== at.workspaceId) {
+      return 'untrusted';
+    }
+    return entry.state === 'settled' ? 'settled' : 'unsettled';
+  }
+
+  async proveQuiet(target: QuietProofTarget): Promise<QuietProof> {
+    const no = (detail: string): QuietProof => ({ quiet: false, detail });
+    const turn = this.turns.get(target.jobId);
+    if (turn?.runActive || (turn?.promptSent && !turn.settled)) {
+      return no('This process is still running, or has an unsettled prompt in, that turn.');
+    }
+    let read;
+    try {
+      read = await this.journal.read(target.jobId);
+    } catch {
+      return no('The record of what was submitted to the agent could not be read.');
+    }
+    if (read.kind !== 'entry') return no('There is no trustworthy record that the last submitted turn settled.');
+    if (
+      read.entry.jobId !== target.jobId || read.entry.agentName !== target.agentName ||
+      read.entry.workspaceId !== target.workspaceId
+    ) {
+      return no('The record of what was submitted is about a different agent.');
+    }
+    if (read.entry.state !== 'settled') {
+      return no('A prompt was submitted and its turn was never recorded as settled.');
+    }
+
+    let agent: AgentInfo | undefined;
+    try {
+      agent = await this.herdr.agentGet(target.agentName);
+    } catch {
+      return no('Herdr could not be reached to look at the agent.');
+    }
+    if (!agent) return no('The agent could not be found, which is not proof that it stopped.');
+    if (!this.isRecordedAgent(agent, target) || !(await this.workspaceIsOurs(target.workspaceId))) {
+      return no('The agent found is not provably the recorded Ducky agent.');
+    }
+    if (agent.agent_status === 'idle' || agent.agent_status === 'done') {
+      return { quiet: true, observed: agent.agent_status };
+    }
+    return no(`The agent reports ${agent.agent_status}, not idle or done.`);
   }
 
   /**
@@ -206,6 +455,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     if (spec.recorded?.workspaceId !== workspaceId) {
       return { closed: false, detail: 'That workspace is not the one recorded for this job.' };
     }
+    this.turns.delete(spec.jobId);
 
     const workspaces = await this.herdr.workspaceList();
     const ws = workspaces.find((w) => w.workspace_id === workspaceId);
@@ -252,6 +502,42 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
   }
 
   async runJob(spec: OrchestrationSpec): Promise<OrchestrationOutcome> {
+    const turn = this.beginTurn(spec);
+    try {
+      return await this.runJobInner(spec);
+    } finally {
+      turn.runActive = false;
+      turn.finish();
+    }
+  }
+
+  private beginTurn(spec: OrchestrationSpec): TurnState {
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const turn: TurnState = {
+      agentName: agentNameFor(spec.slugKey),
+      workspaceId: spec.recorded?.workspaceId,
+      paneId: undefined,
+      runActive: true,
+      promptSent: false,
+      settled: false,
+      finished,
+      finish,
+    };
+    this.turns.delete(spec.jobId);
+    this.turns.set(spec.jobId, turn);
+    // Bounded: only recent turns can still be cancelled, and the oldest go first.
+    while (this.turns.size > MAX_TRACKED_TURNS) {
+      const oldest = this.turns.keys().next().value;
+      if (oldest === undefined) break;
+      this.turns.delete(oldest);
+    }
+    return turn;
+  }
+
+  private async runJobInner(spec: OrchestrationSpec): Promise<OrchestrationOutcome> {
     if (!(await this.herdr.available())) return { kind: 'unavailable' };
 
     const agentName = agentNameFor(spec.slugKey);
@@ -304,6 +590,11 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     workspacePath: string,
   ): Promise<OrchestrationOutcome> {
     const workspaceId = spec.recorded!.workspaceId;
+    const turn = this.turns.get(spec.jobId);
+    if (turn) {
+      turn.workspaceId = workspaceId;
+      turn.paneId = agent.pane_id;
+    }
 
     if (agent.agent_status === 'blocked') {
       // Herdr saw an approval or question UI in the pane. Answering it
@@ -317,6 +608,10 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (!settled) {
         return { kind: 'orphan', reason: 'orphan_agent_still_working', workspaceId, agentName };
       }
+      // Work was seen, and then seen to stop: that IS an observed settle, whichever
+      // process dispatched it. Recorded so a later quiet reading can rest on it. An
+      // agent that VANISHED is not a settle and is never recorded as one.
+      if (settled === 'settled') await this.markSettled(spec, { workspaceId, agentName });
       if (settled === 'blocked') {
         return { kind: 'orphan', reason: 'orphan_agent_blocked', workspaceId, agentName };
       }
@@ -324,7 +619,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (recovered) {
         return { kind: 'result', result: recovered, workspaceId, agentName, workspacePath, reused: true };
       }
-      return { kind: 'no_result', workspaceId, agentName, workspacePath };
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath, paneId: agent.pane_id }, spec);
     }
 
     // idle or done. If a previous turn already wrote a result and only the
@@ -334,10 +629,37 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       if (recovered) {
         return { kind: 'result', result: recovered, workspaceId, agentName, workspacePath, reused: true };
       }
+      // A recovery claim that meets a quiet agent with nothing written is the
+      // same wall a pause was reported for (or one whose report was lost). It
+      // must NOT send the brief again: that would spend model capacity on the
+      // very turn that just produced nothing, with no owner in the loop. The
+      // pause hands it to the owner, and resuming clears `recoveryRequired`.
+      //
+      // Whatever the fresh observation says is what is returned: a pause only
+      // on positive identity and idle/done proof, otherwise the unproven
+      // `no_result` or the working/blocked orphan. Falling through to a prompt
+      // here would send model work without the proof this branch exists for.
+      return this.noResultOutcome({ workspaceId, agentName, workspacePath, paneId: agent.pane_id }, spec);
     }
 
+    // A new prompt goes only to an agent whose last submitted turn is durably
+    // recorded as settled. Without that, an idle reading is not enough to send a
+    // second writer's worth of work into a pane that may still be starting one.
+    const provenance = await this.provenance(spec, { workspaceId, agentName });
+    if (provenance !== 'settled') {
+      return {
+        kind: 'orphan',
+        reason: 'orphan_prompt_unsettled',
+        workspaceId,
+        agentName,
+        detail: provenance === 'unsettled' ? UNSETTLED_DETAIL : UNTRUSTED_DETAIL,
+      };
+    }
+
+    // Pinned to the pane of the owned agent as first observed and proved, not to
+    // whatever pane a later lookup by name happens to return.
     return this.promptAndSettle(spec, {
-      workspaceId, agentName, workspacePath, reused: true,
+      workspaceId, agentName, workspacePath, reused: true, paneId: agent.pane_id,
     });
   }
 
@@ -370,6 +692,11 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
       workspacePath = spec.repoPath;
     }
 
+    const turn = this.turns.get(spec.jobId);
+    if (turn) {
+      turn.workspaceId = workspaceId;
+      turn.paneId = rootPaneId;
+    }
     await this.herdr.workspaceReportMetadata(workspaceId, { owner: 'ducky', job: spec.publicId });
 
     // Register ownership BEFORE an agent exists. A crash after this point still
@@ -390,9 +717,15 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     ]);
     // The agent exists now, so the record should no longer say `creating`.
     await spec.onAgentStarted?.({ workspaceId, agentName });
+    // A started agent that has been given nothing is a settled one. Recorded
+    // before any prompt can exist, so "recorded workspace, no journal entry" can
+    // only mean the record was lost -- never "never prompted".
+    await this.record(spec, { workspaceId, agentName }, 'settled');
 
+    // The pane is pinned to the root pane this very call started the agent in, so
+    // a same-name agent that appears in another pane cannot be mistaken for it.
     return this.promptAndSettle(spec, {
-      workspaceId, agentName, workspacePath, reused: false,
+      workspaceId, agentName, workspacePath, reused: false, paneId: rootPaneId,
     });
   }
 
@@ -416,7 +749,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    */
   private async promptAndSettle(
     spec: OrchestrationSpec,
-    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean },
+    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean; paneId?: string },
   ): Promise<OrchestrationOutcome> {
     // The brief goes over as a FILE, and only a one-line pointer is pasted.
     // A 3.3 KB brief was measured on this host being left unsent in Pi's input
@@ -437,8 +770,12 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
 
     let settled: AgentInfo | undefined;
     try {
-      settled = await this.submitWhenReady(at.agentName, briefPointerPrompt(briefPath), spec);
+      settled = await this.submitWhenReady(at, briefPointerPrompt(briefPath), spec);
     } catch (err) {
+      if (err instanceof PromptWithheld) return this.withheldOutcome(err, at, spec);
+      // Nothing was sent: the record that would have protected it could not be
+      // written. That is a failure to report as it is, with every hold kept.
+      if (err instanceof DispatchJournalError) throw err;
       return this.afterPromptFailure(err, at, spec);
     }
 
@@ -461,12 +798,99 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
           workspacePath: at.workspacePath,
           reused: at.reused,
         }
-      : {
-          kind: 'no_result',
-          workspaceId: at.workspaceId,
-          agentName: at.agentName,
-          workspacePath: at.workspacePath,
-        };
+      : this.noResultOutcome(at, spec);
+  }
+
+  /**
+   * What a turn that settled WITHOUT a valid result means, decided from a fresh
+   * observation of the agent rather than from the settle that led here.
+   *
+   * - `idle`/`done`, with the recorded name AND workspace AND a pane id: proven
+   *   quiet, so `quiet_pause` (and only this earns the slot release it carries);
+   * - `working`/`blocked`: the agent is alive, so each keeps its orphan outcome;
+   * - absent, unknown, an unreadable answer, or an agent that is not provably
+   *   ours: not quiet proof, so the unchanged `no_result` failure, which keeps
+   *   the repository reserved for the owner.
+   *
+   * The screen is never read. Whether the agent stopped because of quota,
+   * sign-in or anything else is not something Herdr's status can say.
+   */
+  private async noResultOutcome(
+    at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
+    spec: OrchestrationSpec,
+    cause: JobPauseCause = 'agent_idle_no_result',
+    detail?: string,
+  ): Promise<OrchestrationOutcome> {
+    const base = { workspaceId: at.workspaceId, agentName: at.agentName };
+    const noResult = {
+      kind: 'no_result' as const,
+      ...base,
+      workspacePath: at.workspacePath,
+      ...(detail === undefined ? {} : { detail }),
+    };
+    let agent: AgentInfo | undefined;
+    try {
+      agent = await this.herdr.agentGet(at.agentName);
+    } catch {
+      return noResult;
+    }
+    if (!agent || !this.isRecordedAgent(agent, at)) return noResult;
+    if (agent.agent_status === 'blocked') {
+      return { kind: 'orphan', reason: 'orphan_agent_blocked', ...base };
+    }
+    if (agent.agent_status === 'working') {
+      return { kind: 'orphan', reason: 'orphan_agent_still_working', ...base };
+    }
+    if (agent.agent_status !== 'idle' && agent.agent_status !== 'done') return noResult;
+    if (!(await this.workspaceIsOurs(at.workspaceId))) return noResult;
+    // Quiet is not enough unless the durable journal says the last submitted
+    // turn SETTLED: an idle reading may only mean the agent has not picked the
+    // work up yet (or, after a restart, that nothing remembers what was sent),
+    // and a pause would release the slot under it.
+    const provenance = await this.provenance(spec, at);
+    if (provenance !== 'settled') {
+      return {
+        kind: 'orphan',
+        reason: 'orphan_prompt_unsettled',
+        ...base,
+        detail: provenance === 'unsettled' ? UNSETTLED_DETAIL : UNTRUSTED_DETAIL,
+      };
+    }
+    return {
+      kind: 'quiet_pause',
+      cause,
+      observed: agent.agent_status,
+      ...base,
+      workspacePath: at.workspacePath,
+    };
+  }
+
+  /**
+   * Positive identity: the recorded name, the recorded workspace id, and a pane
+   * -- the PINNED pane when one was fixed at the start or at the first owned
+   * observation, so a same-name replacement elsewhere is not "the agent".
+   */
+  private isRecordedAgent(
+    agent: AgentInfo,
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): boolean {
+    return (
+      agent.name === at.agentName &&
+      agent.name.startsWith(DUCKY_AGENT_PREFIX) &&
+      typeof agent.workspace_id === 'string' &&
+      agent.workspace_id === at.workspaceId &&
+      agent.pane_id.length > 0 &&
+      (at.paneId === undefined || agent.pane_id === at.paneId)
+    );
+  }
+
+  private async workspaceIsOurs(workspaceId: string): Promise<boolean> {
+    try {
+      const ws = (await this.herdr.workspaceList()).find((w) => w.workspace_id === workspaceId);
+      return ws !== undefined && (ws.label ?? '').startsWith(DUCKY_WORKSPACE_LABEL_PREFIX);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -482,16 +906,19 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    */
   private async afterPromptFailure(
     err: unknown,
-    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean },
-    spec?: OrchestrationSpec,
+    at: { workspaceId: string; agentName: string; workspacePath: string; reused: boolean; paneId?: string },
+    spec: OrchestrationSpec,
   ): Promise<OrchestrationOutcome> {
     // A STALL is not a failure of the submission. Herdr delivered the text and
     // then stopped waiting because it saw no lifecycle change within its own
     // 5-second window -- which a large brief routinely exceeds. Observed live:
     // two identical runs, one flipped to `working` in time and one did not.
     // Giving up here would fail a job whose agent is about to start working.
-    if (spec !== undefined && isDuckyError(err) && err.code === 'herdr_prompt_stalled') {
+    if (isDuckyError(err) && err.code === 'herdr_prompt_stalled') {
       const resumed = await this.awaitStalledTurn(at.agentName, spec, at.workspacePath);
+      // Seeing the agent work and then settle (or a result land) IS a settled
+      // turn. No pickup observed is not, and stays unsettled.
+      if (resumed === 'settled' || resumed === 'blocked') await this.markSettled(spec, at);
       if (resumed === 'blocked') {
         return {
           kind: 'orphan',
@@ -508,7 +935,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
           agentName: at.agentName,
         };
       }
-      if (resumed === 'settled') {
+      if (resumed === 'settled' || resumed === 'vanished') {
         const result = await this.readResultSettling(at.workspacePath);
         return result
           ? {
@@ -519,15 +946,13 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
               workspacePath: at.workspacePath,
               reused: at.reused,
             }
-          : {
-              kind: 'no_result',
-              workspaceId: at.workspaceId,
-              agentName: at.agentName,
-              workspacePath: at.workspacePath,
-            };
+          : this.noResultOutcome(at, spec);
       }
-      // 'never_started': the agent stayed quiet for the whole grace and wrote
-      // nothing. Fall through and report the stall honestly.
+      // 'never_started': no pickup was observed within the grace and nothing was
+      // written. That is a quiet agent without a result -- possibly one that
+      // could not start the turn -- and it is paused for the owner when, and
+      // only when, a fresh look proves the agent quiet. Anything else falls
+      // through and reports the stall honestly.
     }
 
     let agent: AgentInfo | undefined;
@@ -575,9 +1000,84 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         reused: at.reused,
       };
     }
+    // A stalled prompt that nobody was seen to pick up is NOT a quiet agent. The
+    // text was delivered, and Herdr saw no lifecycle change inside its window or
+    // ours; the agent may simply start later. So nothing is released and no pause
+    // is made: the outcome is an orphan that keeps the writer lock, the repository
+    // and the slot, saying only that submitted work was not observed to settle.
+    // It claims neither that the agent is working nor any cause for the silence.
+    // Any OTHER error stays an error: a malformed or unexpected failure must not
+    // be relabelled as anything.
+    if (isDuckyError(err) && err.code === 'herdr_prompt_stalled') {
+      return {
+        kind: 'orphan',
+        reason: 'orphan_prompt_unsettled',
+        workspaceId: at.workspaceId,
+        agentName: at.agentName,
+        detail: UNSETTLED_DETAIL,
+      };
+    }
     // Nothing running and nothing written: re-raise so the caller reports the
     // real reason (a stall is not an outage) rather than inventing one here.
     throw err;
+  }
+
+  /**
+   * The pre-prompt guard declined, so NO prompt was sent. The agent is paused
+   * only after a fresh look proves it quiet (it was just started or resumed and
+   * given nothing, so it normally is); anything unproven keeps the unchanged
+   * fail-closed outcome, which retains the repository for the owner.
+   */
+  private withheldOutcome(
+    err: PromptWithheld,
+    at: { workspaceId: string; agentName: string; workspacePath: string; paneId?: string },
+    spec: OrchestrationSpec,
+  ): Promise<OrchestrationOutcome> {
+    return this.noResultOutcome(
+      at,
+      spec,
+      'memory_headroom_unproven',
+      'The prompt was withheld before any model work was sent: ' + err.reason,
+    );
+  }
+
+  /**
+   * A fresh look at the agent, returned only when it is BOTH the recorded one
+   * and in a state a prompt may be sent to: `idle` or `done`, and not reporting
+   * `interactive_ready: false`. The guard calls this before its reads and again
+   * after, so it can never permit a prompt into a working, blocked, unknown or
+   * not-yet-ready target, whatever the readiness wait did or did not conclude.
+   */
+  private async proveAgent(
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): Promise<PromptGuardTarget | undefined> {
+    let agent: AgentInfo | undefined;
+    try {
+      agent = await this.herdr.agentGet(at.agentName);
+    } catch {
+      return undefined;
+    }
+    if (!agent || !this.isRecordedAgent(agent, at)) return undefined;
+    if (agent.agent_status !== 'idle' && agent.agent_status !== 'done') return undefined;
+    if (agent.interactive_ready === false) return undefined;
+    return { agentName: at.agentName, workspaceId: at.workspaceId, paneId: agent.pane_id };
+  }
+
+  private async assertPromptAllowed(
+    at: { workspaceId: string; agentName: string; paneId?: string },
+  ): Promise<void> {
+    if (!this.beforePrompt) return;
+    const target = await this.proveAgent(at);
+    if (!target) {
+      throw new PromptWithheld('the target agent could not be positively identified as the recorded one and ready for input');
+    }
+    let verdict;
+    try {
+      verdict = await this.beforePrompt(target, { proveAgent: () => this.proveAgent(at) });
+    } catch {
+      throw new PromptWithheld('the memory headroom check failed unexpectedly');
+    }
+    if (!verdict.ok) throw new PromptWithheld(verdict.reason);
   }
 
   /**
@@ -610,19 +1110,52 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
    *   writer.
    */
   private async submitWhenReady(
-    agentName: string,
+    at: { workspaceId: string; agentName: string; paneId?: string },
     text: string,
     spec: OrchestrationSpec,
   ): Promise<AgentInfo | undefined> {
+    const agentName = at.agentName;
     await this.awaitInteractiveReady(agentName, spec);
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.readyRetries; attempt += 1) {
       if (spec.signal?.aborted) break;
+      const gated = this.promptGate?.();
+      if (gated !== undefined) {
+        throw new DispatchJournalError(`Model work is withheld: ${gated}.`);
+      }
+      // At the last safe boundary, on EVERY attempt: a retry after
+      // `agent_not_ready` is a second chance to send model work, and the agent
+      // may since have moved into a tighter cgroup.
+      await this.assertPromptAllowed(at);
+      // Durably recorded BEFORE the text can reach the agent, and the prompt is
+      // not sent if it cannot be: a prompt with no record would leave every later
+      // idle reading unprovable.
+      await this.record(spec, at, 'dispatching');
+      // Marked BEFORE the call, because the text may reach the agent even if the
+      // call is later abandoned or fails: from here a quiet reading proves
+      // nothing until the turn is seen to settle.
+      const turn = this.turns.get(spec.jobId);
+      if (turn) {
+        turn.promptSent = true;
+        turn.settled = false;
+      }
       try {
-        return await this.herdr.agentPrompt(agentName, text, spec.promptTimeoutMs, spec.signal);
+        const settled = await this.herdr.agentPrompt(agentName, text, spec.promptTimeoutMs, spec.signal);
+        if (
+          settled &&
+          (settled.agent_status === 'idle' || settled.agent_status === 'done' || settled.agent_status === 'blocked')
+        ) {
+          await this.markSettled(spec, at);
+        }
+        return settled;
       } catch (err) {
         if (!(isDuckyError(err) && err.code === 'herdr_agent_not_ready')) throw err;
+        // Refused as not ready: the text was NOT accepted. The record goes back to
+        // settled on a best-effort basis; if that write is lost it stays
+        // `dispatching`, which only ever keeps holds.
+        if (turn) turn.promptSent = false;
+        await this.record(spec, at, 'settled').catch(() => undefined);
         lastError = err;
         // Not yet promptable. Wait for readiness again and try once more.
         await this.sleep(this.pollIntervalMs);
@@ -731,7 +1264,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     agentName: string,
     spec: OrchestrationSpec,
     workspacePath: string,
-  ): Promise<'settled' | 'blocked' | 'still_working' | 'never_started' | undefined> {
+  ): Promise<'settled' | 'vanished' | 'blocked' | 'still_working' | 'never_started' | undefined> {
     const pickupDeadline = Date.now() + this.stallPickupMs;
     let observedWorking = false;
 
@@ -744,7 +1277,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
         // Cannot observe: assume the worst rather than release anything.
         return 'still_working';
       }
-      if (!now) return 'settled';
+      if (!now) return 'vanished';
       if (now.agent_status === 'blocked') return 'blocked';
       if (now.agent_status === 'working') {
         observedWorking = true;
@@ -759,6 +1292,7 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
 
     const settled = await this.pollUntilSettled(agentName, spec.promptTimeoutMs, spec.signal);
     if (settled === 'blocked') return 'blocked';
+    if (settled === 'vanished') return 'vanished';
     return settled === 'settled' ? 'settled' : 'still_working';
   }
 
@@ -767,13 +1301,16 @@ export class HerdrPiOrchestrator implements PiOrchestrator {
     agentName: string,
     waitMs: number,
     signal?: AbortSignal | undefined,
-  ): Promise<'settled' | 'blocked' | undefined> {
+  ): Promise<'settled' | 'vanished' | 'blocked' | undefined> {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) return undefined;
       await this.sleep(this.pollIntervalMs);
       const now = await this.herdr.agentGet(agentName);
-      if (!now) return 'settled';
+      // Absence is NOT a settle: a vanished pane says nothing about whether the
+      // work finished, and a fresh agent of the same name could later appear. It
+      // is reported on its own so nothing records it as `settled`.
+      if (!now) return 'vanished';
       if (now.agent_status === 'blocked') return 'blocked';
       if (now.agent_status === 'idle' || now.agent_status === 'done') return 'settled';
     }

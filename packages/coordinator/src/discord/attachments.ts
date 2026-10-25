@@ -1,5 +1,5 @@
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { readdirSync, statSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -166,6 +166,14 @@ async function readCapped(response: Response, maxBytes: number): Promise<Buffer>
  * Sweeps EVERY surface's prefix. A prefix added without being listed in
  * `TEMP_PREFIXES` would leave the owner's bytes on disk after a crash, so the
  * list is the single place a new surface has to register.
+ *
+ * A prefix is a claim of ownership, not proof of it, and the directory it is
+ * looked for in may be shared. So an entry is removed only when it is a REAL
+ * directory (a symlink or file with the prefix is left alone, and `lstat`
+ * never follows one) that THIS user owns. Another account's lookalike, or
+ * anything this process did not create, is never touched. Run it against a
+ * Ducky-specific TMPDIR (see the user-unit template) so the directory swept is
+ * not one that other tools or other cleanup timers also manage.
  */
 export function sweepStaleTempDirs(olderThanMs = 3_600_000, tmpdir = os.tmpdir()): string[] {
   const removed: string[] = [];
@@ -180,7 +188,10 @@ export function sweepStaleTempDirs(olderThanMs = 3_600_000, tmpdir = os.tmpdir()
     if (!TEMP_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
     const full = path.join(tmpdir, name);
     try {
-      if (statSync(full).mtimeMs < cutoff) {
+      const info = lstatSync(full);
+      if (!info.isDirectory()) continue;
+      if (typeof process.getuid === 'function' && info.uid !== process.getuid()) continue;
+      if (info.mtimeMs < cutoff) {
         void rm(full, { recursive: true, force: true });
         removed.push(full);
       }

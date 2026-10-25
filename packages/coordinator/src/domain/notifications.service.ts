@@ -1,4 +1,8 @@
-import { ownerNextStep, ownerStateLabel, type JobState } from '@ducky/contracts';
+import {
+  LEASE_EXPIRED_DEFERRED_REASON, deferredExpiryOwnerText, PAUSE_OVERTAKEN_OWNER_TEXT, SYSTEM_PAUSE_OWNER_TEXT, ownerNextStep, ownerStateLabel,
+  parsePauseOvertakenReason, parseSystemPauseReason,
+  type JobState,
+} from '@ducky/contracts';
 import type { NotificationTarget, PendingNotificationRow, Store } from '@ducky/persistence';
 import type { ComponentSigner } from '../security/component-signing.js';
 import type { DiscordTransport } from '../discord/transport.js';
@@ -201,7 +205,35 @@ export class JobNotifier {
    */
   private shouldNotifyOwner(row: PendingNotificationRow): boolean {
     if (row.actor.startsWith('owner:')) return false;
-    return NOTIFIABLE_STATES.has(row.toState);
+    // A deferred lease expiry is the one `waiting_for_executor` move worth a DM: it
+    // is a hold with no timer, so the owner must be told what is held and how to
+    // end it. Only while it is STILL true -- if the job has since been reconciled,
+    // recovered, cancelled or expired again, this row describes a wait that is over.
+    if (this.isDeferredExpiry(row)) return this.deferredExpiryStillHolds(row);
+    if (!NOTIFIABLE_STATES.has(row.toState)) return false;
+    // A delayed pause or question row that a LATER pause or question has
+    // superseded is dropped entirely. Its text and its button describe a wait
+    // that is over, and the button would act on whatever wait is current now:
+    // an Answer meant for an old question resuming a system pause, a Resume
+    // resolving a real question, or the older of two identical pauses offering
+    // an action for the newer one. Only the latest move into the state speaks.
+    if (row.toState === 'needs_owner_input') {
+      const latest = this.store.jobs.latestTransitionInto(row.jobId, 'needs_owner_input');
+      if (latest !== undefined && latest.id !== row.transitionId) return false;
+    }
+    return true;
+  }
+
+  private isDeferredExpiry(row: PendingNotificationRow): boolean {
+    return row.toState === 'waiting_for_executor' && row.reason === LEASE_EXPIRED_DEFERRED_REASON;
+  }
+
+  private deferredExpiryStillHolds(row: PendingNotificationRow): boolean {
+    const job = this.store.jobs.byId(row.jobId);
+    if (!job || job.state !== 'waiting_for_executor') return false;
+    if (this.store.jobs.pendingExpiry(job.id) === undefined) return false;
+    const latest = this.store.jobs.latestTransitionInto(job.id, 'waiting_for_executor');
+    return latest === undefined || latest.id === row.transitionId;
   }
 
   /**
@@ -258,20 +290,49 @@ export class JobNotifier {
    * is who is DMed even if a historical row's stored id were ever stale.
    */
   private buildMessage(row: PendingNotificationRow): OutboundMessage {
+    // Decided from THIS transition's own reason, never from the job's latest
+    // state: a sweep can run after the job has resumed or paused again, and the
+    // row must describe the pause it was written for.
+    if (this.isDeferredExpiry(row)) {
+      const text = deferredExpiryOwnerText(row.publicId, row.repoSlug);
+      return {
+        embeds: [
+          {
+            title: `Job ${row.publicId}`,
+            description: `${row.repoSlug} — held for its executor`,
+            fields: [
+              { name: 'Reason', value: text.reason },
+              { name: 'What happens next', value: text.next },
+            ],
+          },
+        ],
+      };
+    }
+    const systemPause = row.toState === 'needs_owner_input' ? parseSystemPauseReason(row.reason) : undefined;
+    const overtaken = parsePauseOvertakenReason(row.reason);
     const fields: OutboundEmbedField[] = [
       { name: 'What happens next', value: ownerNextStep(row.toState) },
-      { name: 'Reason', value: humanize(row.reason) },
+      {
+        name: 'Reason',
+        value: systemPause
+          ? SYSTEM_PAUSE_OWNER_TEXT[systemPause.cause]
+          : overtaken
+            ? PAUSE_OVERTAKEN_OWNER_TEXT[overtaken.outcome]
+            : humanize(row.reason),
+      },
     ];
     const rows: OutboundRow[] = [];
 
-    const result = this.store.results.byJobId(row.jobId);
+    // A system pause asked no question, so whatever result snapshot exists
+    // belongs to an earlier round and is not shown beside it.
+    const result = systemPause ? undefined : this.store.results.byJobId(row.jobId);
     if (result) {
       fields.push({ name: 'Result', value: result.summaryRedacted });
       fields.push({ name: 'Verdict', value: humanize(result.verdict) });
     }
 
     if (row.toState === 'needs_owner_input') {
-      this.addOwnerInputComponents(row, result, fields, rows);
+      this.addOwnerInputComponents(row, result, fields, rows, systemPause !== undefined);
     } else if (row.toState === 'needs_approval') {
       this.addApprovalComponents(row, fields, rows);
     }
@@ -306,6 +367,7 @@ export class JobNotifier {
     result: ReturnType<Store['results']['byJobId']>,
     fields: OutboundEmbedField[],
     rows: OutboundRow[],
+    systemPause = false,
   ): void {
     const job = this.store.jobs.byId(row.jobId);
     if (!job || job.state !== 'needs_owner_input') return;
@@ -322,7 +384,7 @@ export class JobNotifier {
             entityId: row.publicId,
             actorUserId: this.ownerId,
           }),
-          label: 'Answer',
+          label: systemPause ? 'Resume' : 'Answer',
           style: 'primary',
         },
       ],

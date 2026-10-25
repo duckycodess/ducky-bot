@@ -8,6 +8,7 @@ import { MemoryBriefWriter } from '../src/pi/brief-file.js';
 import { exampleImplementedResult } from '../src/pi/pi.mock.js';
 import type { ResultReader } from '../src/pi/result-file.js';
 import type { OrchestrationSpec } from '../src/pi/pi-orchestrator.port.js';
+import { MemoryDispatchJournal } from '../src/pi/dispatch-journal.js';
 
 /**
  * The readiness observation, and the orchestrator behaviour built on it.
@@ -102,8 +103,13 @@ const slugKey = toSlugKey(SLUG);
 const AGENT = agentNameFor(slugKey);
 const WS = 'wDemo';
 
+/** The durable record every recorded agent in these tests already has: its last turn settled. */
+const seeded = (): MemoryDispatchJournal =>
+  new MemoryDispatchJournal().seedSettled({ jobId: 'job-1', workspaceId: WS, agentName: AGENT });
+
 const spec = (over: Partial<OrchestrationSpec> = {}): OrchestrationSpec => ({
   jobId: 'job-1',
+  leaseId: 'lease-1',
   publicId: 'jabcde',
   repoSlug: SLUG,
   slugKey,
@@ -135,6 +141,7 @@ const shortSleep = (ms: number): Promise<void> =>
 
 function orchestrator(herdr: MockHerdr, over: { readyMarkerWaitMs?: number } = {}) {
   return new HerdrPiOrchestrator({
+    journal: seeded(),
     herdr,
     briefWriter: new MemoryBriefWriter(),
     resultReader: reader(),

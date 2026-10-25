@@ -1,7 +1,11 @@
-import type { JobResultFile, JobWorkPhase } from '@ducky/contracts';
+import type {
+  JobPauseCause, JobPauseQuietStatus, JobResultFile, JobWorkPhase,
+} from '@ducky/contracts';
 
 export interface OrchestrationSpec {
   readonly jobId: string;
+  /** The lease this attempt runs under; recorded with every dispatch the journal keeps. */
+  readonly leaseId: string;
   readonly publicId: string;
   readonly repoSlug: string;
   /** Normalized slug that fits herdr's 32-char agent-name rule with the prefix. */
@@ -78,13 +82,84 @@ export type OrchestrationOutcome =
     }
   | {
       kind: 'orphan';
-      reason: 'orphan_agent_still_working' | 'orphan_agent_blocked';
+      reason: 'orphan_agent_still_working' | 'orphan_agent_blocked' | 'orphan_prompt_unsettled';
       workspaceId: string;
       agentName: string;
+      /** Owner-safe wording for this outcome, when the default is not accurate enough. */
+      detail?: string;
+    }
+  /**
+   * The agent is PROVEN quiet and left no valid result (or the prompt was
+   * withheld before it was sent). Produced only after a fresh `agent get`
+   * positively matched the recorded name and workspace and reported `idle` or
+   * `done`. It is what lets the runner pause the job for the owner instead of
+   * failing it -- and it never says WHY, because nothing observed can.
+   */
+  | {
+      kind: 'quiet_pause';
+      cause: JobPauseCause;
+      observed: JobPauseQuietStatus;
+      workspaceId: string;
+      agentName: string;
+      workspacePath: string;
     }
   | { kind: 'conflict'; reason: 'foreign_agent_conflict'; agentName: string }
   | { kind: 'unavailable' }
-  | { kind: 'no_result'; workspaceId: string; agentName: string; workspacePath: string };
+  | {
+      kind: 'no_result';
+      workspaceId: string;
+      agentName: string;
+      workspacePath: string;
+      /** Owner-safe wording for why, when it is not the ordinary "finished without a result". */
+      detail?: string;
+    };
+
+/** The exact agent a prompt is about to be sent to, freshly proven. */
+export interface PromptGuardTarget {
+  readonly agentName: string;
+  readonly workspaceId: string;
+  readonly paneId: string;
+}
+
+export interface PromptGuardContext {
+  /**
+   * A fresh, positively identified look at the SAME agent (recorded name,
+   * recorded workspace id, a pane id), or `undefined` when that cannot be
+   * proved right now. A guard calls it again after its own reads so that an
+   * agent that moved or was replaced in between cannot pass on stale proof.
+   */
+  proveAgent(): Promise<PromptGuardTarget | undefined>;
+}
+
+export type PromptGuardVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Consulted immediately before EVERY prompt attempt -- the first one, the
+ * retries after `agent_not_ready`, and a resumed agent's -- because model work
+ * is what the check exists to withhold. A refusal (or an exception) withholds
+ * the prompt; it never sends it anyway.
+ */
+export type PromptGuard = (
+  target: PromptGuardTarget,
+  context: PromptGuardContext,
+) => Promise<PromptGuardVerdict>;
+
+/**
+ * A fresh, positive proof that a job's recorded agent is quiet, taken without
+ * any in-memory turn (an executor that restarted has none) and therefore
+ * resting on the durable dispatch journal as well as on a fresh look.
+ */
+export type QuietProof =
+  | { readonly quiet: true; readonly observed: JobPauseQuietStatus }
+  | { readonly quiet: false; readonly detail: string };
+
+export interface QuietProofTarget {
+  readonly jobId: string;
+  readonly workspaceId: string;
+  readonly agentName: string;
+}
 
 export interface PiOrchestrator {
   readonly name: string;
@@ -96,6 +171,14 @@ export interface PiOrchestrator {
    * Implementations must not fabricate a termination they cannot observe.
    */
   cancel(spec: OrchestrationSpec): Promise<CancelOutcome>;
+  /**
+   * Proves, now, that the exact recorded agent is quiet: a durable journal entry
+   * saying its last submitted turn settled, the recorded name and workspace and a
+   * pane, an owned workspace, and a fresh `idle` or `done`. An earlier reading, an
+   * absent or unreadable journal, a dispatched-but-unsettled prompt and every
+   * other state are NOT quiet. Never sends anything to the agent.
+   */
+  proveQuiet(target: QuietProofTarget): Promise<QuietProof>;
   /**
    * Closes a workspace after a successful terminal result.
    *

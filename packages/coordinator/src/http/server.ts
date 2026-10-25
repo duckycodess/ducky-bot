@@ -5,7 +5,8 @@ import {
   HTTP_BODY_LIMIT, HTTP_CONNECTION_TIMEOUT_MS, HTTP_KEEPALIVE_TIMEOUT_MS,
   HTTP_REQUEST_TIMEOUT_MS, RATE_LIMITS, RESULT_MAX_BYTES,
   CancelAckRequestSchema, ClaimRequestSchema, HeartbeatRequestSchema,
-  JobFailureRequestSchema, JobHeartbeatRequestSchema, JobResultRequestSchema,
+  JobFailureRequestSchema, JobHeartbeatRequestSchema, JobPauseRequestSchema, JobResultRequestSchema,
+  JobStatusRequestSchema, PauseDispositionRequestSchema, PauseReportRequestSchema,
   WorkspaceCloseRequestSchema, WorkspaceRegistrationRequestSchema,
   EXECUTOR_HEADERS, EXECUTOR_ID_RE, isDuckyError,
 } from '@ducky/contracts';
@@ -250,7 +251,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         const waitMs = Math.min(body.waitMs, CLAIM_MAX_WAIT_MS);
         const deadline = Date.now() + waitMs;
         for (;;) {
-          const claimed = deps.jobs.claim(executorId, body.idempotencyKey);
+          const claimed = deps.jobs.claim(executorId, body.idempotencyKey, body.capabilities);
           if (claimed) return claimed;
           if (Date.now() >= deadline) return null;
           await sleep(Math.min(500, Math.max(50, deadline - Date.now())));
@@ -310,7 +311,64 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         ...(body.detail === undefined ? {} : { detail: body.detail }),
         ...(body.workspaceId === undefined ? {} : { workspaceId: body.workspaceId }),
         ...(body.agentName === undefined ? {} : { agentName: body.agentName }),
+        ...(body.quiescent === undefined ? {} : { quiescent: body.quiescent }),
       });
+    }),
+  );
+
+  // A lease-checked SYSTEM pause: the executor proved its agent quiet and
+  // result-less. Idempotent for the pausing lease, so a lost response can be
+  // retried; cancellation and an elapsed deadline are decided in the service.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/pause',
+    { config: { rateLimit: { max: RATE_LIMITS.result.max, timeWindow: RATE_LIMITS.result.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = JobPauseRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.pauseJob(executorId, id, body.leaseId, {
+        cause: body.cause,
+        workspaceId: body.workspaceId,
+        agentName: body.agentName,
+        agentStatus: body.agentStatus,
+      });
+    }),
+  );
+
+  // Durable pause delivery (protocol 1): a report bound to its full identity,
+  // idempotent by report id, answered with a structured disposition. A NEW
+  // route rather than new fields on the one above: an older coordinator must
+  // answer "no such route", not a 400 an executor would read as a refusal.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/pause-report',
+    { config: { rateLimit: { max: RATE_LIMITS.result.max, timeWindow: RATE_LIMITS.result.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = PauseReportRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.deliverPause(executorId, id, body);
+    }),
+  );
+
+  // Read-only: what became of a report. Needs no lease, because the lease it
+  // names may be long gone; it is bound to the executor and to the report.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/pause-disposition',
+    { config: { rateLimit: { max: RATE_LIMITS.result.max, timeWindow: RATE_LIMITS.result.windowMs } } },
+    authed(async (req, executorId) => {
+      const body = PauseDispositionRequestSchema.parse(req.body);
+      const { id } = req.params as { id: string };
+      return deps.jobs.pauseDisposition(executorId, id, body);
+    }),
+  );
+
+  // Read-only job status for the executor that ran the job: lets it drop durable
+  // local records once the job is one nothing will run again.
+  app.post<{ Params: { id: string } }>(
+    '/api/v1/executor/jobs/:id/status',
+    { config: { rateLimit: { max: RATE_LIMITS.jobHeartbeat.max, timeWindow: RATE_LIMITS.jobHeartbeat.windowMs } } },
+    authed(async (req, executorId) => {
+      JobStatusRequestSchema.parse(req.body ?? {});
+      const { id } = req.params as { id: string };
+      return deps.jobs.executorJobStatus(executorId, id);
     }),
   );
 

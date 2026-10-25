@@ -385,25 +385,45 @@ export class GitHubWatchesRepo {
       .run(atIso, maxAttempts, atIso, id);
   }
 
-  /** How many of the owner's requested-changes facts are held (neither sent, abandoned nor receipted). Counts only. */
+  /**
+   * How many of the owner's REVIEW facts are held (neither sent, abandoned nor receipted). Counts only. A held pull
+   * request close shares the held outbox row but is counted by `heldCloseCount`: its key is a `pr_closed:` transition key.
+   */
   heldCount(ownerId: string): number {
     return Number(
       (this.db
         .prepare(
           `SELECT COUNT(*) AS n FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL`,
+            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'`,
         )
         .get(ownerId) as { n: number }).n,
     );
   }
 
-  /** The held facts, identifiers only (a hash of the review id, never the id), for the export. */
+  /**
+   * How many of the owner's native exact CLOSES are held because the target settled a close of that pull request before
+   * migration 39 and nothing proves what it showed (neither sent, abandoned nor receipted; kept through a cancel and
+   * retention; never cleared). Counts only, including a cancelled or identity-stopped watch's.
+   */
+  heldCloseCount(ownerId: string): number {
+    return Number(
+      (this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
+            WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) = 'pr_closed:'`,
+        )
+        .get(ownerId) as { n: number }).n,
+    );
+  }
+
+  /** The held REVIEW facts, identifiers only (a hash of the review id, never the id), for the export. */
   heldReviews(limit: number): GitHubHeldReviewRow[] {
     return this.db
       .prepare(
         `SELECT e.id, e.watch_id, w.public_id, e.repo_key, e.held_key, e.provider_at, e.created_at, w.state
            FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-          WHERE e.held_reason IS NOT NULL ORDER BY e.created_at ASC, e.id ASC LIMIT ?`,
+          WHERE e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'
+          ORDER BY e.created_at ASC, e.id ASC LIMIT ?`,
       )
       .all(limit)
       .map((raw) => {

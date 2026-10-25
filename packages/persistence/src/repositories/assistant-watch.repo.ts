@@ -1432,6 +1432,24 @@ export class AssistantWatchRepo {
   }
 
   /**
+   * Imported pull request closes that are still PENDING: not settled, not withheld, not held, on an ACTIVE target. A close
+   * settles only once the briefing that carried it was sent AND its exact number and canonical instant were proven in the
+   * final output, so a close that was clipped, redacted or dropped stays here, counted, with the age of the oldest. Counts
+   * and one instant only: never a repository, a number or a title.
+   */
+  pendingCloses(ownerId: string): { count: number; oldestCreatedAt: string | null } {
+    const r = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n, MIN(e.created_at) AS oldest FROM assistant_watch_events e
+           JOIN assistant_watch_targets t ON t.id = e.target_id
+          WHERE t.discord_user_id = ? AND t.state = 'active' AND e.kind = 'pr_closed'
+            AND e.digested_at IS NULL AND e.withheld_reason IS NULL AND e.held = 0`,
+      )
+      .get(ownerId) as { n: number; oldest: string | null };
+    return { count: Number(r.n), oldestCreatedAt: r.oldest };
+  }
+
+  /**
    * Unsettled events of active targets that a native path currently holds. Paged, and bounded by
    * `maxScan` events looked at in total, so a long run of waiting events at the head of the order
    * cannot hide what is behind it and the work stays bounded.

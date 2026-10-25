@@ -51,12 +51,42 @@ export interface LedgerBoundary {
 }
 
 /**
+ * What migration 39 found when it read the imported pull request closes that carried a delivery or settlement marker.
+ * Provenance and counts only: it is never a cutoff and never a receipt (`native_close_uncertainty` is the evidence).
+ */
+export interface CloseFamilyProvenance {
+  /** Null on a database that has not run migration 39 (never the case once the store opens). */
+  readonly at: string | null;
+  /** Source events that became (part of) an uncertainty row. */
+  readonly uncertainEvents: number;
+  /** Uncertainty rows (grouped by owner, repository, key or pull request, origin and marker class). */
+  readonly uncertainRows: number;
+  /** Of those events, the ones whose instant could not be read (they match any close of that pull request). */
+  readonly itemScopeEvents: number;
+  /** Marked closes whose number, repository or owner could not be read: counted, never given a key. */
+  readonly unidentifiableEvents: number;
+  /** Closes in a state that could not have existed before migration 39 (withheld or settled by a native receipt). */
+  readonly impossibleEvents: number;
+}
+
+/** The permanent evidence that a historical close may already have been told (identifiers and counts only). */
+export interface CloseUncertaintyCounts {
+  /** Source events behind the rows (the sum of their multiplicities). */
+  readonly events: number;
+  readonly rows: number;
+  /** Rows that match any close of one pull request because the historical instant could not be read. */
+  readonly itemScopeRows: number;
+}
+
+/**
  * What a native path may do with one item it is about to tell. `ambiguous`: the target delivered a
  * requested-changes review on the SAME pull request whose id differs, and nothing proves the two are
  * different reviews (the provider instants are equal or one is unknown): the card is neither sent nor
- * skipped, it is HELD and counted.
+ * skipped, it is HELD and counted. `uncertain` (a pull request close only): the target settled a close of that pull
+ * request BEFORE migration 39 and nothing proves what it showed, so the exact native close is HELD and counted the same
+ * way, never sent and never cleared.
  */
-export type NativeProbe = 'free' | 'target_delivered' | 'target_in_flight' | 'ambiguous';
+export type NativeProbe = 'free' | 'target_delivered' | 'target_in_flight' | 'ambiguous' | 'uncertain';
 
 export interface NativeProbeOptions {
   /**
@@ -288,11 +318,35 @@ export class NativeTransitionsRepo {
     if (repo === null || !isWellFormedTransition(t)) return 'free';
     if (t.kind === 'changes_requested') return this.probeReview(ownerId, repo, t, canonicalStamp(providerAt));
     if (isObservedReviewKind(t.kind)) return this.probeObserved(ownerId, repo, t, canonicalStamp(providerAt), opts);
+    if (t.kind === 'pr_closed') return this.probeClose(ownerId, repo, t);
     // An update is covered by a target update at or after it; every other kind by its exact key.
     const state = t.kind === 'pr_updated'
       ? this.strongest(ownerId, repo, t.kind, t.item, 'target', 'AND stamp >= ?', t.stamp ?? '')
       : this.byKeyState(ownerId, repo, transitionKey(t), 'target');
     return state === 'delivered' ? 'target_delivered' : state === 'reserved' ? 'target_in_flight' : 'free';
+  }
+
+  /**
+   * A native exact close, in one step and in this order: an exact target receipt (the target already delivered this very
+   * close: covered), then an exact target reservation (a send is in flight: wait), then the permanent legacy
+   * uncertainty (the target settled a close of this pull request before migration 39: held, counted, not sent), else
+   * free. A marker-only legacy close that is LATER actually digested with proof leaves a real target receipt, which is
+   * checked first and covers the native close despite the retained uncertainty.
+   */
+  private probeClose(ownerId: string, repo: string, t: Transition): NativeProbe {
+    const exact = this.byKeyState(ownerId, repo, transitionKey(t), 'target');
+    if (exact === 'delivered') return 'target_delivered';
+    if (exact === 'reserved') return 'target_in_flight';
+    return this.closeUncertain(ownerId, repo, t.item, transitionKey(t)) ? 'uncertain' : 'free';
+  }
+
+  private closeUncertain(ownerId: string, repo: string, item: string, key: string): boolean {
+    return this.db
+      .prepare(
+        `SELECT 1 FROM native_close_uncertainty
+          WHERE owner_id = ? AND repo_key = ? AND item = ? AND (scope = 'item' OR transition_key = ?) LIMIT 1`,
+      )
+      .get(ownerId, repo, item, key) !== undefined;
   }
 
   /**
@@ -501,6 +555,9 @@ export class NativeTransitionsRepo {
     if (t.status === 'none') return { outcome: 'deliver' };
     const repo = transitionRepoKey(repoKey);
     if (repo === null) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
+    // A close whose instant cannot be read is decided on its own rule: only an ordinary watch bound to this repository
+    // could ever tell it natively, so only then is it withheld (and nothing else: no feed, no legacy cutoff).
+    if (t.status === 'ambiguous' && t.family === 'pr_closed') return this.ambiguousClose(ownerId, repo);
     const occurredMs = Date.parse(e.occurredAt);
     if (!Number.isFinite(occurredMs)) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
 
@@ -520,10 +577,12 @@ export class NativeTransitionsRepo {
       const near = this.nativeObservedHolders(ownerId, repo, x, canonicalStamp(e.providerAt ?? null));
       if (near) return near;
     }
-    // The observed-state review families are exempt from the migration-36 cutoff: they were deliverable before
-    // they had a counterpart, and migration 38 only records provenance. Withholding them by time would make
-    // history that was never a receipt look like one.
-    if (!isObservedReviewKind(x.kind) && this.legacyHeld(occurredMs)) {
+    // The observed-state review families and the close family are exempt from the migration-36 cutoff: they were
+    // deliverable before they had a counterpart, and migrations 38 and 39 only record provenance. Withholding them by
+    // time would make history that was never a receipt look like one. (A close that a target settled BEFORE migration
+    // 39 is not delivered again anyway: it is settled. What it may have told is the permanent uncertainty, which holds
+    // the NATIVE close, never this one.)
+    if (!isObservedReviewKind(x.kind) && x.kind !== 'pr_closed' && this.legacyHeld(occurredMs)) {
       return { outcome: 'withhold', reason: 'legacy_unproven' };
     }
     return { outcome: 'deliver' };
@@ -558,6 +617,21 @@ export class NativeTransitionsRepo {
       if (ordinary !== undefined) return { outcome: 'withhold', reason: 'ambiguous_evidence' };
     }
     return { outcome: 'deliver' };
+  }
+
+  /**
+   * An imported close with a readable pull request number and an unreadable instant. It has no exact key, so no receipt
+   * can ever be written for it: it is delivered only when no native path could ever tell the close, which for a close
+   * means no ordinary watch of THIS owner has ever been bound to the canonical repository (in any state: a cancelled or
+   * identity-stopped watch is a tombstone just as a live one is). Otherwise it is withheld, counted, never sent and never
+   * settled. No feed test and no legacy time cutoff apply: the feed tells no close, and the close family was always
+   * deliverable.
+   */
+  private ambiguousClose(ownerId: string, repo: string): TargetResolution {
+    const watch = this.db
+      .prepare('SELECT 1 FROM github_watches WHERE repo_key = ? AND discord_user_id = ? LIMIT 1')
+      .get(repo, ownerId);
+    return watch !== undefined ? { outcome: 'withhold', reason: 'ambiguous_evidence' } : { outcome: 'deliver' };
   }
 
   /**
@@ -701,6 +775,38 @@ export class NativeTransitionsRepo {
   }
 
   // ---- counts only -------------------------------------------------------------------
+
+  /** What migration 39 found, or null when the boundary cannot be read. Counts only. */
+  closeFamilyProvenance(): CloseFamilyProvenance | null {
+    const r = this.db.prepare('SELECT * FROM native_ledger_boundary WHERE id = 1').get() as Record<string, unknown> | undefined;
+    if (!r) return null;
+    const n = (k: string): number => Number(r[k] ?? 0);
+    return {
+      at: r['close_family_at'] == null ? null : String(r['close_family_at']),
+      uncertainEvents: n('close_uncertain_events'), uncertainRows: n('close_uncertain_rows'),
+      itemScopeEvents: n('close_item_scope_events'), unidentifiableEvents: n('close_unidentifiable_events'),
+      impossibleEvents: n('close_impossible_events'),
+    };
+  }
+
+  /** The owner's permanent legacy close uncertainty, counted. Counts only. */
+  closeUncertaintyCounts(ownerId: string): CloseUncertaintyCounts {
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(multiplicity), 0) AS events, COUNT(*) AS rows,
+                COALESCE(SUM(CASE WHEN scope = 'item' THEN 1 ELSE 0 END), 0) AS item_rows
+           FROM native_close_uncertainty WHERE owner_id = ?`,
+      )
+      .get(ownerId) as { events: number; rows: number; item_rows: number };
+    return { events: Number(r.events), rows: Number(r.rows), itemScopeRows: Number(r.item_rows) };
+  }
+
+  /** The owner's permanent legacy close uncertainty for the export: identifiers only, never a title or a payload. */
+  closeUncertainty(ownerId: string, limit: number): Record<string, unknown>[] {
+    return this.db
+      .prepare('SELECT * FROM native_close_uncertainty WHERE owner_id = ? ORDER BY id LIMIT ?')
+      .all(ownerId, limit) as Record<string, unknown>[];
+  }
 
   counts(): { reservedNative: number; reservedTarget: number; receiptsNative: number; receiptsTarget: number } {
     const n = (path: ClaimPath, state: string): number =>

@@ -34,7 +34,7 @@ describe('upgrading a database that already holds assistant records', () => {
     db.prepare(`INSERT INTO assistant_watch_checkpoints (target_id, surface, state, cursor, next_due_at, updated_at)
                 VALUES ('w1','issues','ready',?,?,?)`).run(at, at, at);
 
-    expect(runMigrations(db)).toEqual([30, 31, 32, 33, 34, 35, 36, 37, 38]);
+    expect(runMigrations(db)).toEqual([30, 31, 32, 33, 34, 35, 36, 37, 38, 39]);
 
     const task = db.prepare("SELECT * FROM tasks WHERE id = 't1'").get() as Record<string, unknown>;
     expect(task).toMatchObject({ title: 'Old task', priority: 'high', urgent: 0, category: null });

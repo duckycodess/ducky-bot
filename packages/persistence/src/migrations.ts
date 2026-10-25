@@ -1,4 +1,5 @@
 import { captureNativeLedgerBoundary } from './native-ledger-boundary.js';
+import { captureCloseFamily } from './native-close-evidence.js';
 
 export interface Migration {
   readonly version: number;
@@ -2299,6 +2300,95 @@ CREATE INDEX ix_gap_markers_owner ON github_watch_gap_markers(owner_id);
 ALTER TABLE native_ledger_boundary ADD COLUMN review_families_at TEXT;
 `,
   },
+  {
+    version: 39,
+    name: 'exact_pr_close_family_and_legacy_close_uncertainty',
+    // Migrations 36 to 38 are published and are not revised. The claims ledger is rebuilt ONLY to widen its kind
+    // CHECK, and the rebuild is proved column for column, in the SAME transaction, before the original is dropped.
+    // The imported event table, the staging table and the held outbox rows are left exactly as they are.
+    after: (db, ctx) => verifyCloseFamilyRebuild(db, ctx.at),
+    sql: `
+-- The exact pull request close family (ADR 0034): a close is its number AND the provider's canonical close instant,
+-- never the number alone, so a pull request that is reopened and closed again at another instant is another close.
+-- Every existing row is copied unchanged: every holder, reservation, receipt, state, domain and key.
+DROP INDEX ux_native_claims_one_target;
+DROP INDEX ix_native_claims_family;
+DROP INDEX ix_native_claims_ref;
+ALTER TABLE native_transition_claims RENAME TO native_transition_claims_v38;
+CREATE TABLE native_transition_claims (
+  owner_id       TEXT NOT NULL,
+  repo_key       TEXT NOT NULL,
+  transition_key TEXT NOT NULL,
+  kind           TEXT NOT NULL CHECK (kind IN
+                   ('commit','pr_opened','pr_updated','pr_merged','changes_requested','issue_opened','ci_failed',
+                    'review_approved','review_commented','review_dismissed','pr_closed')),
+  item           TEXT NOT NULL,
+  stamp          TEXT,
+  provider_hash  TEXT,
+  hash_domain    TEXT NOT NULL DEFAULT 'provider' CHECK (hash_domain IN ('provider','source_identity')),
+  provider_state TEXT CHECK (provider_state IS NULL OR provider_state IN
+                   ('APPROVED','COMMENTED','DISMISSED','COMMENTED|DISMISSED')),
+  attempt        TEXT,
+  provider_at    TEXT,
+  path           TEXT NOT NULL CHECK (path IN ('native','target')),
+  state          TEXT NOT NULL CHECK (state IN ('reserved','delivered')),
+  via            TEXT NOT NULL CHECK (via IN
+                   ('feed_event','feed_commit','watch_summary','target_alert','target_digest')),
+  ref            TEXT NOT NULL,
+  observed_at    TEXT NOT NULL,
+  delivered_to   TEXT CHECK (delivered_to IS NULL OR delivered_to IN ('github_channel','owner_dm')),
+  delivered_at   TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  PRIMARY KEY (owner_id, repo_key, transition_key, path, via, ref),
+  CHECK ((state = 'delivered') = (delivered_at IS NOT NULL))
+);
+INSERT INTO native_transition_claims
+  (owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt,
+   provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at)
+  SELECT owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt,
+         provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at
+    FROM native_transition_claims_v38;
+CREATE UNIQUE INDEX ux_native_claims_one_target
+  ON native_transition_claims(owner_id, repo_key, transition_key) WHERE path = 'target';
+CREATE INDEX ix_native_claims_family ON native_transition_claims(owner_id, repo_key, kind, item, path, stamp);
+CREATE INDEX ix_native_claims_ref ON native_transition_claims(via, ref);
+
+-- Provenance for the close family: when it began and what the migration found. It is NEVER used as a cutoff: a close
+-- was deliverable before it had a counterpart, so no legacy-time withholding applies to it. Counts only.
+ALTER TABLE native_ledger_boundary ADD COLUMN close_family_at TEXT;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_uncertain_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_uncertain_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_item_scope_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_unidentifiable_events INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE native_ledger_boundary ADD COLUMN close_impossible_events INTEGER NOT NULL DEFAULT 0;
+
+-- Imported closes that carried a delivery or settlement marker BEFORE this migration. NOT receipts: nothing proves what a
+-- historical digest or a source alert marker actually showed. A native exact close that matches one of these rows is held
+-- and counted (never sent, never cleared). Owner scoped and independent of the event and target rows (no foreign key,
+-- no cascade), so forgetting or deleting those never erases it. Identifiers, origin, marker class and multiplicity only:
+-- never a title or a payload. scope 'exact' names the transition key a native close would have; scope 'item' is a
+-- readable pull request number whose instant could not be read, so it matches ANY close of that pull request.
+CREATE TABLE native_close_uncertainty (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id           TEXT NOT NULL,
+  repo_key           TEXT NOT NULL,
+  scope              TEXT NOT NULL CHECK (scope IN ('exact','item')),
+  item               TEXT NOT NULL,
+  transition_key     TEXT NOT NULL,
+  origin             TEXT NOT NULL CHECK (origin IN ('imported','observed')),
+  marker             TEXT NOT NULL CHECK (marker IN ('alert_marker_only','digest_marker','alert_and_digest_markers')),
+  multiplicity       INTEGER NOT NULL CHECK (multiplicity >= 1),
+  representative_ref TEXT NOT NULL,
+  earliest_marked_at TEXT,
+  recorded_at        TEXT NOT NULL,
+  CHECK ((scope = 'exact') = (transition_key != ''))
+);
+CREATE UNIQUE INDEX ux_close_uncertainty
+  ON native_close_uncertainty(owner_id, repo_key, scope, transition_key, item, origin, marker);
+CREATE INDEX ix_close_uncertainty_item ON native_close_uncertainty(owner_id, repo_key, item);
+`,
+  },
 ];
 
 /**
@@ -2338,6 +2428,30 @@ function verifyReviewFamilyRebuild(db: import('./db.js').Db, at: string): void {
     `hash_domain = 'provider' AND provider_state IS NULL AND provider_at IS NULL`,
   );
   db.prepare('UPDATE native_ledger_boundary SET review_families_at = ? WHERE id = 1 AND review_families_at IS NULL').run(at);
+}
+
+/**
+ * Migration 39's proof, in its own transaction: the rebuilt claims ledger holds exactly the rows and values of the
+ * original (every column, both directions, the same row count), and only then is the original dropped. The close
+ * family's legacy uncertainty is derived afterwards, from rows the migration does not change, and it never writes a
+ * claim: a difference here throws and rolls the whole migration back.
+ */
+function verifyCloseFamilyRebuild(db: import('./db.js').Db, at: string): void {
+  const scalar = (sql: string): number => Number((db.prepare(sql).get() as { n: number }).n);
+  const columns =
+    'owner_id, repo_key, transition_key, kind, item, stamp, provider_hash, hash_domain, provider_state, attempt, ' +
+    'provider_at, path, state, via, ref, observed_at, delivered_to, delivered_at, created_at, updated_at';
+  const lost = (a: string, b: string): number =>
+    scalar(`SELECT COUNT(*) AS n FROM (SELECT ${columns} FROM ${a} EXCEPT SELECT ${columns} FROM ${b})`);
+  if (
+    scalar('SELECT COUNT(*) AS n FROM native_transition_claims_v38') !== scalar('SELECT COUNT(*) AS n FROM native_transition_claims') ||
+    lost('native_transition_claims_v38', 'native_transition_claims') !== 0 ||
+    lost('native_transition_claims', 'native_transition_claims_v38') !== 0
+  ) {
+    throw new Error('migration 39: native_transition_claims does not hold exactly the rows of native_transition_claims_v38');
+  }
+  db.exec('DROP TABLE native_transition_claims_v38');
+  captureCloseFamily(db, { at });
 }
 
 function verifyNativeHolderRebuild(db: import('./db.js').Db): void {

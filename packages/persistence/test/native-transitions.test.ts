@@ -99,7 +99,7 @@ describe('an exact native receipt settles the imported event; a reservation only
 
   it('gives kinds with no native counterpart no ledger decision at all', () => {
     const { store } = fresh();
-    for (const k of ['release', 'ci_started', 'pr_closed', 'issue_updated', 'default_branch_change'] as const) {
+    for (const k of ['release', 'ci_started', 'issue_updated', 'default_branch_change'] as const) {
       expect(resolve(store, facts(k as never, '1:x'))).toEqual({ outcome: 'deliver' });
     }
   });

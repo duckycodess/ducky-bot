@@ -71,7 +71,7 @@ describe('migration 38 rebuilds from a populated migration 37 without losing a r
     expect(claimsBefore).toHaveLength(1);
     expect(eventsBefore).toHaveLength(4);
 
-    expect(runMigrations(db, { now: () => T3 })).toEqual([38]);
+    expect(runMigrations(db, { upTo: 38, now: () => T3 })).toEqual([38]);
 
     expect(only(all(db, 'native_transition_claims', 'transition_key'), claimCols)).toEqual(claimsBefore);
     expect(only(all(db, 'assistant_watch_events', 'id'), eventCols)).toEqual(eventsBefore);

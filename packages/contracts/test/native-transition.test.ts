@@ -5,6 +5,7 @@ import {
   feedEventTransition, hashProviderRef, isWellFormedTransition, mergedTransition, openedTransition, reviewTransition,
   runTransition, targetTransition, transitionKey, transitionRepoKey, updatedTransition,
   hashSourceIdentity, observedReviewTransition, observedStateKind, type Transition,
+  classifyCloseEvidence, closedTransition, TRANSITION_KINDS,
 } from '../src/index.js';
 
 const facts = (kind: (typeof WATCH_EVENT_KINDS)[number], identity: string, extra: { occurredAt?: string; providerHash?: string | null; attempt?: string | null } = {}) => ({
@@ -12,11 +13,11 @@ const facts = (kind: (typeof WATCH_EVENT_KINDS)[number], identity: string, extra
 });
 
 describe('the codec decides, per imported kind, what a native path could have told', () => {
-  it('has an entry for EVERY imported event kind, and only nine families have a native counterpart', () => {
+  it('has an entry for EVERY imported event kind, and only ten families have a native counterpart', () => {
     expect(Object.keys(IMPORTED_COUNTERPART).sort()).toEqual([...WATCH_EVENT_KINDS].sort());
-    // The seven earlier families, and the observed-state approved and commented reviews (migration 38).
-    expect(new Set(Object.values(IMPORTED_COUNTERPART).filter((v) => v !== null)).size).toBe(9);
-    for (const none of ['pr_closed', 'review_pending', 'issue_updated', 'issue_closed',
+    // The seven earlier families, the observed-state approved and commented reviews (migration 38) and the close (39).
+    expect(new Set(Object.values(IMPORTED_COUNTERPART).filter((v) => v !== null)).size).toBe(10);
+    for (const none of ['review_pending', 'issue_updated', 'issue_closed',
       'release', 'ci_started', 'ci_recovered', 'default_branch_change'] as const) {
       expect(IMPORTED_COUNTERPART[none], none).toBeNull();
       expect(targetTransition(facts(none, '1:x')).status, none).toBe('none');
@@ -201,5 +202,74 @@ describe('the observed-state review families (migration 38)', () => {
   it('reads an identity it cannot parse as having no native counterpart to be confused with', () => {
     expect(targetTransition(facts('review_approved', 'garbage')).status).toBe('none');
     expect(targetTransition(facts('review_commented', '0:review:1')).status).toBe('none');
+  });
+});
+
+describe('an exact pull request close is its number AND the provider\'s canonical close instant (migration 39)', () => {
+  const CLOSED = '2026-10-02T03:04:05.678Z';
+  const H = hashProviderRef('PRR_1')!;
+
+  it('is a transition kind with a counterpart, keyed by number and instant and never by the number alone', () => {
+    expect(TRANSITION_KINDS).toContain('pr_closed');
+    expect(IMPORTED_COUNTERPART.pr_closed).toBe('pr_closed');
+    const t = closedTransition(7, '2026-10-02T03:04:05.678+00:00')!;
+    expect(t).toEqual({ kind: 'pr_closed', item: '7', stamp: CLOSED, hash: null, attempt: null });
+    expect(transitionKey(t)).toBe(`pr_closed:7:${CLOSED}`);
+    expect(isWellFormedTransition(t)).toBe(true);
+    // A second close at another instant is another close: no key is shared across instants.
+    expect(transitionKey(closedTransition(7, '2026-10-02T03:04:06.000Z')!)).not.toBe(transitionKey(t));
+  });
+
+  it('canonicalizes every ISO spelling of an instant to one key, and refuses everything else', () => {
+    const keys = ['2026-10-02T03:04:05.678Z', '2026-10-02T11:04:05.678+08:00', '2026-10-02T03:04:05.678000Z']
+      .map((x) => transitionKey(closedTransition(7, x)!));
+    expect(new Set(keys).size).toBe(1);
+    for (const bad of [null, undefined, '', 'garbage', '2026-10-02', 'Oct 2 2026 03:04:05 UTC', '2026-13-45T00:00:00Z']) {
+      expect(closedTransition(7, bad), String(bad)).toBeNull();
+    }
+    for (const n of [0, -1, 1.5, 1e10]) expect(closedTransition(n, CLOSED), String(n)).toBeNull();
+    // A stored row is well formed only when its parts are exactly what the codec writes.
+    const base = { kind: 'pr_closed' as const, item: '7', stamp: CLOSED, hash: null, attempt: null };
+    expect(isWellFormedTransition({ ...base, stamp: null })).toBe(false);
+    expect(isWellFormedTransition({ ...base, stamp: '2026-10-02T11:04:05.678+08:00' })).toBe(false);
+    expect(isWellFormedTransition({ ...base, hash: H })).toBe(false);
+  });
+
+  it('reads an imported close by the number in its identity and the instant of the event', () => {
+    const key = (f: ReturnType<typeof facts>) => {
+      const t = targetTransition(f);
+      return t.status === 'exact' ? transitionKey(t.transition) : t;
+    };
+    expect(key(facts('pr_closed', '7:closed', { occurredAt: '2026-10-02T11:04:05.678+08:00' }))).toBe(`pr_closed:7:${CLOSED}`);
+    // Two events of the same pull request at two instants are two transitions.
+    expect(key(facts('pr_closed', '7:closed', { occurredAt: '2026-10-02T03:04:06.000Z' }))).toBe('pr_closed:7:2026-10-02T03:04:06.000Z');
+  });
+
+  it('calls a readable number with an unreadable instant AMBIGUOUS, and an unreadable identity none', () => {
+    for (const occurredAt of ['garbage', 'Oct 2 2026', '', '2026-10-02']) {
+      expect(targetTransition(facts('pr_closed', '7:closed', { occurredAt })), occurredAt)
+        .toEqual({ status: 'ambiguous', family: 'pr_closed', item: '7' });
+    }
+    for (const identity of ['x:closed', '0:closed', '07:closed', '7:closed:extra', '7', '7:merged', ' 7:closed', '1234567890:closed']) {
+      expect(targetTransition(facts('pr_closed', identity, { occurredAt: CLOSED })).status, identity).toBe('none');
+    }
+  });
+
+  it('never takes the number from anywhere but the identity', () => {
+    const t = targetTransition({ ...facts('pr_closed', '7:closed', { occurredAt: CLOSED }), providerHash: H, attempt: '3' });
+    expect(t).toMatchObject({ status: 'exact', transition: { item: '7', hash: null, attempt: null } });
+  });
+
+  describe('what a stored historical close identifies (the permanent uncertainty)', () => {
+    it('is exact for a readable number and instant, same-item for a readable number alone, else unidentifiable', () => {
+      expect(classifyCloseEvidence('Acme/Demo', '7:closed', '2026-10-02T11:04:05.678+08:00')).toEqual({
+        kind: 'exact', repoKey: 'acme/demo', item: '7', transitionKey: `pr_closed:7:${CLOSED}`,
+      });
+      expect(classifyCloseEvidence('Acme/Demo', '7:closed', 'Oct 2 2026')).toEqual({ kind: 'item', repoKey: 'acme/demo', item: '7' });
+      expect(classifyCloseEvidence('Acme/Demo', '7:closed', '')).toEqual({ kind: 'item', repoKey: 'acme/demo', item: '7' });
+      for (const [repo, identity] of [['nope', '7:closed'], ['a/b/c', '7:closed'], ['acme/demo', 'x:closed'], ['acme/demo', '7:closed:2']] as const) {
+        expect(classifyCloseEvidence(repo, identity, CLOSED), `${repo} ${identity}`).toEqual({ kind: 'unidentifiable' });
+      }
+    });
   });
 });

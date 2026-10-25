@@ -83,6 +83,16 @@ export interface OwnerStateSnapshot {
    * Never a title, a body or a review id.
    */
   readonly gapMarkers: RawRow[];
+  /**
+   * Historical imported closes that carried a delivery or settlement marker before migration 39 (permanent, never a
+   * receipt): owner, canonical repository, scope, pull request, exact transition key (empty for a same-item fallback),
+   * origin, marker class, multiplicity, the representative event reference and its earliest marker. Identifiers only.
+   */
+  readonly closeUncertainty: RawRow[];
+  /** Imported closes still pending (unsettled, unwithheld, unheld) on an active target: a count and the oldest creation. */
+  readonly pendingCloses: { readonly count: number; readonly oldestCreatedAt: string | null };
+  /** Native exact closes held because of the uncertainty above, identifiers only (watch handle, repository, key). */
+  readonly heldCloses: RawRow[];
   /** Names of tables that held more than the cap, so the read was cut. */
   readonly truncated: string[];
   /** A deletion cause row present at read time: a process died mid-deletion. */
@@ -205,7 +215,8 @@ export class RollbackDeltaRepo {
         `SELECT w.public_id AS watch_handle, w.state AS watch_state, e.repo_key, e.held_reason, e.held_key,
                 e.hash_domain, e.provider_at, e.created_at
            FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
-          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL ORDER BY e.created_at, e.id`,
+          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) != 'pr_closed:'
+          ORDER BY e.created_at, e.id`,
         owner,
       ),
       gapMarkers: read(
@@ -214,6 +225,28 @@ export class RollbackDeltaRepo {
                 m.outbox_ref, m.delivered_at
            FROM github_watch_gap_markers m LEFT JOIN github_watches w ON w.id = m.watch_id
           WHERE m.owner_id = ? ORDER BY m.id`,
+        owner,
+      ),
+      closeUncertainty: read(
+        'native_close_uncertainty', 'SELECT * FROM native_close_uncertainty WHERE owner_id = ? ORDER BY id', owner,
+      ),
+      pendingCloses: (() => {
+        const r = this.db
+          .prepare(
+            `SELECT COUNT(*) AS n, MIN(e.created_at) AS oldest FROM assistant_watch_events e
+               JOIN assistant_watch_targets t ON t.id = e.target_id
+              WHERE t.discord_user_id = ? AND t.state = 'active' AND e.kind = 'pr_closed'
+                AND e.digested_at IS NULL AND e.withheld_reason IS NULL AND e.held = 0`,
+          )
+          .get(owner) as { n: number; oldest: string | null };
+        return { count: Number(r.n), oldestCreatedAt: r.oldest };
+      })(),
+      heldCloses: read(
+        'github_watch_events_held_closes',
+        `SELECT w.public_id AS watch_handle, w.state AS watch_state, e.repo_key, e.held_key, e.created_at
+           FROM github_watch_events e JOIN github_watches w ON w.id = e.watch_id
+          WHERE w.discord_user_id = ? AND e.held_reason IS NOT NULL AND substr(e.held_key, 1, 10) = 'pr_closed:'
+          ORDER BY e.created_at, e.id`,
         owner,
       ),
       truncated,

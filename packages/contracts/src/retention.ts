@@ -74,6 +74,14 @@ export const RETENTION_FORBIDDEN_TABLES = [
    * watch, and nothing clears it. Identifiers and reasons only, never a title or a body.
    */
   'github_watch_gap_markers',
+  /**
+   * Imported pull request closes that carried a delivery or settlement marker BEFORE migration 39, read through the
+   * runtime codec in that migration's transaction (ADR 0034). Nothing proves what a historical digest or source alert
+   * actually showed, so a native exact close that matches one is held and counted, never delivered. Owner scoped,
+   * independent of `assistant_watch_events` and `assistant_watch_targets` (no foreign key, no cascade), never cleared.
+   * Identifiers, origin, marker class and multiplicity only: never a title or a payload.
+   */
+  'native_close_uncertainty',
   /** When the owner's monitoring was paused and by whom: status and export provenance. */
   'assistant_watch_pause_periods',
   /** Who may write this database right now. */

@@ -55,13 +55,15 @@ export const GH_OPERATIONS: Readonly<
    * disappearance of an open PR, which the open-only list could only ever report
    * as "it is gone".
    *
-   * `createdAt` is a field `gh pr list --json` already lists (`pnpm probe:gh` records it, the feed's own
-   * list selects it). It is read only to PROVE an opening against the watch's last read boundary; it adds
-   * no verb, flag, endpoint or authority to this argv.
+   * `createdAt` and `closedAt` are fields `gh pr list --json` already lists (`pnpm probe:gh` records both, the
+   * feed's own list selects `createdAt`). `createdAt` is read only to PROVE an opening against the watch's last read
+   * boundary; `closedAt` only to PROVE a close (raw state CLOSED, `mergedAt` explicitly null and a readable close
+   * instant) and to carry the provider's instant into its exact transition. Neither adds a verb, flag, endpoint or
+   * authority to this argv: the selector list is the only thing that moved.
    */
   prListAll: (ref) => [
     'pr', 'list', '-R', `${ref.owner}/${ref.repo}`, '--state', 'all', '--limit', '20',
-    '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,reviewDecision,createdAt',
+    '--json', 'number,title,state,isDraft,headRefName,headRefOid,updatedAt,mergedAt,closedAt,reviewDecision,createdAt',
   ],
 
   /**

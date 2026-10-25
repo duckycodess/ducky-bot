@@ -19,6 +19,8 @@ import type { WatchEventKind } from './assistant-watch.js';
  * - a named commit is its SHA;
  * - an update is its number and the provider's `updatedAt` instant;
  * - a merge is its number and the provider's `mergedAt` instant;
+ * - a close is its number and the provider's canonical `closedAt` instant (never the number alone: a pull request
+ *   that is reopened and closed again at a different instant is a different close);
  * - a requested-changes review is its pull request number and a HASH of the provider's
  *   review id (exact string equality, no decoding; the raw id is never stored here);
  * - a failed workflow run is its id and its rerun attempt.
@@ -27,6 +29,7 @@ import type { WatchEventKind } from './assistant-watch.js';
 export const TRANSITION_KINDS = [
   'commit', 'pr_opened', 'pr_updated', 'pr_merged', 'changes_requested', 'issue_opened', 'ci_failed',
   'review_approved', 'review_commented', 'review_dismissed',
+  'pr_closed',
 ] as const;
 export type TransitionKind = (typeof TRANSITION_KINDS)[number];
 
@@ -83,8 +86,10 @@ export const IMPORTED_COUNTERPART = {
   pr_opened: 'pr_opened',
   pr_updated: 'pr_updated',
   pr_merged: 'pr_merged',
-  // Native count lines ("no longer open") never name an item.
-  pr_closed: null,
+  // A close is its number AND the provider's canonical close instant (migration 39). Native count lines ("no longer
+  // listed") still name no item and claim nothing: only an exact close, proven from the list's own explicit evidence,
+  // is claimed. An imported close whose time cannot be read is AMBIGUOUS (see `targetTransition`).
+  pr_closed: 'pr_closed',
   review_requested_changes: 'changes_requested',
   // A submitted review in an OBSERVED STATE (migration 38). The ordinary summary names new approved and
   // commented reviews and observed dismissals exactly; a PR-level decision and the conversation-comment count
@@ -116,6 +121,8 @@ const NUMBER = /^[1-9]\d{0,8}$/;
 const RUN = /^(0|[1-9]\d{0,14})$/;
 const ATTEMPT = /^[1-9]\d{0,3}$/;
 const HASH = /^[0-9a-f]{64}$/;
+/** The identity the typed engine writes for a close: the pull request number, nothing else. */
+const CLOSE_IDENTITY = /^([1-9]\d{0,8}):closed$/;
 
 /** A canonical instant, as `toISOString` writes it, from any ISO string the provider sends; else null. */
 export function canonicalStamp(raw: string | null | undefined): string | null {
@@ -165,6 +172,12 @@ export function mergedTransition(n: number, mergedAt: string | null | undefined)
   return stamp !== null && NUMBER.test(String(n)) ? build('pr_merged', String(n), { stamp }) : null;
 }
 
+/** A close: the pull request number and the provider's canonical close instant. Null unless both are valid. */
+export function closedTransition(n: number, closedAt: string | null | undefined): Transition | null {
+  const stamp = canonicalStamp(closedAt);
+  return stamp !== null && NUMBER.test(String(n)) ? build('pr_closed', String(n), { stamp }) : null;
+}
+
 export function reviewTransition(n: number, providerRef: string | null | undefined): Transition | null {
   const hash = hashProviderRef(providerRef);
   return hash !== null && NUMBER.test(String(n)) ? build('changes_requested', String(n), { hash }) : null;
@@ -210,7 +223,7 @@ export function runTransition(runId: number | string, attempt: number | string |
 export function transitionKey(t: Transition): string {
   switch (t.kind) {
     case 'commit': case 'pr_opened': case 'issue_opened': return `${t.kind}:${t.item}`;
-    case 'pr_updated': case 'pr_merged': return `${t.kind}:${t.item}:${t.stamp}`;
+    case 'pr_updated': case 'pr_merged': case 'pr_closed': return `${t.kind}:${t.item}:${t.stamp}`;
     case 'changes_requested': return `${t.kind}:${t.item}:${t.hash}`;
     case 'ci_failed': return `${t.kind}:${t.item}:${t.attempt}`;
     // The domain is part of the key, so a provider hash and a source-identity hash can never collide, and a
@@ -226,7 +239,7 @@ export function isWellFormedTransition(t: Transition): boolean {
   switch (t.kind) {
     case 'commit': return SHA.test(t.item) && !t.stamp && !t.hash && !t.attempt;
     case 'pr_opened': case 'issue_opened': return NUMBER.test(t.item) && !t.stamp && !t.hash && !t.attempt;
-    case 'pr_updated': case 'pr_merged':
+    case 'pr_updated': case 'pr_merged': case 'pr_closed':
       return NUMBER.test(t.item) && t.stamp !== null && canonicalStamp(t.stamp) === t.stamp && !t.hash && !t.attempt;
     case 'changes_requested': return NUMBER.test(t.item) && t.hash !== null && HASH.test(t.hash) && !t.stamp && !t.attempt;
     case 'ci_failed': return RUN.test(t.item) && t.attempt !== null && ATTEMPT.test(t.attempt) && !t.stamp && !t.hash;
@@ -343,6 +356,15 @@ export function targetTransition(e: TargetEventFacts): TargetTransition {
       const t = m ? updatedTransition(Number(m[1]), m[2]!) : null;
       return t ? { status: 'exact', transition: t } : invalid();
     }
+    case 'pr_closed': {
+      // The number comes from the identity ONLY (never from a payload), and must be exactly what the engine writes.
+      const n = CLOSE_IDENTITY.exec(e.identity)?.[1] ?? null;
+      if (n === null) return invalid();
+      const t = closedTransition(Number(n), e.occurredAt);
+      // A readable number with an unreadable instant could still be a native close the codec cannot name: the
+      // family is known, the exact transition is not.
+      return t ? { status: 'exact', transition: t } : { status: 'ambiguous', family, item: n };
+    }
     case 'review_approved':
     case 'review_commented': {
       const n = head(/^(\d+):review:/);
@@ -380,6 +402,29 @@ export function targetTransition(e: TargetEventFacts): TargetTransition {
     default:
       return { status: 'none' };
   }
+}
+
+/**
+ * What a stored imported close row identifies, for the permanent legacy-close uncertainty (migration 39).
+ *
+ * - `exact`: a readable number and a readable instant: the close names exactly the key a native close would.
+ * - `item`: a readable number whose instant cannot be read: it could be ANY close of that pull request.
+ * - `unidentifiable`: no readable number (or no readable repository): it can never be matched, so it is only counted.
+ * The repository is canonicalized by the same function both sides use.
+ */
+export type CloseEvidence =
+  | { readonly kind: 'exact'; readonly repoKey: string; readonly item: string; readonly transitionKey: string }
+  | { readonly kind: 'item'; readonly repoKey: string; readonly item: string }
+  | { readonly kind: 'unidentifiable' };
+
+export function classifyCloseEvidence(repoKey: string, identity: string, occurredAt: string): CloseEvidence {
+  const repo = transitionRepoKey(repoKey);
+  const n = CLOSE_IDENTITY.exec(identity)?.[1] ?? null;
+  if (repo === null || n === null) return { kind: 'unidentifiable' };
+  const t = closedTransition(Number(n), occurredAt);
+  return t === null
+    ? { kind: 'item', repoKey: repo, item: n }
+    : { kind: 'exact', repoKey: repo, item: n, transitionKey: transitionKey(t) };
 }
 
 // ---- unidentified per-author review lines that were actually delivered (gap markers) ----------------------

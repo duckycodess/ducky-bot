@@ -41,6 +41,9 @@ export const PrListSchema = z.array(
     // review schema is: the names are recorded, the values are not.
     headRefOid: z.string().optional(),
     mergedAt: z.string().nullable().optional(),
+    // When the pull request was closed (the provider's own instant), or null while it is open or merged. Optional
+    // for the same reason as every field here: the NAME is recorded (`pnpm probe:gh`), the values are not.
+    closedAt: z.string().nullable().optional(),
     reviewDecision: z.string().nullable().optional(),
     // Added for the GitHub feed: when it opened, who opened it, and the latest
     // verdict per reviewer. All optional, for the same reason as the rest.

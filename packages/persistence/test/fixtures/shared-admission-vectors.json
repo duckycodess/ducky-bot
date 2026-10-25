@@ -1,0 +1,95 @@
+{
+  "comment": "Protocol-1 conformance vectors. Run by the Node ledger test and, privately, by the Agent Flow companion's Python harness against a scratch ledger, so both implementations answer the same words. Sizes are MiB. `as` names a fence; `fence`/`resume` refer to one. Holders are aliases: d1/d2 are Ducky instances, a1/a2/a3 Agent Flow jobs.",
+  "policy": { "globalCap": 2, "ceilingMiB": 14336, "notificationReserveMiB": 512, "pendingTtlSeconds": 120 },
+  "holders": {
+    "d1": { "program": "ducky", "instanceId": "ducky-dev-0001", "jobRef": "job-d1" },
+    "d2": { "program": "ducky", "instanceId": "ducky-prod-0002", "jobRef": "job-d2" },
+    "a1": { "program": "agent-flow", "instanceId": "agentflow-0001", "jobRef": "dotph/one#1" },
+    "a2": { "program": "agent-flow", "instanceId": "agentflow-0001", "jobRef": "dotph/two#2" },
+    "a3": { "program": "agent-flow", "instanceId": "agentflow-0001", "jobRef": "dotph/three#3" },
+    "a4": { "program": "agent-flow", "instanceId": "agentflow-0001", "jobRef": "dotph/one#9" }
+  },
+  "scenarios": [
+    {
+      "name": "ducky is exclusive with every other hold; two Agent Flow jobs coexist without it",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 4096 },
+        { "op": "acquire", "holder": "d1", "repo": "duckycodess/ducky-bot", "reserveMiB": 2560, "as": "f1", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "expect": { "ok": false, "reason": "ducky_present" } },
+        { "op": "confirm", "holder": "d1", "fence": "f1", "expect": { "ok": true } },
+        { "op": "acquire", "holder": "d2", "repo": "duckycodess/other", "reserveMiB": 2560, "expect": { "ok": false, "reason": "ducky_exclusive" } },
+        { "op": "release", "holder": "d1", "fence": "f1", "expect": "released" },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "as": "g1", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a2", "repo": "dotph/two", "reserveMiB": 3584, "as": "g2", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a3", "repo": "dotph/three", "reserveMiB": 3584, "expect": { "ok": false, "reason": "global_cap" } },
+        { "op": "acquire", "holder": "a4", "repo": "dotph/one", "reserveMiB": 3584, "expect": { "ok": false, "reason": "repo_held" } },
+        { "op": "acquire", "holder": "d1", "repo": "duckycodess/ducky-bot", "reserveMiB": 2560, "expect": { "ok": false, "reason": "ducky_exclusive" } }
+      ]
+    },
+    {
+      "name": "reservations and the notification reserve are counted in full under the lock",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 8192 },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 5120, "as": "f1", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a2", "repo": "dotph/two", "reserveMiB": 5120, "expect": { "ok": false, "reason": "insufficient_memory" } },
+        { "op": "memory", "limitMiB": 6000, "currentMiB": 0 },
+        { "op": "acquire", "holder": "a2", "repo": "dotph/two", "reserveMiB": 512, "expect": { "ok": false, "reason": "insufficient_memory" } },
+        { "op": "memory", "fail": true },
+        { "op": "acquire", "holder": "a2", "repo": "dotph/two", "reserveMiB": 512, "expect": { "ok": false, "reason": "observation_failed" } }
+      ]
+    },
+    {
+      "name": "only a never-confirmed hold times out",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 1024 },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "as": "p", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a2", "repo": "dotph/two", "reserveMiB": 3584, "as": "c", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "confirm", "holder": "a2", "fence": "c", "expect": { "ok": true } },
+        { "op": "advance", "seconds": 121 },
+        { "op": "verify", "holder": "a1", "fence": "p", "expect": "gone" },
+        { "op": "confirm", "holder": "a1", "fence": "p", "expect": { "ok": false, "reason": "gone" } },
+        { "op": "advance", "seconds": 36000 },
+        { "op": "verify", "holder": "a2", "fence": "c", "expect": "confirmed" },
+        { "op": "acquire", "holder": "a3", "repo": "dotph/one", "reserveMiB": 3584, "expect": { "ok": true, "state": "pending", "adopted": false } }
+      ]
+    },
+    {
+      "name": "release is by exact fence and holder; an old generation can never free a new one",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 1024 },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "as": "f1", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "confirm", "holder": "a1", "fence": "f1", "expect": { "ok": true } },
+        { "op": "release", "holder": "a2", "fence": "f1", "expect": "not_holder" },
+        { "op": "release", "holder": "d1", "fence": "f1", "expect": "not_holder" },
+        { "op": "verify", "holder": "a1", "fence": "f1", "expect": "confirmed" },
+        { "op": "release", "holder": "a1", "fence": "f1", "expect": "released" },
+        { "op": "release", "holder": "a1", "fence": "f1", "expect": "gone" },
+        { "op": "release", "holder": "a1", "fence": 999, "expect": "unknown_fence" },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "as": "f2", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "confirm", "holder": "a1", "fence": "f2", "expect": { "ok": true } },
+        { "op": "release", "holder": "a1", "fence": "f1", "expect": "gone" },
+        { "op": "verify", "holder": "a1", "fence": "f2", "expect": "confirmed" }
+      ]
+    },
+    {
+      "name": "a name alone never adopts a hold; a changed identity or reservation cannot",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 1024 },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "as": "f1", "expect": { "ok": true, "state": "pending", "adopted": false } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "expect": { "ok": false, "reason": "identity_held" } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 3584, "resume": "f1", "expect": { "ok": true, "state": "pending", "adopted": true } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 4096, "resume": "f1", "expect": { "ok": false, "reason": "identity_conflict" } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/two", "reserveMiB": 3584, "resume": "f1", "expect": { "ok": false, "reason": "identity_conflict" } }
+      ]
+    },
+    {
+      "name": "a malformed request is refused before anything is read or written",
+      "steps": [
+        { "op": "memory", "limitMiB": 14336, "currentMiB": 1024 },
+        { "op": "acquire", "holder": "a1", "repo": "DotPH/One", "reserveMiB": 3584, "expect": { "ok": false, "reason": "invalid_request" } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one.git", "reserveMiB": 3584, "expect": { "ok": false, "reason": "invalid_request" } },
+        { "op": "acquire", "holder": "a1", "repo": "dotph/one", "reserveMiB": 0, "expect": { "ok": false, "reason": "invalid_request" } }
+      ]
+    }
+  ]
+}
